@@ -43,6 +43,8 @@ need(svgs.length >= 5, `needs >= 5 figures, found ${svgs.length}`);
 for (const s of svgs) { need(/role="img"/.test(s), 'svg without role="img"'); need(/aria-label="[^"]+"/.test(s), 'svg without aria-label'); need(/viewBox="0 0 \d+ \d+"/.test(s), 'svg without viewBox'); }
 for (const [tag] of html.matchAll(/<(rect|text|circle|path|ellipse|polygon|line)\b[^>]*>/g)) need(/\bfill="/.test(tag), 'shape without fill attribute: ' + tag.slice(0, 70));
 for (const [, t] of html.matchAll(/<text\b[^>]*font-size="(\d+(?:\.\d+)?)"/g)) need(+t >= 11, 'svg text smaller than 11: ' + t);
+// A fill colour class would turn a stroke-only line into a filled shape; lines use f-line.
+for (const [tag] of html.matchAll(/<(?:path|polyline|line)\b[^>]*fill="none"[^>]*>/g)) { const c = (tag.match(/class="(f-[a-z]+)"/) || [])[1]; need(!c || c === 'f-line', 'stroke-only shape uses fill class ' + c + ': ' + tag.slice(0, 70)); }
 for (const [, x] of html.matchAll(/\bid="([^"]+)"/g)) if (!/^sec-\d+$/.test(x)) need(x.startsWith('c' + id + '-'), 'id must start with c' + id + '-: ' + x);
 for (const [, cls] of html.matchAll(/class="(f-[a-z]+)"/g)) need(['f-box', 'f-soft', 'f-accent', 'f-side', 'f-text', 'f-muted', 'f-on', 'f-line', 'f-warn'].includes(cls), 'unknown figure class ' + cls);
 need(!/深色的|浅色的格|绿色的|蓝色的|青色的/.test(html), 'do not name colours in text; themes change them');
