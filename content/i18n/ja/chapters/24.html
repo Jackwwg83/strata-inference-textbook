@@ -1,0 +1,271 @@
+<div class="hook"><span class="eyebrow">気づいたかも</span>
+<p>チャット画面には「停止」ボタンがあります。押すと、文字はすぐに止まります。でも、GPU は本当に止まったのでしょうか。</p>
+<p>Strata のソースには、とても正直なコメントがあります（issue 番号 #430、#431）。以前は、クライアントが切断したあとも、そのリクエストのせいでエンジンは忙しいままでした。答えを書き終えるか、質問をすべて読み終えるまで続いたのです。画面ではとっくに止まっているのに、GPU は、もういない人のために働き続けていました。この章では 3 つのことを説明します。リクエストはどう生まれ、どう終わるのか。「止まれ」は、どのように層を通って GPU まで伝わるのか。そして、誰があなたの GPU を働かせる資格を持つのか。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>1 つのリクエストは、ブラウザ、HTTP 接続、サーバープロセス、エンジンプロセスの 4 層を通ります。「停止」は、層ごとに伝え、層ごとに確かめる信号です。「認証」は、誰がリクエストを送り込めるかを決めます。</p>
+
+<h2 id="sec-1">24.1 「停止」を押したら、何が止まったのか</h2>
+<p>ボタンを押してから、GPU がそのリクエストの計算をやめるまでには、いくつもの層があります。「止まった」の意味は層ごとに違います（図 24-1）。</p>
+<figure class="fig"><svg viewBox="0 0 400 340" role="img" aria-label="図 24-1：1 つのリクエストは 5 つの層を通り、各層で「止まった」の意味が違う。上の層が止まっても、下の層が止まったとは限らない">
+<text class="f-muted" fill="#5c6d66" x="75" y="18" font-size="12" text-anchor="middle">層</text>
+<text class="f-muted" fill="#5c6d66" x="152" y="18" font-size="12">この層が「止まった」と言えるのは？</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="28" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="55" font-size="13" font-weight="600" text-anchor="middle">ブラウザ</text>
+<text class="f-text" fill="#182f2b" x="152" y="55" font-size="12">新しい文字を表示しなくなる</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="84" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="111" font-size="13" font-weight="600" text-anchor="middle">HTTP 接続</text>
+<text class="f-text" fill="#182f2b" x="152" y="111" font-size="12">接続が閉じ、もう書き込まない</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="140" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="167" font-size="13" font-weight="600" text-anchor="middle">サーバープロセス</text>
+<text class="f-text" fill="#182f2b" x="152" y="167" font-size="12">リクエストが「キャンセル済み」になる</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="196" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="223" font-size="13" font-weight="600" text-anchor="middle">エンジンプロセス</text>
+<text class="f-text" fill="#182f2b" x="152" y="214" font-size="12">STOP を受け取り、</text>
+<text class="f-text" fill="#182f2b" x="152" y="232" font-size="12">このリクエストの DONE を書く</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="252" width="130" height="44" rx="8"/>
+<text class="f-on" fill="#ffffff" x="75" y="279" font-size="13" font-weight="600" text-anchor="middle">GPU</text>
+<text class="f-text" fill="#182f2b" x="152" y="270" font-size="12">手元の計算は終わらせ、</text>
+<text class="f-text" fill="#182f2b" x="152" y="288" font-size="12">新しい計算は始めない</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="316" font-size="12" text-anchor="middle">停止信号は上から下へ伝わります。</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="334" font-size="12" text-anchor="middle">上の層が止まっても、下の層が止まったとは限りません</text>
+</svg><figcaption>図 24-1　「停止」の意味は層ごとに違います。ブラウザの層がいちばん先に止まり、GPU の層がいちばん最後に止まります。間のどの層でも、誰かが信号を下へ伝えなければなりません。</figcaption></figure>
+<p>この話をはっきりさせるために、まずリクエストの<dfn>状態機械</dfn>を描いてみます。リクエストは、どの瞬間にも 1 つの状態にあり、決まったイベントだけが別の状態への移動を起こします。次は、この本の教育用のバージョンです。</p>
+<ul>
+<li><strong>キュー待ち</strong>：リクエストは着いたが、エンジンはほかの人に対応中。Strata は一度に 1 つのシーケンスしか処理しないので、後から来たものは FIFO（先入れ先出し）キューで待ちます。[S15]</li>
+<li><strong>プリフィル</strong>：エンジンが質問を 1 チャンクずつ読みます（第 1 章で説明した prefill です）。</li>
+<li><strong>デコード</strong>：トークンを 1 つずつ書いて、答えを作ります。</li>
+<li><strong>完了 / キャンセル済み / 失敗</strong>：3 つの終点です。どのリクエストも、最後は必ずこのどれかに着地します。宙ぶらりんは許されません。</li>
+<li><strong>キャンセル中</strong>：「止まれ」と叫んだが、エンジンがまだ止まったと確認していない状態。この中間状態は、いちばん見落とされがちです。</li>
+</ul>
+<p>これらの状態名はこの本の抽象であり、上流コードの列挙型ではありません。Strata が実際に記録しているのは、リクエストが「キュー待ち」か「生成中」かの区別と、「質問を読み込み中」「回答中」のような段階の説明だけです。<span class="ev ev-code">コード上の事実</span> 下のシミュレータは、この過程をゆっくり見せます。</p>
+<div class="viz" data-viz="request-lifecycle"><figure class="fig"><svg viewBox="0 0 400 278" role="img" aria-label="図 24-2：リクエストの教育用状態機械。キュー待ち、プリフィル、デコード、完了が正常な道。キャンセル中は、プリフィルとデコードがキャンセルされたあとの中間状態で、確認されてからキャンセル済みになる。エンジンが応答しなくなると失敗になる">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="16" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="64" y="39" font-size="13" text-anchor="middle">キュー待ち</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="152" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="200" y="39" font-size="13" text-anchor="middle">プリフィル</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="288" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="39" font-size="13" text-anchor="middle">デコード</text>
+<rect class="f-accent" fill="#136d5a" x="152" y="104" width="96" height="36" rx="8"/><text class="f-on" fill="#ffffff" x="200" y="127" font-size="13" font-weight="600" text-anchor="middle">キャンセル中</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="288" y="104" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="127" font-size="13" text-anchor="middle">完了</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="152" y="192" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="200" y="215" font-size="13" text-anchor="middle">キャンセル済み</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="288" y="192" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="215" font-size="13" text-anchor="middle">失敗</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M112 34H150M248 34H286M336 52V102M200 52V102M296 52L240 104M200 140V190M64 52V210H150"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M248 130L300 192"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="248" font-size="12" text-anchor="middle">破線：エンジンが応答しなくなると、ウォッチドッグが介入します。</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="266" font-size="12" text-anchor="middle">操作版では、どの状態でも「キャンセル」を押せます</text>
+</svg><figcaption>図 24-2　リクエストの教育用状態機械。プリフィルとデコードがキャンセルされると、まず「キャンセル中」に入り、エンジンが止まったと確認されてはじめて「キャンセル済み」になります。終点は 3 つだけです。完了、キャンセル済み、失敗。</figcaption></figure></div>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>「オペレーティングシステム」の授業で習うプロセスの状態遷移図（実行可能、実行中、待機、終了）も、同じように描きます。状態機械の良いところは、1 つずつ点検できることです。どの状態にどのイベントが来たら、どこへ行くのか。終点に永遠にたどり着けない状態はないか。</p>
+
+<h2 id="sec-2">24.2 プロセスとスレッド：実際に働いているのは誰か</h2>
+<p>「止まれ」を誰に伝えるべきかを知るには、まず、誰が働いているのかを知る必要があります。</p>
+<aside class="primer" id="c24-process-thread">
+<h3>プロセスとスレッドのライフサイクル</h3>
+<p><dfn>プロセス</dfn>は、実行中のプログラムです。OS は、独立したメモリのひと区画と、開いているファイルやネットワーク接続などの資源を割り当てます。2 つのプロセスは、既定では互いのメモリを見られず、<dfn>パイプ</dfn>やネットワークなどの経路を通してメッセージをやり取りするしかありません。プロセスが終わると、OS は、そのプロセスが使っていたメモリや VRAM をまとめて回収します。</p>
+<p><dfn>スレッド</dfn>は、プロセスの中の 1 本の実行経路です。1 つのプロセスは複数のスレッドを持てます。スレッドは同じメモリを共有するので、データのやり取りはとても楽ですが、お互いの足を踏みやすくもあります。</p>
+<p>どちらにもライフサイクルがあります。作成、実行、待機（ネットワークのデータを待つなど）、終了。終わり方は 2 通りで、<strong>自分で走り終える</strong>か、<strong>ほかの者に終わらされる</strong>かです。Unix 系の OS では、あるプロセスがほかのプロセスにシグナルを送れます。SIGTERM は「終了してください」で、相手には先に片付ける機会があります。SIGKILL は「即座に終了」で、相手には後始末の機会がまったくありません。</p>
+<p>Strata との関係：サーバーとエンジンは<strong>2 つのプロセス</strong>で、パイプを通して 1 行ずつテキストをやり取りします。サーバーの中にも、役割を分けたスレッドがいくつかあります（図 24-3）。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%83%97%E3%83%AD%E3%82%BB%E3%82%B9" target="_blank" rel="noopener noreferrer">Wikipedia：プロセス</a> · <a href="https://ja.wikipedia.org/wiki/%E3%82%B9%E3%83%AC%E3%83%83%E3%83%89_%28%E3%82%B3%E3%83%B3%E3%83%94%E3%83%A5%E3%83%BC%E3%82%BF%29" target="_blank" rel="noopener noreferrer">Wikipedia：スレッド</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-intro.pdf" target="_blank" rel="noopener noreferrer">OSTEP：プロセス（英語）</a> · <a href="https://docs.python.org/ja/3/library/subprocess.html" target="_blank" rel="noopener noreferrer">Python ドキュメント：subprocess</a> · <a href="https://man7.org/linux/man-pages/man7/signal.7.html" target="_blank" rel="noopener noreferrer">man 7 signal</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="図 24-3：Strata のサーバープロセスには、リクエストスレッド、監視スレッド、読み取りスレッドがあり、FIFO ロックで順番にエンジンを使う。エンジンは別のプロセスで、双方は標準入出力でテキスト行をやり取りする">
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="10" width="380" height="170" rx="10"/>
+<text class="f-text" fill="#182f2b" x="20" y="31" font-size="13" font-weight="600">Python サーバープロセス：serve/server.py</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="18" y="44" width="118" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="77" y="67" font-size="12" font-weight="600" text-anchor="middle">リクエストスレッド</text>
+<text class="f-muted" fill="#5c6d66" x="77" y="88" font-size="12" text-anchor="middle">接続ごとに 1 つ</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="141" y="44" width="118" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="67" font-size="13" font-weight="600" text-anchor="middle">監視スレッド</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="88" font-size="12" text-anchor="middle">0.5 秒ごと接続確認</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="264" y="44" width="118" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="323" y="67" font-size="13" font-weight="600" text-anchor="middle">読み取りスレッド</text>
+<text class="f-muted" fill="#5c6d66" x="323" y="88" font-size="12" text-anchor="middle">出力をためる</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="116" width="360" height="48" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="145" font-size="13" text-anchor="middle">FIFO ロック：エンジンを使えるのは同時に 1 リクエスト</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 180V228M250 228V180"/>
+<path class="f-muted" fill="#5c6d66" d="M100 232l-5-8h10z"/>
+<path class="f-muted" fill="#5c6d66" d="M250 176l-5 8h10z"/>
+<text class="f-muted" fill="#5c6d66" x="108" y="200" font-size="12">stdin：GEN、STOP、QUIT</text>
+<text class="f-muted" fill="#5c6d66" x="258" y="222" font-size="12">stdout：T、PP、DONE</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="234" width="380" height="56" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="257" font-size="13" font-weight="600" text-anchor="middle">エンジンプロセス：strata --serve</text>
+<text class="f-on" fill="#ffffff" x="200" y="278" font-size="12" text-anchor="middle">重み、エキスパートキャッシュ、VRAM はすべてこちらの管理</text>
+</svg><figcaption>図 24-3　サーバーとエンジンは 2 つのプロセスで、パイプを通して 1 行ずつテキストをやり取りします。サーバーの中のスレッドは、それぞれの持ち場を担当します。FIFO ロックが、エンジンを使うリクエストを同時に 1 つに保ちます。</figcaption></figure>
+<p>サーバーは、Python の <code>subprocess.Popen</code> で <code>strata --serve</code> を起動し、その標準入力と標準出力を両方ともパイプにつなぎます。<span class="ev ev-code">コード上の事実</span> エンジンは重みを読み込み終えると、まず <code>INFO</code> を何行か書き、続いて、コンテキスト長を添えた <code>READY</code> を 1 行書きます。この行に <code>stop</code> も付いていれば、このエンジンのバージョンは途中での停止に対応しているということです。サーバーは <code>READY</code> を読んではじめて、エンジンを「生きている」とみなします。その後、サーバーが <code>GEN</code> コマンドを 1 行書いてリクエストを出すと、エンジンは <code>T</code>（トークン 1 つ）、<code>PP</code>（プリフィルの進み具合）、<code>DONE</code>（終了）、<code>ERR</code>（エラー）のどれかを返します。</p>
+<p>専用の読み取りスレッドもあります。エンジンの出力を 1 行ずつキューに入れる役です。これで、リクエストを処理するスレッドは「タイムアウト付きで」次の行を待てます。待っても来なければ、先にハートビートを送ったり、キャンセルフラグを確認したりできます。ただぼんやり待ち続けることはありません。<span class="ev ev-code">コード上の事実</span></p>
+<p>エンジンプロセスが予期せず終了することもあります。コードには専用の <code>EngineDied</code> 例外があり、コメントには最もよくある原因が書かれています。Linux でメモリ不足のときに、OOM killer に終了させられることです。[S15] このとき、現在のリクエストはエラーで終わり、次のリクエストが来たときに、サーバーが同じコマンドでエンジンを再起動します。</p>
+<p>エンジンを通常どおり止めるときにも、作法があります。サーバーは 3 段階で進め、各段階で最大 20 秒待ちます（図 24-4）。</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="図 24-4：エンジンプロセスの終了は 3 段階。まず QUIT を書いて自分で終了させ、だめなら terminate、それでもだめなら kill。3 段階でも終了しなければエラーを報告する">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">エンジンプロセスの終了：まず丁寧に、だめなら強制</text>
+<rect class="f-soft" fill="#e5f1df" x="8" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="51" y="54" font-size="13" font-weight="600" text-anchor="middle">QUIT</text>
+<text class="f-text" fill="#182f2b" x="51" y="76" font-size="12" text-anchor="middle">自主的に終了</text>
+<text class="f-text" fill="#182f2b" x="51" y="94" font-size="12" text-anchor="middle">メモリを解放</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="106" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="149" y="54" font-size="13" font-weight="600" text-anchor="middle">terminate</text>
+<text class="f-text" fill="#182f2b" x="149" y="76" font-size="12" text-anchor="middle">終了シグナル</text>
+<text class="f-text" fill="#182f2b" x="149" y="94" font-size="12" text-anchor="middle">（SIGTERM）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="204" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="247" y="54" font-size="13" font-weight="600" text-anchor="middle">kill</text>
+<text class="f-text" fill="#182f2b" x="247" y="76" font-size="12" text-anchor="middle">強制終了</text>
+<text class="f-text" fill="#182f2b" x="247" y="94" font-size="12" text-anchor="middle">後始末なし</text>
+<rect class="f-warn" fill="#9e5d24" x="302" y="32" width="90" height="76" rx="8"/>
+<text class="f-on" fill="#ffffff" x="347" y="54" font-size="13" font-weight="600" text-anchor="middle">終了せず</text>
+<text class="f-on" fill="#ffffff" x="347" y="76" font-size="12" text-anchor="middle">エラーを報告</text>
+<text class="f-on" fill="#ffffff" x="347" y="94" font-size="12" text-anchor="middle">解放を装わない</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M94 70H104M192 70H202M290 70H300"/>
+<text class="f-muted" fill="#5c6d66" x="51" y="128" font-size="12" text-anchor="middle">20 秒待つ</text>
+<text class="f-muted" fill="#5c6d66" x="149" y="128" font-size="12" text-anchor="middle">20 秒待つ</text>
+<text class="f-muted" fill="#5c6d66" x="247" y="128" font-size="12" text-anchor="middle">20 秒待つ</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">なぜ丁寧にやるのか：エンジンは数十 GB のメモリを握っています。</text>
+<text class="f-text" fill="#182f2b" x="10" y="184" font-size="12">自分で順序よく解放させるほうが、強制回収より確実です。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">Windows では、エンジンを「ジョブオブジェクト」に入れます。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">サーバーがどう終了しても、OS がエンジンも道連れに終了させます。</text>
+</svg><figcaption>図 24-4　エンジンを止める 3 段の階段。各段に 20 秒かけ、3 段とも失敗したら、「エンジンはまだ終了していません」と正直に報告します。VRAM とメモリが戻ったふりはしません。</figcaption></figure>
+<p>コメントは、最初の手順が <code>QUIT</code> である理由を説明しています。エンジンは自分でメモリを解放しますが、数十 GB のピン留めメモリのロックを外すには、少し時間がかかるからです。<span class="ev ev-code">コード上の事実</span> 3 段階がすべて失敗すると、サーバーは <code>EngineStuck</code> を投げ、そのプロセスの記録を<strong>残したままにします</strong>。VRAM とメモリがもう返ったとは、主張しません。さらに Windows では、サーバーがエンジンを「閉じたら終了」を設定したジョブオブジェクトに入れます。こうすれば、コンソールウィンドウを直接閉じても、エンジンも一緒に終わり、管理者のいない孤児プロセスにはなりません。<span class="ev ev-code">コード上の事実</span></p>
+
+<h2 id="sec-3">24.3 キャンセル：「止まれ」を層ごとに伝える</h2>
+<aside class="primer" id="c24-cancel">
+<h3>キャンセル：なぜ「止まってください」とお願いするしかないのか</h3>
+<p>いちばん直接的なキャンセルは、働いているスレッドを外から断ち切ることです。ただし、これは危険です。そのスレッドは、ロックを持っている最中かもしれないし、データ構造を半分書きかけかもしれないし、VRAM の区画を借りている最中かもしれません。断ち切られると、ロックは誰にも解放されず、データは半分だけ新しくなり、後に続く人がみんな間違えます。</p>
+<p>そこで、実際のシステムの多くは<dfn>協調的キャンセル</dfn>を使います。外側は<dfn>キャンセルフラグ</dfn>を立てるだけです。働く側は、決めておいた<dfn>チェックポイント</dfn>でフラグをちらっと見ます。立っていれば、自分で後始末をして終わります。Python の <code>threading.Event</code>、Go の <code>context</code>、C# の <code>CancellationToken</code> は、どれもこの考え方です。</p>
+<p>ここから 2 つの法則が出ます。1 つ目は、キャンセルは一瞬では終わらず、最悪の場合は次のチェックポイントまで待つこと。2 つ目は、チェックポイントの間隔が空くほど、キャンセルは遅くなること。だから「止まれと叫ぶ」ことと「本当に止まる」ことは別の話で、その間の時間が、図 24-2 の「キャンセル中」です。</p>
+<p class="further">さらに読む：<a href="https://docs.python.org/ja/3/library/threading.html" target="_blank" rel="noopener noreferrer">Python ドキュメント：threading（Event オブジェクト）</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/threads-intro.pdf" target="_blank" rel="noopener noreferrer">OSTEP：並行性とスレッド（英語）</a> · <a href="https://en.wikipedia.org/wiki/Multithreading_%28computer_architecture%29" target="_blank" rel="noopener noreferrer">Wikipedia：マルチスレッド（英語）</a></p>
+</aside>
+<p>Strata のキャンセルは協調的です。各リクエストの開始時に、サーバーはキャンセルフラグとして <code>threading.Event</code> を作ります。これを立てる道は 2 つあります。</p>
+<ul>
+<li><strong>書き込めない</strong>：サーバーが接続に SSE イベントを書くときにエラーが出たら、クライアントがいなくなったということなので、すぐにフラグを立てます。コメントにはこう書かれています。「クライアントがいなくなった：エンジンを止める」<span class="ev ev-code">コード上の事実</span></li>
+<li><strong>監視スレッド</strong>：書き込みエラーだけでは足りません。長い質問を読んでいる間、サーバーはキープアライブのコメントをなかなか書きません。しかも、切断後の最初の書き込みは、たいてい「成功」してしまいます。そこで、リクエストごとに監視スレッドを別に立て、0.5 秒ごとに接続を確認します。接続が「読める」と表示されているのに、データが 1 つも読めなければ、相手が閉じたということなので、フラグを立てます。<span class="ev ev-code">コード上の事実</span> これが、冒頭で触れた #430、#431 の修正です。</li>
+</ul>
+<p>フラグが立ったあとは、チェックポイントを通して効き目が出ます（図 24-5）。</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="図 24-5：クライアントの切断から FIFO の解放までの 6 段階。切断の検出、キャンセルフラグの設定、生成ループが STOP を書く、エンジンがチェックポイントで停止、このリクエストの DONE を読む、FIFO を解放">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="8" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">① クライアントが切断（「停止」を押した）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="56" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="79" font-size="13" text-anchor="middle">② 監視スレッドが切断を検出（最大 0.5 秒）</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="104" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="127" font-size="13" text-anchor="middle">③ キャンセルフラグ cancel を立てる</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="152" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="175" font-size="13" text-anchor="middle">④ 出力待ちループがフラグを見て STOP を送る</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="200" width="320" height="36" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="223" font-size="13" text-anchor="middle">⑤ エンジンが次のチェックポイントで停止</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="248" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="271" font-size="13" text-anchor="middle">⑥ このリクエストの DONE を読み、FIFO を解放</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V54M200 92V102M200 140V150M200 188V198M200 236V246"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="310" font-size="12" text-anchor="middle">デコード中：次のトークンがチェックポイントなので、すぐ止まる</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="330" font-size="12" text-anchor="middle">プリフィル中：手元の 1 チャンクを読み切るまで十数秒</text>
+</svg><figcaption>図 24-5　キャンセルの 6 段階。最初の 3 段階にかかるのは 1 秒足らずです。第 ⑤ 段階は、エンジンがチェックポイントに着くのを待ちます。どの段階でキャンセルしたかが、待ち時間を決めます。</figcaption></figure>
+<p>第 ⑤ 段階のチェックポイントはどこにあるでしょうか。デコード中は、トークンを 1 つ出すたびに、ループがフラグをちらっと見ます。プリフィル中は、エンジンが 1 チャンクずつ読みます。<code>prefill.hpp</code> の <code>should_stop</code> が、<strong>各チャンクを始める前に</strong>1 回確認し、真が返れば早めに終わります。エラーメッセージは “cancelled” です。<span class="ev ev-code">コード上の事実</span>[S12] サーバーのコメントにも、プリフィル中に出した STOP は、手元の 1 チャンクを読み終えるまで見てもらえない、と書かれています。1 チャンクは最大 32768 トークンです。[S15] インタラクティブな図の「最悪でどれだけ待つか」は、この数字で計算しています。</p>
+<p>第 ⑥ 段階も同じくらい大切です。STOP を出したあと、サーバーは<strong>そのリクエスト自身の</strong> <code>DONE</code> が来るまでエンジンの出力を読み続け、その間ずっと FIFO ロックを持っています。コメントが理由を説明しています。早く手放すと、エンジンのキューに前のリクエストの <code>DONE</code> が残っていて、次のリクエストが、それを自分の終了の合図と取り違えてしまうからです。<span class="ev ev-code">コード上の事実</span> この段階にも制限時間があります。STOP のエコーを待つときは、決して無期限には待ちません。待っている間は FIFO が占められていて、後ろの全員が並んでいるからです。</p>
+<p>テストに使う <code>MockEngine</code> も、この約束を守ります。トークンを 1 つ出す前に、毎回キャンセルフラグをちらっと見ます。[S15] だから、キャンセルのロジックは、GPU のないマシンでもテストできます。</p>
+
+<h2 id="sec-4">24.4 固まったらどうするか：ウォッチドッグ</h2>
+<p>キャンセルは、エンジンが「協力してくれる」ことを前提にしています。エンジンが固まって、何も言わなくなったらどうでしょう。サーバーには<dfn>ウォッチドッグ</dfn>（番犬）が必要です。しばらく何の動きもなければ、問題が起きたと判断する仕組みです。</p>
+<p>難しいのは「どれくらいなら長すぎるか」です。エンジンがデコードしているときは、トークンごとに 1 行書くので、にぎやかです。ところが、とても長い質問を読んでいるときは、何分も黙っていることがあります。ウォッチドッグが一律の基準だと、真面目に質問を読んでいるエンジンを誤って殺してしまうか、本当に固まったエンジンをいつまでも待つことになります。Strata は、段階ごとに別の制限時間を決めています [S15]。</p>
+<ul>
+<li>基本の制限時間 300 秒：リクエストの処理中に、エンジンからの出力がこれだけ途絶えたら、応答なしと判断します。設定で変更でき、0 にすると永遠に待ちます。</li>
+<li>プリフィルの最初のチャンク：300 秒に加えて、「いちばん遅いマシンでも毎秒 50 トークンは読める」として、そのチャンクにかかる時間を足します。</li>
+<li>1 チャンクを読み終えたあと：次のチャンクには、前のチャンクの実際の所要時間の最大 3 倍まで使えます。ただし 300 秒を下回りません。</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="図 24-6：ウォッチドッグの制限時間。デコード中は 300 秒、プリフィルの最初のチャンクは約 955 秒、速い PC は 1 チャンク読み終えたあとも 300 秒、遅い PC は約 983 秒">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">エンジンはどれだけ黙っていてよいか（秒、バーの長さは比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">デコード中：トークンごとに計時をやり直す</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="50" width="90" height="14"/>
+<text class="f-text" fill="#182f2b" x="106" y="62" font-size="12">300</text>
+<text class="f-text" fill="#182f2b" x="10" y="92" font-size="12">プリフィル最初のチャンク：300 + 32768 ÷ 50</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="98" width="286.6" height="14"/>
+<text class="f-text" fill="#182f2b" x="302" y="110" font-size="12">≈ 955</text>
+<text class="f-text" fill="#182f2b" x="10" y="140" font-size="12">以降のチャンク、速い PC：max(300, 3 × 15.1)</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="146" width="90" height="14"/>
+<text class="f-text" fill="#182f2b" x="106" y="158" font-size="12">300</text>
+<text class="f-text" fill="#182f2b" x="10" y="188" font-size="12">以降のチャンク、遅い PC：max(300, 3 × 327.7)</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="194" width="294.9" height="14"/>
+<text class="f-text" fill="#182f2b" x="310" y="206" font-size="12">≈ 983</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">1 チャンク = 32768 トークンで計算。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="254" font-size="12">速い PC は毎秒 2171、遅い PC は毎秒 100 トークンを読む</text>
+</svg><figcaption>図 24-6　ウォッチドッグの制限時間は、作業の段階に合わせて変わります。遅い PC が大きな質問を読むときは、制限時間が自動的に十数分まで延び、働いているエンジンを誤って殺さないようにします。<span class="ev ev-est">教育用の試算</span></figcaption></figure>
+<p>図の数字は、コードの定数を代入して計算したものです。<span class="ev ev-est">教育用の試算</span> 最初のチャンク：300 + 32768 ÷ 50 ≈ 955 秒。速い PC は、上流の実測値の毎秒 2171 トークンで 32768 トークンの 1 チャンクを読むと約 15.1 秒で、3 倍は 45.3 秒です。300 秒に届かないので、制限時間は 300 秒のままです。遅い PC は毎秒 100 トークンなので、1 チャンクに 327.7 秒かかり、3 倍は約 983 秒です。</p>
+<p>タイムアウトしたらどうするのでしょうか。コメントはこれを「両側のずれ」と呼んでいます。エンジンのメインスレッドは次のコマンドを待ち、サーバーはこのリクエストの終了を待っている状態です。サーバーはエンジンプロセスを終了させ、このリクエストはエラーで終わり、次のリクエストが来たときにエンジンを再起動します。[S15] プロセスを終わらせるのは乱暴ですが、VRAM もメモリも、プロセスと一緒に必ず戻ってくるという利点があります。</p>
+<p>もっと低い層にも、同じ考え方があります。ドラフトトークンを検証する <code>Verifier</code> には <code>release_gpu_waits</code> があります。GPU 上の一連の計算が固まって、普通には終わらなくなったとき、GPU 上で待っているフラグをすべて強制的に通して、その計算を空にします。ただしそれ以後、この Verifier は、新しい計算ウィンドウの実行を<strong>拒否</strong>します。あの計算は、信頼できない条件のもとで走り終えたものだからです。<span class="ev ev-code">コード上の事実</span>[S08] 強制的に空にしたことは、正常な完了と同じではありません。何事もなかったふりをして、次のリクエストの処理を続けてはいけません。</p>
+
+<h2 id="sec-5">24.5 誰があなたの GPU を使えるのか：認証と API キー</h2>
+<p>ここまでは「どう止めるか」の話でした。この節は「誰が始められるか」の話です。他人があなたの Strata に自由にリクエストを送れるなら、あなたの GPU は公共の資源になってしまいます。</p>
+<aside class="primer" id="c24-auth">
+<h3>認証と API キー</h3>
+<p><dfn>認証</dfn>は「あなたは誰か」に答えるものです。<dfn>認可</dfn>は「あなたは何をしてよいか」に答えるものです。いちばん簡単な認証の方法が <dfn>API キー</dfn>です。サーバーとクライアントが、あらかじめとても長いランダムな文字列を共有しておき、クライアントは毎回、リクエストの HTTP ヘッダにそれを付けます。よくある書き方は <code>Authorization: Bearer キー</code> です。サーバーは、照合して一致すれば通し、一致しなければ 401 を返します。</p>
+<p>API キーは、みんなで共有する 1 本の鍵のようなものです。手にした人は誰でもドアを開けられます。だから秘密にしておく必要があります。Web ページのソースに書いてはいけませんし、公開リポジトリにコミットしてもいけません。ネットワークで送るときは、できれば HTTPS を使います。そうでないと、途中にいる人に見られてしまいます。</p>
+<p>照合の仕方にも注意が必要です。普通の文字列比較は、違う文字に出会うとすぐ戻ってきます。当てた先頭部分が長いほど、比較にかかる時間も長くなります。攻撃者が時間を測れば、キーを 1 文字ずつ当てられます。処理時間や消費電力のような「副産物」から情報を漏らす攻撃を<dfn>サイドチャネル攻撃</dfn>と呼び、そのうち時間を使うものを<dfn>タイミング攻撃</dfn>と呼びます。防ぐには、<dfn>定数時間比較</dfn>を使います。何文字目から違っていても、文字列全体を比べ終えてから結果を返す方法です。</p>
+<p class="further">さらに読む：<a href="https://en.wikipedia.org/wiki/API_key" target="_blank" rel="noopener noreferrer">Wikipedia：API key（英語）</a> · <a href="https://ja.wikipedia.org/wiki/%E3%82%B5%E3%82%A4%E3%83%89%E3%83%81%E3%83%A3%E3%83%8D%E3%83%AB%E6%94%BB%E6%92%83" target="_blank" rel="noopener noreferrer">Wikipedia：サイドチャネル攻撃</a> · <a href="https://developer.mozilla.org/ja/docs/Web/HTTP/Reference/Headers/Authorization" target="_blank" rel="noopener noreferrer">MDN：Authorization ヘッダー</a> · <a href="https://docs.python.org/ja/3/library/hmac.html" target="_blank" rel="noopener noreferrer">Python ドキュメント：hmac.compare_digest</a> · <a href="https://www.rfc-editor.org/rfc/rfc6750" target="_blank" rel="noopener noreferrer">RFC 6750：Bearer トークン</a></p>
+</aside>
+<p>Strata の第 1 の防御線は、<strong>既定ではローカルだけを待ち受ける</strong>ことです。サーバーは既定で <code>127.0.0.1</code> を待ち受けるので、ほかの機器はそもそもつながりません。<span class="ev ev-code">コード上の事実</span> このとき README は、アプリには API キーとして何を入れてもよい、と伝えています。[S01] スマホやほかのコンピュータからアクセスしたいときは、待ち受けを <code>0.0.0.0</code> に変える必要があります。README の原文は「必ずキーを付けること」です。[S01] 待ち受けアドレスを変えたのにキーを設定していないと、サーバーは起動時に警告を 1 行出します。API キーがないので、ネットワーク内の誰でもこのモデルを使える、という警告です。<span class="ev ev-code">コード上の事実</span></p>
+<p>キーを設定したあとは、<code>/v1/*</code> へのリクエストは必ずキーを付けなければなりません。<code>Authorization: Bearer …</code> と書くか、<code>x-api-key</code> ヘッダに書きます（Anthropic 流のクライアントはこちらを使います）。照合には <code>hmac.compare_digest</code> を使い、コードのコメントには「定数時間」と書かれています。照合に失敗したら 401 を返し、種別は <code>authentication_error</code> です。<span class="ev ev-code">コード上の事実</span> 判断の全体は図 24-7 のとおりです。</p>
+<figure class="fig"><svg viewBox="0 0 400 326" role="img" aria-label="図 24-7：Strata の API キー検査の流れ。キー未設定ならそのまま通す。設定済みならクライアントのキーを取り出し、定数時間で比較して、一致すれば処理し、不一致なら 401 を返す">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="8" width="200" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">リクエストが /v1/… に到着</text>
+<rect class="f-soft" fill="#e5f1df" x="100" y="62" width="200" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="84" font-size="13" text-anchor="middle">設定に API キーはある？</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="316" y="62" width="76" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="354" y="84" font-size="13" text-anchor="middle">通す</text>
+<text class="f-muted" fill="#5c6d66" x="308" y="56" font-size="12" text-anchor="middle">なし</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="122" width="280" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="144" font-size="13" text-anchor="middle">Bearer / x-api-key ヘッダから取得</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="114" font-size="12">あり</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="176" width="280" height="34" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="198" font-size="13" text-anchor="middle">hmac.compare_digest で比較</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="236" width="160" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="258" font-size="13" text-anchor="middle">一致：処理する</text>
+<rect class="f-warn" fill="#9e5d24" x="220" y="236" width="160" height="34" rx="8"/>
+<text class="f-on" fill="#ffffff" x="300" y="258" font-size="13" text-anchor="middle">不一致：401 を返す</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V60M300 79H314M200 96V120M200 156V174M160 210V222H100V234M240 210V222H300V234"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="296" font-size="12" text-anchor="middle">さらに手前にもう 1 枚：既定では 127.0.0.1 だけを</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="314" font-size="12" text-anchor="middle">待ち受けるので、ほかの機器は接続できない</text>
+</svg><figcaption>図 24-7　Strata の API キー検査。既定ではローカルだけを待ち受けるので、キーがなくても安全です。外部に公開した途端、キーが唯一の錠前になり、照合は定数時間でなければなりません。</figcaption></figure>
+<p>なぜ定数時間でなければならないのでしょうか。下のシミュレータで、攻撃者になってみましょう。</p>
+<div class="viz" data-viz="key-compare-timing"><figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="図 24-8：キーの 1 桁目を当てるとき、1 文字ずつ比較では、当たった候補だけ 1 文字多く比較するのでバーがはっきり高くなる。定数時間比較では 16 個の候補の所要時間がまったく同じになる">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="13" font-weight="600" text-anchor="middle">1 文字ずつ比較：違えば即停止</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="13" font-weight="600" text-anchor="middle">定数時間比較</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="12" text-anchor="middle">正解だけ 1 文字多く比べる</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="38" font-size="12" text-anchor="middle">何を入れても 4 文字すべて比べる</text>
+<rect class="f-accent" fill="#136d5a" x="16" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="27" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="38" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="49" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="60" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="71" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="82" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="93" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="104" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="115" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="126" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="137" y="126" width="8" height="24"/><rect class="f-warn" fill="#9e5d24" x="148" y="102" width="8" height="48"/><rect class="f-accent" fill="#136d5a" x="159" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="170" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="181" y="126" width="8" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="216" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="227" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="238" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="249" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="260" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="271" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="282" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="293" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="304" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="315" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="326" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="337" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="348" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="359" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="370" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="381" y="54" width="8" height="96"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 150H194M210 150H394"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="12" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="152" y="168" font-size="12" text-anchor="middle">c</text>
+<text class="f-muted" fill="#5c6d66" x="185" y="168" font-size="12" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="168" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="385" y="168" font-size="12" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="194" font-size="12" text-anchor="middle">1 桁目の 16 個の候補（本当のキーは c で始まる）</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="214" font-size="12" text-anchor="middle">操作版：1 桁ずつ当てて、何回試すか見る</text>
+</svg><figcaption>図 24-8　1 文字ずつの比較では、「何桁当たったか」が所要時間に書き込まれるので、攻撃者は各桁を 16 回試すだけで済みます。定数時間比較では、すべての候補がまったく同じに見えます。<span class="ev ev-est">教育用の試算</span></figcaption></figure></div>
+<p>現実の世界では、1 回の比較の差は数ナノ秒にすぎず、ネットワークの揺らぎは数ミリ秒あります。だから本物の攻撃では、同じ推測を何千回、何万回も繰り返して測り、統計の方法で違いを掘り出します。難しいことですが、不可能ではありません。<code>hmac.compare_digest</code> を使うのは、コード 1 行ですむことで、この危険を冒す理由はありません。</p>
+<p>Strata は、もっと見えにくい攻撃にも備えています。<dfn>DNS リバインディング</dfn>です。あなたが開いた悪意のある Web ページが、自分のドメインを一時的に <code>127.0.0.1</code> に向けさせ、「自分のサイト」の顔をして、あなたのローカルのサービスにアクセスできてしまいます。そこで、キーが設定されていないときは、サーバーは、<code>Host</code> ヘッダが知っている名前（<code>localhost</code> や IP アドレスなど）であるリクエストにだけ応答します。見知らぬ Web ページを送信元とする <code>POST</code> リクエストも断ります。キーを設定したあとは、キーがすべてを決めます。他人の Web ページは、あなたのキーを手に入れられないからです。<span class="ev ev-report">上流レポート</span></p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>この節は、「コンピュータネットワーク」や「情報セキュリティ」の基本概念にいくつか対応しています。認証と認可の違い、露出面の最小化（既定ではループバックアドレスだけを待ち受ける）、サイドチャネル攻撃。セキュリティ対策は何層にも重ね、各層は守るべきものだけを守ります。</p>
+
+<h2 id="sec-6">24.6 手を動かす：自分の手でキャンセルする</h2>
+<p>この章に独立した実験ページはありません。2 つのインタラクティブ図が実験です。順に 3 つやってみましょう。</p>
+<ol>
+<li>ライフサイクルシミュレータで、<strong>キュー待ち、プリフィル、デコード</strong>の 3 つの状態それぞれで「キャンセル」を押し、「最悪でどれだけ待つか」を記録します。プリフィルでは約 15.6 秒、デコードでは約 0.51 秒です。考えてみましょう。自分で設計するなら、プリフィルでもっと早く止まるようにするには、どうしますか。代償は何でしょうか。</li>
+<li>キャンセルを押したあと、「キャンセル中」で「エンジンが応答しない」を押します。サーバーがどう収拾をつけるか、STOP のエコーを待つのに制限時間が必要な理由を見てください。</li>
+<li>タイミング攻撃シミュレータで、2 つの比較方法をそれぞれ 1 回ずつ破ってみて、何回試す必要があったかを数えます。</li>
+</ol>
+<p>Python が書ける人は、Strata に付属する <code>MockEngine</code>（<code>python -m serve.server --engine mock</code>）を使えば、GPU のないマシンでサービスを起動できます。<code>curl</code> でストリーミングのリクエストを送り、途中で Ctrl+C で切断して、サーバーのウィンドウでこのリクエストの結末を確かめてください。[S15]</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>1 つのリクエストは、ブラウザ、HTTP 接続、サーバープロセス、エンジンプロセス、GPU を通ります。「止まった」の意味は層ごとに違うので、キャンセル信号は層ごとに伝え、確認しなければなりません。</li>
+<li>Strata のキャンセルは協調的です。監視スレッドが 0.5 秒ごとに接続を確認してキャンセルフラグを立て、エンジンはチェックポイントで止まり、サーバーはそのリクエスト自身の DONE を読んではじめて FIFO を解放します。プリフィル中はチェックポイントの間隔が長いので、キャンセルが遅くなります。</li>
+<li>Strata は既定ではローカルだけを待ち受けます。外部に公開するときは API キーが必須で、照合には定数時間の <code>hmac.compare_digest</code> を使い、タイミング攻撃を防ぎます。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「ブラウザのページを閉じれば、GPU も止まる。」</strong></p>
+<p>ページを閉じて止まるのは、いちばん上の層だけです。サーバーが切断に気づき、エンジンに知らせ、エンジンが次のチェックポイントまで進んではじめて止まります。Strata でも、#430、#431 を直す前は、クライアントがとっくにいなくなったのに、エンジンが計算を続ける状況が実際にありました。「止まった」かどうかは、層ごとに別々に確かめる必要があります。</p></div>
+
+<details class="deep"><summary>もう一歩深く：キャンセルの線形化点、遅れて届く古い応答、信頼の境界</summary>
+<h3>キャンセルはどの瞬間から「効いた」ことになるのか</h3>
+<p>キャンセルは、次のように定義できます。確認済みのある境界から先は、ユーザーに新しいトークンを渡さず、関連する資源も最終的に使われなくなること。この境界が、キャンセルの<dfn>線形化点</dfn>です。フラグを立てただけで、プリフィルのチャンクループやデコードのループがまだそれを見ていなければ、キャンセルは完了していません。</p>
+<p>この本が <code>serve/server.py</code> を読んで理解したところでは、まだキュー待ちのリクエストは、FIFO ロックを取り、<code>GEN</code> コマンドをエンジンに送ったあとで、はじめて、エンジンの出力を待つループの中でキャンセルフラグを確認します。最初のトークンかプリフィルの進み具合を 1 行受け取ったとき、または出力なしで 10 秒待ち切ったときです。<span class="ev ev-code">コード上の事実</span> つまり、とっくに切断された、キュー待ちのリクエストでも、エンジンはまずその質問を読み始め、そのあとで STOP を受け取ります。取り組む価値のある発展課題があります。ロックを取ったあと、コマンドを送る前に、もう 1 回フラグを確認することです。</p>
+<h3>例題：タイムアウト後に届く古い応答</h3>
+<p>リクエスト A がタイムアウトし、サービスがリクエスト B を処理し始めたとします。A の遅れた結果がまだ共有の出力キューに書き込まれると、B は A のトークンを受け取ったり、A の <code>DONE</code> を自分の終了と取り違えたりするかもしれません。解決の方向は、出力に持ち主の検査を付けることと、古い実行が終わったと確認できるまで、同じ可変な状態を使い回さないことです。</p>
+<p>Strata が採っているのは、まさに後者です。STOP を出したあとは、そのリクエスト自身の <code>DONE</code> まで読み続け、その間ずっと FIFO ロックを持っています。使用量を集計するときも、そのリクエストの期間中に届いた <code>DONE</code> だけを数えます。そうしないと、エラーで終わったリクエストや切断されたリクエストが、前のリクエストのデコード数を自分のものとして記録してしまいます。<span class="ev ev-code">コード上の事実</span> この本は、上流のすべての出力の持ち主の経路を監査したわけではありません。授業では、わざと遅らせた mock エンジンでこのリスクを作り出し、修正を検証するとよいでしょう。</p>
+<h3>ウォッチドッグは作業の段階を理解しなければならない</h3>
+<p>「しばらく文字の出力がない」ことをすべてデッドロックとみなすと、長い質問を読んでいる健全なリクエストを誤って殺します。永遠に待つと、FIFO 全体が詰まります。まともな診断は、次を区別できなければなりません。キュー待ち、正当な長い計算、遅い I/O、子プロセスの応答なし、プロトコルのずれ。そして、あいまいな「タイムアウト」だけでなく、状態と最後の進み具合を報告します。Strata がプリフィルのチャンクごとに制限時間を調整し、応答なしの原因をエラーメッセージに書くのは、この考え方です。[S15]</p>
+<p>同じように、「明示的なモデル制御」（ロードとアンロード）は、実行中やキュー待ちのリクエストを中断してはいけません。コードには、そのための <code>ModelBusy</code> が定義されています。[S15] 上流のドキュメントによると、このとき制御 API は 409 を返します。<span class="ev ev-report">上流レポート</span></p>
+<h3>ツール、画像 URL、ローカルファイルは、どれも信頼の境界</h3>
+<p>モデルの出力は信頼できない入力です。ツールの引数は、構造の検証と権限の検査を通す必要があります。リモート URL の取得は、外部へのアクセスと資源の制限に関わります。ローカルパスの読み取りは、ファイルの権限とパスの範囲に関わります。Strata の画像入力は、base64 データ、http(s) の URL、ローカルファイルのパスの 3 種類の入力元に対応しています。[S15] SSRF やパストラバーサルなどを防げているかは、入口ごとに監査する必要があります。どこかで安全なライブラリを使っているからといって、全体が安全だと断言してはいけません。</p>
+<p><code>frontend.py</code> は、サンドボックス化した Jinja 環境でテンプレートを描画します。[S16] これはテンプレート層の具体的な選択であり、ツールの実行、URL の取得、ファイルへのアクセスがすべて安全であることを、自動的に証明するものではありません。資源の種類ごとに、別々の脅威モデルが必要です。</p>
+<h3>「キャンセル完了」の受け入れチェックリスト</h3>
+<p>mock エンジンに、次の状況を注入します。プリフィル中のキャンセル、出力の中断、重複したキャンセル、エンジンの無応答、古い結果の遅れ、復旧後の再リクエスト。受け入れ条件：ユーザーに見える新しいトークンをもう渡さない。バッファの読み書きに関わるタスクがすべて停止または完了している。キューと状態が次のリクエストに誤って使われない。遅れて届いた古い出力を識別して捨てられる。資源の解放は 1 回だけ。クライアントには、「成功」ではなく、明確な「キャンセル済み」か「失敗」が返る。</p>
+<p>最後に 1 つ注意です。この教材は静的な Web サイトで、本物の推論 API キーは含まれていません。ブラウザからあなたのモデルサーバーに直接アクセスすることもありません。将来、本物の実験プラットフォームにつなぐときは、認証、クォータ、ジョブの分離、サーバー側のプロキシを別に用意すべきで、キーをコースのページに書いてはいけません。</p>
+</details>

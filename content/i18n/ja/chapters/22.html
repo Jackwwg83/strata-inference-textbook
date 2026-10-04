@@ -1,0 +1,263 @@
+<div class="hook"><span class="eyebrow">見たことがあるかも</span>
+<p>オープンソースのソフトをダウンロードするとき、リリースページにファイルがずらっと並んでいることがあります。<code>windows-x64</code>、<code>linux-x64</code>、<code>macos-arm64</code>……同じプログラムなのに、なぜこんなにたくさん用意するのでしょうか。</p>
+<p>Strata の README の冒頭には、NVIDIA または AMD のグラフィックスカード、Windows または Linux と書かれています。<span class="ev ev-report">上流レポート</span>[S01] 原理ドキュメントはもっと端的です。NVIDIA（CUDA）と AMD（HIP）のカードで動くのは同じエンジンで、ただそれぞれ 1 回ずつコンパイルするだけ、というのです。[S02] この章では 2 つの問いに答えます。同じソースコードは、どうやって別々のマシンで動くプログラムになるのか。そして「動いた」ことは、何をどこまで証明するのか。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>チップはそれぞれ自分の命令しか分かりません。Strata はソースを 1 つだけ書き、コンパイルスイッチ、条件付きコンパイル、そして CUDA→HIP の「名前の置き換え表」を使って、NVIDIA 版と AMD 版の 2 つのエンジンを作ります。CPU 側は、起動時に CPU が使える命令を問い合わせてから、AVX-512 か AVX2 のカーネルを選びます。コンパイルできた、テストに通った、実機で動いた、メンテナが検証した。この 4 つは、強さの違う 4 段階の証拠です。</p>
+
+<h2 id="sec-1">22.1 同じレシピ、3 つの台所</h2>
+<p>レシピを書いて、3 軒のレストランに送るところを想像してください。1 軒はガスコンロ、1 軒は IH、1 軒はオーブンしかありません。レシピの「3 分炒める」は、各店が自分の設備での操作に読み替える必要があります。</p>
+<p>プログラムも同じです。プログラマが書くのは<dfn>ソースコード</dfn>、つまり人間が読める文字です。チップが実際に実行するのは<dfn>機械語</dfn>、つまり 2 進数の命令の列です。チップがどの命令を実行できるか、各命令をどう符号化するかは<dfn>命令セット</dfn>が決めます。「この台所にどんな電化製品があるか」にあたります。ソースコードを、ある命令セットの機械語に翻訳する仕事が<dfn>コンパイラ</dfn>です。</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="図 22-1：同じソースコードがプリプロセッサとコンパイラを通り、x86 CPU、NVIDIA GPU、AMD GPU の 3 種類の機械語になる">
+<rect class="f-soft" fill="#e5f1df" x="60" y="8" width="280" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="33" font-size="14" font-weight="600" text-anchor="middle">ソースコード：書くのは 1 回だけ</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="70" width="300" height="46" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="90" font-size="14" font-weight="600" text-anchor="middle">プリプロセッサ</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="108" font-size="12" text-anchor="middle">#include 展開、マクロ置換、#if で 1 分岐を残す</text>
+<rect class="f-accent" fill="#136d5a" x="50" y="138" width="300" height="46" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="158" font-size="14" font-weight="600" text-anchor="middle">コンパイラ</text>
+<text class="f-on" fill="#ffffff" x="200" y="176" font-size="12" text-anchor="middle">ある命令セットの機械語に翻訳する</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 48V68M200 116V136M200 184V196H70V210M200 196V210M200 196H330V210"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="212" width="124" height="54" rx="8"/>
+<text class="f-text" fill="#182f2b" x="70" y="234" font-size="13" font-weight="600" text-anchor="middle">x86 CPU</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="254" font-size="12" text-anchor="middle">AVX2 / AVX-512</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="138" y="212" width="124" height="54" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="234" font-size="13" font-weight="600" text-anchor="middle">NVIDIA GPU</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="254" font-size="12" text-anchor="middle">sm_75 … sm_120</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="268" y="212" width="124" height="54" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="234" font-size="13" font-weight="600" text-anchor="middle">AMD GPU</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="254" font-size="12" text-anchor="middle">gfx1030 … gfx1201</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="12" text-anchor="middle">同じソースから、3 つの「方言」の機械語</text>
+</svg><figcaption>図 22-1　ソースコードは 1 回だけ書きます。プリプロセッサがターゲットに合わせてソースを書き換え、コンパイラがそれをターゲットチップの命令に翻訳します。チップが変われば、もう一度コンパイルが必要です。</figcaption></figure>
+<p>図の <code>sm_120</code> や <code>gfx1100</code> はカードのアーキテクチャ番号で、台所の型番にあたります。Strata のビルドスクリプトは、NVIDIA カードの compute capability（計算能力）が 7.5 以上、つまり RTX 20 シリーズ以降であることを求めます。AMD 側は明示的なリストに載ったものだけを受け付け、リスト外のアーキテクチャはエラーにします。<span class="ev ev-code">コード上の事実</span></p>
+<aside class="primer" id="c22-compiler">
+<h3>コンパイラ、命令セット、条件付きコンパイル</h3>
+<p><dfn>命令セット</dfn>は、ハードウェアとソフトウェアの間の約束です。チップは「この命令なら分かります」と約束し、ソフトウェアはその命令だけで話しかけます。同じファミリーのチップは、少しずつ新しい命令を足していきます。たとえば x86 CPU ファミリーでは、まず AVX2 ができ、その後もっと幅の広い AVX-512 が加わりました。古いチップは、知らない命令に出会うと「不正命令」と報告して、プログラムをクラッシュさせます。</p>
+<p><dfn>コンパイラ</dfn>はソースコードを機械語に翻訳します。C と C++ のコンパイルは 2 段階です。まず<dfn>プリプロセッサ</dfn>が文字の加工をし、次にコンパイラ本体が翻訳します。プリプロセッサの仕事は 3 つあります。<code>#include</code> したファイルをそのまま貼り込むこと。<code>#define</code> で定義した<dfn>マクロ</dfn>を名前で置き換えること（「検索と置換」のようなものです）。そして <code>#if</code> の条件に合う 1 つの分岐だけを残し、ほかの分岐をまるごと消すこと。最後のものを<dfn>条件付きコンパイル</dfn>と呼びます。</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="図 22-2：#if 分岐を含む 1 つのソースファイル。gfx1100 向けにコンパイルすると sudot4 の分岐だけが残り、gfx1030 向けでは sdot4 の分岐だけが残る">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">ソースファイル（1 つ）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="30" width="184" height="148" rx="8"/>
+<text class="f-text" fill="#182f2b" x="16" y="52" font-size="12">#if defined(__gfx1100__)</text>
+<text class="f-muted" fill="#5c6d66" x="28" y="70" font-size="12">sudot4 命令を使う</text>
+<text class="f-text" fill="#182f2b" x="16" y="88" font-size="12">#elif defined(__gfx1030__)</text>
+<text class="f-muted" fill="#5c6d66" x="28" y="106" font-size="12">sdot4 命令を使う</text>
+<text class="f-text" fill="#182f2b" x="16" y="124" font-size="12">#else</text>
+<text class="f-muted" fill="#5c6d66" x="28" y="142" font-size="12">バイトごとのループ</text>
+<text class="f-text" fill="#182f2b" x="16" y="160" font-size="12">#endif</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M192 66H212M192 140H212"/>
+<rect class="f-soft" fill="#e5f1df" x="214" y="34" width="178" height="62" rx="8"/>
+<text class="f-text" fill="#182f2b" x="224" y="52" font-size="12" font-weight="600">gfx1100 向けにコンパイル</text>
+<text class="f-text" fill="#182f2b" x="224" y="70" font-size="12">コンパイラに見えるのは</text>
+<text class="f-text" fill="#182f2b" x="224" y="88" font-size="12">sudot4 命令を使う行だけ</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="110" width="178" height="62" rx="8"/>
+<text class="f-text" fill="#182f2b" x="224" y="128" font-size="12" font-weight="600">gfx1030 向けにコンパイル</text>
+<text class="f-text" fill="#182f2b" x="224" y="146" font-size="12">コンパイラに見えるのは</text>
+<text class="f-text" fill="#182f2b" x="224" y="164" font-size="12">sdot4 命令を使う行だけ</text>
+<text class="f-text" fill="#182f2b" x="200" y="202" font-size="12" text-anchor="middle">コンパイルの前に、選ばれなかった分岐を消す</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="222" font-size="12" text-anchor="middle">だから 1 つのソースから、道が 1 本だけの別々のプログラムができる</text>
+</svg><figcaption>図 22-2　条件付きコンパイル：1 つのソースファイルにすべての分岐を書いておき、コンパイルのたびにターゲットに合う 1 つだけを残します。コンパイラはほかの分岐を目にすることがありません。</figcaption></figure>
+<p>これがまさに、Strata が AMD カードで「4 バイト内積」を書くやり方です。RDNA3 と RDNA4 のカードは sudot4 命令を 1 つ使います。RDNA2 にはこの命令がないので、古い sdot4 を使います。それ以外の場合は、バイトごとに掛けて足すループに戻ります。3 つの道が出す整数はまったく同じで、速さだけが違います。<span class="ev ev-code">コード上の事実</span> 22.3 節で、実際にコンパイルして確かめます。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%82%B3%E3%83%B3%E3%83%91%E3%82%A4%E3%83%A9" target="_blank" rel="noopener noreferrer">Wikipedia：コンパイラ</a> · <a href="https://ja.wikipedia.org/wiki/%E5%91%BD%E4%BB%A4%E3%82%BB%E3%83%83%E3%83%88" target="_blank" rel="noopener noreferrer">Wikipedia：命令セット</a> · <a href="https://en.wikipedia.org/wiki/C_preprocessor" target="_blank" rel="noopener noreferrer">Wikipedia：C プリプロセッサ（英語）</a> · <a href="https://en.cppreference.com/w/cpp/preprocessor/conditional" target="_blank" rel="noopener noreferrer">cppreference：条件付きコンパイル（英語）</a></p>
+</aside>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>「コンパイラ」の授業で習うのは、字句解析、構文解析、コード生成という本筋です。プリプロセスはそのすべてより前に行われる純粋なテキスト加工で、文法を理解しません。だからマクロ置換が間違っていると、エラーの位置がとても奇妙になることがよくあります。コンパイラが見ているのは、すでに置き換えられた後のコードだからです。</p>
+
+<h2 id="sec-2">22.2 CPU：まず使える命令を確かめ、それからカーネルを選ぶ</h2>
+<p>第 10 章で見たように、GPU にキャッシュされていないエキスパートは、CPU がメモリ上でそのまま計算します。上流ドキュメントの要約では、この計算は AVX-512 か AVX2 のカーネルで行い、i-quant 形式のモデルは ggml のカーネルを使います。<span class="ev ev-report">上流レポート</span>[S02] ソースを見るともう少し細かく分かれています。i-quant 形式でも、1 グループに複数のトークンがあるときは、Strata 自前のマルチトークンカーネルに切り替わります。<span class="ev ev-code">コード上の事実</span> ここで<dfn>カーネル</dfn>とは、猛烈に速く走るように特別に書かれた、中心的な計算コードのことです。</p>
+<p>AVX2 も AVX-512 も <dfn>SIMD</dfn> 命令です。1 つの命令で、ひとならびの数をまとめて処理します（第 13 章で詳しく説明します）。違いは、このならびの幅です。AVX2 のレジスタは 256 ビット、AVX-512 は 512 ビットです。図 22-3 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 228" role="img" aria-label="図 22-3：AVX2 のレジスタは 256 ビットで 8 ビット整数を 32 個、AVX-512 のレジスタは 512 ビットで 64 個入る">
+<defs><pattern id="c22-lane" width="4.6875" height="18" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="3.6" height="18"/></pattern></defs>
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">ベクトルレジスタに入る 8 ビット整数の数（1 目盛り = 1 個）</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="12" font-weight="600">AVX2</text>
+<rect fill="url(#c22-lane)" x="90" y="38" width="150" height="18"/>
+<text class="f-text" fill="#182f2b" x="250" y="52" font-size="12">256 ビット = 32 個</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12" font-weight="600">AVX-512</text>
+<rect fill="url(#c22-lane)" x="90" y="84" width="300" height="18"/>
+<text class="f-text" fill="#182f2b" x="90" y="124" font-size="12">512 ビット = 64 個：1 命令で 2 倍の仕事</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="156" font-size="12">Strata の CPU エキスパート用カーネル：</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="176" font-size="12">AVX-512 があればそれを使い、なければ AVX2 版を使う</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="200" font-size="12">前提：CPU がこの命令群を理解し、</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">OS もこのレジスタを保存してくれること</text>
+</svg><figcaption>図 22-3　レジスタの幅が 2 倍なら、1 命令で処理できる数も 2 倍です。ただし古い CPU は AVX-512 を知らないので、プログラムはカーネルを 2 セット用意しておく必要があります。</figcaption></figure>
+<p>困るのはここです。プログラム全体を AVX-512 でコンパイルすると、コンパイラはどこにでも AVX-512 命令を挿入できてしまい、古い CPU ではクラッシュします。Strata のビルドスクリプトは、いくつかのカーネルのソースファイルにだけ AVX-512 または AVX2 のコンパイルスイッチを付けます（GCC なら <code>-mavx512f</code> のようなオプション、MSVC なら <code>/arch:AVX512</code> です）。「CPU を調べる」担当のファイルには付けません。だからどの x86-64 CPU でも安全に動きます。<span class="ev ev-code">コード上の事実</span></p>
+<p>調べるには <dfn>CPUID</dfn> を使います。CPU に「自己紹介」をさせる命令で、ビット列が返り、各ビットが 1 つの機能に対応します。Strata は、AVX-512 の 5 つのサブ機能（F、BW、VL、VNNI、VBMI）がすべて揃っているかを確かめます。さらに、スレッドを切り替えるときに OS がこの大きなレジスタを保存してくれるかも確かめます。1 つでも欠ければ、AVX-512 はないものとして扱います。<span class="ev ev-code">コード上の事実</span> そのうえで、次の順にカーネルを選びます。</p>
+<div class="viz" data-viz="cpu-dispatch"><figure class="fig"><svg viewBox="0 0 400 404" role="img" aria-label="図 22-4：CPU カーネルの選び方。AVX2 がなければ起動を拒否し、標準 Q2_0 パッケージには AVX-512 が必須で、ネイティブ形式はまず AVX-512 カーネル、次に AVX2 カーネル、最後に ggml-cpu に戻る">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="320" height="36" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" font-weight="600" text-anchor="middle">起動：CPUID で CPU が使える命令を問い合わせる</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="64" width="230" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="125" y="87" font-size="12" text-anchor="middle">AVX2（FMA・F16C 含む）はある？</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="248" y="64" width="144" height="36" rx="8"/>
+<text class="f-warn" fill="#9e5d24" x="320" y="87" font-size="12" text-anchor="middle">なし：起動を拒否</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="120" width="230" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="125" y="143" font-size="12" text-anchor="middle">標準 Q2_0 パッケージ？</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="248" y="116" width="144" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="320" y="134" font-size="12" text-anchor="middle">はい：AVX-512 版だけ</text>
+<text class="f-warn" fill="#9e5d24" x="320" y="151" font-size="12" text-anchor="middle">なければ起動を拒否</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="176" width="230" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="125" y="199" font-size="12" text-anchor="middle">AVX-512 が完全で、オフでもない？</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="248" y="172" width="144" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="320" y="190" font-size="12" text-anchor="middle">はい：iq512 カーネル</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="207" font-size="12" text-anchor="middle">2 トークン以上のとき</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="232" width="230" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="125" y="255" font-size="12" text-anchor="middle">この形式の AVX2 版があり有効？</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="248" y="228" width="144" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="320" y="246" font-size="12" text-anchor="middle">はい：iq256 カーネル</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="263" font-size="12" text-anchor="middle">2 トークン以上のとき</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="292" width="382" height="38" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="316" font-size="13" font-weight="600" text-anchor="middle">どれも当てはまらない：ggml-cpu の 1 トークン内積</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V62M240 82H246M125 100V118M240 138H246M125 156V174M240 194H246M125 212V230M240 250H246M125 268V290"/>
+<text class="f-muted" fill="#5c6d66" x="132" y="114" font-size="12">はい</text>
+<text class="f-muted" fill="#5c6d66" x="132" y="170" font-size="12">いいえ</text>
+<text class="f-muted" fill="#5c6d66" x="132" y="226" font-size="12">いいえ</text>
+<text class="f-muted" fill="#5c6d66" x="132" y="284" font-size="12">いいえ</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="352" font-size="12">略図：IQ4_XS が AVX-512 CPU で</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="372" font-size="12">ggml に戻る特例は省略しています</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="392" font-size="12">ロジックの出典：generate.cpp、native_expert.cpp</text>
+</svg><figcaption>図 22-4　同じプログラムファイルが、CPU によって別のカーネルを通ります。判断は実行時に行われるので、バイナリを 1 つ配布するだけで新旧の CPU に対応できます。</figcaption></figure></div>
+<p>いくつか、立ち止まって見ておきたい点があります。<span class="ev ev-code">コード上の事実</span></p>
+<ul>
+<li><strong>AVX2 がなければ、起動しません。</strong>CPU エキスパートのカーネルは、最低でも AVX2、FMA、F16C が必要です。エンジンは CPU の型番を表示し、Intel Haswell（2013 年）、AMD Zen（2017 年）、またはそれ以降の CPU が必要だと伝えます。</li>
+<li><strong>標準 Q2_0 パッケージには AVX-512 カーネルしかありません。</strong>上流のインストールドキュメントによると、setup は AVX-512 CPU でだけ、Q2_0 用に約 40 GB のエキスパートのコピーを追加で書き出し、この高速カーネルに使わせます。<span class="ev ev-report">上流レポート</span> 起動時にすぐ拒否する理由は、ヘッダのコメントがはっきり書いています。古い CPU のユーザーに、0 秒目で原因を知らせるためです。4000 個目のトークンで不正命令にぶつかるよりずっとましです。</li>
+<li><strong>環境変数でも道を変えられます。</strong><code>STRATA_NO_IQ512</code> を付けると、AVX-512 CPU が AVX2 カーネルに回ります。<code>STRATA_NO_IQ256</code> を足すと AVX2 カーネルも止まり、ggml だけが残ります。同じマシン、同じプログラムでも、環境変数を変えるだけで計算の道が変わります。</li>
+</ul>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは「実行時ディスパッチ」で、オブジェクト指向の仮想関数と同じ発想です。呼び出し側は変わらず、実際にどのコードが動くかは実行時に決まります。違いは、決め手がオブジェクトの型ではなく、CPUID が返す機能ビットだという点です。</p>
+
+<h2 id="sec-3">22.3 GPU：CUDA 流の 1 つのソースから、NVIDIA と AMD の 2 つのエンジンを作る</h2>
+<p>CPU 側では、1 つのプログラムファイルに 2 セットのカーネルを入れて、実行時に選びます。GPU 側はもっと先へ進みます。NVIDIA と AMD のカードは命令がまったく違い、プログラミングのプラットフォームまで違うので、それぞれ別のエンジンをコンパイルするしかありません。</p>
+<aside class="primer" id="c22-cuda-hip">
+<h3>CUDA と HIP</h3>
+<p><dfn>CUDA</dfn> は NVIDIA の GPU プログラミングプラットフォームです。C++ の拡張構文、ランタイム関数ライブラリ、そしてコンパイラ nvcc からなります。プログラマはこれで GPU 上で並列に動く関数を書き、<code>cudaMalloc</code> や <code>cudaMemcpy</code> のような関数で VRAM の確保やデータの転送をします。CUDA が作れるのは NVIDIA カードの機械語だけです。</p>
+<p><dfn>HIP</dfn> は、AMD が ROCm プラットフォームで提供する対応物です。意図的に CUDA に似せて設計されていて、関数名はほとんどの場合、接頭辞 <code>cuda</code> を <code>hip</code> に変えるだけです。たとえば <code>cudaMalloc</code> は <code>hipMalloc</code> に対応し、意味はほぼ同じです。だから 1 つの CUDA コードは、「名前を変える」だけで AMD カードでもコンパイルできることがよくあります。AMD は、自動で名前を変えるツール HIPIFY も公式に用意しています。</p>
+<p>名前の置き換えだけでは済まない違いもあります。GPU は、スレッドを束ねて同期しながら実行します。この束を NVIDIA は warp、AMD は wavefront（略して wave）と呼びます。NVIDIA の束は常に 32 スレッドです。AMD の古いアーキテクチャでは 64、RDNA シリーズでは 32 にもなります。「1 束 32 個」を前提にしたコードを 64 のマシンに持っていくと、間違った結果になります。Strata の HIP カーネルは wave32 だけをサポートし、起動時にもう一度確認します。<span class="ev ev-code">コード上の事実</span> スレッドや warp については、第 15 章で詳しく説明します。</p>
+<p>この章との関係：Strata は、ツールでソースを書き換えるのではなく、「名前の置き換え表」をコンパイル時にすべてのソースファイルへ自動で差し込みます。その仕組みをこれから見ます。</p>
+<p class="further">さらに読む：<a href="https://rocm.docs.amd.com/projects/HIP/en/latest/what_is_hip.html" target="_blank" rel="noopener noreferrer">ROCm ドキュメント：What is HIP（英語）</a> · <a href="https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_porting_guide.html" target="_blank" rel="noopener noreferrer">ROCm ドキュメント：CUDA から HIP への移植（英語）</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA：CUDA プログラミングガイド（英語）</a> · <a href="https://ja.wikipedia.org/wiki/CUDA" target="_blank" rel="noopener noreferrer">Wikipedia：CUDA</a> · <a href="https://en.wikipedia.org/wiki/ROCm" target="_blank" rel="noopener noreferrer">Wikipedia：ROCm（英語）</a></p>
+</aside>
+<p>Strata の GPU コードは CUDA 流の書き方で、<code>.cu</code> ファイルに入っています。<code>src</code> ディレクトリには 53 個あります。HIP ビルドのスイッチを入れると、3 つのことが起こります。<span class="ev ev-code">コード上の事実</span></p>
+<ol>
+<li>ビルドスクリプトが、すべての <code>.cu</code> ファイルを HIP 言語としてマークし、AMD のコンパイラに渡します。</li>
+<li>コンパイルオプションに <code>-include hip_compat/cuda_runtime.h</code> を足し、このシムのヘッダを、すべてのソースファイルの先頭に強制的に差し込みます。ここで<dfn>シム</dfn>（shim）とは、2 つの層の間に挟まって違いをならすための、薄いコードの層のことです。</li>
+<li>シムの中には、<code>#define cudaMalloc hipMalloc</code> の形のマクロが 82 行あります。別の <code>cublas_v2.h</code> のシムが、行列ライブラリの名前を 17 行ぶん受け持ちます。プリプロセッサが置き換えると、CUDA の名前が HIP の名前に変わります。</li>
+</ol>
+<p>ビルドスクリプトは、CUDA と HIP の 2 つのスイッチを同時に入れられないことも定めています。1 回のビルドで作るバックエンドは 1 つだけです。<span class="ev ev-code">コード上の事実</span></p>
+<p>名前を変えるだけでは足りません。CUDA の GPU 組み込み関数の中には、HIP が RDNA カード向けに用意していないものがあり、シムが自分で実装するしかありません。たとえば 4 バイト内積 <code>__dp4a</code> です。2 つの 32 ビット整数をそれぞれ 4 つの符号付きバイトに分け、対応するもの同士を掛けて、アキュムレータに足します。シムは、カードのアーキテクチャによって 3 つの道に分けます（22.1 節のコラムを見てください）。もう 1 つは、warp 内でデータを交換する <code>__shfl_xor_sync</code> です。シムはまず「32 レーンすべてが参加しているか」を調べ、そうでなければすぐに中断します。この意味づけをこっそり落としたりはしません。<span class="ev ev-code">コード上の事実</span></p>
+<p>下のシミュレータは、3 行のソースをいろいろなターゲットカードに渡します。<strong>コンパイル</strong>を押して、流れのバーが 1 段ずつ進むのを見てください。</p>
+<div class="viz" data-viz="portable-build"><figure class="fig"><svg viewBox="0 0 400 304" role="img" aria-label="図 22-5：CUDA 流の同じソースを、NVIDIA ビルドでは名前をそのまま残してハードウェアの dp4a を使い、AMD ビルドでは cudaMalloc を hipMalloc に、dp4a を sudot4 命令に置き換える">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">CUDA 流の 1 つのソース</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="28" width="320" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="56" y="51" font-size="12">cudaMalloc(&amp;buf, bytes);</text>
+<text class="f-text" fill="#182f2b" x="56" y="73" font-size="12">acc = STRATA_DP4A(a, b, acc);</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 86V98H102V108M200 98H298V108"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="110" width="188" height="120" rx="8"/>
+<text class="f-text" fill="#182f2b" x="20" y="134" font-size="13" font-weight="600">NVIDIA：nvcc でコンパイル</text>
+<text class="f-text" fill="#182f2b" x="20" y="160" font-size="12">cudaMalloc はそのまま</text>
+<text class="f-text" fill="#182f2b" x="20" y="184" font-size="12">STRATA_DP4A → __dp4a</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="208" font-size="12">ハードウェアの dp4a 命令</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="204" y="110" width="188" height="120" rx="8"/>
+<text class="f-text" fill="#182f2b" x="216" y="134" font-size="13" font-weight="600">AMD：HIP でコンパイル</text>
+<text class="f-text" fill="#182f2b" x="216" y="160" font-size="12">cudaMalloc → hipMalloc</text>
+<text class="f-text" fill="#182f2b" x="216" y="184" font-size="12">STRATA_DP4A → sudot4</text>
+<text class="f-muted" fill="#5c6d66" x="216" y="208" font-size="12">RDNA3 の v_dot4 命令</text>
+<text class="f-text" fill="#182f2b" x="200" y="252" font-size="12" text-anchor="middle">名前の置き換えは hip_compat/cuda_runtime.h の</text>
+<text class="f-text" fill="#182f2b" x="200" y="270" font-size="12" text-anchor="middle">82 行の #define が受け持つ</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="292" font-size="12" text-anchor="middle">例題の dp4a はどちらも 95：整数演算は 1 ビットまで同じ</text>
+</svg><figcaption>図 22-5　ソースは 1 文字も変えません。NVIDIA ビルドは CUDA の名前をそのまま使います。AMD ビルドでは、シムが名前を HIP の言い方に置き換え、内積を AMD 自前の命令に差し替えます。</figcaption></figure></div>
+<p>できあがったエンジンは、自分がどのアーキテクチャ向けに作られたかを覚えています。起動時に、エンジンはカードの実際のアーキテクチャをこのリストと照合し、wave32 であることも求めます。合わなければ、カードの名前とリストを添えてエラーで終了します。実行の途中で、意味の分からない「invalid device function」が出るのを待つことはしません。<span class="ev ev-code">コード上の事実</span></p>
+<p>NVIDIA 側でも、古いカードのために条件付きコンパイルを使っています。<code>__dp4a</code> は compute capability 6.1 からあります。6.0 の古いカード向けにコンパイルするときは、<code>#if</code> が等価なソフトウェアのループに切り替えます。ただしこの道は実験スイッチを手動で入れる必要があり、上流はサポートしていません。もう 1 つの例：CUDA 12.8 で RTX 50 シリーズ向けにコンパイルすると、ビルドスクリプトが警告を出します。そうして作ったエンジンが、長いプロンプトでクラッシュしたというユーザー報告があるからです。<span class="ev ev-code">コード上の事実</span> コンパイラのバージョンそのものも変数だと分かります。</p>
+
+<h2 id="sec-4">22.4 「コンパイルできる」から「サポート」までは、どれくらい遠いか</h2>
+<p>あなたのカードのアーキテクチャがリストにあり、エンジンもコンパイルできたとします。これは「サポート」でしょうか。Strata 自身のビルドスクリプトは、とても細かく答えています。AMD のアーキテクチャを 3 段に分け、CMake は設定時に段ごとに違う態度をとります。<span class="ev ev-code">コード上の事実</span></p>
+<figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="図 22-6：サポートの 4 段階の証拠。コンパイルできる、テストに通る、実機で動く、メンテナが検証した。Strata の各 AMD アーキテクチャがどの段にいるかも示す">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle">「サポート」の証拠は何段階か（上ほど強い）</text>
+<rect class="f-accent" fill="#136d5a" x="190" y="40" width="200" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="59" font-size="13" font-weight="600">④ メンテナが検証</text>
+<text class="f-on" fill="#ffffff" x="200" y="77" font-size="12">gfx1100、gfx1201</text>
+<rect class="f-soft" fill="#e5f1df" x="130" y="100" width="200" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="140" y="119" font-size="13" font-weight="600">③ 実機でモデルが動く</text>
+<text class="f-muted" fill="#5c6d66" x="140" y="137" font-size="12">gfx1101・gfx1200（ユーザー）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="70" y="160" width="200" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="80" y="179" font-size="13" font-weight="600">② 付属テストに合格</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="197" font-size="12">gfx1102：ctest に合格</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="220" width="200" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="20" y="239" font-size="13" font-weight="600">① コンパイルできる</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="257" font-size="12">gfx1102、gfx1030：警告つき</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="247" font-size="12">← コンパイラが受け付けただけ</text>
+<text class="f-muted" fill="#5c6d66" x="280" y="181" font-size="12">← 落ちない、</text>
+<text class="f-muted" fill="#5c6d66" x="280" y="197" font-size="12">　結果も正しい</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="127" font-size="12">実負荷で動作 →</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="67" font-size="12">再現可能・責任者あり →</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="286" font-size="12" text-anchor="middle">リスト外のアーキテクチャ：① の段階で拒否</text>
+</svg><figcaption>図 22-6　「コンパイルできる」は、いちばん下の層の証拠にすぎません。Strata のビルドスクリプトは、AMD のアーキテクチャを証拠の強さで段分けし、リスト外のものは断ります。</figcaption></figure>
+<ul>
+<li><strong>メンテナが検証</strong>：gfx1100（RX 7900 XT / XTX）と gfx1201（RX 9070 シリーズ、Radeon AI PRO R9700）。メンテナが実機で動かしています。</li>
+<li><strong>ユーザーが検証</strong>：gfx1101 と gfx1200。カードの持ち主が動かして報告しました。設定時には 1 行のメッセージを出すだけです。</li>
+<li><strong>未検証</strong>：gfx1102 と gfx1030 はコンパイルでき、設定時に警告が出て、結果の報告をお願いされます。gfx1102 は付属テストに通りましたが、モデルを丸ごと動かした報告はまだありません。gfx1030 はコミュニティのマシンで動きましたが、メンテナはまだ自分では検証していません。</li>
+</ul>
+<p>2 つ目の落とし穴は数値です。図 22-5 の dp4a は整数演算なので、3 つの道は 1 ビットまで同じです。浮動小数点演算は違います。足し算の順序が変わると、下の数桁が変わることがあります（第 4 章で浮動小数点の丸めを説明しました）。Strata の AMD ドキュメントは、2 つのバックエンドが 1 ビットまで同じ答えを出すとは約束しない、と明記しています。<span class="ev ev-report">上流レポート</span> 同じマシンでもこれは起こります。IQ 系のモデルでは、CPU は 1 トークンずつ計算するときに ggml の内積を使い、まとめて計算するときは Strata のマルチトークンカーネルを使います。両者は丸めが少し違います。そして 1 グループに何トークン入るかは、ドラフトによって変わります。だから温度が 0 でも、同じプロンプトから、もう 1 つの同じくらいもっともらしい答えが返ることがあります。エンジン 0.1.30 以降は <code>STRATA_IQ_MT_MIN=1</code> を設定してこの差をなくせますが、上流が Ryzen 7600（AVX-512）で測ったところ、IQ3_S のデコードが 1〜3% 遅くなります。<span class="ev ev-report">上流レポート</span>[S03]</p>
+<p>つまり<strong>ビルド設定は実験条件</strong>であり、ハードウェアと同じようにレポートに書く必要があります。同じコミットでも、<code>STRATA_PORTABLE</code> を入れるかどうかで、ggml の CPU 部分は「AVX2 のある任意の CPU」向けか「このマシンの CPU」向けかが変わります。環境変数を 1 つ変えれば、計算の道も変わります。<span class="ev ev-code">コード上の事実</span> README の速度表も見てみましょう。Q2_0 モデルの書き出し速度は、RTX 5070 のマシンで毎秒 94 トークン、RX 9070 XT のマシンで毎秒 60 トークンです。<span class="ev ev-report">上流レポート</span>[S01] 条件は短い会話で、README にはエンジンのバージョンも、具体的なコンテキスト長も書かれていません。2 台の CPU も違います。1 台は AVX-512 のある Ryzen 5 7600、もう 1 台は AVX2 しかない Ryzen 9 3900X（Zen 2）です。この数字から言えるのは「どちらのマシンでも動く」ということまでで、NVIDIA と AMD のどちらが速いかの比較には使えません。</p>
+<p>確かめるべき組み合わせはいくつあるでしょうか。ざっと計算してみましょう（図 22-7）。<span class="ev ev-est">教育用の試算</span></p>
+<figure class="fig"><svg viewBox="0 0 400 184" role="img" aria-label="図 22-7：10 種類の GPU アーキテクチャ × 3 本の CPU 経路 × 2 種類の OS × 5 種類のモデルパッケージで、合計 300 通りの組み合わせ">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="10" width="78" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="47" y="32" font-size="13" font-weight="600" text-anchor="middle">GPU アーキ</text>
+<text class="f-text" fill="#182f2b" x="47" y="56" font-size="14" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="98" y="44" font-size="14" text-anchor="middle">×</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="10" width="78" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="149" y="32" font-size="13" font-weight="600" text-anchor="middle">CPU 経路</text>
+<text class="f-text" fill="#182f2b" x="149" y="56" font-size="14" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="44" font-size="14" text-anchor="middle">×</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="212" y="10" width="78" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="251" y="32" font-size="13" font-weight="600" text-anchor="middle">OS</text>
+<text class="f-text" fill="#182f2b" x="251" y="56" font-size="14" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="302" y="44" font-size="14" text-anchor="middle">×</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="314" y="10" width="78" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="353" y="32" font-size="13" font-weight="600" text-anchor="middle">モデル</text>
+<text class="f-text" fill="#182f2b" x="353" y="56" font-size="14" text-anchor="middle">5</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="90" width="200" height="40" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="115" font-size="14" font-weight="600" text-anchor="middle">合計 300 通り</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 68V88"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="152" font-size="12" text-anchor="middle">さらにコンテキスト長、マルチ GPU、KV 形式を掛けると、</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="172" font-size="12" text-anchor="middle">組み合わせは何倍にも増えます</text>
+</svg><figcaption>図 22-7　ざっと計算しても 300 通りあり、1 台のマシンで確かめられるのはそのうちの 1 マスだけです。試していないマスは、空欄のままにしておくべきです。最初からチェックを付けてはいけません。</figcaption></figure>
+<p>計算式：GPU アーキテクチャは 10 種類（NVIDIA はビルドスクリプトに載っている RTX 20/30/40/50 の 4 世代、AMD は Windows 版エンジンに組み込まれる 6 種類）、CPU 経路は 3 本（AVX-512、AVX2、ggml）、OS は 2 種類、README に載っているモデルパッケージは 5 種類です。10 × 3 × 2 × 5 = 300。全部を試せる人はいません。現実的なのは層に分けるやり方です。純粋な数学の小さなサンプルでアルゴリズムをカバーする。フォーマットのテストで量子化のデコードをカバーする。バックエンドごとに代表的なカーネルを選んで比較テストをする。エンドツーエンドは、いちばん重要な数通りの組み合わせだけにする。</p>
+
+<h2 id="sec-5">22.5 手を動かす：1 行のソースを 2 つのバックエンドに渡す</h2>
+<p>この章には独立したインタラクティブ実験がありません。2 つのシミュレータが実験台です。次の順で遊ぶのがおすすめです。</p>
+<ol>
+<li>「1 つのソース、2 つのバックエンド」で、RTX 50、RX 7900、RX 6900 を順にコンパイルします。プリプロセス後の 3 行を見比べてください。どの名前が入れ替わったか、dp4a はどの分岐に落ちたか。例題の結果が、いつも 95 になることも確かめましょう。</li>
+<li>「リスト外のアーキテクチャ」を選びます。CMake が最初の段階で断るほうを選ぶ理由を、味わってください。</li>
+<li>「CPU カーネル選択器」で、CPU とモデルパッケージを固定し、環境変数とトークン数だけを変えます。数えてみましょう。同じマシンで、計算の道は何本に分かれるでしょうか。</li>
+</ol>
+<p>手元に C コンパイラがある人は、もう 1 つ小さな実験ができます。スカラーの内積関数を書き、次に 8 個ずつ 1 組にして足し込む版も書きます。同じランダムな浮動小数点数の列で、2 つの結果と所要時間を比べてください。下の数桁が違うはずです。まずロジックが正しいことを確かめてから、性能を考えましょう。配列が小さすぎると、測った速さは本物の SIMD カーネルを代表しません。</p>
+
+<h2 id="sec-6">22.6 境界：ライセンス、モデル、そしてこの教材自身</h2>
+<p>「ポータブル」には、もう 1 つの意味があります。コード、モデル、ドキュメントを、それぞれ誰が持っていき、どう使えるか、ということです。Strata リポジトリのコードは MIT ライセンスです。<span class="ev ev-code">コード上の事実</span>[S19] リポジトリのごく一部は別のライセンスです。<code>third_party/ggml</code> は llama.cpp / ggml（MIT）に由来し、Web アプリが使うフォントは SIL Open Font License です。モデルファイルはリポジトリには入っておらず、各モデルがそれぞれのライセンスに従います。<span class="ev ev-report">上流レポート</span>[S02]</p>
+<p>この教材自体は静的な Web サイトです。HTML、CSS、JavaScript でできていて、推論エンジンは含まず、モデルの重みもダウンロードしません。どんな Web ホスティングに置いても、コースを公開しているだけです。そのサーバーで Strata が動いていることにはなりません。教材のインタラクティブな図はすべて教育用のシミュレーションです。Strata のソースにある判断ロジックを再現してはいますが、Strata のカーネルではなく、実際のどのマシンの性能も予測しません。</p>
+<p>上流のコードを引用するときは、この本は固定したコミット番号を記録し、上流のフォントやモデルを再パッケージせず、これが独立して書かれた教材であり、元のプロジェクトやモデルの提供元の公式な認証を受けていないことを明記します。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>チップは自分の命令セットしか分かりません。同じソースでも、ターゲットごとに 1 回ずつコンパイルが必要です。条件付きコンパイルを使うと、1 つのソースから、コンパイルのたびにターゲットに合う分岐だけが残ります。</li>
+<li>Strata は CPU では実行時ディスパッチをします。まず CPUID で AVX-512 と AVX2 の有無を確かめ、それからカーネルを選びます。GPU ではコンパイル時ディスパッチをします。CUDA→HIP の名前の置き換え表と、自前で書いたいくつかの組み込み関数で、NVIDIA 版と AMD 版の 2 つのエンジンを作ります。</li>
+<li>コンパイルできる、テストに通る、実機で動く、メンテナが検証した。この 4 つは強さの違う 4 段階の証拠です。浮動小数点の結果は、バックエンドをまたぐと 1 ビットまで同じとは限りません。ビルド設定と環境変数も、実験条件として記録しましょう。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「自分のカードでコードがコンパイルできたなら、自分のカードはサポートされている。」</strong></p>
+<p>コンパイルが通るのは、コンパイラがそのコードを理解できたということだけです。Strata のビルドスクリプトに、ちょうどよい反例があります。gfx1102 はコンパイルでき、付属テストにも通りましたが、モデルを丸ごと動かした報告はまだありません。だから設定時には「未検証」の警告が出ます。本当のサポートとは、実機で本物のモデルを動かし、結果が合っていて、誰かが再現できることです。</p></div>
+
+<details class="deep"><summary>もう一歩深く：コンパイル時と実行時の役割分担、シムの境界、サポート宣言</summary>
+<h3>なぜ AVX-512 スイッチは 1 つのファイルにだけ付けるのか</h3>
+<p>ビルドスクリプトのコメントが理由を説明しています。<code>/arch:AVX512</code> でコンパイルしたソースファイルでは、コンパイラは<strong>どこにでも</strong> AVX-512 命令を使えます。「フォールバック」のつもりで書いたスカラーのコードの中にも、です。スカラーのフォールバックと AVX-512 カーネルを同じファイルに置くと、フォールバックはもうフォールバックではなくなり、古い CPU でやはりクラッシュします。そこで Strata は、スイッチをカーネルのファイルにだけ付けます。CPU を調べる関数はスイッチなしのファイルに置き、「問い合わせる」段階がどの x86-64 CPU でも安全であるようにしています。<span class="ev ev-code">コード上の事実</span></p>
+<p>調べる処理そのものにも条件付きコンパイルを使っています。同じ CPUID のコードでも、MSVC コンパイラは <code>__cpuidex</code> と <code>_xgetbv</code> を使い、GCC/Clang は <code>__cpuid_count</code> とインラインアセンブリの <code>xgetbv</code> を使います。XCR0 レジスタを調べるのは、スレッド切り替えのときに OS が AVX-512 の大きなレジスタを保存してくれるかを確かめるためです。CPU が対応していても OS が保存しないなら、やはり使えません。<span class="ev ev-code">コード上の事実</span></p>
+<h3>シムの境界：こっそり意味を変えるくらいなら、中断する</h3>
+<p>CUDA の warp 交換関数には、「どのレーンが参加するか」を表すマスクの引数があります。HIP の対応する関数にはこの引数がありません。シムのやり方はこうです。現在のカーネルが使うのは全ビット 1 のマスクだけなので、そうでない呼び出しに出会ったらすぐ中断します（<code>__builtin_trap</code>）。マスクを捨てて計算を続けることはしません。<code>__nanosleep</code> は CUDA ではクロックサイクルで数えますが、AMD のスリープ命令は 0 から 15 までしか受け付けません。シムは思い切って最小の 1 に統一しています。ここでは「ちょっと待って」というヒントとしてしか使わないからです。<span class="ev ev-code">コード上の事実</span></p>
+<p>dp4a の 3 つの道にも、それぞれ工夫があります。RDNA3/RDNA4 の sudot4 命令は、2 つのオペランドそれぞれに符号の有無を指定できます。シムは両方を符号付きにして、はじめて CUDA の <code>__dp4a</code> と意味が一致します。RDNA2 の sdot4 は、もともと「符号付き × 符号付きを、2³² を法として足し込む」ものなので、意味は同じです。ポータブルなループは、符号なし 32 ビット整数で足し込んでから符号付きとして解釈し、結果はやはり 2³² を法とします。この章のシミュレータのテストファイルは、この 3 つの書き方が、オーバーフローの境界でも 1 ビットまで同じことを 1 つずつ確かめています。</p>
+<h3>名前では形式は決まらない：型でディスパッチする</h3>
+<p>同じテンソル名でも、層によって量子化形式が違うことがあります。<code>layer.cpp</code> のコメントには、ある教訓が記録されています。初期のコードは「名前が形式を決める」と仮定していて、たとえば <code>attn_qkv</code> は必ずある K-quant だとしていました。ところが実際のモデルパッケージでは、36 個の GDN 層の <code>attn_qkv</code> に、IQ4_XS、Q3_K、Q2_0、Q4_K の 4 種類がありました。そこで規則を<strong>型</strong>によるディスパッチに改めました。2 ビット符号化は Q8_0 のアクティベーションを使い、それ以外の量子化形式は Q8_K を使います。間違えたときの行列ベクトル積の誤差は 0.6%〜1.4% です。出てくるのは、はっきり壊れたベクトルではなく「それらしく見える」ベクトルで、これがいちばん見つけにくいのです。<span class="ev ev-code">コード上の事実</span>[S14]</p>
+<h3>依存ライブラリも固定する</h3>
+<p>Strata の CPU エキスパートは ggml-cpu の内積を使い、ビルド時に llama.cpp のリポジトリから ggml を取ってきます。取るのは「最新版」ではなく、<code>third_party/ggml/VERSION.txt</code> に書かれた 1 つのコミット番号です。<span class="ev ev-code">コード上の事実</span> 理由は、この本が Strata のコミット番号を固定するのと同じです。依存が変わると、数値の道も変わるかもしれないからです。</p>
+<h3>最小限のサポート宣言</h3>
+<p>新しいバックエンドのサポート宣言を書くときは、少なくとも次のことを書きます。</p>
+<ul>
+<li>ソースのコミット番号、コンパイラとそのバージョン、ターゲットアーキテクチャのリスト、すべてのコンパイルスイッチ、依存ライブラリのバージョン、実行時の環境変数。</li>
+<li>試したデバイス、ドライバ、モデルパッケージ、量子化形式、KV 形式、プリフィルとデコードの両方の経路、コンテキスト長の範囲。</li>
+<li>証拠を層ごとに分けて書く：コンパイルが通る、付属テストに通る、テンソル単位の比較（参照実装との誤差）、エンドツーエンドの品質、安定性、性能。</li>
+<li>試していない組み合わせは「未テスト」とはっきり書き、「全面的にサポート」とは書かない。</li>
+</ul>
+<p>同じコミットから作った 2 つのバイナリでも、コンパイルスイッチが違えば、別のコードの道を通ることがあります。起動ログには、実際にどのバックエンド、どの CPU 経路を使ったか、フォールバックしたかどうかを書くべきです。Strata は、AVX-512 のない CPU で起動すると、AVX2 と ggml のどちらに切り替えたかを表示します。<span class="ev ev-code">コード上の事実</span> ユーザーがファイル名から推測する必要があってはいけません。</p>
+<h3>ベクトル化の「しっぽ」</h3>
+<p>ベクトルの長さがレーン数で割り切れないとき、余った「しっぽ」は、マスクか別のスカラーの道で処理しなければなりません。手間を省こうと余分に数バイト読むと、次のエキスパートのデータを読んでしまうかもしれません。必ずクラッシュするとは限りませんが、結果は間違っています。Strata はネイティブのエキスパートを読み込むとき、まずエキスパートのサイズが形式のブロックサイズの整数倍かを確かめ、そうでなければ拒否します。<span class="ev ev-code">コード上の事実</span></p>
+</details>

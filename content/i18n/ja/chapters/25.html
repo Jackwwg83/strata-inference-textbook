@@ -1,0 +1,256 @@
+<div class="hook"><span class="eyebrow">まず、ある場面を想像してみよう</span>
+<p>自宅のパソコンで Strata を動かしていたら、ルームメイトや友達も使いたがりました。5 人が同時に Web ページを開いて質問します。Strata の README ははっきり書いています。一度に答えるリクエストは 1 つだけ、と。<span class="ev ev-report">上流レポート</span>[S01] では、5 人目はどれだけ待つのでしょうか。1 人が長い文章を書かせたら、残りの 4 人はずっと待たされるのでしょうか。</p>
+<p>この章は<strong>設計の授業</strong>です。上流の Strata は、先入れ先出しのキューの後ろで、1 本のシーケンスだけを処理します。マルチユーザーのスケジューリングは上流の機能ではなく、これから私たちが手を動かして設計する拡張です。まず、スケジューリングアルゴリズムと待ち行列理論で「どれだけ待つか」を計算します。そのうえで、シングルシーケンスをマルチシーケンスに変えるとき、何に手を入れなければならないかを見ます。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>誰が先に走るか、どれだけ待つか、一緒に計算できるか。これは 3 つの別の問いで、順にスケジューリング方針、待ち行列理論、バッチ処理が答えます。そして改造に手を付ける前に、シーケンスごとの状態をきれいに分離しておく必要があります。</p>
+
+<h2 id="sec-1">25.1 現状：ロックが 1 つ、行列が 1 本</h2>
+<p><code>serve/server.py</code> の冒頭には、「一度に 1 シーケンス、1 本の FIFO の後ろに並ぶ」と書かれています。<span class="ev ev-code">コード上の事実</span>[S15] 実装はとても簡単です。サービス層にロック <code>self.fifo = threading.Lock()</code> があり、ロックを取ったリクエストがエンジンを独占します。ほかのリクエストはロックの外で待ち、ステータスページの「待機数」が 1 つ増えます。<span class="ev ev-code">コード上の事実</span></p>
+<p>一方、HTTP サーバーは Python の <code>ThreadingHTTPServer</code> を使い、接続ごとにスレッドが 1 つ付くので、5 人が同時に<strong>つながる</strong>ことはできます。つながることと、対応してもらえることは別です（図 25-1）。</p>
+<figure class="fig"><svg viewBox="0 0 400 286" role="img" aria-label="図 25-1：5 つの接続が同時に到着し、FIFO ロックの前に並ぶ。エンジンは一度に 1 つのシーケンスだけを処理する。接続数、待機数、アクティブなシーケンス数は、3 つの別の数">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="44" y="31" font-size="12" text-anchor="middle">ユーザー 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="88" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="122" y="31" font-size="12" text-anchor="middle">ユーザー 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="166" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="200" y="31" font-size="12" text-anchor="middle">ユーザー 3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="278" y="31" font-size="12" text-anchor="middle">ユーザー 4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="322" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="356" y="31" font-size="12" text-anchor="middle">ユーザー 5</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M44 42L150 74M122 42L170 74M200 42V74M278 42L230 74M356 42L250 74"/>
+<rect class="f-soft" fill="#e5f1df" x="70" y="76" width="260" height="40" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="101" font-size="13" text-anchor="middle">FIFO ロック：先着順、残りは待機</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 116V138"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="140" width="260" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="165" font-size="13" text-anchor="middle">エンジン：今は 1 シーケンスだけ処理</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="198" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="221" font-size="12">HTTP 接続数：5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="198" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="215" y="221" font-size="12">待機中のリクエスト：4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="242" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="265" font-size="12">生成中のシーケンス：1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="242" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="215" y="265" font-size="12">1 回の計算内のシーケンス：1</text>
+</svg><figcaption>図 25-1　上流 Strata の現状：5 人とも接続はできますが、同じ瞬間に生成されているのは 1 人のシーケンスだけです。下の 4 つの数は別々に数える必要があり、まったく違う値になることがあります。</figcaption></figure>
+<p>上流には、「マルチセッション」に少し関わる機能もあります。容量を制限した「セッション駐車場」を任意で有効にすると、メモリ上に最大いくつかの会話の状態を置いておけます。交互に届くリクエストが、毎回質問を最初から読み直さずにすみます。ただしドキュメントは、これが<strong>リクエストを並行して実行するものではない</strong>と明言しています。<span class="ev ev-report">上流レポート</span> この駐車されたセッションを管理するコードも、再利用の条件がとても厳しいものです。トークンがまったく同じ、画像の同一性が同じ、ガイドモードが同じ。3 つのうち 1 つでも欠けてはいけません。<span class="ev ev-code">コード上の事実</span>[S10]</p>
+<p>だから、この章のこの先のすべて、つまりスケジューリング方針の比較やマルチシーケンスの状態分離は、<strong>設計の練習</strong>であって、上流にすでにある能力ではありません。</p>
+
+<h2 id="sec-2">25.2 誰が先に走るか：FIFO、SJF、ラウンドロビン</h2>
+<aside class="primer" id="c25-scheduling">
+<h3>スケジューリングアルゴリズム：FIFO、SJF、ラウンドロビン</h3>
+<p>店員が 1 人しかいないのにお客さんが大勢いるとき、「誰から先に対応するか」は<dfn>スケジューリング</dfn>の問題です。OS がプロセスに CPU を割り当てるのも、プリンターが印刷ジョブを並べるのも、推論サービスがリクエストを並べるのも、すべて同じ問題です。いちばん古典的な 3 つの方針があります。</p>
+<ul>
+<li><dfn>FIFO</dfn>（先入れ先出し。FCFS、先着順とも呼ぶ）：到着順に、1 つ終えたら次をやります。簡単で公平ですが、長い仕事が 1 つあると後ろの短い仕事がすべて足止めされます。これを<dfn>コンボイ効果</dfn>と呼びます。</li>
+<li><dfn>SJF</dfn>（最短ジョブ優先）：そのつど、いちばん短いものから先にやります。すべての仕事が同時に到着するなら、平均待ち時間がいちばん短くなることが証明できます。代償は 2 つあります。各仕事の長さを前もって知っている必要があること。そして、短い仕事が次々に来ると、長い仕事がずっと後ろへ押しやられること。これを<dfn>飢餓</dfn>（スタベーション）と呼びます。</li>
+<li><dfn>ラウンドロビン</dfn>（Round-Robin）：全員が少しずつ順番にやります。その 1 回分を<dfn>タイムスライス</dfn>と呼び、終わらなければ行列の最後尾に戻ります。全員がすぐに始められますが、切り替えにコストがかかり、平均完了時間が短くなるとは限りません。</li>
+</ul>
+<p>良し悪しを測る指標も 1 つではありません。<strong>待ち時間</strong>（完了時刻 − 到着時刻 − 自分の長さ）、<strong>初回応答</strong>（いつ対応が始まるか。チャットなら、最初の 1 文字が見えるまでの時間）、<strong>スループット</strong>（単位時間に何件終わるか）。方針ごとに、指標ごとの勝ち負けがあります。</p>
+<p class="further">さらに読む：<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-sched.pdf" target="_blank" rel="noopener noreferrer">OSTEP：スケジューリング入門（英語）</a> · <a href="https://ja.wikipedia.org/wiki/%E3%82%B9%E3%82%B1%E3%82%B8%E3%83%A5%E3%83%BC%E3%83%AA%E3%83%B3%E3%82%B0" target="_blank" rel="noopener noreferrer">Wikipedia：スケジューリング</a> · <a href="https://en.wikipedia.org/wiki/Resource_starvation" target="_blank" rel="noopener noreferrer">Wikipedia：Resource starvation（英語）</a> · <a href="https://ja.wikipedia.org/wiki/%E3%83%A9%E3%82%A6%E3%83%B3%E3%83%89%E3%83%AD%E3%83%93%E3%83%B3%E3%83%BB%E3%82%B9%E3%82%B1%E3%82%B8%E3%83%A5%E3%83%BC%E3%83%AA%E3%83%B3%E3%82%B0" target="_blank" rel="noopener noreferrer">Wikipedia：ラウンドロビン・スケジューリング</a></p>
+</aside>
+<p>まず、いちばん小さな例を見ます。3 つのリクエストが同時に到着し、答えの長さがそれぞれ 8、3、5 トークンだとします。トークンを 1 つ生成するのに時間が 1 単位かかり、切り替えには時間がかからないものとします。<span class="ev ev-est">教育用の試算</span></p>
+<div class="viz" data-viz="sched-race"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="図 25-2：同時に到着した 3 つのリクエスト（長さ 8、3、5）。FIFO では最初の文字が出る時刻は 1、9、12。タイムスライス 1 のラウンドロビンでは 1、2、3 になるが、平均待ち時間は 6.33 から 7 に増える">
+<text class="f-text" fill="#182f2b" x="20" y="30" font-size="13" font-weight="600">FIFO：最初の文字は 1、9、12；平均待ち 6.33</text>
+<rect class="f-accent" fill="#136d5a" x="20.0" y="40" width="179.0" height="28"/>
+<text class="f-on" fill="#ffffff" x="110.0" y="59" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="200.0" y="40" width="66.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="233.8" y="59" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="267.5" y="40" width="111.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="323.8" y="59" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<text class="f-text" fill="#182f2b" x="20" y="114" font-size="13" font-weight="600">ラウンドロビン（1）：最初の文字は 1、2、3；平均待ち 7</text>
+<rect class="f-accent" fill="#136d5a" x="20.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="31.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="42.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="53.8" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="65.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="76.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="87.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="98.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="110.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="121.3" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="132.5" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="143.8" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="155.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="166.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="177.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="188.8" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="200.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="211.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="222.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="233.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-soft" fill="#e5f1df" x="245.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="256.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="267.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="278.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-soft" fill="#e5f1df" x="290.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="301.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="312.5" y="124" width="66.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="346.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 168H380"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="186" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="186" font-size="12" text-anchor="middle">8</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="186" font-size="12" text-anchor="middle">16</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="210" font-size="12" text-anchor="middle">どちらも同じ長さ：総仕事量は変わらず、変わるのは順番だけ</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="228" font-size="12" text-anchor="middle">操作版：3 つの方式、3 組のリクエスト、スライスも調整できる</text>
+</svg><figcaption>図 25-2　同じ 3 つのリクエストでも、ラウンドロビンなら全員が時刻 3 より前に最初の文字を見られます。ただし平均待ち時間は、6.33 からかえって 7 に増えます。公平さと効率の間に、タダ飯はありません。<span class="ev ev-est">教育用の試算</span></figcaption></figure></div>
+<p>FIFO を計算してみましょう。A は 8 で完了、B は 11、C は 16 で完了します。待ち時間はそれぞれ 0、8、11 で、平均は約 6.33 です。SJF は、まず B（3）、次に C（5）、最後に A（8）をやります。待ち時間は 8、0、3 で、平均は約 3.67 と、いちばん短くなります。ラウンドロビンは、全員が 1 単位ずつ順番にやるので、最初の文字が出る時刻は 1、2、3 で、全員がすぐに反応をもらえます。ところが、3 人とも終わるのがだいぶ遅くなり、平均待ち時間は 7 と、いちばん長くなります。</p>
+<p>切り替えのたびに、大きなシーケンス状態（たとえば第 9 章の GDN の再帰状態）を保存して復元しなければならないなら、タイムスライスが小さすぎると、切り替えのコストが時間の大部分を食ってしまいます。公平さは無料ではありません。最初の文字までの時間、完了時間、スループット、状態を動かす量を、同時に見る必要があります。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは「オペレーティングシステム」の CPU スケジューリングの章そのものです。ただ「プロセス」が「生成リクエスト」に、「CPU のタイムスライス」が「トークンのステップ」に変わっただけです。重要な違いが 1 つあります。OS がプロセスを切り替えるときに保存するのは、レジスタなどの少量のコンテキストだけです。推論エンジンがシーケンスを切り替えるときは、その裏にある KV キャッシュや再帰状態のような、大きなデータが動きます。</p>
+
+<h2 id="sec-3">25.3 待ち行列理論の入門：8 割忙しくなると詰まり始める</h2>
+<p>スケジューリングは誰が先に走るかを決めますが、もっと根本的な問いがあります。リクエストはどれくらい密に来るのか。どんなに賢いスケジューリングでも、来る速さがこなす速さを上回れば、行列は際限なく伸びます。</p>
+<aside class="primer" id="c25-queueing">
+<h3>待ち行列理論の入門：リトルの法則と M/M/1</h3>
+<p><dfn>待ち行列理論</dfn>は、「到着、待ち、サービス」という種類のシステムを研究します。いくつかの量でシステムを表します。到着率 λ（単位時間にいくつ来るか）、サービス率 μ（単位時間にいくつこなせるか）、そして<dfn>利用率</dfn> ρ = λ ÷ μ（店員が時間のどれだけを忙しく過ごしているか）です。</p>
+<p>いちばん役に立つ結論が<dfn>リトルの法則</dfn>、L = λ × W です。システムの中に平均 L 人のお客さんがいる数は、到着率に、1 人あたりの平均滞在時間 W を掛けたものに等しい、というものです。ほとんど何の仮定にも頼らないので、タピオカ店にも、高速道路にも、推論サービスにも当てはまります。たとえば、毎分 3 つのリクエストが来て、それぞれ平均 20 秒（1/3 分）滞在するなら、システムの中には平均 1 つのリクエストがいます。</p>
+<p>いちばん簡単な待ち行列のモデルが <dfn>M/M/1</dfn> です。到着はランダム（隣り合う到着の間隔が指数分布に従う）で、サービス時間もランダムで、店員は 1 人だけです。平均滞在時間は W = 1 ÷ (μ − λ) です。この式は、直感に反することを教えてくれます。<strong>利用率が 100% に近づくほど、待ち時間は急激に長くなる</strong>のです。ρ = 50% では、W はサービス時間の 2 倍。80% では 5 倍。95% では 20 倍です。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%83%AA%E3%83%88%E3%83%AB%E3%81%AE%E6%B3%95%E5%89%87" target="_blank" rel="noopener noreferrer">Wikipedia：リトルの法則</a> · <a href="https://en.wikipedia.org/wiki/M/M/1_queue" target="_blank" rel="noopener noreferrer">Wikipedia：M/M/1 queue（英語）</a> · <a href="https://ja.wikipedia.org/wiki/%E5%BE%85%E3%81%A1%E8%A1%8C%E5%88%97%E7%90%86%E8%AB%96" target="_blank" rel="noopener noreferrer">Wikipedia：待ち行列理論</a></p>
+</aside>
+<p>これを Strata に当てはめて計算してみましょう。<span class="ev ev-est">教育用の試算</span> 平均して 1 つの答えに 10 秒かかる（たとえば 500 トークンを毎秒 50 トークンで書く）とすると、Strata 1 台は毎分最大 μ = 6 件のリクエストを処理できます。平均で毎分 3 件来る（ρ = 50%）なら、平均滞在時間は 1 ÷ (6 − 3) 分 = 20 秒。毎分 4.8 件来る（ρ = 80%）と、1 ÷ 1.2 分 = 50 秒。毎分 5.7 件来る（ρ = 95%）と、200 秒になります。リクエストは 2 倍にもなっていないのに、待ち時間は 10 倍に膨らみました。</p>
+<div class="viz" data-viz="queue-load"><figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="図 25-3：M/M/1 モデルでの、利用率に対する平均滞在時間の変化。50% で 20 秒、80% で 50 秒、95% で 200 秒、100% に近づくと急上昇する">
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M56 20V206H382"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.6" stroke-dasharray="3 4" d="M56 144H382M56 82H382M56 20H382"/>
+<text class="f-muted" fill="#5c6d66" x="50" y="211" font-size="12" text-anchor="end">0</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="148" font-size="12" text-anchor="end">100</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="86" font-size="12" text-anchor="end">200</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="24" font-size="12" text-anchor="end">300</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M56.0 199.8L62.5 199.7L69.0 199.5L75.4 199.4L81.9 199.3L88.4 199.1L94.9 199.0L101.4 198.8L107.8 198.6L114.3 198.4L120.8 198.3L127.3 198.1L133.8 197.8L140.2 197.6L146.7 197.4L153.2 197.1L159.7 196.9L166.2 196.6L172.6 196.3L179.1 196.0L185.6 195.7L192.1 195.3L198.6 194.9L205.0 194.5L211.5 194.1L218.0 193.6L224.5 193.1L231.0 192.5L237.4 191.9L243.9 191.2L250.4 190.5L256.9 189.7L263.4 188.8L269.8 187.8L276.3 186.6L282.8 185.3L289.3 183.9L295.8 182.2L302.2 180.2L308.7 177.8L315.2 175.0L321.7 171.6L328.2 167.2L334.6 161.7L341.1 154.3L347.6 144.0L354.1 128.5L360.6 102.7L367.0 51.0L369.2 20.0"/>
+<circle class="f-warn" fill="#9e5d24" cx="218.0" cy="193.6" r="5"/>
+<circle class="f-warn" fill="#9e5d24" cx="315.2" cy="175.0" r="5"/>
+<circle class="f-warn" fill="#9e5d24" cx="363.8" cy="82.0" r="5"/>
+<text class="f-text" fill="#182f2b" x="218" y="180" font-size="12" text-anchor="middle">50%：20 秒</text>
+<text class="f-text" fill="#182f2b" x="300" y="160" font-size="12" text-anchor="end">80%：50 秒</text>
+<text class="f-text" fill="#182f2b" x="354" y="80" font-size="12" text-anchor="end">95%：200 秒</text>
+<text class="f-muted" fill="#5c6d66" x="218" y="226" font-size="12" text-anchor="middle">50%</text>
+<text class="f-muted" fill="#5c6d66" x="315" y="226" font-size="12" text-anchor="middle">80%</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="226" font-size="12" text-anchor="middle">100%</text>
+<text class="f-muted" fill="#5c6d66" x="62" y="16" font-size="12">平均滞在（秒）</text>
+<text class="f-muted" fill="#5c6d66" x="219" y="246" font-size="12" text-anchor="middle">利用率 ρ（1 つの答えの平均を 10 秒と仮定）</text>
+</svg><figcaption>図 25-3　待ち時間は、利用率とともに急激に上がります。80% までは曲線もまだなだらかですが、90% を過ぎるとほとんど垂直になります。だからサービスには余裕を持たせるべきで、「ちょうど満杯」を基準に計画してはいけません。<span class="ev ev-est">教育用の試算</span></figcaption></figure></div>
+<p>M/M/1 は粗いモデルにすぎません。大規模モデルの答えの長さは指数分布には従いませんし、プリフィルとデコードにかかる時間もずいぶん違います。それでも、このモデルが与える定性的な結論はとても頑健です。<strong>満杯に近づけば、待ち時間は制御不能になる</strong>のです。実際のシステムでは、マシンを増やすか、流量を制限するか（行列が長すぎたら「あとでもう一度」とユーザーにすぐ伝える）、あるいは μ を上げる工夫をするか、ということになります。最後のものが、次の節のバッチ処理です。</p>
+
+<h2 id="sec-4">25.4 連続バッチ処理：複数のシーケンスを一緒に進める</h2>
+<p>前の 2 つの節は、エンジンが一度に 1 つのシーケンスだけを処理すると仮定していました。μ を上げる方法の 1 つは、複数のシーケンスを<strong>同じ 1 回の計算の中で一緒に前進させる</strong>ことです。</p>
+<aside class="primer" id="c25-continuous-batching">
+<h3>連続バッチ処理</h3>
+<p>トークンを 1 つ生成するとき、エンジンは関連する重みを VRAM から一度読み出さなければなりません。1 つのシーケンスだけを処理するなら、重みを 1 回読んでも、トークンは 1 つしか計算できません。8 つのシーケンスを同時に処理すれば、重みを 1 回読むだけで、8 つのトークンを計算できます。これが<dfn>バッチ処理</dfn>の利点です。行列とベクトルの積を、行列と行列の積に変え、重みを 1 回読んで何回も使うのです（第 16 章で詳しく説明します）。</p>
+<p>素朴な<dfn>静的バッチ処理</dfn>は、いくつかのシーケンスを 1 つのバッチにまとめ、一緒に始めて一緒に終わらせます。問題は、答えには長短があることです。短いものはとっくに書き終えているのに、その枠は空けておくしかありません。いちばん長いものが書き終わるのを待って、はじめて次のバッチが始まります。</p>
+<p><dfn>連続バッチ処理</dfn>（反復レベルのスケジューリングとも呼ぶ）は、スケジューリングの粒度を「リクエストのバッチ」から「生成の 1 ステップ」へ小さくします。トークンを 1 つ生成するたびに、書き終えたシーケンスがないかを確認し、あれば、待っていた新しいシーケンスをすぐにその枠へ補充します。この考え方は、Orca というシステムが比較的早い時期に体系的に提案し、のちに vLLM などの推論フレームワークで広く採用されました。ページ方式の KV キャッシュ管理（第 17 章）と組み合わせて使われます。</p>
+<p class="further">さらに読む：<a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener noreferrer">vLLM / PagedAttention 論文（arXiv）</a> · <a href="https://ja.wikipedia.org/wiki/%E3%83%90%E3%83%83%E3%83%81%E5%87%A6%E7%90%86" target="_blank" rel="noopener noreferrer">Wikipedia：バッチ処理</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 312" role="img" aria-label="図 25-4：3 つの枠（スロット）と 6 つのシーケンス。静的バッチ処理はバッチ内でいちばん長いシーケンスが書き終わるのを待ってから次へ進み、11 ステップで終わり、空転は 10 スロットステップ。連続バッチ処理は空きが出るたびに補充し、9 ステップで終わり、空転は 4">
+<text class="f-text" fill="#182f2b" x="10" y="22" font-size="13" font-weight="600">静的バッチ処理：バッチ全体が一緒に始まり、一緒に終わる</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="51" font-size="12">枠 1</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="79" font-size="12">枠 2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="107" font-size="12">枠 3</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="13" font-weight="600">連続バッチ処理：空きが出たら、すぐ補充</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="181" font-size="12">枠 1</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="209" font-size="12">枠 2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="237" font-size="12">枠 3</text>
+<rect class="f-accent" fill="#136d5a" x="50.0" y="34" width="83.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="92.5" y="51" font-size="13" font-weight="600" text-anchor="middle">P</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="135.0" y="34" width="83.5" height="24" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="220.0" y="34" width="55.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="248.3" y="51" font-size="13" font-weight="600" text-anchor="middle">S</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="276.7" y="34" width="83.5" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="50.0" y="62" width="168.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="135.0" y="79" font-size="13" font-weight="600" text-anchor="middle">Q</text>
+<rect class="f-warn" fill="#9e5d24" x="220.0" y="62" width="140.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="290.8" y="79" font-size="13" font-weight="600" text-anchor="middle">T</text>
+<rect class="f-soft" fill="#e5f1df" x="50.0" y="90" width="111.8" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="106.7" y="107" font-size="13" font-weight="600" text-anchor="middle">R</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="163.3" y="90" width="55.2" height="24" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" x="220.0" y="90" width="83.5" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="262.5" y="107" font-size="13" font-weight="600" text-anchor="middle">U</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="305.0" y="90" width="55.2" height="24" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="50.0" y="164" width="83.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="92.5" y="181" font-size="13" font-weight="600" text-anchor="middle">P</text>
+<rect class="f-accent" fill="#136d5a" x="135.0" y="164" width="55.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="163.3" y="181" font-size="13" font-weight="600" text-anchor="middle">S</text>
+<rect class="f-soft" fill="#e5f1df" x="191.7" y="164" width="83.5" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="234.2" y="181" font-size="13" font-weight="600" text-anchor="middle">U</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="276.7" y="164" width="26.8" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="50.0" y="192" width="168.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="135.0" y="209" font-size="13" font-weight="600" text-anchor="middle">Q</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="220.0" y="192" width="83.5" height="24" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" x="50.0" y="220" width="111.8" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="106.7" y="237" font-size="13" font-weight="600" text-anchor="middle">R</text>
+<rect class="f-warn" fill="#9e5d24" x="163.3" y="220" width="140.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="234.2" y="237" font-size="13" font-weight="600" text-anchor="middle">T</text>
+<text class="f-muted" fill="#5c6d66" x="50.0" y="266" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="106.7" y="266" font-size="12" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="163.3" y="266" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="220.0" y="266" font-size="12" text-anchor="middle">6</text>
+<text class="f-muted" fill="#5c6d66" x="276.7" y="266" font-size="12" text-anchor="middle">8</text>
+<text class="f-muted" fill="#5c6d66" x="333.3" y="266" font-size="12" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="390.0" y="266" font-size="12" text-anchor="middle">12</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="288" font-size="12" text-anchor="middle">破線の枠は空転している枠です。</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="306" font-size="12" text-anchor="middle">静的：11 ステップ、空転 10。連続：9 ステップ、空転 4</text>
+</svg><figcaption>図 25-4　同じ 3 つの枠と、長さのまちまちな 6 つのシーケンス。連続バッチ処理は、毎ステップ空きがないかを確認するので、枠がほとんど遊ばず、全体がより早く終わります。<span class="ev ev-est">教育用の試算</span></figcaption></figure>
+<p>Strata のような MoE モデルでは、バッチ処理にもう 1 つ特別な点があります。各シーケンスは、層ごとに 10 個のエキスパートを選びます（第 10 章）。シーケンスごとに、選ばれるエキスパートはたいてい違います。バッチの中のシーケンスが多いほど、その層で動員するエキスパートの<strong>和集合</strong>は大きくなります（図 25-5）。<span class="ev ev-est">教育用の試算</span></p>
+<figure class="fig"><svg viewBox="0 0 400 244" role="img" aria-label="図 25-5：各シーケンスが層ごとに 10 個のエキスパートを選ぶとき、各シーケンスが独立に一様に選ぶなら、1 シーケンスで 10 個、4 シーケンスで約 39 個、16 シーケンスで約 139 個、32 シーケンスで約 240 個が動員される">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">1 バッチが 1 層で使うエキスパート数（全 512 個）</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">1 シーケンス</text><text class="f-text" fill="#182f2b" x="390" y="44" font-size="12" text-anchor="end">10 個（2%）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="50" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="50" width="7.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">4 シーケンス（最大 40 個）</text><text class="f-text" fill="#182f2b" x="390" y="88" font-size="12" text-anchor="end">約 38.8 個（8%）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="94" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="94" width="28.8" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="132" font-size="12">16 シーケンス（最大 160 個）</text><text class="f-text" fill="#182f2b" x="390" y="132" font-size="12" text-anchor="end">約 138.6 個（27%）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="138" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="138" width="102.9" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">32 シーケンス（最大 320 個）</text><text class="f-text" fill="#182f2b" x="390" y="176" font-size="12" text-anchor="end">約 239.6 個（47%）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="182" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="182" width="177.8" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">各シーケンスが独立に、一様に 10 個を選ぶと仮定</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="238" font-size="12">期待値 = 512 × (1 − (1 − 10/512)^B)、B はシーケンス数</text>
+</svg><figcaption>図 25-5　バッチが大きいほど、1 つの層で起こされるエキスパートは増えます。エキスパートの大半がメモリにあり、CPU が計算する Strata では、バッチ処理で節約できる「重みを 1 回読む」分が、読み出すエキスパートの増加によって、一部打ち消されます。<span class="ev ev-est">教育用の試算</span></figcaption></figure>
+<p>この見積もりは、エキスパートが一様に選ばれると仮定しています。本物のルーティングには人気の偏りがあるので、和集合はもう少し小さくなります。それでも、向きははっきりしています。「エキスパートはメモリにいて、ミスしたエキスパートは CPU が計算する」アーキテクチャでは、バッチ処理の利益を、密なモデルの経験からそのまま持ってくることはできず、実測が必要です。この章がこれを設計問題としてしか扱わない理由でもあります。</p>
+
+<h2 id="sec-5">25.5 マルチシーケンス化：まず状態を分離し、速さの話はそれから</h2>
+<p>あなたが手を動かして、Strata に 2 つのシーケンスを同時に処理させると決めたとします。最初の一歩は、スケジューラを書くことではありません。何が共有されていて、何がシーケンスごとの専用なのか、をはっきり書き出すことです。</p>
+<p>上流のコードには、とても良い読み始めの入口があります。<code>session.hpp</code> の <code>SessionState</code> のコメントには、「1 つのシーケンスが必要とするもののうち、重み以外のすべて」と書かれています。各層の状態、ブロック計算の一時作業バッファ（scratch）、GPU と CPU のエキスパートプールの間の受け渡し領域です。<span class="ev ev-code">コード上の事実</span>[S13] つまり上流の設計では、1 つのシーケンスに <code>SessionState</code> が 1 つ対応します。</p>
+<p>もっと大事なのは、コメントのこの 2 つの文です。36 個の GDN 層は、一時作業バッファを<strong>1 セットだけ共用</strong>し、層ごとに 1 つずつあるのは<strong>状態</strong>のほうです。12 個の QSA 層も一時作業バッファを 1 セット共用し、理由が括弧の中に書かれています。「同時には動かないから」です。<span class="ev ev-code">コード上の事実</span>[S13] シングルシーケンスで、層を順番に実行するという前提のもとでは、この共有はまったく正しく、VRAM の節約にもなります。ところが 2 つのシーケンスが同時に走ると、「同時には動かない」という前提が崩れ、共有の一時作業バッファに両方から同時に書き込まれて、2 つのシーケンスのデータが互いに混ざってしまいます。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは並行プログラミングのいちばん典型的な落とし穴です。コードがもともと正しかったのは、ある「実行者は 1 人だけ」という暗黙の仮定のおかげでした。マルチスレッドに改造するときは、この種の仮定をすべて 1 つずつ探し出し、排他を証明し直すか、1 人に 1 つずつ持たせる形に変える必要があります。外側にグローバルロックを 1 つ付ければ終わり、ではありません。</p>
+<p>次は VRAM の予算です。上流は、セッションの初期化時に、すべての層の状態を最大コンテキストの分だけ一度に確保します。コメントによると、その理由は、トークンを 1 つ生成する道筋で<strong>割り当てがゼロ</strong>であることを要求しているからです。一時的な <code>cudaMalloc</code> は、ほかのテストはすべて通っても、この 1 つには通りません。<span class="ev ev-code">コード上の事実</span>[S13] マルチシーケンスでも、同じ原則を当てはめると、新しいシーケンスを受け入れる前に、その状態の領域をすべて先に予約しておく必要があります。図 25-6 は、教育用の数字でこの勘定を計算したものです。</p>
+<figure class="fig"><svg viewBox="0 0 400 222" role="img" aria-label="図 25-6：教育用の予算。1 シーケンスで 26 GiB。重みを共有する 5 シーケンスなら 34 GiB で足りる。全体を 5 回コピーすると 130 GiB 必要になる">
+<text class="f-text" fill="#182f2b" x="10" y="22" font-size="12" font-weight="600">1 シーケンス：20 + 2 + 2 + 2 = 26 GiB</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="30" width="55.4" height="18"/><rect class="f-warn" fill="#9e5d24" x="65.4" y="30" width="5.5" height="18"/><rect class="f-soft" fill="#e5f1df" x="70.9" y="30" width="5.5" height="18"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76.4" y="30" width="5.5" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="78" font-size="12" font-weight="600">5 シーケンス、重み共有：20 + 5 × 2 + 2 + 2 = 34 GiB</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="86" width="55.4" height="18"/><rect class="f-warn" fill="#9e5d24" x="65.4" y="86" width="27.7" height="18"/><rect class="f-soft" fill="#e5f1df" x="93.1" y="86" width="5.5" height="18"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="98.6" y="86" width="5.5" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="12" font-weight="600">5 シーケンス、丸ごとコピー：5 × 26 = 130 GiB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="142" width="360" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="26" y="193" font-size="12">共有の重み</text>
+<rect class="f-warn" fill="#9e5d24" x="150" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="166" y="193" font-size="12">シーケンス別状態</text>
+<rect class="f-soft" fill="#e5f1df" x="276" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="292" y="193" font-size="12">一時バッファ</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="202" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="26" y="213" font-size="12">予備の余裕（バー長は比例、数値は教育用の仮定）</text>
+</svg><figcaption>図 25-6　重みは 1 セットあれば足り、状態だけがシーケンスごとに必要です。だから、5 シーケンスは 5 倍の VRAM を必要としませんが、1 シーケンスと同じ量で済むこともありません。<span class="ev ev-est">教育用の試算</span></figcaption></figure>
+<p>この数字は教育用の仮定です。共有する重みとキャッシュが 20 GiB、各シーケンスの状態が 2 GiB、一時作業バッファが 2 GiB、予備が 2 GiB。<span class="ev ev-est">教育用の試算</span> アクティブなシーケンスが 5 つなら、20 + 5 × 2 + 2 + 2 = 34 GiB 必要です。2 点に注意してください。コンテキストの長さが違えば、各シーケンスの状態も違います。そして、5 つのシーケンスが本当に同時に計算するなら、一時作業バッファも並行数に合わせて計算し直す必要があり、もう 1 セットを共用してはいけません。</p>
+<p>ここから、<dfn>アドミッション制御</dfn>の原則が出てきます。シーケンスを「アクティブ」と約束する前に、そのすべての予算をアトミックに予約すること。予算が足りなければ、待たせるか、はっきり断ること。リクエストをいったん全部受け入れてから、VRAM のアロケータが失敗しないことを願うのは、だめです。</p>
+
+<h2 id="sec-6">25.6 手を動かす：短いリクエストは、なぜ待たされ続けるのか</h2>
+<p>この章のインタラクティブ実験「短いリクエストはなぜ待ち続けるのか」を開いてください。FIFO とラウンドロビンを、最初の文字までの時間、完了時間、切り替えコストで比べます。すべてのリクエストは時刻 0 に準備ができていて、1 トークンの計算は 1 ミリ秒です。本物の GPU でのバッチ処理やプリフィルは再現していません。順に試してみましょう。</p>
+<ol>
+<li>既定のいくつかのリクエストで、FIFO とラウンドロビンの最初の文字までの時間を比べます。ラウンドロビンでは、短いリクエストがより早く始まります。</li>
+<li>切り替えコストを上げます。ラウンドロビンの総所要時間が延び、公平さの代償が見えるようになります。</li>
+<li>タイムスライスを、ラウンドロビンの結果が FIFO とまったく同じになるまで大きくします。</li>
+</ol>
+<p>この章の 2 つのインタラクティブ図にも戻ってみましょう。スケジューリング比較器で「短いリクエストが次々に到着する」を試して、SJF が長いリクエストをどう飢えさせるかを見ます。待ち行列の曲線では、利用率を 95% まで引き上げ、シミュレーションを何度か押してみます。実験の数字は、スケジューリングのトレードオフを議論するためだけのもので、どんな実システムのベンチマーク値としても使えません。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>上流 Strata は一度に 1 つのシーケンスだけを処理し、ほかのリクエストは FIFO ロックの前で待ちます。マルチユーザーのスケジューリングは、この章の設計練習であり、上流の機能ではありません。接続数、待機数、アクティブなシーケンス数は、分けて数える必要があります。</li>
+<li>FIFO は簡単ですが長いリクエストに足止めされます。SJF は平均待ち時間が最短ですが、長いリクエストを飢えさせます。ラウンドロビンは全員が最初の文字をより早く見られますが、切り替えコストを払います。利用率が 100% に近づくほど、待ち時間は急激に長くなります。</li>
+<li>マルチシーケンスに変えるなら、まず「実行者は 1 人だけ」という暗黙の仮定、たとえば共有の一時作業バッファを、すべて見つけ出します。そのうえで「重みは 1 セット、状態はシーケンスごとに 1 つ」で予算を計算し、新しいシーケンスを受け入れる前にアトミックに予約します。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「Strata の HTTP サーバーはマルチスレッドだから、複数のユーザーを同時に処理できる。」</strong></p>
+<p>マルチスレッドで可能になるのは、複数の人が同時に<strong>つながる</strong>ことだけです。実際に働くエンジンの前には FIFO ロックがあり、同じ瞬間に生成されているシーケンスは 1 つだけです。接続の並行性、スレッドの並行性、シーケンスの並行性は、3 つの別の層の話です。<code>ThreadingHTTPServer</code> を見ただけで、エンジンが連続バッチ処理に対応していると断定してはいけません。</p></div>
+
+<details class="deep"><summary>もう一歩深く：4 つのカウンタ、予算の細部、切り替えコスト、並行性の受け入れ検査</summary>
+<h3>まず、現状と設計を区別する</h3>
+<p>固定したコミットの上流サービスファイルには、FIFO の後ろで一度に 1 つのシーケンスを処理する、と書かれています。[S15] この本の発起人は、複数の並行処理に対応させた Strata のブランチを自分で改造したことがあると説明していましたが、そのブランチのソースは今回のレビューの範囲外です。この章が示すのは、<strong>マルチユーザー拡張の設計と受け入れの方法</strong>であり、そのブランチを監査した、あるいは実装した、と主張するものではありません。</p>
+<p>4 つの数は、別々に数える必要があります。HTTP の同時接続数、待機中のリクエスト数、生成中のシーケンス数、同じ 1 回のカーネル計算で処理するシーケンス数。これらは、まったく違う値になることがあります。スレッドを増やしても、KV キャッシュ、GDN の状態、PLE の状態、乱数、一時バッファの分離の問題は、自動的には解決しません。</p>
+<h3>変更可能な状態は、1 つずつ持ち主を書き出す</h3>
+<p>読み取り専用の重みと、読み取り専用のキャッシュの中身は、適切な同期のもとなら共有できます。各シーケンスのトークン履歴、KV ページのマッピング、GDN の状態、PLE の状態、サンプリングパラメータ、乱数カウンタ、キャンセルフラグには、はっきりした持ち主が必要です。上流の <code>SessionState</code> は、「重み以外のシーケンスの状態」を読むための良い入口です [S13]。PLE の履歴とトークンウィンドウも、コメントがはっきり「シーケンスの状態」と呼んでいる点に注意してください。</p>
+<p>共有の一時バッファが安全かどうかは、スケジューリングが排他を保証できるかにかかっています。「各層は並行して動かない」と仮定していた一時バッファを、2 つのセッションが同時に使うと、もともと正しかったコードが、たちまち成り立たなくなります。並行化するときは、すべての単一シーケンスの仮定を書き出すべきで、グローバルな排他ロックを 1 つ探して済ませてはいけません。</p>
+<h3>予算の細部</h3>
+<p>本文の 34 GiB は、出発点にすぎません。5 つのシーケンスがそれぞれ独立の一時作業バッファを必要とするなら、その 2 GiB は実際の並行数でもう一度計算する必要があります。コンテキストの長さが違えば、各シーケンスの状態の大きさも違います。アドミッション制御は、アクティブなシーケンスを約束する前に、予算をアトミックに予約しなければなりません。セッション駐車場（上流の任意機能）はホストのメモリを使うので、これも別に予算へ入れます。<span class="ev ev-report">上流レポート</span></p>
+<h3>ラウンドロビンの本当のコスト</h3>
+<p>教育用のシミュレーションは、切り替えに時間がかからない、またはかかっても一定の定数だと仮定しています。本物のエンジンがシーケンスを切り替えるときは、1 つのシーケンスの KV キャッシュと再帰状態を VRAM の外へ動かし、別のものを持ち込む必要があるかもしれません。タイムスライスが小さすぎると、状態を動かすコストが計算を圧倒します。だから「公平さ」の評価では、最初の文字までの時間、完了時間、スループット、状態を動かす量を同時に見る必要があります。SJF には、現実的な難しさもあります。答えの長さは、生成し終えるまで分かりません。見積もるしかないのです。飢餓を防ぐための一般的なやり方は、長く待っているリクエストほど優先度を高くすることで、これを<dfn>エイジング</dfn>と呼びます。</p>
+<h3>例題：最後の枠に、2 つのリクエストが同時に到着する</h3>
+<p>受け入れの断言：ちょうど 1 つのリクエストが有効な予算を得てアクティブになり、もう 1 つは待つか、はっきり断られる。二重に予約してはならず、クライアントのリトライで 2 つのセッションを作ってもならない。完了またはキャンセルのあと、予算はちょうど 1 回だけ解放される。古いリクエストが、新しい枠の状態へ書き込み続けてはならない。</p>
+<h3>並行性の受け入れ検査は、「状態の取り違え」リスクを突く必要がある</h3>
+<p>言語やタスクの異なる 2 つの固定リクエスト A、B を設計し、まず別々に単独で実行して、参照用の出力を記録します。そのうえで、交互に、または並行して実行します。次のような場合を網羅します。A のキャンセル中も B は続ける。A が長くプリフィルしている間に B がデコードする。プレフィックスは同じで画像が違う。セッションの復元。予算がちょうど最後の枠 1 つ分のときの、並行する奪い合い。</p>
+<p>最低限の合格条件：状態の分離が正しい。予算を超える約束がない。二重の終了がない。古いリクエストの出力が混ざらない。長いリクエストの飢餓がない。総スループットは上がったけれど、ときどきコンテキストを取り違える、というシステムは、合格した並行推論サービスではありません。</p>
+<h3>シミュレータの証拠の境界</h3>
+<p>この章の 2 つのインタラクティブ図とインタラクティブ実験は、どれも離散的な教育用シミュレーションです。トークンごとの所要時間は一定で、本物のプリフィル、ドラフトの検証、プレフィックスのヒット、GPU カーネル、キャッシュの競合はありません。スケジューリングのトレードオフを議論するためにしか使えず、図の上の倍率を、どんな実システムの性能の宣伝にも使ってはいけません。</p>
+</details>

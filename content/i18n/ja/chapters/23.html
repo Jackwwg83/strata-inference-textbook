@@ -1,0 +1,246 @@
+<div class="hook"><span class="eyebrow">気づいたかも</span>
+<p>チャットの画面では、答えが 1 文字ずつ現れます。ところが画面を介さず、コマンドラインからローカルの Strata の API を直接呼ぶと、まったく違う景色が見えます。<code>data: {…}</code> という行が並び、行と行の間は空行で、最後の行は <code>data: [DONE]</code> です。</p>
+<p>この行は <dfn>SSE</dfn>（Server-Sent Events、サーバー送信イベント）と呼ばれます。サーバーを出るときは<strong>バイト</strong>の列ですが、あなたの手元に届くまでに、ネットワークが適当な大きさの塊に切り分けてしまいます。1 つの漢字が真っ二つになることもありますし、1 つのメッセージが 2 回に分かれて届くこともあります。この章では、そうした断片を、文字化けしない 1 つの完全な文に組み立て直す方法を説明します。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>モデルが出したトークンが画面の文字になるまでに、3 つの関門を通ります。バイトを文字にする（UTF-8）、文字をイベントに切る（SSE の空行）、イベントを構造に読む（JSON）。どの関門でも、先に全部そろえてから処理します。</p>
+
+<h2 id="sec-1">23.1 モデルとアプリの間には、もう 1 つサービスの層がある</h2>
+<p>推論エンジンが分かるのはトークン番号だけです。番号の列を渡すと、新しい番号を 1 つずつ出してきます。ところがあなたのアプリは別の言葉を話します。JSON 形式のチャットメッセージを送り、文字のまとまりを受け取りたいのです。その間を翻訳するのが<dfn>サービス層</dfn>です。図 23-1 が Strata のサービス層です。</p>
+<figure class="fig"><svg viewBox="0 0 400 400" role="img" aria-label="図 23-1：Strata のサービス層は HTTP サーバー、テキストフロントエンド、エンジン境界の 3 層に分かれ、いちばん下に常駐するエンジンプロセスがある">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="8" width="360" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="14" font-weight="600" text-anchor="middle">あなたのアプリ</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="48" font-size="12" text-anchor="middle">チャット画面、コーディングアシスタント、OpenAI SDK……</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="84" width="360" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="106" font-size="14" font-weight="600" text-anchor="middle">HTTP サーバー：serve/server.py</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="124" font-size="12" text-anchor="middle">パスの判定、API キーの確認、キュー、SSE の書き出し</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="160" width="360" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="182" font-size="14" font-weight="600" text-anchor="middle">テキストフロントエンド：serve/frontend.py</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="200" font-size="12" text-anchor="middle">テンプレート適用 · 出力を思考／本文／ツール呼び出しに分ける</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="236" width="360" height="50" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="258" font-size="14" font-weight="600" text-anchor="middle">エンジン境界：Engine.generate</text>
+<text class="f-on" fill="#ffffff" x="200" y="276" font-size="12" text-anchor="middle">トークン番号を入れると、番号を 1 つずつ出す</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="312" width="360" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="334" font-size="14" font-weight="600" text-anchor="middle">strata --serve 常駐プロセス</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="352" font-size="12" text-anchor="middle">重みは 1 回だけ読み込み · stdin/stdout で行を送受信</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 58V82M200 134V158M200 210V234M200 286V310"/>
+<text class="f-muted" fill="#5c6d66" x="208" y="75" font-size="12">HTTP + JSON</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="151" font-size="12">メッセージ一覧</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="227" font-size="12">トークン番号</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="303" font-size="12">1 行に 1 つのコマンドか結果</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="388" font-size="12" text-anchor="middle">上の 3 層は文字だけを扱い、GPU を使うのは最下層だけ</text>
+</svg><figcaption>図 23-1　Strata のサービス層。HTTP サーバーとテキストフロントエンドは文字だけを扱うので、GPU がなくてもテストできます。本当の計算は、いちばん下の常駐プロセスで行われます。</figcaption></figure>
+<p><code>serve/server.py</code> の冒頭に、この層の役割が書かれています。「トークン番号をトークンに対応づけるどんなエンジン」の上でも、OpenAI 流と Anthropic 流の 2 種類の API を提供する、というものです。エンドポイントには <code>POST /v1/chat/completions</code>（OpenAI 流。ストリーミングも非ストリーミングも可）、<code>POST /v1/messages</code>（Anthropic 流）、<code>GET /v1/models</code>、<code>GET /health</code> などがあります。<span class="ev ev-code">コード上の事実</span>[S15]</p>
+<p>エンジンとの約束は、関数 1 つだけです。<code>Engine.generate(prompt_ids, max_new, sampling, cancel)</code> で、トークン番号を 1 つずつ出すイテレータを返します。本物の <code>StrataEngine</code> は <code>strata --serve</code> プロセスを常駐させ、標準入出力で話しかけます。<code>MockEngine</code> は台本どおりにトークンを出すので、GPU のないマシンでもすべての API の経路をテストできます。[S15]</p>
+<p><code>serve/frontend.py</code> の冒頭の一文は「ここにあるものはすべてテキストです。モデルも GPU もありません」です。仕事は 3 つあります。OpenAI 形式と Anthropic 形式のリクエストを、チャットテンプレートが求めるメッセージ一覧にそろえること。モデルに付属の Jinja テンプレートでプロンプトを組み立てること（Hugging Face の結果と一致することを、10 個のサンプルで確かめてあります）。ストリーミング出力を、思考、本文、ツール呼び出しへと少しずつ分けること。このとき<strong>タグを半分だけ出すことは決してありません</strong>。<span class="ev ev-code">コード上の事実</span>[S16]</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは「コンピュータネットワーク」で習う階層化の考え方の、小さな版です。各層は上下の層とだけやり取りし、インターフェースさえ決まっていれば、層の中身は自由に入れ替えられます。<code>MockEngine</code> が本物のエンジンの代わりになれるのは、境界が <code>generate</code> という関数 1 つだけだからです。</p>
+
+<h2 id="sec-2">23.2 なぜ答えを書きながら送れるのか</h2>
+<p>普通の Web リクエストは 1 問 1 答です。ブラウザがリクエストを 1 つ送り、サーバーは<strong>答え全体</strong>を用意して、一度に返します。大規模モデルでは、最初の 1 文字が見えるまで何十秒も待つことになります。<dfn>ストリーミングレスポンス</dfn>はやり方を変えます。同じ答えを小さな断片に分け、1 つ書けたらすぐ 1 つ送るのです。図 23-2 で 2 つの方式を比べます。</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="図 23-2：通常のレスポンスは答え全体が書き上がるまで待ってから返す。ストリーミングは 1 つ書けるたびに送るので、最初の文字がずっと早く出る">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">通常のレスポンス：答え終わってから一度に返す</text>
+<text class="f-muted" fill="#5c6d66" x="175" y="42" font-size="12" text-anchor="middle">待機……（モデルが生成中）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 60H390"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="44" width="8" height="16"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="32" y="48" width="286" height="8"/>
+<rect class="f-accent" fill="#136d5a" x="322" y="44" width="66" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="78" font-size="12" text-anchor="middle">送信</text>
+<text class="f-muted" fill="#5c6d66" x="355" y="78" font-size="12" text-anchor="middle">回答全体</text>
+<text class="f-text" fill="#182f2b" x="10" y="120" font-size="13" font-weight="600">ストリーミング（SSE）：1 つ書けたらすぐ送る</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 160H390"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="144" width="8" height="16"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="92" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="114" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="136" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="158" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="180" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="202" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="224" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="246" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="268" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="290" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="312" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="334" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="356" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="378" y="144" width="12" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="178" font-size="12" text-anchor="middle">送信</text>
+<text class="f-muted" fill="#5c6d66" x="84" y="178" font-size="12" text-anchor="middle">最初の文字</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="178" font-size="12" text-anchor="middle">最後の文字</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">目安の図で、縮尺は正確ではありません。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="224" font-size="12">合計時間はほぼ同じで、違うのは最初の文字が出る時刻です。</text>
+</svg><figcaption>図 23-2　ストリーミングは、モデルの計算を速くはしません。ただ、最初の文字をずっと早く見せてくれます。数百トークンを書く答えでは、体感がまったく違います。</figcaption></figure>
+<aside class="primer" id="c23-http-sse">
+<h3>HTTP とストリーミング（SSE）</h3>
+<p><dfn>HTTP</dfn> は、ブラウザとサーバーが会話するときの決まりです。会話は 2 つの半分に分かれます。クライアントが<strong>リクエスト</strong>（どのパスにアクセスするか、どんなデータを持っていくか）を送り、サーバーが<strong>レスポンス</strong>を返します。レスポンスは、ステータスコード（200 は成功、400 はリクエストに問題あり、401 は認証に通らなかった、など）に、いくつかのヘッダと本文がついたものです。ヘッダの <code>Content-Type</code> は、本文がどんな形式かを相手に伝えます。</p>
+<p>普通のレスポンスは、本文を一度に書き終えます。<dfn>SSE</dfn> は、レスポンスの <code>Content-Type</code> を <code>text/event-stream</code> にして、接続を閉じません。サーバーは思いついたものを 1 つずつ書き込み、その 1 つ 1 つを<dfn>イベント</dfn>と呼びます。形式はとても素朴です。</p>
+<ul>
+<li>1 つのイベントは何行かでできていて、<code>data:</code> で始まる行にデータが入ります。</li>
+<li><strong>空行</strong>が 1 つ来ると、そのイベントはおしまいです。</li>
+<li>コロンで始まる行はコメントで、クライアントは単に無視します。</li>
+<li>任意の <code>event:</code> 行で、イベントに名前を付けられます。</li>
+</ul>
+<p>例を挙げます。サーバーが <code>data: 你好</code>、改行、さらに空行を書き出すと、クライアントは内容が「你好」の 1 つのイベントを受け取ります。仕様はさらに次のことを求めています。イベントストリームは UTF-8 でエンコードすること。改行は LF、CR、CRLF のどれでもよいこと。同じイベントの複数の <code>data</code> 行は改行でつなぐこと。イベントの途中でストリームが切れたら、その半端なイベントは捨てること（完全なものとして渡してはいけません）。[R05]</p>
+<p>Strata との関係：<code>/v1/chat/completions</code> に <code>"stream": true</code> を付けると、答えが SSE で返ります。付けなければ、生成が終わるまで待って、JSON を 1 つまとめて返します。</p>
+<p class="further">さらに読む：<a href="https://developer.mozilla.org/ja/docs/Web/HTTP/Guides/Overview" target="_blank" rel="noopener noreferrer">MDN：HTTP の概要</a> · <a href="https://developer.mozilla.org/ja/docs/Web/API/Server-sent_events/Using_server-sent_events" target="_blank" rel="noopener noreferrer">MDN：サーバー送信イベントの使用</a> · <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html" target="_blank" rel="noopener noreferrer">HTML 標準：Server-sent events（英語）</a> · <a href="https://ja.wikipedia.org/wiki/HTTP" target="_blank" rel="noopener noreferrer">Wikipedia：HTTP</a></p>
+</aside>
+<p>Strata が SSE を書き出すコードは短いものです。まずステータス 200 を返し、ヘッダに <code>Content-Type: text/event-stream</code> と <code>Cache-Control: no-cache</code> を書き、さらに <code>X-Accel-Buffering: no</code> を足します。これは nginx のようなリバースプロキシに、ためこまず、イベントを受け取ったらすぐ転送するよう頼むものです。<span class="ev ev-code">コード上の事実</span> その後、答えの 1 つ 1 つは、<code>data: </code> に JSON を 1 つ付け、空行を 1 つ付けた形で書かれます。全部終わったら <code>data: [DONE]</code> を書きます。図 23-3 で、このバイト列を分解して見てみましょう。</p>
+<figure class="fig"><svg viewBox="0 0 400 312" role="img" aria-label="図 23-3：Strata が書き出す SSE のバイト列。各イベントは data に JSON を付けて空行で終わる。コロンで始まるキープアライブのコメントはクライアントが無視し、最後は data: [DONE] で終わる">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">↵ は改行 1 つ。↵ が 2 つ続くと「空行」</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="44" font-size="12" font-family="monospace">data: {…"delta":{"role":"assistant",…}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="68" font-size="12">1 つ目：アシスタントの発話開始を告げるだけ（文字なし）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="82" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="100" font-size="12" font-family="monospace">data: {…"delta":{"content":"こんにちは"}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="124" font-size="12">1 イベント = data: + JSON 1 つ + 空行</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="138" width="380" height="26" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="18" y="156" font-size="12" font-family="monospace">: keep-alive↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="180" font-size="12">コロンで始まる行はコメント：無視され、接続が生きている証拠</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="194" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="212" font-size="12" font-family="monospace">data: {…"delta":{"content":"、世界"}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="236" font-size="12">続きの文字。思考内容は reasoning_content に入る</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="250" width="380" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="18" y="268" font-size="12" font-family="monospace">data: [DONE]↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="294" font-size="12">終了の合図。OpenAI API の慣習で、SSE の仕様ではない</text>
+</svg><figcaption>図 23-3　Strata が書き出す SSE のバイト列の一部です（JSON の id や model などのフィールドは「…」で省略しました）。クライアントは、空行を手がかりに、イベントが完全にそろったかを判断します。</figcaption></figure>
+<p>途中の <code>: keep-alive</code> に注目してください。とても長い質問を読んでいる間、エンジンは何分もトークンを出さないことがあります。その間、Strata は 10 秒ごとに「ハートビート」を作り、HTTP 層がそれを SSE のコメントとして書き出します。<span class="ev ev-code">コード上の事実</span> クライアントはコメントを無視しますが、バイトが流れてくるので、接続が切れたとは思いません。サーバーも、書き込みのついでに、相手がもういないことに気づけます（第 24 章で詳しく説明します）。</p>
+
+<h2 id="sec-3">23.3 1 つの漢字は 3 バイト</h2>
+<p>ネットワークが知っているのはバイトだけで、文字は知りません。簡略化したイベント <code>data: {"delta":"你好"}</code> を例にします。最後の空行まで含めると、回線の上では 26 バイトで、<code>你</code> と <code>好</code> が 3 バイトずつです。ここで問題が起きます。TCP 接続がプログラムに渡す「1 塊」の大きさは、ネットワークと OS が決めるもので、文字の境目とはまったく関係がありません。1 つの漢字の 3 バイトのうち、最初の 1 バイトがこの塊に、残りの 2 バイトが次の塊に入ることも、十分ありえます。</p>
+<aside class="primer" id="c23-utf8">
+<h3>UTF-8：1 文字は何バイトか</h3>
+<p>コンピュータの中では、どの文字にも番号があり、<dfn>コードポイント</dfn>と呼ばれます。たとえば「中」は U+4E2D です。<dfn>UTF-8</dfn> は、コードポイントをバイトとして書くための規則です。英字のようによく使う文字は 1 バイトだけで、昔の ASCII とまったく同じです。ほとんどの漢字は 3 バイト、絵文字は 4 バイトです。</p>
+<p>うまくできているのは、どのバイトも「自分の素性を持っている」ことです（図 23-4）。先頭バイトの冒頭に 1 がいくつ並ぶかで、その文字が何バイトかが分かります。後ろのバイトはすべて <code>10</code> で始まり、<dfn>継続バイト</dfn>と呼ばれます。だからデコーダは <code>E4</code>（2 進数で 1110 0100）を読むと、「後ろに継続バイトが 2 つ続くはずだ」と分かります。このとき塊がもう終わっていたら、正しいやり方は<strong>まず E4 を保留する</strong>ことです。次の塊が来てから、つなぎ合わせます。</p>
+<p>Python の <code>codecs.getincrementaldecoder</code> も、ブラウザの <code>TextDecoder</code>（<code>stream: true</code> を付けたもの）も、このような<dfn>インクリメンタルデコーダ</dfn>（増分デコーダ）です。逆に、塊ごとに単独でデコードすると、半分の文字は置換文字 � になり、二度と元に戻せません。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/UTF-8" target="_blank" rel="noopener noreferrer">Wikipedia：UTF-8</a> · <a href="https://developer.mozilla.org/ja/docs/Web/API/TextDecoder" target="_blank" rel="noopener noreferrer">MDN：TextDecoder</a> · <a href="https://docs.python.org/ja/3/library/codecs.html" target="_blank" rel="noopener noreferrer">Python ドキュメント：codecs</a> · <a href="https://www.rfc-editor.org/rfc/rfc3629" target="_blank" rel="noopener noreferrer">RFC 3629：UTF-8</a></p>
+<figure class="fig"><svg viewBox="0 0 400 272" role="img" aria-label="図 23-4：「中」のコードポイント U+4E2D が 3 つのバイト E4 B8 AD に分かれ、各バイトの先頭のマークビットが、文字の中での位置を表す">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle"><tspan lang="zh">中</tspan> = U+4E2D = 0100 111000 101101（16 ビット）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="36" width="110" height="40" rx="6"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="36" width="110" height="40" rx="6"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="270" y="36" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">1110</tspan> 0100</text>
+<text class="f-text" fill="#182f2b" x="200" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">10</tspan>111000</text>
+<text class="f-text" fill="#182f2b" x="325" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">10</tspan>101101</text>
+<text class="f-text" fill="#182f2b" x="75" y="96" font-size="13" font-weight="600" text-anchor="middle">E4</text>
+<text class="f-text" fill="#182f2b" x="200" y="96" font-size="13" font-weight="600" text-anchor="middle">B8</text>
+<text class="f-text" fill="#182f2b" x="325" y="96" font-size="13" font-weight="600" text-anchor="middle">AD</text>
+<text class="f-muted" fill="#5c6d66" x="75" y="114" font-size="12" text-anchor="middle">先頭：全 3 バイト</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="114" font-size="12" text-anchor="middle">継続バイト</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="114" font-size="12" text-anchor="middle">継続バイト</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="128" width="380" height="96" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="148" font-size="12" font-family="monospace">0xxxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="148" font-size="12">1 バイト：英字、数字</text>
+<text class="f-text" fill="#182f2b" x="20" y="170" font-size="12" font-family="monospace">110xxxxx 10xxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="170" font-size="12">2 バイト：例 é</text>
+<text class="f-text" fill="#182f2b" x="20" y="192" font-size="12" font-family="monospace">1110xxxx 10xxxxxx 10xxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="192" font-size="12">3 バイト：ほとんどの漢字</text>
+<text class="f-text" fill="#182f2b" x="20" y="214" font-size="12" font-family="monospace">11110xxx 10xxxxxx ×3</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="214" font-size="12">4 バイト：例 絵文字</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="244" font-size="12" text-anchor="middle">強調したマークビットが役割を示し、</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="262" font-size="12" text-anchor="middle">残りのビットが順にコードポイントを作る</text>
+</svg><figcaption>図 23-4　UTF-8 は「中」を E4 B8 AD の 3 バイトに分けます。先頭バイトを見るだけで、その文字が全部で何バイトか分かります。だからデコーダは「この塊の終わりは、文字の半分ではないか」を判断できます。</figcaption></figure>
+</aside>
+<p>Strata 自身も、この問題をもっと早い段階で処理しなければなりません。モデルの 1 トークンは、完全な 1 文字とは限らないからです。<code>serve/server.py</code> の <code>Detokenizer</code> は、各トークンのバイトをインクリメンタル UTF-8 デコーダに渡します。完全な文字はすぐに送り出し、トークンをまたぐ半分の文字は保留して、後のトークンが補うのを待ちます。<span class="ev ev-code">コード上の事実</span> コードのコメントには、こんな計算も残されています。昔のやり方では、トークンが来るたびに、これまでに生成した番号を<strong>すべて</strong>デコードし直していました。答えが 8K トークンに達すると、トークンごとに 2 ミリ秒、16K では 4 ミリ秒余計にかかります。インクリメンタルデコードなら、トークンごとのコストは一定です。</p>
+<p>サーバーがバイトを書き出した後は、クライアントが同じ問題をもう一度解かなければなりません。しかも、1 層多くなります。イベントも切られるからです。下のスライサーは、126 バイトの SSE ストリームをランダムに切って、2 つのクライアントに同時に受信させます。</p>
+<div class="viz" data-viz="sse-chunk-split"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="図 23-5：「你」の 3 バイトが 2 つの塊の間で切れる。不注意なクライアントは塊ごとに単独でデコードして文字化けし、正しいクライアントは E4 を保留して、そろってから「你」を復元する">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">1 つの「<tspan lang="zh">你</tspan>」が 2 つの塊の間で切れる</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="70" y="34" width="38" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="89" y="54" font-size="13" text-anchor="middle">"</text>
+<rect class="f-warn" fill="#9e5d24" x="112" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="54" font-size="13" text-anchor="middle">E4</text>
+<rect class="f-accent" fill="#136d5a" x="168" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="187" y="54" font-size="13" text-anchor="middle">BD</text>
+<rect class="f-accent" fill="#136d5a" x="210" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="229" y="54" font-size="13" text-anchor="middle">A0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="252" y="34" width="38" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="54" font-size="13" text-anchor="middle">…</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="3 3" d="M159 28V72"/>
+<text class="f-muted" fill="#5c6d66" x="100" y="86" font-size="12" text-anchor="middle">塊 3 の末尾</text>
+<text class="f-muted" fill="#5c6d66" x="229" y="86" font-size="12" text-anchor="middle">塊 4 の先頭</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="100" width="190" height="112" rx="8"/>
+<text class="f-text" fill="#182f2b" x="16" y="122" font-size="13" font-weight="600">不注意なクライアント</text>
+<text class="f-text" fill="#182f2b" x="16" y="146" font-size="12">塊 3 を単独で：E4 → �</text>
+<text class="f-text" fill="#182f2b" x="16" y="168" font-size="12">塊 4 を単独で：BD A0 → ��</text>
+<text class="f-warn" fill="#9e5d24" x="16" y="194" font-size="12">「<tspan lang="zh">你</tspan>」は永久に失われる</text>
+<rect class="f-soft" fill="#e5f1df" x="202" y="100" width="190" height="112" rx="8"/>
+<text class="f-text" fill="#182f2b" x="210" y="122" font-size="13" font-weight="600">正しいクライアント</text>
+<text class="f-text" fill="#182f2b" x="210" y="146" font-size="12">塊 3：E4 を保留</text>
+<text class="f-text" fill="#182f2b" x="210" y="168" font-size="12">塊 4：E4 BD A0 → <tspan lang="zh">你</tspan></text>
+<text class="f-text" fill="#182f2b" x="210" y="194" font-size="12">空行を待ってから JSON 解析</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="236" font-size="12" text-anchor="middle">操作版：「1 ステップ」で 126 バイトを順に受信して比べる</text>
+</svg><figcaption>図 23-5　塊の境目は、文字の境目を気にしません。塊ごとに単独でデコードすると、半分の文字は文字化けになり、二度と元に戻せません。インクリメンタルデコードなら、不完全なバイトを保留し、そろってから文字を出力します。</figcaption></figure></div>
+<p>何度か遊んでみると分かります。不注意なクライアントは、文字を落とすだけではありません。切られたイベントを不正なデータとして捨ててしまいます。間違い方は毎回違い、こうした出たり出なかったりするバグは、いちばん調べにくいものです。</p>
+
+<h2 id="sec-4">23.4 JSON：イベントに入っているのは構造</h2>
+<p>SSE の仕事は、イベントを切り出すところまでです。イベントの中身には関知しません。Strata は <code>data:</code> の後ろに JSON を置きます。</p>
+<aside class="primer" id="c23-json">
+<h3>JSON：人にもプログラムにも読めるデータ形式</h3>
+<p><dfn>JSON</dfn> は、少ない決まりで構造のあるデータを表します。波括弧 <code>{}</code> は「名前: 値」の組、角括弧 <code>[]</code> はリストで、値には文字列、数値、<code>true</code>/<code>false</code>、<code>null</code> を使えます。さらにもう 1 層入れ子にもできます。たとえば <code>{"delta":{"content":"你好"}}</code> は、delta の中の content が「你好」である、という意味です。</p>
+<p>JSON を読むには、1 つ厳しい条件があります。<strong>テキストが完全でなければならない</strong>ことです。閉じ括弧が 1 つ足りなくても、引用符が半分欠けていても、パーサーはエラーを出します。だから、まず空行で完全なイベントを切り出してから読む必要があるのです。</p>
+<p>JSON の文字列の中の ASCII 以外の文字には、2 通りの書き方があります。UTF-8 のバイトをそのまま書くか、<code>中</code> のようなエスケープで書くかです。2 つは同じ意味ですが、バイト数が違います（図 23-6）。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/JSON" target="_blank" rel="noopener noreferrer">Wikipedia：JSON</a> · <a href="https://developer.mozilla.org/ja/docs/Web/JavaScript/Reference/Global_Objects/JSON" target="_blank" rel="noopener noreferrer">MDN：JSON</a> · <a href="https://docs.python.org/ja/3/library/json.html" target="_blank" rel="noopener noreferrer">Python ドキュメント：json（ensure_ascii を含む）</a> · <a href="https://www.rfc-editor.org/rfc/rfc8259" target="_blank" rel="noopener noreferrer">RFC 8259</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="図 23-6：同じ「中文」の 2 文字を、UTF-8 でそのまま書くと 18 バイト、\u エスケープで書くと 24 バイト。漢字 100 文字なら、それぞれ 300 バイトと 600 バイト">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">同じ JSON の 2 通りの書き方</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="32" width="380" height="28" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="51" font-size="12" font-family="monospace" lang="zh">{"delta":"中文"}</text>
+<text class="f-text" fill="#182f2b" x="380" y="51" font-size="12" text-anchor="end">18 バイト</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="68" width="380" height="28" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="87" font-size="12" font-family="monospace">{"delta":"中文"}</text>
+<text class="f-text" fill="#182f2b" x="380" y="87" font-size="12" text-anchor="end">24 バイト</text>
+<text class="f-text" fill="#182f2b" x="10" y="124" font-size="12" font-weight="600">漢字 100 文字の答えは、文字部分だけで：</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="134" width="125" height="16"/>
+<text class="f-text" fill="#182f2b" x="143" y="147" font-size="12">UTF-8 そのまま：300 バイト</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="160" width="250" height="16"/>
+<text class="f-text" fill="#182f2b" x="268" y="173" font-size="12">\u 形式：600 バイト</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="202" font-size="12">漢字 1 文字：UTF-8 は 3 バイト、\u は ASCII 6 文字</text>
+</svg><figcaption>図 23-6　Strata のストリーミングイベントは <code>ensure_ascii=False</code> で UTF-8 をそのまま書くので、中国語のバイト数はエスケープ形式の半分です。代償として、1 つの漢字のバイトがネットワークに切られることがあり、クライアントはインクリメンタルにデコードしなければなりません。</figcaption></figure>
+<p>Strata がストリーミングイベントを書くときに呼ぶのは <code>json.dumps(c, ensure_ascii=False)</code> で、中国語は UTF-8 のまま書き出されます。<span class="ev ev-code">コード上の事実</span> エスケープ形式に変えれば、回線の上はすべて ASCII バイトになり、「半分の漢字」はもう出ません。けれども、中国語のバイト数は 2 倍になりますし、SSE の仕様はもともと UTF-8 でデコードすることを求めています。イベントが切られる問題も、やはり残ります。だから正しい方向は、クライアントがきちんとインクリメンタルにデコードすることで、エスケープで逃げることではありません。</p>
+<p>3 つの関門をつなぐと、順番は入れ替えられません。</p>
+<ol>
+<li><strong>バイト → 文字</strong>：インクリメンタル UTF-8 デコード。不完全なバイトは保留する。</li>
+<li><strong>文字 → イベント</strong>：バッファにためて、空行が来たときだけ完全なイベントを切り出す。コメントは捨てる。</li>
+<li><strong>イベント → 構造</strong>：完全な <code>data</code> を JSON として読み、文字を取り出す。</li>
+</ol>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは「コンパイラ」で習う「文字ストリーム → 字句解析 → 構文解析」というパイプラインと同じ発想です。各層は、上の層が<strong>完全な単位</strong>を渡してくれてから働きます。そして TCP が保証するのはバイトの順序だけで、それより上のどんな単位の完全さも保証しません。</p>
+
+<h2 id="sec-5">23.5 モデルの出力も「そろえてから送る」</h2>
+<p>同じ厄介事は、サーバーの内側でもう一度起こります。このモデルは、まず「考えて」から答えます。思考の内容は <code>&lt;think&gt;</code> と <code>&lt;/think&gt;</code> の間に書かれます。ツールを呼ぶ必要があるときは、<code>&lt;tool_call&gt;&lt;function=名前&gt;&lt;parameter=引数&gt;値&lt;/parameter&gt;…</code> のようなタグを書きます。これらのタグはプログラム向けで、あなたの画面に出てはいけません。</p>
+<p>厄介なのは、タグも切られることがある点です。ある 1 歩で <code>&lt;/th</code> が出て、次の 1 歩でやっと <code>ink&gt;</code> が出る、といった具合です。<code>frontend.py</code> の <code>OutputParser</code> は、まさにこのためにあります。切られたタグは保留しておき、完全になってから処理します。だからクライアントは、<code>&lt;tool_</code> や <code>&lt;/thi</code> のような半端なタグを目にすることがありません。<span class="ev ev-code">コード上の事実</span>[S16]</p>
+<div class="viz" data-viz="think-tag-holdback"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="図 23-7：モデル出力の 2 つの断片が、思考終了タグを半分に切っている。パーサーは前半を保留し、次の断片が届くと完全なタグを見分けて、その後の文字を本文に入れる">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">モデルが続けて出した 2 つの断片</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="180" height="30" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="46" font-size="13">考えた。<tspan class="f-warn" fill="#9e5d24">&lt;/th</tspan></text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="26" width="180" height="30" rx="5"/>
+<text class="f-text" fill="#182f2b" x="220" y="46" font-size="13"><tspan class="f-warn" fill="#9e5d24">ink&gt;</tspan>はい、</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 60V78"/>
+<rect class="f-soft" fill="#e5f1df" x="30" y="80" width="340" height="30" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="100" font-size="13" font-weight="600" text-anchor="middle">パーサー：タグの先頭かもしれない末尾を保留</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 110V126"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="128" width="120" height="58" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="70" y="148" font-size="12" text-anchor="middle">思考</text>
+<text class="f-text" fill="#182f2b" x="70" y="172" font-size="13" text-anchor="middle">考えた。</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="128" width="120" height="58" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="148" font-size="12" text-anchor="middle">保留して次を待つ</text>
+<text class="f-warn" fill="#9e5d24" x="200" y="172" font-size="13" text-anchor="middle">&lt;/th</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="128" width="120" height="58" rx="6"/>
+<text class="f-on" fill="#ffffff" x="330" y="148" font-size="12" text-anchor="middle">本文</text>
+<text class="f-on" fill="#ffffff" x="330" y="172" font-size="13" text-anchor="middle">はい、</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="210" font-size="12" text-anchor="middle">2 つをつなぐと完全な &lt;/think&gt;：思考は終わり、以降は本文</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="228" font-size="12" text-anchor="middle">操作版：6 つの断片を順に入れて、3 種類に分かれる様子を見る</text>
+</svg><figcaption>図 23-7　パーサーが保留するのは、「タグの先頭かもしれない」数文字だけです。ほかの文字はすぐに送り出します。こうすれば、半端なタグが漏れることもなく、表示が遅くなることもありません。</figcaption></figure></div>
+<p>本物の <code>OutputParser</code> は、このウィジェットよりも 2 つ多くのことをします。1 つ目は、ツール呼び出しの進み具合を、書いている途中から報告することです。ツール名が現れた時点で開始イベントを出し、引数も少しずつ報告します。モデルが大きなファイルを書いている間、クライアントが何分も待ちぼうけにならないようにするためです。<span class="ev ev-code">コード上の事実</span> 2 つ目は、タグの前後の改行を丁寧に扱い、ストリーミング出力と一括出力の結果がまったく同じになるようにすることです。</p>
+<p>ツール呼び出しは、安全性にも関わります。モデルが関数名を書いたからといって、システムがその実行を許可するわけではありません。モデルの出力は<strong>信頼できない入力</strong>です。実行する前に、引数と権限を確かめる必要があります。Strata が MCP ツールを提供するのは、はっきり要求したリクエスト（<code>"strata_mcp": true</code> 付き）だけで、ほかのクライアントから見える API は、これまでとまったく同じです。[S15] 「誰がモデルに何をさせる権限を持つか」は、第 24 章でも続けます。</p>
+
+<h2 id="sec-6">23.6 手を動かす：同じストリームを好きな大きさに切る</h2>
+<p>この章のインタラクティブ実験「バイトの断片はイベントではない」を開いてください。中国語を含む SSE ストリームを、1〜32 バイトの固定サイズで切り、正しい 3 つの関門で復元します。順に 3 つ試してみましょう。</p>
+<ol>
+<li>1 バイトから 32 バイトまで順に試す：どの切り方でも、復元した文字がまったく同じでなければなりません。1 つでも違うものがあれば、パーサーにバグがあります。</li>
+<li>CRLF 改行を入れる：SSE は 3 種類の改行を認めていて、パーサーはすべて認識する必要があります。</li>
+<li>「未完了」のバッファに注目する：イベントの途中でストリームが切れたら、その半端なイベントは残すかエラーにするかのどちらかです。完全なふりをしてはいけません。</li>
+</ol>
+<p>それから、この章の 2 つのインタラクティブ図で、断片の大きさを 1 バイトと 64 バイトにして、それぞれ走らせてみてください。塊が小さいほど、不注意な書き方の間違いがはっきり見えます。塊が大きいほど、間違いは深く隠れます。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>Strata のサービス層は、アプリの JSON リクエストをトークン番号に翻訳し、エンジンが出したトークンを文字に戻して、SSE のイベントストリームとして返します。エンジンとの間のインターフェースは <code>Engine.generate</code> だけです。</li>
+<li>バイトから文字までには、3 つの関門があります。UTF-8 のインクリメンタルデコード、空行によるイベントの切り出し、完全な JSON の解析です。ネットワークの塊の境目は、この 3 つの境目のどれとも無関係なので、どの関門でも先にそろえます。</li>
+<li>モデル出力の中のタグも切られます。Strata の <code>OutputParser</code> は、タグの先頭かもしれない末尾を保留し、半分のタグは決して出しません。完全なツール呼び出しは、書き終わってから初めて有効になります。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「SSE のイベントを数えれば、モデルが何トークン生成したか分かる。」</strong></p>
+<p>両者に決まった関係はありません。Strata の最初のイベントは「アシスタントが話し始める」と告げるだけで、トークンは入っていません。長い質問を読んでいる間は、キープアライブのコメントが挟まります。1 つのトークンが漢字の半分だけを運んできたときは、その一歩では送る文字がありません。タグが保留されているときも、一時的に送らないことがあります。逆に、1 つのイベントの文字が、何個ものトークンから来ていることもあります。トークン数を知りたいときは、レスポンスの最後にある <code>usage</code> フィールドを見てください。イベントを数えてはいけません。</p></div>
+
+<details class="deep"><summary>もう一歩深く：3 つの境界の厳密な要求、「互換」の範囲、検証の方法</summary>
+<h3>3 つの境界を、仕様どおりに書く</h3>
+<p>SSE の仕様がパーサーに求めることは、次のようにまとめられます [R05]。イベントストリームは UTF-8 でデコードする。行末は CRLF、単独の LF、単独の CR のどれでもよい。空行が 1 回のイベント配信を引き起こす。同じイベントの複数の <code>data</code> 行は LF でつなぐ。コロンで始まる行はコメント。ストリームが終わったとき、空行で終わっていない半端なイベントは捨てる。</p>
+<p>ここから、実装の順序が導かれます。<strong>インクリメンタルなバイトデコード → テキストを蓄積してイベントの境界で区切る → data のペイロードを解析する</strong>。塊を 1 つ読むたびに <code>JSON.parse</code> すると、文字の切断とイベントの切断の両方にやられます。この本のインタラクティブ実験が実装しているのは、data だけのサブセットで、LF と CRLF に対応しています。EventSource の自動再接続や、<code>id</code>、<code>retry</code> フィールドは実装していないので、完全な SSE クライアントとしては使えません。</p>
+<h3>例題：1 つの漢字が 3 つの塊にまたがる</h3>
+<p>「中」の 3 バイト E4 B8 AD が、3 つのネットワークの塊に分かれたとします。塊ごとに完全なテキストとしてデコードすると、置換文字が 3 つ出ます。インクリメンタルデコーダは、E4 を読んだ時点で「あと 2 バイト足りない」と分かって保留し、B8 を読むと「あと 1 バイト」、AD を読んでやっと「中」を出力します。同じように、<code>data: {"delta":"中"}</code> の後ろの 2 つの改行も、コロンや引用符の間、2 つの改行の間のどこで切られてもおかしくありません。ネットワークの塊の数とトークンの数の間に、決まった関係はありません。</p>
+<h3>「OpenAI 互換」とは、あるインターフェースのサブセットのこと</h3>
+<p>「互換」は、どのエンドポイントを、どのフィールドを、どんな意味で実装しているかで理解する必要があります。パスが <code>/v1/...</code> に似ているだけで、すべて互換だと判断してはいけません。この本が説明するのは、<code>serve/server.py</code> の冒頭に挙げられたエンドポイントと境界だけで [S15]、プロトコルのすべてのフィールドを 1 つずつ監査したわけではありません。ソースを読んで確認できる細部がいくつかあります。最初のイベントの delta は <code>{"role":"assistant","content":""}</code> であること。思考内容は <code>reasoning_content</code> フィールドに入ること。キャンセルによる終了は、クライアントには <code>stop</code> として報告されること。</p>
+<h3>ストリームが始まってから、エラーに気づいたら？</h3>
+<p>HTTP のステータスコードはレスポンスヘッダにあり、ヘッダは一度送ったら変えられません。そこで Strata は、事前に分かるエラーを、ストリームが始まる前に処理します。質問の長さに最大出力の長さを足してコンテキストを超えるときは、すぐに 400 で断り、こっそり切り詰めることは決してしません。[S15] ストリームが始まってからエンジンがエラーを出したとき（たとえばエンジンプロセスが突然終了したとき）は、ステータスコードがすでに 200 になっています。そこで Strata は、ストリームの中に <code>error</code> フィールド付きのイベントを書き、そのあと <code>data: [DONE]</code> で通常どおり締めくくります。Anthropic 流の API では、<code>event: error</code> イベントを書きます。<span class="ev ev-code">コード上の事実</span> クライアントは、ステータスコードだけでなく、イベントの中身も確認しなければなりません。</p>
+<h3>テンプレートのサンドボックスは、テンプレートの層だけを守る</h3>
+<p><code>frontend.py</code> は、Jinja の <code>ImmutableSandboxedEnvironment</code> でチャットテンプレートを描画します。[S16] これはテンプレート層の具体的な防御で、テンプレートのコードにできることを制限します。ツールの実行、画像 URL の取得、ローカルファイルの読み取りまでが安全だと、自動的に証明してくれるわけではありません。資源へのアクセスの種類ごとに、別々の脅威モデルが必要です。MCP ツールについては、Strata にもう 1 つ別の検査があります。Strata 自身の Web ページ（または設定で明示的に信頼した送信元）から、しかも JSON 形式で送られたときだけ、モデルにこれらのツールを使わせます。ツールは、あなたのこのコンピュータ上の権限で動くからです。<span class="ev ev-code">コード上の事実</span></p>
+<h3>検証の方法と、証拠の境界</h3>
+<p>SSE 解析の検証：中国語を含む 2 つの JSON イベントを 1〜32 バイトで切り、どの切り方でも復元結果がまったく同じであることを求めます。CRLF、複数行の data、末尾の欠けたイベントもテストに加えます。欠けたイベントは、未完了のままにするかエラーにするかで、成功を偽装してはいけません。</p>
+<p><code>MockEngine</code> で確かめられるのは、ストリーミングと非ストリーミングのレスポンス、キャンセル、ツールの引数、エラー時の締めくくりのイベントです。ただし、GPU 推論の品質や、本物の性能の証明にはなりません。[S15] これが階層化したテストの利点であり、同時にその証拠の境界でもあります。</p>
+</details>
