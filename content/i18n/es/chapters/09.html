@@ -1,0 +1,215 @@
+<div class="hook"><span class="eyebrow">Primero, una comparación</span>
+<p>Hay dos formas de tomar notas en una reunión. La primera es la del taquígrafo: apunta cada frase, el cuaderno se hace cada vez más grueso y, para encontrar algo, hay que hojearlo hacia atrás. La segunda es la de la pizarra: es un tablero de tamaño fijo. Cuando llega algo nuevo, borras un poco de lo viejo y reescribes un poco. La pizarra siempre mide lo mismo.</p>
+<p>La atención del capítulo 8 es el taquígrafo. Este capítulo trata de la pizarra. De las 48 capas del modelo de Strata, 36 usan <dfn>GDN</dfn> (Gated DeltaNet). En cada capa, cada cabeza tiene solo una «pizarra» de 128 × 128, y no crece por larga que sea la conversación. Con unos ejemplos pequeños que puedes calcular a mano, veremos cómo se borra, cómo se escribe y cómo se lee esa pizarra.</p></div>
+<p class="tldr"><strong>En una línea:</strong> GDN comprime la historia en una matriz de estado de tamaño fijo. Con cada token, primero hace decaer todo el estado, luego lee el valor viejo con la clave actual y escribe, con un solo producto exterior, solo la diferencia entre el valor objetivo y el viejo. El estado no crece con el contexto, pero pierde información, y si el orden de los pasos falla por uno, el resultado cambia en silencio.</p>
+
+<h2 id="sec-1">9.1 Dos memorias: hojear notas o borrar y reescribir una pizarra</h2>
+<p>La atención guarda una clave y un valor por cada posición del historial y los consulta cuando hace falta. La ventaja es que no se pierde nada. El precio es que, cuanto más largo el contexto, más se guarda y más lenta es la consulta (capítulo 8). GDN toma otro camino: no conserva registros uno a uno, sino que mantiene un <strong>estado</strong> de tamaño fijo y lo actualiza una vez por cada token que llega (figura 9-1).</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figura 9-1: la caché KV de la atención crece de forma lineal con el contexto, unos 6 GiB a 262K; el estado GDN se mantiene siempre en unos 112 MiB">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">Bytes de memoria usados (según la longitud del contexto)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M50 190H380M50 190V36"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M50 190L380 40"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" stroke-dasharray="7 4" d="M50 187.3H380"/>
+<text class="f-text" fill="#182f2b" x="96" y="80" font-size="12">Caché KV de la atención:</text>
+<text class="f-text" fill="#182f2b" x="96" y="98" font-size="12">+24 KiB por cada token</text>
+<text class="f-text" fill="#182f2b" x="150" y="176" font-size="12">Estado GDN: siempre unos 112 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="46" y="44" font-size="12" text-anchor="end">6 GiB</text>
+<text class="f-muted" fill="#5c6d66" x="46" y="194" font-size="12" text-anchor="end">0</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="208" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="208" font-size="12" text-anchor="middle">128K</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="208" font-size="12" text-anchor="end">262K</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="230" font-size="12">KV: FP16, 12 capas QSA; GDN con historial de conv.</text>
+</svg><figcaption>Figura 9-1　La caché KV sube sin parar con el contexto; el estado de GDN mide lo mismo desde el primer token. El precio: una pizarra de tamaño fijo no puede guardar detalles sin límite.</figcaption></figure>
+<aside class="primer" id="c09-rnn-state">
+<h3>Redes neuronales recurrentes y «estado»</h3>
+<p>Intuición: cuando cuentas ovejas, en la cabeza guardas un solo número, «voy por la oveja tal». Cada vez que ves una oveja, le sumas uno. No necesitas recordar cómo era cada oveja para decir el total en cualquier momento. Eso que llevas «en la cabeza» es el <dfn>estado</dfn>.</p>
+<p>Definición: un sistema actualiza en cada paso con «estado viejo + entrada nueva → estado nuevo», que se escribe hₜ = f(hₜ₋₁, xₜ). Los contadores de los circuitos digitales y los <dfn>autómatas finitos</dfn> de la teoría de compiladores tienen esa forma. Si cambias f por una red neuronal entrenable, obtienes una <dfn>red neuronal recurrente</dfn> (RNN).</p>
+<p>Dos propiedades clave. Primera: el tamaño del estado es fijo, así que el trabajo de cada paso no depende de cuántos pasos se han dado. Es O(1), y leer un texto de n palabras es O(n), más barato que el O(n²) de la atención. Segunda: tamaño fijo significa <strong>con pérdida</strong>. La «persona que cuenta ovejas» te dice el total, pero no el color de la oveja 17. El problema clásico de las RNN antiguas era justo «no recordar lo muy antiguo». Los modelos nuevos como GDN lo alivian con matrices de estado más grandes y reglas de escritura más listas, pero la pérdida sigue ahí.</p>
+<p>Hay además una consecuencia de ingeniería: el estado solo avanza. Con el estado del paso t, en general <strong>no puedes volver</strong> al del paso t − 2, porque al escribir ya se borró parte de la información vieja. Para retroceder tienes que guardar antes una copia instantánea, o repetir todo desde el principio.</p>
+<p>Relación con este capítulo: cada una de las 36 capas GDN de Strata tiene su propio estado, que avanza token a token.</p>
+<p class="further">Lecturas: <a href="https://es.wikipedia.org/wiki/Red_neuronal_recurrente" target="_blank" rel="noopener noreferrer">Wikipedia: Red neuronal recurrente</a> · <a href="https://es.wikipedia.org/wiki/Aut%C3%B3mata_finito" target="_blank" rel="noopener noreferrer">Wikipedia: Autómata finito</a></p>
+</aside>
+<p>En Strata, 36 de las 48 capas son GDN. <span class="ev ev-code">Hecho de código</span>[S04] El estado de la sesión guarda, para cada capa GDN por separado, un estado recurrente y un historial de convolución. El búfer temporal de cálculo lo comparten las 36 capas, pero el estado tiene que ser uno por capa, porque la «recurrencia» es justo eso. [S13] (<code>session.cpp</code>, líneas 38–44) Cuando empieza una conversación nueva, todos los estados se ponen a cero. [S13] La capa GDN ni siquiera recibe un parámetro de «posición»: su entrada por token son solo esos números, y lo que avanza de un token al siguiente es este estado (<code>layer.hpp</code>, líneas 513–515).</p>
+<p class="bridge"><strong>Si estudiaste informática:</strong> imagina una capa GDN como una máquina de estados. El estado son 48 matrices de punto flotante de 128 × 128, la entrada es el vector del token actual y la función de transición es la fórmula recurrente de este capítulo. Es la misma abstracción que un circuito secuencial de lógica digital: la lógica combinacional calcula el estado siguiente y el registro guarda el estado actual.</p>
+
+<h2 id="sec-2">9.2 Producto exterior: reescribir toda la tabla de una vez</h2>
+<p>La pizarra es una matriz. ¿Cómo se escribe en ella la relación «clave k → valor v»? La respuesta es el producto exterior.</p>
+<aside class="primer" id="c09-outer-product">
+<h3>Producto exterior y actualización de rango uno</h3>
+<p>El producto punto del capítulo 3 convierte dos vectores en <strong>un número</strong>: q · k = Σ qᵢkᵢ. El <dfn>producto exterior</dfn> hace lo contrario: convierte dos vectores en <strong>una tabla</strong>. El elemento de la fila i y la columna j de k vᵀ es kᵢ × vⱼ. Si k tiene 3 números y v tiene 2, el producto exterior es una tabla de 3 × 2, como en la figura 9-2, que sigue a este recuadro.</p>
+<p>Esta tabla tiene una particularidad: cada fila es un múltiplo de v (la fila i = kᵢ × v). Todas las filas «apuntan en la misma dirección», y en álgebra lineal se dice que su <dfn>rango</dfn> es 1. Por eso sumar un producto exterior a una matriz se llama <dfn>actualización de rango uno</dfn>: S ← S + k vᵀ.</p>
+<p>¿Por qué sirve una actualización de rango uno como memoria? Porque, si «lees» con la misma k, recuperas v. Se lee con Sᵀk: cada columna hace un producto punto con k. Si S = k vᵀ y k tiene longitud 1, entonces Sᵀk = v × (k · k) = v. Si las claves son perpendiculares entre sí (producto punto 0), lo que escribe cada una no interfiere con las demás; si se solapan, los contenidos se mezclan.</p>
+<p>El costo también es fácil de ver: una actualización de rango uno toca todas las celdas de la tabla, S × S multiplicaciones y sumas. Pero solo depende del par k, v actual y no necesita mirar nada de la historia.</p>
+<p>Relación con este capítulo: GDN hace una actualización de rango uno por cada cabeza de valor y cada token, y cada pizarra es de 128 × 128.</p>
+<p class="further">Lecturas: <a href="https://es.wikipedia.org/wiki/Producto_exterior" target="_blank" rel="noopener noreferrer">Wikipedia: Producto exterior</a> · <a href="https://es.wikipedia.org/wiki/Rango_%28%C3%A1lgebra_lineal%29" target="_blank" rel="noopener noreferrer">Wikipedia: Rango (álgebra lineal)</a> · <a href="https://es.wikipedia.org/wiki/Matriz_%28matem%C3%A1tica%29" target="_blank" rel="noopener noreferrer">Wikipedia: Matriz (matemática)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 242" role="img" aria-label="Figura 9-2: con k igual a 1, 0, 2 y v igual a 2, 3, el producto exterior es una tabla de 3 filas y 2 columnas, y cada fila es un múltiplo de v">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">v = [2, 3]</text>
+<rect class="f-soft" fill="#e5f1df" x="170" y="24" width="56" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="198" y="44" font-size="13" text-anchor="middle">2</text>
+<rect class="f-soft" fill="#e5f1df" x="230" y="24" width="56" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="258" y="44" font-size="13" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="120" y="44" font-size="12" text-anchor="middle">k</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="62" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="84" font-size="13" text-anchor="middle">1</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="100" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="138" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="160" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="170" y="62" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="198" y="84" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="62" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="258" y="84" font-size="13" text-anchor="middle">3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="100" width="56" height="34" rx="3"/><text class="f-muted" fill="#5c6d66" x="198" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="100" width="56" height="34" rx="3"/><text class="f-muted" fill="#5c6d66" x="258" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-accent" fill="#136d5a" x="170" y="138" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="198" y="160" font-size="13" text-anchor="middle">4</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="138" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="258" y="160" font-size="13" text-anchor="middle">6</text>
+<text class="f-text" fill="#182f2b" x="296" y="84" font-size="12">= 1 × v</text>
+<text class="f-text" fill="#182f2b" x="296" y="122" font-size="12">= 0 × v</text>
+<text class="f-text" fill="#182f2b" x="296" y="160" font-size="12">= 2 × v</text>
+<text class="f-text" fill="#182f2b" x="20" y="196" font-size="12">Celda (i, j) = kᵢ × vⱼ; cada fila es un múltiplo de v,</text>
+<text class="f-text" fill="#182f2b" x="20" y="214" font-size="12">por eso el rango es 1</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="236" font-size="12">S ← S + k vᵀ lo suma al estado: actualización de rango uno</text>
+</svg><figcaption>Figura 9-2　El producto exterior «teje» dos vectores en una tabla. La información de la tabla son en realidad solo las dos series de números k y v, por eso es de rango uno.</figcaption></figure>
+
+<h2 id="sec-3">9.3 La regla Delta: leer primero lo viejo y escribir solo la diferencia</h2>
+<p>La forma más ingenua de escribir es sumar siempre un k vᵀ. El problema es que, si escribes dos veces la misma clave, los dos valores se <strong>apilan</strong>. Pruébalo en una pizarra de 2 × 2: primero escribe «manzana» (clave [1, 0]) → [2, 3], y después cambia manzana a [5, 1]. Con suma simple, la primera fila de la pizarra queda [2, 3] + [5, 1] = [7, 4]. Lo que lees es [7, 4], y no es ninguno de los dos valores.</p>
+<p>La <dfn>regla Delta</dfn> hace lo siguiente: antes de escribir, lee con esa clave lo que la pizarra ya guarda (se escribe v̂) y escribe solo la diferencia «objetivo menos valor viejo», δ = v − v̂. En la segunda escritura de manzana, v̂ = [2, 3] y δ = [5, 1] − [2, 3] = [3, −2]. Al sumarlo, la primera fila pasa a [5, 1], y al leer sale justo el valor nuevo. Mira la figura 9-3.</p>
+<div class="viz" data-viz="delta-memory"><figure class="fig"><svg viewBox="0 0 400 228" role="img" aria-label="Figura 9-3: primero se escribe manzana como 2, 3 y luego se reescribe como 5, 1. La suma simple devuelve 7, 4 y la regla Delta devuelve 5, 1">
+<text class="f-text" fill="#182f2b" x="200" y="16" font-size="12" text-anchor="middle">Escribe manzana → [2, 3]; reescribe manzana → [5, 1]</text>
+<text class="f-text" fill="#182f2b" x="100" y="42" font-size="13" font-weight="600" text-anchor="middle">Suma simple</text>
+<rect class="f-warn" fill="#9e5d24" x="30" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="77" font-size="14" text-anchor="middle">7</text>
+<rect class="f-warn" fill="#9e5d24" x="104" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="137" y="77" font-size="14" text-anchor="middle">4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="30" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="63" y="121" font-size="14" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="104" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="137" y="121" font-size="14" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="100" y="160" font-size="12" text-anchor="middle">Leer manzana = [7, 4]:</text>
+<text class="f-warn" fill="#9e5d24" x="100" y="176" font-size="12" text-anchor="middle">lo viejo y lo nuevo se apilan</text>
+<text class="f-text" fill="#182f2b" x="300" y="42" font-size="13" font-weight="600" text-anchor="middle">Regla Delta</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="77" font-size="14" text-anchor="middle">5</text>
+<rect class="f-accent" fill="#136d5a" x="304" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="337" y="77" font-size="14" text-anchor="middle">1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="263" y="121" font-size="14" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="304" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="337" y="121" font-size="14" text-anchor="middle">0</text>
+<text class="f-text" fill="#182f2b" x="300" y="160" font-size="12" text-anchor="middle">Leer manzana = [5, 1]:</text>
+<text class="f-text" fill="#182f2b" x="300" y="176" font-size="12" text-anchor="middle">correcto</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="200" font-size="12">Segunda escritura de Delta: valor viejo v̂ = [2, 3]</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="220" font-size="12">δ = [5, 1] − [2, 3] = [3, −2]; fila 1 → [5, 1]</text>
+</svg><figcaption>Figura 9-3　Al escribir dos veces la misma clave, la suma simple apila el valor viejo y el nuevo. La regla Delta resta primero el valor viejo y luego escribe, y lo que se lee es justo el último valor.</figcaption></figure></div>
+<p>El GDN real tiene una perilla más: la intensidad de escritura β. La diferencia se multiplica por β antes de escribirse: δ = β(v − v̂). β = 1 significa «cambiar del todo al valor nuevo»; β = 0.25 significa «mover solo un cuarto del camino hacia el valor nuevo». β tiene que estar entre 0 y 1, así que la capa lo pasa antes por una sigmoid; el kernel no se encarga de ese paso (el capítulo 7 explicó este contrato). [S17]</p>
+<p>Una pizarra de 2 × 2 tiene solo 4 números. Cuantas más claves escribes y más se solapan, más interfieren entre sí. En el simulador de arriba, si escribes manzana, banana y luego naranja, naranja se lee bien, pero manzana y banana han cambiado. La pizarra real es de 128 × 128 y la interferencia es mucho menor, pero la razón es la misma: «tamaño fijo = con pérdida».</p>
+
+<h2 id="sec-4">9.4 Decaimiento con puerta: un paso de orden equivocado cambia el resultado</h2>
+<p>La pizarra también necesita «olvidar». Con cada token que llega, GDN primero multiplica toda la pizarra por un coeficiente de decaimiento α y después hace la escritura Delta. Si α está cerca de 1, los recuerdos viejos casi no se desvanecen; si está cerca de 0, casi se empieza con la pizarra en blanco. Cada cabeza de valor tiene su propio α, que se calcula con el token actual: α = e<sup>gate</sup>. [S17]</p>
+<p>El gate se calcula como softplus(…) × ssm_a (<code>layer.hpp</code>, línea 14). La salida de softplus nunca es menor que 0, y ssm_a es un coeficiente del modelo para cada cabeza de valor. Mientras ssm_a sea negativo, gate no será mayor que 0 y α quedará entre 0 y 1: es como «en cada paso, un descuento a los recuerdos viejos».</p>
+<p>Este es un paso completo de una cabeza de valor, donde el estado S es una matriz «dimensión de la clave × dimensión del valor» <span class="ev ev-code">Hecho de código</span>[S17]:</p>
+<ol>
+<li>Decaimiento: S̄ = α S</li>
+<li>Leer lo viejo: v̂ = S̄ᵀ k</li>
+<li>Calcular la diferencia: δ = β (v − v̂)</li>
+<li>Escribir: S′ = S̄ + k δᵀ</li>
+<li>Salida: o = S′ᵀ q</li>
+</ol>
+<p>El archivo de cabecera de GDN insiste en que el decaimiento va <strong>antes</strong> de la actualización de rango uno, y hay una prueba que fija ese punto. [S17] ¿Por qué importa tanto el orden? Reduce la matriz a un solo número y calcula a mano. Toma el estado viejo S = 2, α = 0.5, k = 1, v = 3, β = 0.25, q = 1:</p>
+<ul>
+<li><strong>Primero decae y luego escribe</strong> (el contrato): S̄ = 1; v̂ = 1; δ = 0.25 × (3 − 1) = 0.5; S′ = 1.5; salida 1.5.</li>
+<li><strong>Primero escribe y luego decae</strong> (error): v̂ = 2; δ = 0.25 × (3 − 2) = 0.25; tras escribir queda 2.25; multiplicado por 0.5 da 1.125.</li>
+</ul>
+<p>Los dos resultados son razonables, finitos y están en rango, y solo uno corresponde al modelo. El orden incorrecto también descuenta <strong>la información nueva que acaba de escribirse</strong>, como si «se olvidara una parte en el mismo instante de anotarla». La herramienta de abajo te deja cambiar los parámetros y calcula los dos lados a la vez:</p>
+<div class="viz" data-viz="gdn-order"><figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="Figura 9-4: con los mismos parámetros, decaer primero y escribir después da 1.5, y escribir primero y decaer después da 1.125">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">S = 2，α = 0.5，k = 1，v = 3，β = 0.25，q = 1</text>
+<rect class="f-soft" fill="#e5f1df" x="8" y="26" width="188" height="170" rx="8"/>
+<text class="f-text" fill="#182f2b" x="102" y="48" font-size="13" font-weight="600" text-anchor="middle">Primero decae (contrato)</text>
+<text class="f-text" fill="#182f2b" x="18" y="76" font-size="12">S̄ = 0.5 × 2 = 1</text>
+<text class="f-text" fill="#182f2b" x="18" y="100" font-size="12">v̂ = 1 × 1 = 1</text>
+<text class="f-text" fill="#182f2b" x="18" y="124" font-size="12">δ = 0.25 × (3 − 1) = 0.5</text>
+<text class="f-text" fill="#182f2b" x="18" y="148" font-size="12">S′ = 1 + 1 × 0.5 = 1.5</text>
+<text class="f-text" fill="#182f2b" x="18" y="178" font-size="13" font-weight="600">Salida o = 1.5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="204" y="26" width="188" height="170" rx="8"/>
+<text class="f-warn" fill="#9e5d24" x="298" y="48" font-size="13" font-weight="600" text-anchor="middle">Primero escribe (error)</text>
+<text class="f-text" fill="#182f2b" x="210" y="76" font-size="12">v̂ = 2 × 1 = 2</text>
+<text class="f-text" fill="#182f2b" x="210" y="100" font-size="12">δ = 0.25 × (3 − 2) = 0.25</text>
+<text class="f-text" fill="#182f2b" x="210" y="124" font-size="12">S_w = 2 + 0.25 = 2.25</text>
+<text class="f-text" fill="#182f2b" x="210" y="148" font-size="12">S′ = 0.5 × 2.25 = 1.125</text>
+<text class="f-warn" fill="#9e5d24" x="210" y="178" font-size="13" font-weight="600">Salida o = 1.125</text>
+</svg><figcaption>Figura 9-4　Con otro orden, otro resultado. El orden incorrecto reduce a la mitad hasta el 0.25 recién escrito.</figcaption></figure></div>
+<p>Este ejemplo de una dimensión también sirve para escribir pruebas. Cada uno de los tres casos límite verifica una cosa: con α = 0, el recuerdo viejo se borra por completo; con β = 0, no se escribe nada; con k = 0, ninguna clave se reescribe. En esos tres casos los dos órdenes a veces coinciden y a veces no, justo lo que hace falta para comprobar que la implementación no cambió el orden a escondidas.</p>
+
+<h2 id="sec-5">9.5 Por qué se puede paralelizar, y por qué no</h2>
+<p>Si miras otra vez las cinco fórmulas, verás algo poco evidente: para una cabeza de valor h y una dimensión de valor j fijas, cada paso solo toca los números de la columna j de la pizarra. Leer lo viejo es una suma a lo largo de la dimensión de clave i, y la escritura también cambia solo la columna j. Entre columnas distintas no hay ningún intercambio. <span class="ev ev-code">Hecho de código</span>[S17] Por eso un hilo puede quedarse con una columna y calcularla de principio a fin, sin necesitar ni una barrera de sincronización en toda la recurrencia (figura 9-5).</p>
+<figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="Figura 9-5: dentro de un mismo token, cada columna de la pizarra puede ir a un hilo distinto y calcularse en paralelo; pero entre tokens vecinos hay que seguir el orden">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">Dentro de un token: un hilo por columna</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="94" y="26" width="30" height="120"/><rect class="f-accent" fill="#136d5a" x="128" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="162" y="26" width="30" height="120"/><rect class="f-accent" fill="#136d5a" x="196" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="230" y="26" width="30" height="120"/>
+<text class="f-muted" fill="#5c6d66" x="75" y="164" font-size="12" text-anchor="middle">j=0</text>
+<text class="f-muted" fill="#5c6d66" x="143" y="164" font-size="12" text-anchor="middle">j=2</text>
+<text class="f-muted" fill="#5c6d66" x="211" y="164" font-size="12" text-anchor="middle">j=4</text>
+<text class="f-muted" fill="#5c6d66" x="54" y="40" font-size="12" text-anchor="end">i=0</text>
+<text class="f-muted" fill="#5c6d66" x="54" y="140" font-size="12" text-anchor="end">i=S−1</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M276 30V142M270 134L276 144L282 134"/>
+<text class="f-text" fill="#182f2b" x="288" y="80" font-size="12">Suma y escritura</text>
+<text class="f-text" fill="#182f2b" x="288" y="98" font-size="12">a lo largo de</text>
+<text class="f-text" fill="#182f2b" x="288" y="116" font-size="12">la dimensión i</text>
+<text class="f-text" fill="#182f2b" x="20" y="192" font-size="12" font-weight="600">Entre tokens: estrictamente uno tras otro</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="65" y="224" font-size="12" text-anchor="middle">Estado Sₜ</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="195" y="224" font-size="12" text-anchor="middle">Estado Sₜ₊₁</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="325" y="224" font-size="12" text-anchor="middle">Estado Sₜ₊₂</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M110 219H148M140 213L148 219L140 225M240 219H278M270 213L278 219L270 225"/>
+</svg><figcaption>Figura 9-5　El paralelismo está en las «columnas»; la serie está en el «tiempo». En un mismo paso se pueden calcular a la vez 128 × 48 columnas, pero el paso t + 1 tiene que esperar al estado del paso t.</figcaption></figure>
+<p>Para que los hilos paralelos lean la memoria al mismo ritmo, Strata cambió el orden de almacenamiento del estado: de (dimensión de clave, dimensión de valor, cabeza), como en la implementación de referencia, a (dimensión de clave, cabeza, dimensión de valor), de modo que hilos vecinos lean direcciones vecinas. El estado es un búfer de ejecución, no son pesos, así que la disposición se puede elegir con libertad. Pero el archivo de cabecera avisa de que las dos disposiciones indexan los mismos tres números, y mezclarlas no da ningún error. [S17]</p>
+<p>Pero «las columnas se pueden paralelizar» no significa que «los tokens se puedan paralelizar». El estado del paso t + 1 depende del paso t, y en la dirección del tiempo sigue habiendo una cadena. Lo que se paraleliza es el trabajo dentro de un paso, no entre pasos.</p>
+<p>El emparejamiento de las cabezas también tiene su detalle. GDN tiene 16 cabezas de clave/consulta y 48 cabezas de valor, y la cabeza de valor h se empareja con la cabeza de clave número h % 16 (resto). [S17] El GQA del capítulo 8, en cambio, usa división entera. Las convenciones de los dos módulos son justo opuestas, y si escribes una «función genérica de mapeo de cabezas» y la reutilizas en todas partes, saldrá mal.</p>
+<p>Por último, hagamos la cuenta. El estado principal de cada capa GDN son 128 × 128 × 48 números FP32, es decir, 3.145.728 bytes, justo 3 MiB; las 36 capas suman 108 MiB. Si añades el historial de convolución (por capa, 10.240 canales × 3 columnas × 4 bytes = 120 KiB), el total es de unos 112,2 MiB. <span class="ev ev-est">Estimación didáctica</span> (los tamaños salen de [S04]; el número de valores de punto flotante por capa está en <code>session.cpp</code>, líneas 41–44) Esta cantidad no cambia desde el primer token hasta el token 262.144. Pero no es todo el estado del modelo: la caché KV de las capas QSA sigue creciendo con el contexto.</p>
+<p>Un detalle más: la explicación al comienzo del archivo de cabecera de GDN dice «48 capas son GDN y 12 son QSA», que suman 60 capas y no cuadran con las 36 + 12 = 48 reales. [S17] Este libro se guía por la definición de geometría ejecutable y la asignación de estado de la sesión, y no toma un comentario desactualizado como un hecho del modelo. [S04][S13]</p>
+
+<h2 id="sec-6">9.6 Manos a la obra: un GDN de una dimensión y lo difícil que es «retroceder»</h2>
+<p>Abre el laboratorio interactivo «Una actualización recurrente». Reduce GDN a un estado escalar y muestra lado a lado el orden de actualización correcto y el incorrecto. Te sugerimos tres cosas:</p>
+<ol>
+<li>Pon α = 0, β = 0 y k = 0, uno por uno, y comprueba las tres propiedades límite de la sección 9.4.</li>
+<li>Busca unos parámetros con los que los dos órdenes den el mismo resultado, y explica por qué en general son distintos.</li>
+<li>Vuelve a «El orden sí importa: ¿primero decae o primero escribe?» de este capítulo y lleva α a 1: ¿siguen siendo distintos los dos órdenes? Explica con la fórmula por qué.</li>
+</ol>
+<p>Que el estado solo avance se vuelve un problema práctico en la decodificación especulativa (capítulos 18 y 19). El motor primero adivina unas cuantas palabras con un método barato (Strata usa la capa MTP que trae el modelo) y luego deja que las 48 capas completas las verifiquen de una vez. Lo que se adivinó mal hay que deshacerlo. [S02] Con la caché KV es fácil: las claves y valores de las posiciones erróneas pueden quedarse ahí, y se sobrescribirán cuando se procesen esas posiciones. Pero el estado de GDN ya fue reescrito por las palabras erróneas y no basta con «retroceder el contador». Strata lo hace así: la ventana de verificación <strong>no toca</strong> el estado GDN; cuando se decide aceptar las primeras n palabras, se reproducen esas n palabras con las entradas guardadas en la ventana, y así avanzan el historial de convolución y el estado recurrente. <span class="ev ev-code">Hecho de código</span>[S08] Mira la figura 9-6.</p>
+<figure class="fig"><svg viewBox="0 0 400 238" role="img" aria-label="Figura 9-6: cuando se rechaza un borrador, a la caché KV le basta con sobrescribir después la posición errónea; el estado GDN se mantiene sin tocar y se reproducen las palabras aceptadas con las entradas guardadas">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">Verificar 3 palabras del borrador, aceptar las 2 primeras</text>
+<text class="f-text" fill="#182f2b" x="20" y="42" font-size="12">Caché KV (guardada por posición)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="50" width="84" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="62" y="70" font-size="12" text-anchor="middle">Confirmado</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="50" width="84" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="152" y="70" font-size="12" text-anchor="middle">Borrador 1 ✓</text>
+<rect class="f-accent" fill="#136d5a" x="200" y="50" width="84" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="242" y="70" font-size="12" text-anchor="middle">Borrador 2 ✓</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="50" width="84" height="30" rx="4"/><text class="f-warn" fill="#9e5d24" x="332" y="70" font-size="12" text-anchor="middle">Borrador 3 ✗</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="102" font-size="12">La posición ✗ se queda; se sobrescribe la próxima vez</text>
+<text class="f-text" fill="#182f2b" x="20" y="134" font-size="12">Estado GDN (una sola copia)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="142" width="96" height="34" rx="4"/><text class="f-text" fill="#182f2b" x="68" y="156" font-size="12" text-anchor="middle">sin tocar</text><text class="f-text" fill="#182f2b" x="68" y="171" font-size="12" text-anchor="middle">al verificar</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M116 159H150M142 153L150 159L142 165"/>
+<rect class="f-soft" fill="#e5f1df" x="152" y="142" width="128" height="34" rx="4"/><text class="f-text" fill="#182f2b" x="216" y="156" font-size="12" text-anchor="middle">Reproducir</text><text class="f-text" fill="#182f2b" x="216" y="171" font-size="12" text-anchor="middle">borradores 1–2</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M280 159H314M306 153L314 159L306 165"/>
+<rect class="f-accent" fill="#136d5a" x="316" y="142" width="70" height="34" rx="4"/><text class="f-on" fill="#ffffff" x="351" y="156" font-size="12" text-anchor="middle">Estado</text><text class="f-on" fill="#ffffff" x="351" y="171" font-size="12" text-anchor="middle">nuevo</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="202" font-size="12">Se reproduce con las entradas guardadas en la ventana</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="224" font-size="12">Retroceder solo el contador deja rastro del borrador 3</text>
+</svg><figcaption>Figura 9-6　La caché KV se guarda por posición y un error se puede sobrescribir; el estado GDN es una sola copia y un error no se puede borrar. Por eso Strata no lo toca al principio y, una vez confirmado, reproduce las palabras aceptadas.</figcaption></figure>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>GDN recuerda la historia en una matriz de estado de tamaño fijo: 128 × 128 por cabeza de valor y por capa, unos 112 MiB en total para las 36 capas, sin crecer con el contexto. El precio es que pierde información y solo avanza.</li>
+<li>Un paso por token: primero decaimiento S̄ = αS, luego lectura de lo viejo v̂ = S̄ᵀk, luego diferencia δ = β(v − v̂) y escritura con producto exterior S′ = S̄ + kδᵀ. Decaer antes de escribir es el contrato; al revés, se descuenta también la información nueva.</li>
+<li>Dentro de un paso, las columnas de la pizarra son independientes y se pueden paralelizar a razón de un hilo por columna; entre tokens sigue habiendo una cadena en serie.</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «El estado de GDN tiene tamaño fijo, así que la memoria de todo el modelo no crece con el contexto, y además se puede retroceder sin problema».</strong></p>
+<p>Lo que es fijo es solo el estado de las 36 capas GDN. La caché KV de las 12 capas QSA crece igual con el contexto. Y tamaño fijo tampoco significa «se puede invertir»: al escribir, la información vieja ya se borró en parte. Para volver a un estado anterior solo puedes guardar antes una copia instantánea, o reproducir desde un estado conocido.</p></div>
+
+<details class="deep"><summary>Más a fondo: las formas completas de los tensores, algunos contratos fáciles de leer mal y cómo probar una recurrencia</summary>
+<h3>La forma completa de una recurrencia GDN</h3>
+<p><code>gdn.hpp</code> describe un paso con estas líneas (el estado se escribe como st[i, j, h], con los índices de la implementación de referencia) [S17]:</p>
+<ul>
+<li>dec = exp(gate), un número por cabeza de valor; st = state × dec</li>
+<li>sk[h, j] = Σᵢ st[i, j, h] × k[idx[h]][i] (leer lo viejo)</li>
+<li>d[h, j] = (v[h, j] − sk[h, j]) × beta[h] (la diferencia)</li>
+<li>st[i, j, h] += k[idx[h]][i] × d[h, j] (escritura de rango uno)</li>
+<li>o[h, j] = Σᵢ st[i, j, h] × q[idx[h]][i] (lectura)</li>
+</ul>
+<p>Aquí idx[h] = h % h_k, con h_k = 16, h_v = 48, S = 128. Cada línea solo toca la columna (j, h), y esa es la base de «un hilo por columna, sin barreras». [S17]</p>
+<h3>Cuatro contratos de entrada fáciles de leer mal</h3>
+<ul>
+<li><strong>q y k ya pasaron por la normalización L2, y q ya se multiplicó por 1/√S.</strong> Las dos rutas de llama.cpp multiplican este factor en sitios distintos, así que la responsabilidad es de quien llama. [S17] El ε de la normalización L2 se suma a la suma de cuadrados y no se divide por el ancho; si no, hay una diferencia de √128 ≈ 11,3 veces (capítulo 7). [S17]</li>
+<li><strong>gate es el valor antes de aplicar la exponencial.</strong> dec = exp(gate) se calcula dentro del kernel. [S17]</li>
+<li><strong>beta ya pasó por la sigmoid en la capa.</strong> El contrato del kernel es d = (v − sk) × beta, y lo que recibe debe ser ya una fracción; si se pasa directamente la proyección sin procesar, la intensidad de escritura no tiene límite y puede ser positiva o negativa. [S17]</li>
+<li><strong>v no se normaliza.</strong> Solo se normalizan q y k (<code>layer.hpp</code>, línea 23).</li>
+</ul>
+<p>El último paso de la capa es y = rms_norm(o) × ssm_norm × sigmoid(z), con la normalización RMS hecha por separado en cada cabeza; aquí es sigmoid, no la SiLU que usó qwen3.5. [S17]</p>
+<h3>Historial de convolución: otro pequeño trozo de estado</h3>
+<p>Antes de la recurrencia, 10.240 canales pasan por una convolución corta de longitud 4. Necesita recordar las 3 columnas de entrada anteriores, ordenadas con la «más vieja primero»: el coeficiente 0 del núcleo multiplica la columna más vieja y la entrada nueva cae en la última columna. Los pesos se guardan en la disposición nativa de GGML, donde el tap es la dimensión que cambia más deprisa, distinta del orden por filas de la implementación de referencia. [S17] Estas 3 columnas de historial son, como el estado recurrente, un estado por capa que avanza con los tokens, y al retroceder también hay que tratarlas. [S08]</p>
+<h3>Cómo probar una recurrencia</h3>
+<p>El primer tipo son las pruebas de casos límite: α = 0 comprueba el olvido, β = 0 comprueba que no se escribe, k = 0 comprueba que ninguna clave se actualiza, y la prueba del orden «decaer y luego escribir» (la implementación de referencia de GDN tiene una propiedad específica que lo fija). [S17]</p>
+<p>El segundo tipo son las pruebas de copia instantánea y reproducción: procesa una secuencia fija, guarda el estado del paso t, avanza dos pasos más, restaura la copia, reproduce esos dos pasos y exige que el resultado coincida bit a bit con el de avanzar sin interrupción. La lógica de confirmación de la decodificación especulativa depende justo de esta propiedad. [S08]</p>
+<p>El tercer tipo son las pruebas del mapeo de cabezas: tanto el resto como la división entera pueden producir una salida con la forma correcta, así que la prueba debe usar datos que distingan una de otra; si no, nunca descubrirás que usaste la equivocada. [S17]</p>
+<p>No intentes «invertir» el estado final para volver a uno anterior. El decaimiento puede multiplicar ciertas direcciones por casi 0, y la escritura Delta sobrescribe el valor viejo; si no se guardó la información necesaria, esa operación inversa en general no existe.</p>
+</details>

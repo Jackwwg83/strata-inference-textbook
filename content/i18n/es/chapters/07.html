@@ -1,0 +1,249 @@
+<div class="hook"><span class="eyebrow">Empecemos con una comparación</span>
+<p>Un manuscrito tiene que pasar por 48 editores. Si cada editor copia el texto entero de nuevo y luego lo corrige, para la copia número 48 el original ya se habrá deformado hace mucho. Lo más listo es que cada uno pegue solo notas adhesivas en el margen con sus correcciones y que el original se conserve siempre.</p>
+<p>El modelo que ejecuta Strata tiene justo 48 capas, y cada capa es un editor. Este capítulo abre una capa: qué lee, qué calcula, cómo «pega» el resultado de vuelta; y luego mira varias interfaces cuya forma es del todo correcta pero cuyo significado puede fallar en silencio.</p></div>
+<p class="tldr"><strong>En una línea:</strong> una capa tiene dos mitades: primero «mezclar historial» (36 capas con GDN y 12 con atención QSA) y luego «los expertos trabajan» (MoE). Cada mitad es «leer el residuo → normalizar → calcular una pequeña corrección → sumarla al residuo». El residuo de Strata no es un solo vector, sino 4 carriles en paralelo.</p>
+
+<h2 id="sec-1">7.1 Qué hace una capa: entran números, salen números</h2>
+<p>Para el modelo, un token entre capa y capa es una lista de números. En el modelo que usa Strata, esa lista tiene 2.560 números y se llama <dfn>vector oculto</dfn>. <span class="ev ev-code">Hecho de código</span>[S04] Cada capa lee una lista de 2.560 números y escribe otra lista de la misma longitud, que entrega a la capa siguiente. Lo que pasa de capa en capa es la «comprensión», cada vez más rica, que lleva esa lista.</p>
+<aside class="primer" id="c07-layer-activation">
+<h3>Capas de una red neuronal y funciones de activación</h3>
+<p>Intuición: una capa de red neuronal es como una fila de mesas de mezclas de audio. Cada perilla de salida mezcla todas las entradas en proporciones distintas. Ese paso es la multiplicación de matrices del capítulo 3: salida = matriz de pesos × entrada. Los números de la matriz de pesos son los «parámetros» que se aprendieron en el entrenamiento.</p>
+<p>Solo con multiplicación de matrices no basta. Dos multiplicaciones de matrices seguidas equivalen a una sola: A(Bx) = (AB)x. Apilar 100 capas sería lo mismo que 1 y no podría aprender reglas complicadas. Por eso, tras cada multiplicación de matrices hay una <dfn>función de activación</dfn>: una función no lineal que actúa sobre cada número por separado y «dobla» la recta. Estas son tres habituales; las curvas están en la figura 7-2, después del recuadro:</p>
+<ul>
+<li><dfn>ReLU</dfn>: los negativos pasan a 0 y los positivos no cambian. La más simple.</li>
+<li><dfn>sigmoid</dfn> (σ): σ(z) = 1 ÷ (1 + e<sup>−z</sup>), comprime cualquier número entre 0 y 1, por eso se usa a menudo como «interruptor» o «puerta»: 0 es cerrado y 1 es totalmente abierto.</li>
+<li><dfn>SiLU</dfn>: SiLU(z) = z × σ(z). Parece una ReLU suavizada, con una pequeña hondonada en la zona negativa.</li>
+</ul>
+<p>Relación con este capítulo: en cada capa de Strata, sigmoid y SiLU aparecen en lugares distintos. A menudo se les llama a todas «puertas», pero si usas una en vez de otra los valores cambian por completo, como verás en el apartado 7.5.</p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/Red_neuronal_artificial" target="_blank" rel="noopener noreferrer">Wikipedia: Red neuronal artificial</a> · <a href="https://es.wikipedia.org/wiki/Funci%C3%B3n_de_activaci%C3%B3n" target="_blank" rel="noopener noreferrer">Wikipedia: Función de activación</a> · <a href="https://es.wikipedia.org/wiki/Funci%C3%B3n_sigmoide" target="_blank" rel="noopener noreferrer">Wikipedia: Función sigmoide</a> · <a href="https://pytorch.org/docs/stable/generated/torch.nn.SiLU.html" target="_blank" rel="noopener noreferrer">Documentación de PyTorch: SiLU (en inglés)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="Figura 7-2: curvas de las funciones de activación ReLU, sigmoid y SiLU; sigmoid queda comprimida entre 0 y 1">
+<text class="f-text" fill="#182f2b" x="20" y="18" font-size="12" font-weight="600">Tres funciones de activación (z de −4 a 4)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 196H360M200 60V214"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.6" stroke-dasharray="2 3" d="M40 164H360"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="232" font-size="12" text-anchor="middle">−4</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="232" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="360" y="232" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="168" font-size="12" text-anchor="end">1</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="72" font-size="12" text-anchor="end">4</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M40 196L200 196L360 68"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" stroke-dasharray="6 3" d="M40.0 198.3L50.0 198.8L60.0 199.3L70.0 199.9L80.0 200.6L90.0 201.3L100.0 202.1L110.0 202.9L120.0 203.6L130.0 204.3L140.0 204.8L150.0 204.9L160.0 204.6L170.0 203.7L180.0 202.0L190.0 199.5L200.0 196.0L210.0 191.5L220.0 186.0L230.0 179.7L240.0 172.6L250.0 164.9L260.0 156.8L270.0 148.3L280.0 139.6L290.0 130.9L300.0 122.1L310.0 113.3L320.0 104.6L330.0 95.9L340.0 87.3L350.0 78.8L360.0 70.3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" stroke-dasharray="1 3" d="M40.0 195.4L50.0 195.3L60.0 195.1L70.0 194.8L80.0 194.5L90.0 194.1L100.0 193.6L110.0 192.9L120.0 192.2L130.0 191.3L140.0 190.2L150.0 188.9L160.0 187.4L170.0 185.7L180.0 183.9L190.0 182.0L200.0 180.0L210.0 178.0L220.0 176.1L230.0 174.3L240.0 172.6L250.0 171.1L260.0 169.8L270.0 168.7L280.0 167.8L290.0 167.1L300.0 166.4L310.0 165.9L320.0 165.5L330.0 165.2L340.0 164.9L350.0 164.7L360.0 164.6"/>
+<text class="f-text" fill="#182f2b" x="48" y="84" font-size="12">ReLU (línea continua)</text>
+<text class="f-text" fill="#182f2b" x="48" y="102" font-size="12">SiLU (línea discontinua)</text>
+<text class="f-text" fill="#182f2b" x="48" y="120" font-size="12">sigmoid (línea punteada)</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="246" font-size="12">sigmoid siempre está entre 0 y 1: sirve de «puerta»</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="264" font-size="12">SiLU y ReLU no tienen ese tope</text>
+</svg><figcaption>Figura 7-2　Tres curvas de activación. Todas doblan la recta, pero el rango de valores es distinto, así que no se pueden intercambiar a la ligera.</figcaption></figure>
+<p>En la capa GDN de Strata, el lugar de las activaciones está escrito con toda claridad: tras la convolución se aplica SiLU a <strong>todos</strong> los 10.240 números y solo después se corta en q, k y v; la intensidad de escritura β tiene que pasar antes por sigmoid; y lo que multiplica a la salida final es sigmoid(z). <span class="ev ev-code">Hecho de código</span> (<code>layer.hpp</code>, líneas 10–22) Si en cualquiera de estos tres sitios cambias el orden o la función, el resultado sigue siendo una lista de números normales, solo que equivocada.</p>
+
+<h2 id="sec-2">7.2 Las 48 capas no son iguales: 36 GDN + 12 QSA</h2>
+<p>La primera mitad de cada capa tiene que «mirar atrás en el historial»: el token actual debe encontrar información relevante en el texto previo. El modelo de Strata prepara dos formas de mirar atrás. <dfn>QSA</dfn> es un tipo de atención: guarda un registro de cada posición del texto previo y, cuando hace falta, elige las relevantes para consultarlas (capítulo 8). <dfn>GDN</dfn>, en cambio, comprime el texto previo en una «pizarra» de tamaño fijo, que se borra y reescribe con cada token (capítulo 9).</p>
+<p>Qué capa usa cuál lo decide una regla: las capas cuyo índice dividido entre 4 da resto 3 son QSA y las demás son GDN. <span class="ev ev-code">Hecho de código</span>[S04] El índice se cuenta desde 0, así que las capas QSA son 3, 7, 11 … 47, 12 en total, y las otras 36 son GDN. Mira la figura 7-3.</p>
+<figure class="fig"><svg viewBox="0 0 400 196" role="img" aria-label="Figura 7-3: las 48 capas ordenadas por número en dos filas; la última de cada 4 capas es una capa de atención QSA, 12 en total, y las otras 36 son GDN">
+<text class="f-text" fill="#182f2b" x="20" y="18" font-size="12" font-weight="600">Las 48 capas (una casilla por capa, en orden)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="35" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="50" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="65" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="95" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="110" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="125" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="155" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="185" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="245" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="260" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="275" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="305" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="320" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="335" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="365" y="30" width="13" height="26"/>
+<text class="f-muted" fill="#5c6d66" x="26.5" y="72" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="71.5" y="72" font-size="12" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="131.5" y="72" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="371.5" y="72" font-size="12" text-anchor="middle">23</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="35" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="50" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="65" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="95" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="110" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="125" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="155" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="185" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="245" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="260" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="275" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="305" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="320" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="335" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="365" y="84" width="13" height="26"/>
+<text class="f-muted" fill="#5c6d66" x="26.5" y="126" font-size="12" text-anchor="middle">24</text>
+<text class="f-muted" fill="#5c6d66" x="371.5" y="126" font-size="12" text-anchor="middle">47</text>
+<text class="f-text" fill="#182f2b" x="20" y="152" font-size="12">Resaltado: 12 capas QSA (índices 3, 7, 11 … 47)</text>
+<text class="f-text" fill="#182f2b" x="20" y="172" font-size="12">Fondo claro: 36 capas GDN</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="190" font-size="12">Regla: índice % 4 == 3 → QSA; si no, GDN</text>
+</svg><figcaption>Figura 7-3　La última de cada 4 capas es QSA. Ojo: el índice 3 contando desde cero es la «cuarta capa» al contar como las personas; la regla es «una de cada 4 capas», no «una de cada 3».</figcaption></figure>
+<p>Sea cual sea el mezclador de la primera mitad, el esqueleto de una capa es el mismo. El código fuente escribe el orden de operaciones de una capa en dos líneas <span class="ev ev-code">Hecho de código</span> (<code>layer.hpp</code>, líneas 508–515):</p>
+<ul>
+<li>Primera mitad: leer el residuo → mezclador (GDN o QSA) → escribir de vuelta en el residuo</li>
+<li>Segunda mitad: leer el residuo → MoE (los expertos del capítulo 10) → escribir de vuelta en el residuo</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 364" role="img" aria-label="Figura 7-1: los seis pasos de una capa. Primera mitad: leer el residuo, mezclador, escribir de vuelta; segunda mitad: leer el residuo, MoE, escribir de vuelta; se repite en 48 capas">
+<rect class="f-soft" fill="#e5f1df" x="80" y="8" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">Residuo: 4 carriles × 2.560</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="58" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="80" font-size="13" text-anchor="middle">① Leer residuo → un solo vector</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="108" width="240" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="128" font-size="13" font-weight="600" text-anchor="middle">② Mezclador: mira el historial</text>
+<text class="f-on" fill="#ffffff" x="200" y="146" font-size="12" text-anchor="middle">GDN (36 capas) o QSA (12 capas)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="170" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="192" font-size="13" text-anchor="middle">③ Escribir: suma a cada carril</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="220" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="242" font-size="13" text-anchor="middle">④ Leer el residuo otra vez</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="270" width="240" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="290" font-size="13" font-weight="600" text-anchor="middle">⑤ MoE: los expertos trabajan</text>
+<text class="f-on" fill="#ffffff" x="200" y="308" font-size="12" text-anchor="middle">Elige 10 expertos, suma ponderada</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="322" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="344" font-size="13" text-anchor="middle">⑥ Escribir → siguiente capa</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V56M200 92V106M200 154V168M200 204V218M200 254V268M200 316V320"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M70 58V204M70 220V356"/>
+<text class="f-muted" fill="#5c6d66" x="14" y="136" font-size="12">Mitad 1</text>
+<text class="f-muted" fill="#5c6d66" x="14" y="292" font-size="12">Mitad 2</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="4 3" d="M320 339H346V25H320"/>
+<text class="f-muted" fill="#5c6d66" x="352" y="186" font-size="12">× 48</text>
+</svg><figcaption>Figura 7-1　El esqueleto de una capa: dos semicapas de «leer → calcular → escribir de vuelta». El mezclador se encarga de «mirar el texto previo» y MoE de «procesar este token». Las 48 capas tienen este esqueleto.</figcaption></figure>
+<p>Hay otra diferencia fácil de pasar por alto: la capa QSA necesita saber la posición del token actual, mientras que la capa GDN no tiene ningún parámetro de posición. Toda la entrada de GDN para cada token es esa lista de números; lo que avanza de un token al siguiente es el estado de su pizarra. <span class="ev ev-code">Hecho de código</span> (<code>layer.hpp</code>, líneas 513–515)</p>
+
+<h2 id="sec-3">7.3 Normalización: primero, igualar el volumen</h2>
+<p>A lo largo de las 48 capas los números se suman y se restan; algunos crecen cada vez más y otros se hacen cada vez más pequeños. Si no se hace nada, la multiplicación de matrices de la capa siguiente recibe unas veces un «susurro» y otras un «grito», y es difícil que aprenda bien. Por eso, casi antes de cada cálculo, el vector se ajusta primero al «volumen estándar».</p>
+<aside class="primer" id="c07-normalization">
+<h3>Normalización: L2 y RMS</h3>
+<p><dfn>Normalizar</dfn> es dividir un vector por su «tamaño» y quedarse solo con la dirección. El problema es cómo medir el «tamaño». Las dos maneras habituales solo difieren en un divisor:</p>
+<ul>
+<li><dfn>Norma L2</dfn>: ‖x‖ = √(x₁² + x₂² + … + x_d²), la longitud geométrica del vector. Tras normalizar con L2, la longitud del vector es 1.</li>
+<li><dfn>Raíz cuadrática media</dfn> (RMS): √((x₁² + … + x_d²) ÷ d), primero se calcula el <strong>promedio</strong> de los cuadrados y luego la raíz. Tras normalizar con RMS, el «volumen medio» de cada componente es 1.</li>
+</ul>
+<p>Ejemplo: x = [3, 4]. La longitud L2 es √(9 + 16) = 5 y al normalizar sale [0,6; 0,8]. El RMS es √(25 ÷ 2) ≈ 3,54 y al normalizar sale aproximadamente [0,85; 1,13]. Los dos resultados tienen la misma dirección y su tamaño difiere en un factor √2. En general, en un vector de d dimensiones los dos resultados difieren en un factor √d.</p>
+<p>En la fórmula real hay además un número muy pequeño ε (epsilon), que se suma <strong>dentro</strong> de la raíz para evitar dividir por 0 cuando el vector es todo ceros. <dfn>RMSNorm</dfn> multiplica además por un conjunto de coeficientes aprendidos, para que cada componente pueda tener su propio volumen.</p>
+<p>Relación con este capítulo: Strata usa las dos, y en sitios distintos. Si usas una en vez de la otra, no hay error, solo una diferencia de un factor √d.</p>
+<p class="further">Para seguir leyendo: <a href="https://en.wikipedia.org/wiki/Normalization_(machine_learning)" target="_blank" rel="noopener noreferrer">Wikipedia (en inglés): Normalization (machine learning)</a> · <a href="https://arxiv.org/abs/1910.07467" target="_blank" rel="noopener noreferrer">Artículo original de RMSNorm (en inglés)</a> · <a href="https://pytorch.org/docs/stable/generated/torch.nn.RMSNorm.html" target="_blank" rel="noopener noreferrer">Documentación de PyTorch: RMSNorm (en inglés)</a> · <a href="https://es.wikipedia.org/wiki/Norma_vectorial" target="_blank" rel="noopener noreferrer">Wikipedia: Norma vectorial</a></p>
+</aside>
+<p>En Strata: cada vez que se lee el residuo, cada carril hace su propia normalización RMS; la capa GDN aplica normalización L2 a q y k, y no a v. <span class="ev ev-code">Hecho de código</span> (<code>gr.hpp</code>, línea 81; <code>layer.hpp</code>, líneas 12 y 23) El archivo de cabecera de GDN avisa expresamente: ε es un piso que se suma a la <strong>suma de cuadrados</strong>, no al promedio, así que no se debe dividir por el ancho; si se lee por error como «cuadrático medio», con 128 dimensiones por cabeza el resultado difiere en un factor √128 ≈ 11,3. [S17] En este modelo, el ε de la normalización RMS es 10<sup>−6</sup>. [S14][S18]</p>
+<p>La pequeña herramienta de abajo lo calcula por ti. Elige distintas entradas y compara las dos normalizaciones:</p>
+<div class="viz" data-viz="norm-compare"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figura 7-5: con entrada 3 y 4, la normalización L2 da 0,6 y 0,8 y la normalización RMS da 0,85 y 1,13; difieren en un factor raíz de 2">
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">Entrada x</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="28" width="180" height="14"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="46" width="240" height="14"/>
+<text class="f-text" fill="#182f2b" x="286" y="40" font-size="12">3</text>
+<text class="f-text" fill="#182f2b" x="346" y="58" font-size="12">4</text>
+<text class="f-text" fill="#182f2b" x="10" y="104" font-size="12">L2</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="88" width="36" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="100" y="106" width="48" height="14"/>
+<text class="f-text" fill="#182f2b" x="142" y="100" font-size="12">0,60</text>
+<text class="f-text" fill="#182f2b" x="154" y="118" font-size="12">0,80</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">RMS</text>
+<rect class="f-warn" fill="#9e5d24" x="100" y="148" width="50.9" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="100" y="166" width="67.9" height="14"/>
+<text class="f-text" fill="#182f2b" x="157" y="160" font-size="12">0,85</text>
+<text class="f-text" fill="#182f2b" x="174" y="178" font-size="12">1,13</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="208" font-size="12">L2: divide por √(9 + 16) = 5 · RMS: por √(25 ÷ 2) ≈ 3,54</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">Misma dirección; difieren √2 ≈ 1,41 veces (√d en d dim.)</text>
+</svg><figcaption>Figura 7-5　Con la misma entrada, las dos normalizaciones solo difieren en un «dividir por d». Con d = 128, la diferencia es un factor 11,3.</figcaption></figure></div>
+
+<h2 id="sec-4">7.4 Residuo: cada capa solo escribe «notas de corrección»</h2>
+<p>Volvamos a la comparación con los editores del principio. Cada capa no reescribe esta lista de números: solo calcula una «corrección» y la suma de vuelta. Ese canal en el que «el original se conserva siempre y las correcciones se van acumulando» se llama residuo.</p>
+<aside class="primer" id="c07-residual">
+<h3>Conexión residual</h3>
+<p>La <dfn>conexión residual</dfn> escribe una capa como x′ = x + f(x): la salida es la entrada más la corrección f(x) que calcula esta capa. Si una capa «no tiene nada que corregir», le basta con que f(x) sea cercana a 0 y la entrada pasa tal cual.</p>
+<p>¿Por qué importa tanto? Sin residuo, la información tiene que atravesar la multiplicación de matrices y la activación de cada capa, y con muchas capas la señal original se deforma como en el juego del teléfono descompuesto; en el entrenamiento, la señal de error que viaja hacia atrás también se debilita cada vez más. Con el residuo hay un «carril directo»: la información de la capa 1 puede llegar casi intacta a la capa 48, y la señal de error también puede volver por ese carril. En 2015, ResNet usó esta idea para entrenar de forma estable redes de imágenes de más de cien capas.</p>
+<p>Los modelos de lenguaje modernos suelen escribirse como x′ = x + f(norm(x)): primero se normaliza, luego se calcula y después se suma al x original. Fíjate en que lo que se suma es el x <strong>sin normalizar</strong>.</p>
+<p>Relación con este capítulo: el modelo de Strata amplía ese carril directo a 4 carriles, y al sumar de vuelta lleva además pesos que se aprenden.</p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/Red_neuronal_residual" target="_blank" rel="noopener noreferrer">Wikipedia: Red neuronal residual</a> · <a href="https://arxiv.org/abs/1512.03385" target="_blank" rel="noopener noreferrer">Artículo original de ResNet (en inglés)</a> · <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener noreferrer">The Illustrated Transformer (ilustrado, con residuo y normalización; en inglés)</a></p>
+</aside>
+<p>El residuo de Strata son 4 carriles en paralelo, cada uno de 2.560 números. <span class="ev ev-code">Hecho de código</span>[S04][S13] Al leer, los 4 carriles se normalizan por separado y luego se fusionan en un vector que se entrega al mezclador o a MoE; al escribir de vuelta, la misma corrección se suma a <strong>cada uno</strong> de los carriles, solo que cada carril la multiplica por un peso distinto. El peso es w = 2 × sigmoid(inject ÷ 4), donde inject es un número que se calcula de paso al leer el residuo. (<code>gr.hpp</code>, líneas 6–8 y 114–120)</p>
+<p>Este diseño de «2 veces sigmoid» es ingenioso: sigmoid(0) = 0,5, así que con inject = 0 el peso w es exactamente 1 y escribir de vuelta se reduce a la suma residual normal. El comentario del código también lo señala, y las pruebas lo afirman expresamente. El peso puede variar entre 0 y 2, y así el modelo decide por sí mismo si cada carril «escucha un poco más» o «un poco menos». Mira la figura 7-4.</p>
+<div class="viz" data-viz="layer-walk"><figure class="fig"><svg viewBox="0 0 400 266" role="img" aria-label="Figura 7-4: se lee un vector de los 4 carriles del residuo, se calcula una corrección Δ y se suma Δ multiplicada por su peso de vuelta a cada carril">
+<text class="f-text" fill="#182f2b" x="8" y="43" font-size="12">Carril 0</text>
+<text class="f-text" fill="#182f2b" x="8" y="73" font-size="12">Carril 1</text>
+<text class="f-text" fill="#182f2b" x="8" y="103" font-size="12">Carril 2</text>
+<text class="f-text" fill="#182f2b" x="8" y="133" font-size="12">Carril 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="31" width="320" height="14" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="61" width="320" height="14" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="91" width="320" height="14" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="121" width="320" height="14" rx="3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 38V160"/>
+<circle class="f-text" fill="#182f2b" cx="100" cy="38" r="3"/><circle class="f-text" fill="#182f2b" cx="100" cy="68" r="3"/><circle class="f-text" fill="#182f2b" cx="100" cy="98" r="3"/><circle class="f-text" fill="#182f2b" cx="100" cy="128" r="3"/>
+<text class="f-muted" fill="#5c6d66" x="106" y="154" font-size="12">① Leer</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="162" width="160" height="36" rx="8"/>
+<text class="f-on" fill="#ffffff" x="140" y="185" font-size="12" text-anchor="middle">② Calcular la corrección Δ</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M220 180H320V38"/>
+<circle class="f-text" fill="#182f2b" cx="320" cy="38" r="3"/><circle class="f-text" fill="#182f2b" cx="320" cy="68" r="3"/><circle class="f-text" fill="#182f2b" cx="320" cy="98" r="3"/><circle class="f-text" fill="#182f2b" cx="320" cy="128" r="3"/>
+<text class="f-text" fill="#182f2b" x="328" y="28" font-size="12">+Δ×w₀</text>
+<text class="f-text" fill="#182f2b" x="328" y="58" font-size="12">+Δ×w₁</text>
+<text class="f-text" fill="#182f2b" x="328" y="88" font-size="12">+Δ×w₂</text>
+<text class="f-text" fill="#182f2b" x="328" y="118" font-size="12">+Δ×w₃</text>
+<text class="f-muted" fill="#5c6d66" x="236" y="174" font-size="12">③ Escribir</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="222" font-size="12">Peso de escritura w = 2 × sigmoid(inject ÷ 4)</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="240" font-size="12">Con inject = 0, w = 1: es la suma normal</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="258" font-size="12">La misma Δ se suma a cada carril; solo cambian los pesos</text>
+</svg><figcaption>Figura 7-4　El residuo de Strata tiene 4 carriles. Al leer se fusiona en un vector; al escribir de vuelta, la misma corrección multiplicada por su peso se suma a cada carril.</figcaption></figure></div>
+<p class="bridge"><strong>Si estudiaste informática:</strong> la conexión residual se parece a un «parche» del control de versiones: cada capa envía un diff, no reescribe todo el archivo. Los 48 parches se aplican uno tras otro y el contenido original siempre está. El precio: si el parche de una capa se aplica mal, el error viaja por ese carril directo hasta el final y no se «diluye».</p>
+
+<h2 id="sec-5">7.5 La forma correcta no basta: el significado también: los contratos entre módulos</h2>
+<p>Una capa se compone de una docena larga de pasos pequeños, y aunque cada paso pase sus pruebas por separado, unidos pueden fallar. Los errores más peligrosos son los que tienen <strong>la forma totalmente correcta y los valores totalmente normales</strong>: no se cae, no sale NaN, solo calcula en silencio otra respuesta. En el código de Strata hay anotados varios «contratos» así, y la figura 7-6 elige cuatro.</p>
+<figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="Figura 7-6: cuatro contratos entre módulos. Si cualquiera se escribe mal, el resultado sigue siendo números normales">
+<text class="f-muted" fill="#5c6d66" x="14" y="18" font-size="12">Contrato</text>
+<text class="f-muted" fill="#5c6d66" x="90" y="18" font-size="12">Bien</text>
+<text class="f-muted" fill="#5c6d66" x="246" y="18" font-size="12">Mal (aún parece normal)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="28" width="72" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="14" y="56" font-size="12">Puerta β</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="84" y="28" width="152" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="90" y="47" font-size="12">Pasa por sigmoid</text>
+<text class="f-muted" fill="#5c6d66" x="90" y="66" font-size="12">queda entre 0 y 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="240" y="28" width="152" height="48" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="246" y="47" font-size="12">Falta el sigmoid</text>
+<text class="f-muted" fill="#5c6d66" x="246" y="66" font-size="12">sin límite, ± posible</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="82" width="72" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="14" y="110" font-size="12">Salida</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="84" y="82" width="152" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="90" y="101" font-size="12">Se multiplica por</text>
+<text class="f-muted" fill="#5c6d66" x="90" y="120" font-size="12">sigmoid(z)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="240" y="82" width="152" height="48" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="246" y="101" font-size="12">Copiar SiLU de qwen3.5</text>
+<text class="f-muted" fill="#5c6d66" x="246" y="120" font-size="12">forma igual, valores no</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="136" width="72" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="14" y="164" font-size="12">Router</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="84" y="136" width="152" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="90" y="155" font-size="12">Se multiplica una vez</text>
+<text class="f-muted" fill="#5c6d66" x="90" y="174" font-size="12">al combinar: factor 0,2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="240" y="136" width="152" height="48" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="246" y="155" font-size="12">También en el pool</text>
+<text class="f-muted" fill="#5c6d66" x="246" y="174" font-size="12">0,2 × 0,2 = 0,04</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="190" width="72" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="14" y="218" font-size="12">Expertos</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="84" y="190" width="152" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="90" y="209" font-size="12">Expertos de esta capa</text>
+<text class="f-muted" fill="#5c6d66" x="90" y="228" font-size="12">con pesos de esta capa</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="240" y="190" width="152" height="48" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="246" y="209" font-size="12">Expertos de la anterior</text>
+<text class="f-muted" fill="#5c6d66" x="246" y="228" font-size="12">con pesos de esta capa</text>
+</svg><figcaption>Figura 7-6　Cuatro contratos, cuatro formas de equivocarse que «parecen del todo normales». Ninguna hace que el programa se caiga; solo hacen que el modelo diga otra frase.</figcaption></figure>
+<ul>
+<li><strong>β tiene que pasar antes por sigmoid, y de eso se encarga la capa.</strong> El kernel de un solo paso de GDN no lo hace; su contrato es «el β que recibo ya es una puntuación entre 0 y 1». El archivo de cabecera lo dice en mayúsculas: el kernel no lo hace, la capa debe hacerlo. [S17]</li>
+<li><strong>La puerta de salida es sigmoid, no SiLU.</strong> Los modelos qwen3.5 usan aquí SiLU; este modelo no. [S17] Los nombres de las dos funciones tienen que ver con «puerta», la forma es parecida y los valores son completamente distintos.</li>
+<li><strong>El peso del router se multiplica una sola vez.</strong> El pool de expertos <strong>no</strong> multiplica por el peso del router: la multiplicación la hace de forma unificada el paso de combinación en la tarjeta gráfica. Si se multiplica en los dos sitios, en una sola capa casi no se nota, y al acumularse en 48 capas el error crece como una bola de nieve. [S06]</li>
+<li><strong>La salida de los expertos debe llevar los pesos de esta capa.</strong> Para que el cálculo de expertos en la CPU y el trabajo de la GPU fueran a la vez, una versión temprana entregaba el resultado de los expertos de la capa l a la capa l+1 para combinarlo, y así usaba los pesos de la capa l+1. El comentario dice que producía «un token finito, fluido, determinista, pero que no pertenece a este modelo». La solución fue dividir una capa en dos grafos: tras el enrutamiento, primero calcula la CPU y, al terminar, se combina con los pesos de esta capa. <span class="ev ev-code">Hecho de código</span> (<code>layer.hpp</code>, líneas 146–165 y 174–176)</li>
+</ul>
+<p class="bridge"><strong>Si estudiaste informática:</strong> es un ejemplo vivo de «contrato de interfaz» e «pruebas de integración» de la ingeniería de software. Que las pruebas unitarias de cada función pasen no significa que juntas funcionen. El contrato debe dejar claro «quién se encarga de qué» (quién aplica sigmoid, quién multiplica los pesos), y las pruebas de integración deben comparar la salida de toda la capa y de todo el token con la implementación de referencia.</p>
+
+<h2 id="sec-6">7.6 Manos a la obra: mira cómo una capa lee, calcula y escribe</h2>
+<p>Este capítulo no tiene una página de laboratorio propia; los dos gráficos interactivos son el laboratorio:</p>
+<ol>
+<li>En «Recorre una capa», desde la capa 0 pulsa Paso 6 veces y observa que los números de los carriles solo cambian un poquito cada vez; luego pon la capa inicial en 3 y comprueba que el mezclador pasa a ser QSA; por último, pon en 0 el valor de inyección del carril 0 y verifica que el peso de escritura es exactamente 1.</li>
+<li>En «Normalización L2 vs RMS», pulsa [3, 4] y luego 128 dimensiones, anota la proporción de las dos veces y verifica que es √d.</li>
+</ol>
+<p>Ejercicio con papel y lápiz: las salidas de dos expertos son [2, 0] y [0, 4], y los pesos del router son 0,25 y 0,75. El resultado correcto de combinar es 0,25 × [2, 0] + 0,75 × [0, 4] = [0,5; 3]. Si el pool de expertos ya multiplicó una vez por el peso y al combinar se multiplica otra vez, ¿cuál sería el resultado? ¿Por qué es tan difícil descubrir este error «mirando si la salida parece normal»?</p>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>Una capa = dos semicapas: leer el residuo → mezclador (36 capas GDN, 12 capas QSA; la regla es índice % 4 == 3 para QSA) → escribir de vuelta; leer el residuo → MoE → escribir de vuelta.</li>
+<li>La normalización ajusta el vector a un tamaño estándar. L2 divide por la raíz de la suma de cuadrados y RMS por la raíz del promedio de cuadrados; difieren en un factor √d. En GDN, q y k usan L2, y confundirlas daría un factor 11,3.</li>
+<li>El residuo permite que cada capa solo escriba «correcciones». El residuo de Strata tiene 4 carriles, el peso de escritura es w = 2 × sigmoid(inject ÷ 4) y con inject = 0 es la suma normal.</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «Si cada operador está probado, la capa que se arma con ellos seguro es correcta».</strong></p>
+<p>Aunque cada operador sea correcto por separado, al armar la capa todavía se puede pasar a la capa equivocada, olvidar un sigmoid, multiplicar un peso de más o usar mal el divisor de la normalización. Todos estos errores producen números normales que las pruebas unitarias no ven. Solo se detectan comparando la salida de toda la capa y de todo el token con la implementación de referencia.</p></div>
+
+<details class="deep"><summary>Más a fondo: la fórmula real del residuo de varios carriles, el formato de activación según el tipo y cómo localizar qué capa falla</summary>
+<h3>La fórmula didáctica x′ = x + f(norm(x)) no es la igualdad término a término de Strata</h3>
+<p>El texto principal usa la fórmula residual de un solo vector para crear intuición. La geometría real del modelo tiene <code>hc = 4</code>, y el residuo R del estado de la sesión es una estructura de varios carriles de 4 × 2.560. [S04][S13] Si se sustituye por un residuo normal de un solo vector, el modelo cambia.</p>
+<p>Los pasos completos de leer el residuo (<code>gr_read</code>) son: cada carril hace su propia normalización RMS y da xn (el coeficiente de normalización se guarda ya en la forma 1 + w); se unen los 4 carriles y pasan por un «cuello de botella» de 320 dimensiones: lo = SiLU((la versión BF16 de xn × w_down) ÷ hc); ojo: la división por hc está <strong>dentro</strong> de SiLU, es fácil pasarla por alto y cambia de verdad el resultado. Luego mixed = el promedio, sobre los carriles, de xn × sigmoid(lo × w_up); inject = xn × w_inject. En la «mezcla final» tras la última capa no hay inject, porque después ya no se escribe de vuelta. (<code>gr.hpp</code>, líneas 79–91)</p>
+<p>Escribir de vuelta (<code>gr_write</code>) es R_out[c] = R[c] + block_out × w[c], con w[c] = 2 × sigmoid(inject[c] ÷ hc). (<code>gr.hpp</code>, líneas 114–120)</p>
+<p>Estos pesos de carril están todos en formato BF16. Para simplificar la decodificación, el archivo empaquetado los amplía a almacenamiento de 32 bits; el motor, al cargar, los vuelve a recoger a 16 bits sin perder nada de precisión y ahorra 1,374 GiB de los 5,305 GiB de pesos densos. El comentario dice que esa es justo la diferencia entre que «los pesos densos quepan en la VRAM junto con la caché de expertos» y que no quepan. (<code>gr.hpp</code>, líneas 10–14)</p>
+<h3>El formato de activación sigue al tipo de tensor, no al nombre</h3>
+<p>Antes de multiplicar matrices, los pesos cuantizados necesitan que el vector de entrada se convierta a un formato que haga pareja con ellos. <code>layer.cpp</code> registra una lección: tensores con el mismo nombre pueden usar tipos de cuantización distintos en capas distintas. Por ejemplo, el <code>attn_qkv</code> de las 36 capas GDN es IQ4_XS en 13 capas, Q3_K en 18, Q4_K en 4 y Q2_0 en 1. La regla se fija por <strong>tipo</strong>: los códigos de 2 bits se emparejan con entradas en formato Q8_0 y los demás tipos de cuantización con Q8_K. Elegir mal el formato desvía la multiplicación de matrices entre 0,6 % y 1,4 % y da un vector que «parece razonable», no uno roto. [S14]</p>
+<h3>Cómo saber qué capa y qué paso fallan</h3>
+<p>Strata prepara dos niveles de «extracto de cuentas». El registro del residuo capa por capa (residual ladder) te dice <strong>desde qué capa</strong> se separa de la implementación de referencia; el registro de nivel de semicapa descompone además cada capa en «la salida de la semicapa de atención», «la salida de la semicapa MoE» y dos juegos de inject, y te dice <strong>qué paso</strong> es. Esas copias están grabadas dentro del CUDA Graph de cada capa y se reproducen con ella; cuando no se activan, no cuestan nada. (<code>layer.hpp</code>, líneas 445–453)</p>
+<p>Hay también un interruptor de depuración, <code>--sync-every-layer</code>: tras cada capa inserta una sincronización y una comprobación de errores. Atrapa errores como «algún kernel leyó un búfer que solo escribirá una capa posterior», que normalmente no se ven; el precio es que justo viola el requisito de «sin sincronizar» de la ruta rápida, por eso es un parámetro de ejecución y no el comportamiento por defecto. [S13]</p>
+<h3>Por qué las pruebas de combinación son imprescindibles</h3>
+<p>Entre módulos se pueden pasar activaciones de la capa equivocada, normalizar dos veces, ponderar dos veces o usar una disposición o un estado equivocados. Cada uno de estos errores puede pasar sus propias pruebas unitarias. Lo correcto es fijar la entrada y el historial y comparar término a término, con una implementación de referencia independiente, los puntos de control intermedios, como la salida de toda la capa y la de las semicapas. Comparar solo si el último token es correcto suele llegar tarde y es demasiado grueso.</p>
+</details>
