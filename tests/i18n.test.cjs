@@ -5,6 +5,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const I18N = require('../src/i18n.js');
 
+// Japanese is written with kanji, so for ja only glyphs that exist in Simplified Chinese alone count as leftovers.
+const SIMPLIFIED_ONLY = /[这们说时过发个对现么无问还进动样实关应长开见边头间两东车将经资没认该处准则网签据维计读写钟递传输钮页图标题码块缓选择设显错误]/;
+const hanFor = lang => (lang === 'ja' ? SIMPLIFIED_ONLY : /[一-鿿]/);
+
 test('every UI language has exactly the Chinese keys with matching value types', () => {
   const zh = I18N.S.zh;
   for (const [lang, table] of Object.entries(I18N.S)) {
@@ -15,7 +19,7 @@ test('every UI language has exactly the Chinese keys with matching value types',
       if (Array.isArray(zh[k])) assert.equal(table[k].length, zh[k].length, `${lang}.${k} length`);
       if (typeof zh[k] === 'function') assert.equal(table[k].length, zh[k].length, `${lang}.${k} arity`);
     }
-    assert.ok(!/[一-鿿]/.test(JSON.stringify(table, (k, v) => (typeof v === 'function' ? String(v) : v))), lang + ' table must not contain Chinese characters');
+    assert.ok(!hanFor(lang).test(JSON.stringify(table, (k, v) => (typeof v === 'function' ? String(v) : v))), lang + ' table must not contain Chinese characters');
   }
 });
 
@@ -44,7 +48,7 @@ test('lab page string tables match the Chinese keys', () => {
       assert.equal(typeof table[k], typeof zh[k], `labs ${lang}.${k} type`);
       if (Array.isArray(zh[k]) && !translatorKeys.has(k)) assert.equal(table[k].length, zh[k].length, `labs ${lang}.${k} length`);
       if (translatorKeys.has(k)) continue;
-      assert.ok(!/[一-鿿]/.test(typeof table[k] === 'function' ? String(table[k]) : JSON.stringify(table[k])), `labs ${lang}.${k} contains Chinese`);
+      assert.ok(!hanFor(lang).test(typeof table[k] === 'function' ? String(table[k]) : JSON.stringify(table[k])), `labs ${lang}.${k} contains Chinese`);
     }
   }
 });
@@ -69,7 +73,7 @@ test('widget string tables keep the Chinese keys and arities in every language',
         if (typeof zh[k] === 'function') assert.equal(t[k].length, zh[k].length, `widget ${lang}.${k} arity`);
         if (Array.isArray(zh[k])) assert.equal(t[k].length, zh[k].length, `widget ${lang}.${k} length`);
         const text = typeof t[k] === 'function' ? String(t[k]) : JSON.stringify(t[k]);
-        if (!CJK_SAMPLES.has(k)) assert.ok(!/[一-鿿]/.test(text), `widget ${lang}.${k} contains Chinese`);
+        if (!CJK_SAMPLES.has(k)) assert.ok(!hanFor(lang).test(text), `widget ${lang}.${k} contains Chinese`);
       }
     }
   }
