@@ -44,7 +44,7 @@ Recompute every converted number. In widget tables, formulas like `= 480 × 491.
 
 English text is often 1.5–2× wider than Chinese. After translating an SVG:
 1. Every `<text>` must stay inside its box and inside the viewBox; nothing may overlap. Break long labels into two `<text>` lines or shorten them; widen boxes if there is room.
-2. Never go below font-size 11 in static figures.
+2. Use font-size 12 or more for text in static figures; 11 is the hard floor of the checker. A phone shows a 400-wide figure at about 300px, so 12 renders at 9px, the lowest readable size. If a chapter master uses 11 in a static figure, raise it to 12 in the translation and make the text fit.
 3. Run the browser figure checker (main task) at 375px and 1440px.
 
 ## 5. Links
@@ -78,6 +78,18 @@ Swap Chinese Wikipedia links for the English article on the same topic (`https:/
 | 写答案 (decode) | decode (“writing the answer”) |
 | 命中 / 未命中 | hit / miss |
 | 推理引擎 | inference engine |
+
+Chapter metadata uses these fixed values:
+
+| Chinese | English |
+| --- | --- |
+| I · 计算基础 | I · Computing foundations |
+| II · 模型与状态 | II · Model and state |
+| III · 异构执行 | III · Heterogeneous execution |
+| IV · 复用与投机 | IV · Reuse and speculation |
+| V · 服务与扩展 | V · Serving and scaling |
+| VI · 验证与实践 | VI · Verification and practice |
+| 入门 / 核心 / 扩展 / 综合 (level) | Intro / Core / Extension / Capstone |
 
 ## 7. Glossary terms (from content/glossary.json)
 
