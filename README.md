@@ -21,7 +21,7 @@
 
 ## 立刻打开
 
-已经构建好的入口是 `dist/index.html`，正文、数据、样式和脚本都在一个文件中，不需要 CDN、账号、模型 API 或构建依赖。下载后可以尝试直接用现代桌面浏览器打开。浏览器对 `file://` 本地存储的处理可能不同；正式学习与跨设备访问建议使用 HTTP 方式。
+仓库不提交构建产物；运行 `npm run build` 后得到 `dist/index.html`，正文、数据、样式和脚本都在一个文件中，不需要 CDN、账号、模型 API 或构建依赖。下载后可以尝试直接用现代桌面浏览器打开。浏览器对 `file://` 本地存储的处理可能不同；正式学习与跨设备访问建议使用 HTTP 方式。
 
 **不启用 JavaScript** 时，打开 `dist/fullbook.html`。它包含全文、答案、教师手册、实验说明、术语和来源，可以用浏览器打印。
 
@@ -141,4 +141,12 @@ python3 tests/browser_qa.py --url http://127.0.0.1:3000/
 
 独立教材，不是 Strata 官方作品，不代表原作者背书。引用/摘编的源码保留上游 MIT 许可，全文在 `licenses/Strata-MIT.txt`，也嵌入交互版与完整阅读版。本包没有模型权重、第三方字体或上游全仓库。
 
-原始教材与新编教学代码的公开发布许可由发布者决定；在确定许可前，不应暗示整本教材由上游 MIT 许可覆盖。参见 `docs/LICENSING.md`。
+作者：Jackwwg83（AI 辅助编写）。许可分三层：
+
+| 内容 | 许可 |
+| --- | --- |
+| 正文、习题、解析、教师手册等课程内容 | CC BY-SA 4.0，见 `LICENSE-CONTENT.md` |
+| `src/`、`scripts/`、`tests/`、`labs/` 下的教学代码 | MIT，见 `LICENSE` |
+| 引用或摘编的 Strata 源码 | 上游 MIT，见 `licenses/Strata-MIT.txt` |
+
+这是初版，未经同行审阅。发现错误请在 GitHub Issues 提交勘误：https://github.com/Jackwwg83/strata-inference-textbook/issues 。详见 `docs/LICENSING.md`。
