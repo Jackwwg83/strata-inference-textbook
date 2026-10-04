@@ -1,0 +1,214 @@
+<div class="hook"><span class="eyebrow">An analogy first</span>
+<p>There are two ways to take notes in a meeting. One is the stenographer: write down every sentence, the notebook gets thicker and thicker, and to find something you flip back through it. The other is the whiteboard: there is only one board of fixed size, and when new content comes in, you erase a bit of the old and rewrite a bit. The board always stays the same size.</p>
+<p>The attention of Chapter 8 is the stenographer. This chapter is about the whiteboard: 36 of the 48 layers in Strata's model use <dfn>GDN</dfn> (Gated DeltaNet), and each head in each layer has just one 128 × 128 "whiteboard" that never grows, however long the conversation. With a few small examples you can work by hand, we will see clearly how this whiteboard is erased, written and read.</p></div>
+<p class="tldr"><strong>In one line:</strong> GDN compresses the history into a fixed-size state matrix. For each new token, it first decays the whole state, then uses the current key to read out the old value, and writes back only the difference "target value minus old value" with one outer product. The state does not grow with the context, but it is lossy, and one step in the wrong order quietly changes the result.</p>
+
+<h2 id="sec-1">9.1 Two kinds of memory: flip through notes, or erase and rewrite a whiteboard</h2>
+<p>Attention keeps a key and a value for every history position and looks back when needed. The upside is that nothing is lost; the price is that the longer the context, the more it stores and the slower it looks things up (Chapter 8). GDN takes another road: it keeps no record per item, but maintains a fixed-size <strong>state</strong> and updates it once for every token. See Figure 9-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figure 9-1: attention's KV cache grows linearly with the context, to about 6 GiB at 262K; the GDN state always stays about 112 MiB">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">Bytes of memory used (vs. context length)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M50 190H380M50 190V36"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M50 190L380 40"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" stroke-dasharray="7 4" d="M50 187.3H380"/>
+<text class="f-text" fill="#182f2b" x="96" y="80" font-size="12">Attention's KV cache:</text>
+<text class="f-text" fill="#182f2b" x="96" y="98" font-size="12">+24 KiB per token</text>
+<text class="f-text" fill="#182f2b" x="150" y="176" font-size="12">GDN state: always about 112 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="46" y="44" font-size="12" text-anchor="end">6 GiB</text>
+<text class="f-muted" fill="#5c6d66" x="46" y="194" font-size="12" text-anchor="end">0</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="208" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="208" font-size="12" text-anchor="middle">128K</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="208" font-size="12" text-anchor="end">262K</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="230" font-size="12">KV: FP16, 12 QSA layers; GDN incl. conv history</text>
+</svg><figcaption>Figure 9-1　The KV cache keeps climbing with the context; the GDN state is the same size from the very first token. The price: a fixed-size whiteboard cannot hold unlimited detail.</figcaption></figure>
+<aside class="primer" id="c09-rnn-state">
+<h3>Recurrent neural networks and "state"</h3>
+<p>The intuition: when you count sheep, you keep just one number in your head, "how many have I counted so far". Each time you see a sheep, you add one. You do not need to remember what every sheep looked like to report the total at any moment. This "thing kept in your head" is the <dfn>state</dfn>.</p>
+<p>The definition: a system updates itself at every step by "old state + new input → new state", written hₜ = f(hₜ₋₁, xₜ). A counter in a digital circuit and a <dfn>finite-state machine</dfn> from compiler theory both have this shape. Replace f with a trainable neural network and you get a <dfn>recurrent neural network</dfn> (RNN).</p>
+<p>Two key properties. First, the state has a fixed size, so the work per step does not depend on how many steps have gone by: it is O(1). Reading a text of n words is O(n), cheaper than attention's O(n²). Second, a fixed size means <strong>lossy</strong>: the "sheep counter" can tell you the total, but not the color of sheep number 17. The classic trouble with old-style RNNs is exactly "forgetting things from long ago". Newer models like GDN ease it with a bigger matrix state and a smarter write rule, but they are still lossy.</p>
+<p>There is also an engineering consequence: the state only moves forward. Given the state at step t, you generally <strong>cannot work back</strong> to step t − 2, because writing has already erased part of the old information. To roll back, you must save a snapshot in advance, or replay from the start.</p>
+<p>How this ties into the chapter: each of Strata's 36 GDN layers has its own state, pushed forward one token after another.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Recurrent_neural_network" target="_blank" rel="noopener noreferrer">Wikipedia: Recurrent neural network</a> · <a href="https://en.wikipedia.org/wiki/Finite-state_machine" target="_blank" rel="noopener noreferrer">Wikipedia: Finite-state machine</a></p>
+</aside>
+<p>In Strata, 36 of the 48 layers are GDN. <span class="ev ev-code">Code fact</span>[S04] The session state keeps a separate recurrent state and convolution history for each GDN layer. The temporary buffers for intermediate computation are one set shared by all 36 layers, but the state must be one per layer, because "recurrent" is the whole point. [S13] (<code>session.cpp</code> lines 38–44) When a new conversation starts, all states are cleared to zero. [S13] A GDN layer does not even have a "position" parameter: its input for each token is only that row of numbers, and what moves forward from token to token is this state (<code>layer.hpp</code> lines 513–515).</p>
+<p class="bridge"><strong>If you studied CS:</strong> think of a GDN layer as a state machine. The state is 48 floating-point matrices of 128 × 128, the input is the current token's vector, and the transition function is this chapter's recurrence. It is the same abstraction as a sequential circuit in digital logic: combinational logic computes the next state, and registers hold the current one.</p>
+
+<h2 id="sec-2">9.2 The outer product: rewriting a whole table at once</h2>
+<p>The whiteboard is a matrix. How do you write the relation "key k → value v" into it? The answer is the outer product.</p>
+<aside class="primer" id="c09-outer-product">
+<h3>The outer product and the rank-one update</h3>
+<p>The dot product from Chapter 3 turns two vectors into <strong>one number</strong>: q · k = Σ qᵢkᵢ. The <dfn>outer product</dfn> does the reverse and turns two vectors into <strong>a table</strong>: row i, column j of k vᵀ is kᵢ × vⱼ. If k has 3 numbers and v has 2, the outer product is a 3 × 2 table; see Figure 9-2 after this primer.</p>
+<p>This table has one special feature: every row is a multiple of v (row i = kᵢ × v). All the rows "point the same way"; in linear algebra we say its <dfn>rank</dfn> is 1. So adding an outer product to a matrix is called a <dfn>rank-one update</dfn>: S ← S + k vᵀ.</p>
+<p>Why is a rank-one update good for memory? Because "reading" with the same k gets exactly v back. You read with Sᵀk: dot each column with k. If S = k vᵀ and k has length 1, then Sᵀk = v × (k · k) = v. If different keys are perpendicular to each other (dot product 0), what each one writes does not interfere with the others; if they overlap, their contents bleed into each other.</p>
+<p>The cost is just as plain to see: one rank-one update touches every cell of the table, S × S multiply-adds; but it depends only on the current pair k and v, with no need to look back at any history.</p>
+<p>How this ties into the chapter: for every token, GDN does one rank-one update per value head, on a 128 × 128 whiteboard each.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Outer_product" target="_blank" rel="noopener noreferrer">Wikipedia: Outer product</a> · <a href="https://en.wikipedia.org/wiki/Rank_%28linear_algebra%29" target="_blank" rel="noopener noreferrer">Wikipedia: Rank (linear algebra)</a> · <a href="https://en.wikipedia.org/wiki/Matrix_%28mathematics%29" target="_blank" rel="noopener noreferrer">Wikipedia: Matrix (mathematics)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 242" role="img" aria-label="Figure 9-2: with k equal to 1, 0, 2 and v equal to 2, 3, the outer product is a table of 3 rows and 2 columns, and every row is a multiple of v">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">v = [2, 3]</text>
+<rect class="f-soft" fill="#e5f1df" x="170" y="24" width="56" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="198" y="44" font-size="13" text-anchor="middle">2</text>
+<rect class="f-soft" fill="#e5f1df" x="230" y="24" width="56" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="258" y="44" font-size="13" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="120" y="44" font-size="12" text-anchor="middle">k</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="62" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="84" font-size="13" text-anchor="middle">1</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="100" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="138" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="160" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="170" y="62" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="198" y="84" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="62" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="258" y="84" font-size="13" text-anchor="middle">3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="100" width="56" height="34" rx="3"/><text class="f-muted" fill="#5c6d66" x="198" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="100" width="56" height="34" rx="3"/><text class="f-muted" fill="#5c6d66" x="258" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-accent" fill="#136d5a" x="170" y="138" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="198" y="160" font-size="13" text-anchor="middle">4</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="138" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="258" y="160" font-size="13" text-anchor="middle">6</text>
+<text class="f-text" fill="#182f2b" x="296" y="84" font-size="12">= 1 × v</text>
+<text class="f-text" fill="#182f2b" x="296" y="122" font-size="12">= 0 × v</text>
+<text class="f-text" fill="#182f2b" x="296" y="160" font-size="12">= 2 × v</text>
+<text class="f-text" fill="#182f2b" x="20" y="196" font-size="12">Cell (i, j) = kᵢ × vⱼ; each row is a multiple of v,</text>
+<text class="f-text" fill="#182f2b" x="20" y="214" font-size="12">so the rank is 1</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="236" font-size="12">S ← S + k vᵀ adds it to the state: a rank-one update</text>
+</svg><figcaption>Figure 9-2　The outer product "weaves" two vectors into a table. The table really holds only the two rows of numbers k and v, which is why it is called rank one.</figcaption></figure>
+
+<h2 id="sec-3">9.3 The Delta rule: read the old value first, write only the difference</h2>
+<p>The plainest way to write is to add one k vᵀ each time. The trouble is that if the same key is written twice, the two values <strong>pile up</strong>. Try it on a 2 × 2 whiteboard: first write "apple" (key [1, 0]) → [2, 3], then change apple to [5, 1]. After plain addition, the first row of the board is [2, 3] + [5, 1] = [7, 4], and reading it back gives [7, 4], which is neither value.</p>
+<p>The <dfn>Delta rule</dfn> fixes this: before writing, read with this key to see what the board already holds (written v̂), then write only the difference "target minus old value", δ = v − v̂. On the second apple write, v̂ = [2, 3] and δ = [5, 1] − [2, 3] = [3, −2]; after adding it, the first row becomes [5, 1], and reading back gives exactly the new value. See Figure 9-3.</p>
+<div class="viz" data-viz="delta-memory"><figure class="fig"><svg viewBox="0 0 400 228" role="img" aria-label="Figure 9-3: first write apple as 2, 3, then rewrite it as 5, 1. Plain addition reads back 7, 4; the Delta rule reads back 5, 1">
+<text class="f-text" fill="#182f2b" x="200" y="16" font-size="12" text-anchor="middle">Write apple → [2, 3], then rewrite apple → [5, 1]</text>
+<text class="f-text" fill="#182f2b" x="100" y="42" font-size="13" font-weight="600" text-anchor="middle">Plain addition</text>
+<rect class="f-warn" fill="#9e5d24" x="30" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="77" font-size="14" text-anchor="middle">7</text>
+<rect class="f-warn" fill="#9e5d24" x="104" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="137" y="77" font-size="14" text-anchor="middle">4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="30" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="63" y="121" font-size="14" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="104" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="137" y="121" font-size="14" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="100" y="160" font-size="12" text-anchor="middle">Read apple = [7, 4]:</text>
+<text class="f-warn" fill="#9e5d24" x="100" y="176" font-size="12" text-anchor="middle">old and new pile up</text>
+<text class="f-text" fill="#182f2b" x="300" y="42" font-size="13" font-weight="600" text-anchor="middle">Delta rule</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="77" font-size="14" text-anchor="middle">5</text>
+<rect class="f-accent" fill="#136d5a" x="304" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="337" y="77" font-size="14" text-anchor="middle">1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="263" y="121" font-size="14" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="304" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="337" y="121" font-size="14" text-anchor="middle">0</text>
+<text class="f-text" fill="#182f2b" x="300" y="160" font-size="12" text-anchor="middle">Read apple = [5, 1]:</text>
+<text class="f-text" fill="#182f2b" x="300" y="176" font-size="12" text-anchor="middle">correct</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="200" font-size="12">Delta's second write: old value v̂ = [2, 3]</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="220" font-size="12">δ = [5, 1] − [2, 3] = [3, −2]; row 1 → [5, 1]</text>
+</svg><figcaption>Figure 9-3　The same key written twice: plain addition piles the old and new values together, while the Delta rule subtracts the old value before writing, so reading back gives exactly the latest value.</figcaption></figure></div>
+<p>Real GDN has one more knob: the write strength β. The difference is multiplied by β before it is written, δ = β(v − v̂). β = 1 means "change it completely to the new value"; β = 0.25 means "move only a quarter of the way toward the new value". β must lie between 0 and 1, so the layer first passes it through sigmoid; the kernel is not responsible for this step (Chapter 7 covered this contract). [S17]</p>
+<p>A 2 × 2 whiteboard has only 4 numbers. The more keys you write, and the more they overlap, the worse they interfere with each other: in the simulator above, write apple and banana and then orange, and orange reads back accurately while apple and banana have changed. The real whiteboard is 128 × 128, with far less interference, but the principle "fixed size = lossy" is the same.</p>
+
+<h2 id="sec-4">9.4 Gated decay: one step out of order changes the result</h2>
+<p>The whiteboard also needs to "forget". When each token arrives, GDN first multiplies the whole whiteboard by a decay factor α, then does the Delta write. With α close to 1, old memories barely fade; with α close to 0, it almost starts from a blank board. Each value head has its own α, computed fresh from the current token: α = e<sup>gate</sup>. [S17]</p>
+<p>gate is computed as softplus(…) × ssm_a (<code>layer.hpp</code> line 14). The output of softplus is never below 0, and ssm_a is a coefficient in the model for each value head. As long as ssm_a is negative, gate is never above 0, and α lies between 0 and 1: in effect "the old memory is discounted at every step".</p>
+<p>Here is one full step of one value head written out, where the state S is a "key dim × value dim" matrix <span class="ev ev-code">Code fact</span>[S17]:</p>
+<ol>
+<li>Decay: S̄ = α S</li>
+<li>Read the old value: v̂ = S̄ᵀ k</li>
+<li>Compute the difference: δ = β (v − v̂)</li>
+<li>Write: S′ = S̄ + k δᵀ</li>
+<li>Output: o = S′ᵀ q</li>
+</ol>
+<p>The GDN header stresses that the decay must come <strong>before</strong> the rank-one update, and a test pins this down on purpose. [S17] Why does the order matter so much? Shrink the matrix to a single number and work it by hand. Take the old state S = 2, α = 0.5, k = 1, v = 3, β = 0.25 and q = 1:</p>
+<ul>
+<li><strong>Decay, then write</strong> (the contract): S̄ = 1; v̂ = 1; δ = 0.25 × (3 − 1) = 0.5; S′ = 1.5; output 1.5.</li>
+<li><strong>Write, then decay</strong> (wrong): v̂ = 2; δ = 0.25 × (3 − 2) = 0.25; after the write it is 2.25; multiplied by 0.5 that gives 1.125.</li>
+</ul>
+<p>Both results are reasonable, finite and in range, but only one matches the model. The wrong order also discounts <strong>the new information that was just written</strong>, as if "partly forgetting something the moment you note it down". The tool below lets you change the parameters and computes both sides at once:</p>
+<div class="viz" data-viz="gdn-order"><figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="Figure 9-4: with the same parameters, decaying first and then writing gives 1.5, while writing first and then decaying gives 1.125">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">S = 2, α = 0.5, k = 1, v = 3, β = 0.25, q = 1</text>
+<rect class="f-soft" fill="#e5f1df" x="8" y="26" width="188" height="170" rx="8"/>
+<text class="f-text" fill="#182f2b" x="102" y="48" font-size="13" font-weight="600" text-anchor="middle">Decay first (contract)</text>
+<text class="f-text" fill="#182f2b" x="18" y="76" font-size="12">S̄ = 0.5 × 2 = 1</text>
+<text class="f-text" fill="#182f2b" x="18" y="100" font-size="12">v̂ = 1 × 1 = 1</text>
+<text class="f-text" fill="#182f2b" x="18" y="124" font-size="12">δ = 0.25 × (3 − 1) = 0.5</text>
+<text class="f-text" fill="#182f2b" x="18" y="148" font-size="12">S′ = 1 + 1 × 0.5 = 1.5</text>
+<text class="f-text" fill="#182f2b" x="18" y="178" font-size="13" font-weight="600">Output o = 1.5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="204" y="26" width="188" height="170" rx="8"/>
+<text class="f-warn" fill="#9e5d24" x="298" y="48" font-size="13" font-weight="600" text-anchor="middle">Write first (wrong)</text>
+<text class="f-text" fill="#182f2b" x="210" y="76" font-size="12">v̂ = 2 × 1 = 2</text>
+<text class="f-text" fill="#182f2b" x="210" y="100" font-size="12">δ = 0.25 × (3 − 2) = 0.25</text>
+<text class="f-text" fill="#182f2b" x="210" y="124" font-size="12">S_w = 2 + 0.25 = 2.25</text>
+<text class="f-text" fill="#182f2b" x="210" y="148" font-size="12">S′ = 0.5 × 2.25 = 1.125</text>
+<text class="f-warn" fill="#9e5d24" x="210" y="178" font-size="13" font-weight="600">Output o = 1.125</text>
+</svg><figcaption>Figure 9-4　A different order gives a different result. The wrong order also cuts the freshly written 0.25 in half.</figcaption></figure></div>
+<p>This one-dimensional example is also good material for tests. Three edge cases each check one thing: with α = 0, the old memory is cleared completely; with β = 0, nothing is written; with k = 0, no key is rewritten. Across these three cases the two orders agree in some and differ in others, which makes them a good check on whether an implementation has quietly swapped the order.</p>
+
+<h2 id="sec-5">9.5 Why it can run in parallel, and why it cannot</h2>
+<p>Look back at the five-step formula and you will notice something easy to miss: for a fixed value head h and value dimension j, each step touches only the numbers in column j of the whiteboard. Reading the old value sums along the key dimension i, and the write changes only column j. Different columns never interact at all. <span class="ev ev-code">Code fact</span>[S17] So one thread can own one column and compute it from start to finish, with not a single synchronization barrier in the whole recurrence. See Figure 9-5.</p>
+<figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="Figure 9-5: within one token, each column of the whiteboard can go to a different thread in parallel; but neighboring tokens must go in order">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">Within one token: one thread per column</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="94" y="26" width="30" height="120"/><rect class="f-accent" fill="#136d5a" x="128" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="162" y="26" width="30" height="120"/><rect class="f-accent" fill="#136d5a" x="196" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="230" y="26" width="30" height="120"/>
+<text class="f-muted" fill="#5c6d66" x="75" y="164" font-size="12" text-anchor="middle">j=0</text>
+<text class="f-muted" fill="#5c6d66" x="143" y="164" font-size="12" text-anchor="middle">j=2</text>
+<text class="f-muted" fill="#5c6d66" x="211" y="164" font-size="12" text-anchor="middle">j=4</text>
+<text class="f-muted" fill="#5c6d66" x="54" y="40" font-size="12" text-anchor="end">i=0</text>
+<text class="f-muted" fill="#5c6d66" x="54" y="140" font-size="12" text-anchor="end">i=S−1</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M276 30V142M270 134L276 144L282 134"/>
+<text class="f-text" fill="#182f2b" x="288" y="80" font-size="12">Sum and write</text>
+<text class="f-text" fill="#182f2b" x="288" y="98" font-size="12">down key dim i</text>
+<text class="f-text" fill="#182f2b" x="20" y="192" font-size="12" font-weight="600">Between tokens: strictly one after another</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="65" y="224" font-size="12" text-anchor="middle">State Sₜ</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="195" y="224" font-size="12" text-anchor="middle">State Sₜ₊₁</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="325" y="224" font-size="12" text-anchor="middle">State Sₜ₊₂</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M110 219H148M140 213L148 219L140 225M240 219H278M270 213L278 219L270 225"/>
+</svg><figcaption>Figure 9-5　Parallel across "columns", serial across "time". Within one step, 128 × 48 columns can be computed at once; but step t + 1 must wait for the state from step t.</figcaption></figure>
+<p>To keep parallel threads in step when they read memory, Strata changed the storage order of the state from the reference implementation's (key dim, value dim, head) to (key dim, head, value dim), so neighboring threads read neighboring addresses. The state is a runtime buffer, not a weight, so its layout can be chosen freely; but the header warns that both layouts index the same three numbers, and mixing them up raises no error. [S17]</p>
+<p>But "columns can run in parallel" does not mean "tokens can run in parallel". The state at step t + 1 depends on step t, so along the time direction it is still a chain. What runs in parallel is the work within one step, not the steps themselves.</p>
+<p>The pairing of heads also matters. GDN has 16 key/query heads and 48 value heads, and value head h is paired with key head h % 16 (the remainder). [S17] Chapter 8's GQA, however, uses integer division. The two modules use exactly opposite conventions, so writing one "general multi-head mapping function" and reusing it everywhere would actually cause bugs.</p>
+<p>Finally, the bill. The main state of each GDN layer is 128 × 128 × 48 FP32 numbers, which is 3,145,728 bytes, exactly 3 MiB; the 36 layers come to 108 MiB. Add the convolution history (10,240 channels × 3 columns × 4 bytes = 120 KiB per layer), and the total is about 112.2 MiB. <span class="ev ev-est">Teaching estimate</span> (sizes from [S04]; the float count per layer is in <code>session.cpp</code> lines 41–44) This number stays the same from the first token to token 262,144. But it is not all of the model's state: the KV cache of the QSA layers still grows with the context.</p>
+<p>A side note: the description at the top of the GDN header says "48 layers are GDN and 12 are QSA". That adds up to 60 layers, which does not match the real 36 + 12 = 48. [S17] This book goes by the executable geometry definition and the session's state allocation, and does not treat an outdated comment as a model fact. [S04][S13]</p>
+
+<h2 id="sec-6">9.6 Hands-on: a one-dimensional GDN, and how hard "rolling back" is</h2>
+<p>Open this chapter's interactive lab, "One recurrent update". It shrinks GDN to a scalar state and shows the correct and the wrong update order side by side. Three things to try:</p>
+<ol>
+<li>Set α = 0, β = 0 and k = 0, and verify the three edge-case properties from Section 9.4 one by one.</li>
+<li>Find a set of parameters for which the two orders give the same result; then explain why they differ in general.</li>
+<li>Go back to this chapter's "Order really matters" and drag α to 1. Do the two orders still differ? Explain why with the formula.</li>
+</ol>
+<p>The fact that the state only moves forward becomes a real problem in speculative decoding (Chapters 18 and 19). The engine first guesses a few words the cheap way (Strata uses the model's built-in MTP layer), then lets the full 48 layers check them all at once, and wrong guesses must be rolled back. [S02] The KV cache is easy: the keys and values at wrongly guessed positions can just stay there, and they are overwritten the next time those positions are processed. The GDN state, however, has already been rewritten by the wrong words, and you cannot simply "roll back the counter". Strata's approach: the verify window <strong>does not touch</strong> the GDN state; once it is settled that the first n words are accepted, the inputs saved in the window are used to replay those n words, pushing the convolution history and the recurrent state forward. <span class="ev ev-code">Code fact</span>[S08] See Figure 9-6.</p>
+<figure class="fig"><svg viewBox="0 0 400 238" role="img" aria-label="Figure 9-6: when a draft is rejected, the KV cache only needs the wrong position overwritten later; the GDN state is kept unchanged, and the accepted words are replayed from the saved inputs">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">Verify 3 draft words, accept the first 2</text>
+<text class="f-text" fill="#182f2b" x="20" y="42" font-size="12">KV cache (stored by position)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="50" width="70" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="55" y="70" font-size="12" text-anchor="middle">Committed</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="50" width="70" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="70" font-size="12" text-anchor="middle">Draft 1 ✓</text>
+<rect class="f-accent" fill="#136d5a" x="172" y="50" width="70" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="207" y="70" font-size="12" text-anchor="middle">Draft 2 ✓</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="248" y="50" width="70" height="30" rx="4"/><text class="f-warn" fill="#9e5d24" x="283" y="70" font-size="12" text-anchor="middle">Draft 3 ✗</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="102" font-size="12">The ✗ slot stays; it is overwritten next time</text>
+<text class="f-text" fill="#182f2b" x="20" y="134" font-size="12">GDN state (only one copy)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="142" width="96" height="34" rx="4"/><text class="f-text" fill="#182f2b" x="68" y="156" font-size="12" text-anchor="middle">untouched</text><text class="f-text" fill="#182f2b" x="68" y="171" font-size="12" text-anchor="middle">during check</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M116 159H150M142 153L150 159L142 165"/>
+<rect class="f-soft" fill="#e5f1df" x="152" y="142" width="128" height="34" rx="4"/><text class="f-text" fill="#182f2b" x="216" y="164" font-size="12" text-anchor="middle">Replay drafts 1–2</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M280 159H314M306 153L314 159L306 165"/>
+<rect class="f-accent" fill="#136d5a" x="316" y="142" width="70" height="34" rx="4"/><text class="f-on" fill="#ffffff" x="351" y="164" font-size="12" text-anchor="middle">New state</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="202" font-size="12">Replay uses the inputs saved in the verify window</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="224" font-size="12">Rewind only the counter: draft 3's trace stays</text>
+</svg><figcaption>Figure 9-6　The KV cache is stored by position, so a mistake can be overwritten; the GDN state has only one copy, so a mistake cannot be erased. That is why Strata leaves it alone first and replays the accepted words after they are confirmed.</figcaption></figure>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>GDN remembers the history in a fixed-size state matrix: 128 × 128 per value head per layer, about 112 MiB across the 36 layers, and it does not grow with the context. The price is that it is lossy and can only move forward.</li>
+<li>One step per token: first decay S̄ = αS, then read the old value v̂ = S̄ᵀk, compute the difference δ = β(v − v̂), and write it with an outer product S′ = S̄ + kδᵀ. Decay before write is the contract; the reverse also discounts the new information.</li>
+<li>Within one step, the columns of the whiteboard are independent, so they can run in parallel, one thread per column; from token to token it is still a serial chain.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "The GDN state has a fixed size, so the whole model's memory does not grow with the context, and it can roll back freely."</strong></p>
+<p>Only the state of the 36 GDN layers is fixed. The KV cache of the 12 QSA layers still grows with the context. A fixed size does not mean "reversible" either: writing has already partly erased old information, so the only ways back to an earlier state are a snapshot saved in advance or a replay from a known state.</p></div>
+
+<details class="deep"><summary>Go deeper: the full tensor shapes, a few contracts that are easy to misread, and how to test a recurrence</summary>
+<h3>One GDN recurrence step written out in full</h3>
+<p><code>gdn.hpp</code> describes one step in these six lines (the state written with the reference implementation's indices as st[i, j, h]) [S17]:</p>
+<ul>
+<li>dec = exp(gate), one number per value head; st = state × dec</li>
+<li>sk[h, j] = Σᵢ st[i, j, h] × k[idx[h]][i] (read the old value)</li>
+<li>d[h, j] = (v[h, j] − sk[h, j]) × beta[h] (the difference)</li>
+<li>st[i, j, h] += k[idx[h]][i] × d[h, j] (rank-one write)</li>
+<li>o[h, j] = Σᵢ st[i, j, h] × q[idx[h]][i] (read out)</li>
+</ul>
+<p>Here idx[h] = h % h_k, with h_k = 16, h_v = 48 and S = 128. Every line touches only the column (j, h); that is the basis for "one thread per column, no barrier needed". [S17]</p>
+<h3>Four input contracts that are easy to misread</h3>
+<ul>
+<li><strong>q and k have already been L2-normalized, and q has already been multiplied by 1/√S.</strong> The two llama.cpp paths apply this factor in different places, so the caller is responsible for it. [S17] The ε of L2 normalization is added to the sum of squares and must not be divided by the width; otherwise the result is off by √128 ≈ 11.3 (Chapter 7). [S17]</li>
+<li><strong>gate is the value before the exponential.</strong> dec = exp(gate) is computed inside the kernel. [S17]</li>
+<li><strong>The layer passes beta through sigmoid first.</strong> The kernel's contract is d = (v − sk) × beta, and what it receives must already be a fraction. Pass in the raw projection value and the write strength becomes unbounded and can take either sign. [S17]</li>
+<li><strong>v is not normalized.</strong> Only q and k are (<code>layer.hpp</code> line 23).</li>
+</ul>
+<p>The layer's last step is y = rms_norm(o) × ssm_norm × sigmoid(z), with a separate RMS normalization per head. It is sigmoid here, not the SiLU that qwen3.5 used. [S17]</p>
+<h3>The convolution history: one more small piece of state</h3>
+<p>Before the recurrence, the 10,240 channels first pass through a short convolution of length 4. It must remember the previous 3 columns of input, ordered "oldest first": coefficient 0 of the kernel multiplies the oldest column, and the new input lands in the last column. The weights are stored in GGML's native layout, where the tap is the fastest-changing dimension, unlike the reference implementation's row-major order. [S17] These 3 columns of history, like the recurrent state, are per-layer state that moves forward with each token, and they must be handled on rollback too. [S08]</p>
+<h3>How to test a recurrence</h3>
+<p>The first kind is edge-case tests: α = 0 checks forgetting, β = 0 checks writing nothing, k = 0 checks a keyless update, plus an order test for "decay before write" (GDN's reference implementation has a property dedicated to pinning it down). [S17]</p>
+<p>The second kind is snapshot-and-replay tests: process a fixed sequence, save the state at step t, go on for two more steps, then restore the snapshot and replay those two steps, and require the result to match an uninterrupted run bit for bit. The commit logic of speculative decoding depends on exactly this property. [S08]</p>
+<p>The third kind is head-mapping tests: both the remainder pairing and the integer-division pairing produce correctly shaped outputs, so the tests must use data that tells the two apart, or a mix-up will never be found. [S17]</p>
+<p>Do not try to "work back" from the final state to an earlier one. The decay may shrink some directions close to 0, and the Delta write overwrites old values; without the necessary information saved, this inverse generally does not exist.</p>
+</details>
