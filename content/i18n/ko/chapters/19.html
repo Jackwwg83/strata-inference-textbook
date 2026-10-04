@@ -1,0 +1,306 @@
+<div class="hook"><span class="eyebrow">이런 걸 느끼셨을 거예요</span>
+<p>Strata가 글을 쓰는 모습을 보면, 한 글자씩 쥐어짜듯 나오는 게 아니라 "한 번에 한 줄씩 툭툭" 튀어나오는 것처럼 느껴질 때가 있어요. README의 설명은 이래요. 작은 도우미가 뒤에 올 단어 몇 개를 먼저 추측하고, 큰 모델이 그 추측을 한 번에 전부 검사해요. 그래서 같은 답을 1.6~1.8배 빠르게 낼 수 있어요.<span class="ev ev-report">업스트림 보고</span>[S01]</p>
+<p>업스트림 문서는 모델에 내장된 추측 층이 한 번에 토큰을 최대 3개까지 추측한다고도 해요.<span class="ev ev-report">업스트림 보고</span>[S02] 그런데 이상하지 않나요? 맞게 추측한 토큰은 공짜로 버는 셈인데, 왜 한 번에 10개를 추측하지 않을까요? 이 장은 두 가지에 답해요. 몇 개를 추측하는 게 가장 이득인지, 그리고 수락률이 계속 변할 때 엔진이 달리면서 어떻게 마음을 바꾸는지예요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 토큰을 하나 더 추측할 때 기댓값으로 더 얻는 몫은 등비급수로 점점 줄어드는데, 검증 한 라운드의 시간은 계속 늘어요. Strata가 비교하는 건 "1밀리초당 기댓값으로 커밋하는 토큰 수"이고, 수락률은 지수 이동 평균으로 달리면서 갱신해요.</p>
+
+<h2 id="sec-1">19.1 한 번 추측하고 한 번 검증하기: 한 라운드에 토큰이 몇 개 나올까</h2>
+<p>먼저 18장의 <dfn>추측 디코딩(speculative decoding)</dfn>을 복습해요. 먼저 싸게 추측하고, 큰 모델이 채점해요. 추측을 맡는 건 모델에 내장된 <dfn>MTP 층</dfn>(multi-token prediction, 다중 토큰 예측 층)이고, 이 층이 내놓은 후보를 <dfn>드래프트(draft)</dfn>라고 불러요.<span class="ev ev-report">업스트림 보고</span>[S02]</p>
+<p>큰 모델은 "직전에 확정된 토큰 + 드래프트 k개"를 한 줄로 세워요. 48개 층을 한 번만 지나면, 모든 자리에 대해 "여기엔 이게 와야 한다고 생각해요"를 동시에 얻어요. 이 한 줄이 <dfn>검증 윈도우(verify window)</dfn>이고, 길이는 k + 1이에요. 그림 19-1은 k = 3인 예를 따라가요.</p>
+<figure class="fig"><svg viewBox="0 0 400 296" role="img" aria-label="그림 19-1: 추측 디코딩 한 라운드. 드래프트 3개를 추측하고, 앞의 2개는 큰 모델과 같고 3번째는 달라서, 이번 라운드에 토큰 3개를 커밋해요">
+<text class="f-muted" fill="#5c6d66" x="150" y="10" font-size="12" text-anchor="middle">직전</text>
+<text class="f-muted" fill="#5c6d66" x="150" y="23" font-size="12" text-anchor="middle">토큰</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="10" font-size="12" text-anchor="middle">드래프트</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="23" font-size="12" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="10" font-size="12" text-anchor="middle">드래프트</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="23" font-size="12" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="10" font-size="12" text-anchor="middle">드래프트</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="23" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="10" y="46" font-size="13" font-weight="600">① 초안 작성</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="63" font-size="12">MTP가 3개 추측</text>
+<rect class="f-soft" fill="#e5f1df" x="125" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="150" y="55" font-size="15" text-anchor="middle">오늘</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="185" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="210" y="55" font-size="15" text-anchor="middle">공원</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="245" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="270" y="55" font-size="15" text-anchor="middle">에서</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="305" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="55" font-size="15" text-anchor="middle">쉬자</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="13" font-weight="600">② 검증</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="123" font-size="12">48개 층 한 번에</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="185" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="210" y="115" font-size="15" text-anchor="middle">공원</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="245" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="270" y="115" font-size="15" text-anchor="middle">에서</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="305" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="115" font-size="15" text-anchor="middle">놀자</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="144" font-size="12" text-anchor="middle">큰 모델이 각 자리에 올 말로 본 것</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="13" font-weight="600">③ 비교</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="193" font-size="12">틀리면 멈춤</text>
+<text class="f-text" fill="#182f2b" x="210" y="184" font-size="13" text-anchor="middle">같음</text>
+<text class="f-text" fill="#182f2b" x="270" y="184" font-size="13" text-anchor="middle">같음</text>
+<text class="f-warn" fill="#9e5d24" x="330" y="184" font-size="13" font-weight="600" text-anchor="middle">다름</text>
+<text class="f-text" fill="#182f2b" x="10" y="232" font-size="13" font-weight="600">④ 커밋</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="249" font-size="12">수락 2 + 직접 1</text>
+<rect class="f-accent" fill="#136d5a" x="185" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="210" y="241" font-size="15" text-anchor="middle">공원</text>
+<rect class="f-accent" fill="#136d5a" x="245" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="270" y="241" font-size="15" text-anchor="middle">에서</text>
+<rect class="f-accent" fill="#136d5a" x="305" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="330" y="241" font-size="15" text-anchor="middle">놀자</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 80H390M10 154H390M10 204H390"/>
+<text class="f-text" fill="#182f2b" x="200" y="284" font-size="12" text-anchor="middle">한 번 검증에 토큰 3개 커밋, 드래프트 "쉬자"는 폐기</text>
+</svg><figcaption>그림 19-1　추측 디코딩 한 라운드: 3개를 추측했는데 앞의 2개는 큰 모델과 같고 3번째는 달라요. 큰 모델이 3번째 자리에 낸 답 "놀자"를 덤으로 커밋하니까, 이번 라운드에서 토큰 3개를 얻어요.</figcaption></figure>
+<p>규칙은 간단해요. 왼쪽부터 비교하다가 처음 다른 곳에서 멈춰요. 그 앞에서 일치한 드래프트는 모두 <strong>수락(accept)</strong>하고, 멈춘 자리에 큰 모델이 낸 자기 답을 더해요. 그래서 드래프트를 a개 수락하면 이번 라운드에 토큰 a + 1개를 커밋해요. Strata의 생성 루프도 이렇게 세요. 윈도우 안의 드래프트와 큰 모델의 출력을 하나씩 비교한 뒤 <code>commit(a + 1)</code>을 호출해요.<span class="ev ev-code">코드 사실</span></p>
+<p>하나도 맞히지 못해도 이번 라운드에는 큰 모델 자신의 토큰이 1개 있어요. 추측하지 않을 때와 같은 양이에요. 틀리게 추측해도 답이 나빠지지 않아요. 모든 글자를 큰 모델이 최종 결정하기 때문이에요.<span class="ev ev-report">업스트림 보고</span>[S02] 틀린 추측의 대가는 딱 하나예요. 이번 라운드의 검증이 자리 몇 개를 괜히 더 계산했을 뿐이에요.</p>
+
+<h2 id="sec-2">19.2 평균 한 라운드에 몇 개: 기댓값 등장</h2>
+<p>한 라운드에 드래프트를 몇 개 수락할지는 미리 알 수 없어요. 우리가 계산할 수 있는 건 <strong>평균</strong>적으로 한 라운드에 몇 개를 얻는지, 즉 <dfn>기댓값(expected value)</dfn>이에요.</p>
+<p>i번째 드래프트의 <dfn>조건부 수락률</dfn>을 pᵢ라고 해요. 앞의 i − 1개가 모두 수락됐다는 전제에서, i번째도 수락될 확률이에요. "전제"라는 말이 중요해요. 앞에서 하나라도 거부되면 뒤의 것은 비교할 차례조차 오지 않아요.</p>
+<p>i번째 드래프트가 쓰이려면 앞의 i개가 전부 수락돼야 해요. 확률은 p₁ × p₂ × … × pᵢ예요. 자리마다 "쓰일 확률"을 더하면 한 라운드에 기댓값으로 커밋하는 토큰 수가 나와요.</p>
+<div class="equation">E = 1 + p₁ + p₁p₂ + … + p₁p₂…pₖ</div>
+<p>맨 앞의 1은 큰 모델 자신의 토큰이에요. 라운드마다 반드시 얻어요. Strata의 소스 코드도 이렇게 항마다 곱하고 항마다 더해요.<span class="ev ev-code">코드 사실</span>[S09] 모든 자리의 수락률이 p로 같다면 이 합은 등비수열의 앞 k + 1항이에요. 아래 칼럼에서 이 합이 왜 "더할수록 힘이 빠지는지" 설명해요.</p>
+<aside class="primer" id="c19-expected-value">
+<h3>기댓값과 등비급수</h3>
+<p>직관: 기댓값은 "아주 많이 되풀이한 뒤의 평균 결과"예요. 공정한 주사위를 던지면 한 번에는 1부터 6 중 아무거나 나오지만, 평균은 3.5예요. <dfn>기댓값</dfn>의 정의는 이래요. 결과마다 그 확률을 곱한 다음 전부 더해요.</p>
+<p>"한 라운드에 토큰이 몇 개 나오는가"를 계산할 때는 더 편한 방법이 있어요. 자리마다 "쓰일 확률"을 더하는 거예요. 자리 1은 반드시 쓰이니까 확률이 1이고, 자리 2가 쓰일 확률은 p, 자리 3은 p²…이에요. 그래서 E = 1 + p + p² + … + pᵏ가 돼요. 각 항이 앞 항에 같은 수를 곱한 것인 이런 합을 <dfn>등비급수</dfn>(등비수열의 합)라고 하고, 바로 쓸 수 있는 공식이 있어요. E = (1 − pᵏ⁺¹) ÷ (1 − p)예요.</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="그림 19-2: p가 0.86이고 3개를 추측할 때, 네 자리의 기대 기여는 각각 1, 0.86, 0.74, 0.64이고 합계는 약 3.24예요">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">드래프트 3개를 추측할 때 자리별 평균 기여(p = 0.86)</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="12">큰 모델 몫</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="38" width="220" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="326" y="52" font-size="12">1(필수)</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">드래프트 1</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="70" width="189.2" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="295" y="84" font-size="12">p = 0.86</text>
+<text class="f-text" fill="#182f2b" x="10" y="116" font-size="12">드래프트 2</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="102" width="162.7" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="269" y="116" font-size="12">p² ≈ 0.74</text>
+<text class="f-text" fill="#182f2b" x="10" y="148" font-size="12">드래프트 3</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="134" width="139.9" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="246" y="148" font-size="12">p³ ≈ 0.64</text>
+<text class="f-text" fill="#182f2b" x="10" y="182" font-size="12" font-weight="600">합계 E = 1 + 0.86 + 0.74 + 0.64 ≈ 3.24 토큰</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">무한히 추측해도 상한이 있어요: E → 1 ÷ (1 − p) ≈ 7.1</text>
+</svg><figcaption>그림 19-2　하나 더 추측할 때마다 그 몫에 p가 한 번 더 곱해져서, 막대가 점점 짧아져요. 3개를 추측하면 평균 3.24개를 얻고, 무한히 추측해도 7.1개를 넘지 못해요.</figcaption></figure>
+<p>그래서 더 추측해서 얻는 이득은 점점 줄어요. p = 0.86일 때 8번째 드래프트의 기여는 0.86⁸ ≈ 0.30개뿐이에요. 등비수열에는 상한도 있어요. 항 수가 무한대로 가면 합이 1 ÷ (1 − p)에 다가가요. p = 0.86이면 무한히 추측해도 한 라운드 평균은 약 7.1개에 그쳐요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EA%B8%B0%EB%8C%93%EA%B0%92" target="_blank" rel="noopener noreferrer">위키백과: 기댓값</a> · <a href="https://ko.wikipedia.org/wiki/%EB%93%B1%EB%B9%84%EC%88%98%EC%97%B4" target="_blank" rel="noopener noreferrer">위키백과: 등비수열</a> · <a href="https://en.wikipedia.org/wiki/Geometric_series" target="_blank" rel="noopener noreferrer">Wikipedia: Geometric series</a></p>
+</aside>
+<p class="bridge"><strong>CS를 배운 분께:</strong> "한 라운드에 커밋하는 토큰 수"를 확률변수 N이라고 하면, 위의 계산은 확률론의 꼬리 합 공식 E[N] = Σ P(N ≥ i)예요. 이 공식은 어떤 분포에도 성립해서, 유도할 때 자리끼리 독립이라고 가정할 필요가 없어요. 조건부 확률을 이어서 곱하기만 하면 돼요.</p>
+<p>Strata의 숫자를 넣어 볼게요. 소스 코드는 MTP의 모든 자리에 수락률 초깃값 0.86을 주고, 주석은 같은 모델에서 측정한 값이라고 해요.<span class="ev ev-code">코드 사실</span>[S09] 3개를 추측하면 E = 1 + 0.86 + 0.74 + 0.64 ≈ 3.24예요. 업스트림 문서가 보고한 실제 상황은 한 번 검증에 평균 토큰 2.4~3.2개를 커밋한다는 거예요.<span class="ev ev-report">업스트림 보고</span>[S02] 둘이 같은 크기 범위라서, 0.86이 그럴듯한 출발점이라는 걸 알 수 있어요. 실제 수락률은 글에 따라 달라지는데, 이건 19.4절에서 자세히 봐요.<span class="ev ev-est">교육용 추정</span></p>
+
+<h2 id="sec-3">19.3 장부의 나머지 절반: 윈도우가 넓을수록 검증이 비싸요</h2>
+<p>검증에 시간이 들지 않는다면 당연히 많이 추측할수록 좋아요. 하지만 검증에는 시간이 들어요. Strata의 비용 모델 <code>step_ms</code>는 한 라운드의 시간을 네 덩어리로 나눠요.<span class="ev ev-code">코드 사실</span>[S09]</p>
+<ul>
+<li><strong>밀집 부분</strong>: 어텐션처럼 토큰마다 계산해야 하는 부분이에요. 윈도우가 넓을수록 이 부분이 느려지고, 소스 코드는 윈도우 길이로 찾아보는 배율 표를 써요.</li>
+<li><strong>CPU 전문가 계산</strong>: 그래픽 카드에 캐시되지 않은 전문가는 CPU가 계산해요(10장에서 배웠어요). 윈도우 안의 토큰이 많을수록 쓰이는 <strong>서로 다른</strong> 전문가가 늘어서 CPU가 더 바빠져요.</li>
+<li><strong>동기화</strong>: 라운드마다 드는 고정 조율 비용이에요.</li>
+<li><strong>드래프트 작성</strong>: MTP 층이 드래프트를 하나 추측하는 데도 시간이 들어요.</li>
+</ul>
+<p>이 덩어리들의 기본값은 헤더 파일에 적혀 있어요. 밀집 부분 11 ms, 전문가 480개를 전부 CPU에서 계산하면 15.8 ms, VRAM 히트율 55%, 동기화 2.4 ms, MTP 드래프트 하나당 1.2 ms예요. 주석에 따르면 배율 표 같은 기본값은 9월 23일의 측정에서 왔고, 11 ms는 계획상의 목표값이라서 엔진에서는 실측값으로 바꿔야 해요.<span class="ev ev-code">코드 사실</span> 그림 19-3은 이 기본값을 공식에 넣어서, 네 덩어리가 윈도우가 넓어짐에 따라 어떻게 변하는지 보여 줘요.</p>
+<figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="그림 19-3: Strata 기본 파라미터로 보면 한 라운드 시간이 추측하지 않을 때 20.5 밀리초에서 8개를 추측할 때 92.0 밀리초로 늘어요">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">한 라운드 시간은 네 덩어리(단위 ms, 막대 길이는 비율)</text>
+<text class="f-text" fill="#182f2b" x="10" y="54" font-size="12">k = 0</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="40" width="34.7" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="90.7" y="40" width="22.4" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="113.1" y="40" width="7.6" height="20"/>
+<text class="f-text" fill="#182f2b" x="127" y="55" font-size="12">20.5</text>
+<text class="f-text" fill="#182f2b" x="10" y="94" font-size="12">k = 1</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="80" width="36.4" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="92.4" y="80" width="39.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="132.2" y="80" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="139.8" y="80" width="3.8" height="20"/>
+<text class="f-text" fill="#182f2b" x="150" y="95" font-size="12">27.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="12">k = 3</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="120" width="50.3" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="106.3" y="120" width="70.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="177.1" y="120" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="184.7" y="120" width="11.3" height="20"/>
+<text class="f-text" fill="#182f2b" x="202" y="135" font-size="12">44.4</text>
+<text class="f-text" fill="#182f2b" x="10" y="174" font-size="12">k = 8</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="160" width="114.4" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="170.4" y="160" width="137.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="308.2" y="160" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="315.8" y="160" width="30.2" height="20"/>
+<text class="f-text" fill="#182f2b" x="352" y="175" font-size="12">92.0</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="24" y="205" font-size="12">밀집 부분</text>
+<rect class="f-warn" fill="#9e5d24" x="100" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="114" y="205" font-size="12">CPU 전문가 계산</text>
+<rect class="f-muted" fill="#5c6d66" x="250" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="264" y="205" font-size="12">동기화</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="214" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="24" y="223" font-size="12">드래프트 작성</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="248" font-size="12">많이 추측할수록 CPU가 계산할 전문가가 늘지만,</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="264" font-size="12">토큰 수보다는 느리게 늘어요</text>
+</svg><figcaption>그림 19-3　윈도우가 토큰 1개에서 9개로 늘어도 한 라운드 시간은 약 4.5배로만 늘어요. 같은 윈도우 안의 토큰이 같은 전문가 묶음을 고르는 일이 많아서, 가중치를 한 번 읽으면 토큰 여러 개를 계산할 수 있기 때문이에요.<span class="ev ev-est">교육용 추정</span></figcaption></figure>
+<p>CPU 덩어리를 눈여겨보세요. 토큰 9개가 각자 서로 다른 전문가 세트를 쓴다면 CPU 일은 토큰 1개일 때의 9배여야 해요. 그런데 소스 코드의 배율 표는 5.2배까지만 가요. 주석에 따르면 이 표는 라우팅 궤적 측정에서 나왔어요.<span class="ev ev-code">코드 사실</span> 같은 윈도우 안의 토큰이 자주 같은 전문가를 고르는 건, 10장에서 말한 "인기 전문가"가 일하고 있기 때문이에요.</p>
+<p>분자와 분모가 다 있으니 목표가 분명해져요. <strong>속도 = 한 라운드에 기댓값으로 커밋하는 토큰 수 ÷ 한 라운드의 시간</strong>이에요. 컨트롤러는 k마다 이 값을 계산하고 속도가 가장 큰 k를 골라요.<span class="ev ev-code">코드 사실</span>[S09] 아래 인터랙티브 그림이 이 계산을 펼쳐 보여 줘요.</p>
+<div class="viz" data-viz="draft-window"><figure class="fig"><svg viewBox="0 0 400 276" role="img" aria-label="그림 19-4: Strata 기본 파라미터와 p 0.86에서 k가 0부터 8까지일 때의 속도. k가 3일 때 가장 빠르고 초당 약 72.8 토큰이에요">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">윈도우별 속도(token/s)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="30" font-size="12">p = 0.86, 소스 기본 비용</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="102.4" width="26" height="97.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="85" y="66" width="26" height="134"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="124" y="58.6" width="26" height="141.4"/>
+<rect class="f-accent" fill="#136d5a" x="163" y="54.4" width="26" height="145.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="61.4" width="26" height="138.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="241" y="67.2" width="26" height="132.8"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="280" y="73.8" width="26" height="126.2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="319" y="80.2" width="26" height="119.8"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="358" y="84.8" width="26" height="115.2"/>
+<text class="f-text" fill="#182f2b" x="59" y="118" font-size="12" text-anchor="middle">49</text>
+<text class="f-text" fill="#182f2b" x="98" y="61" font-size="12" text-anchor="middle">67</text>
+<text class="f-text" fill="#182f2b" x="137" y="53" font-size="12" text-anchor="middle">71</text>
+<text class="f-text" fill="#182f2b" x="176" y="49" font-size="12" font-weight="600" text-anchor="middle">73</text>
+<text class="f-text" fill="#182f2b" x="215" y="56" font-size="12" text-anchor="middle">69</text>
+<text class="f-text" fill="#182f2b" x="254" y="62" font-size="12" text-anchor="middle">66</text>
+<text class="f-text" fill="#182f2b" x="293" y="68" font-size="12" text-anchor="middle">63</text>
+<text class="f-text" fill="#182f2b" x="332" y="75" font-size="12" text-anchor="middle">60</text>
+<text class="f-text" fill="#182f2b" x="371" y="79" font-size="12" text-anchor="middle">58</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="5 4" d="M40 97.6H390"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 200H390"/>
+<text class="f-muted" fill="#5c6d66" x="59" y="216" font-size="12" text-anchor="middle">k=0</text>
+<text class="f-muted" fill="#5c6d66" x="98" y="216" font-size="12" text-anchor="middle">k=1</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="216" font-size="12" text-anchor="middle">k=2</text>
+<text class="f-text" fill="#182f2b" x="176" y="216" font-size="12" font-weight="600" text-anchor="middle">k=3</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="216" font-size="12" text-anchor="middle">k=4</text>
+<text class="f-muted" fill="#5c6d66" x="254" y="216" font-size="12" text-anchor="middle">k=5</text>
+<text class="f-muted" fill="#5c6d66" x="293" y="216" font-size="12" text-anchor="middle">k=6</text>
+<text class="f-muted" fill="#5c6d66" x="332" y="216" font-size="12" text-anchor="middle">k=7</text>
+<text class="f-muted" fill="#5c6d66" x="371" y="216" font-size="12" text-anchor="middle">k=8</text>
+<text class="f-text" fill="#182f2b" x="10" y="238" font-size="12">강조: k = 3이 가장 빠름. 72.8 token/s로,</text>
+<text class="f-text" fill="#182f2b" x="10" y="254" font-size="12">추측 안 함(48.8)의 1.49배</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="270" font-size="12">점선: 추측 안 함 × 1.05. 드래프트가 넘어야 채택돼요</text>
+</svg><figcaption>그림 19-4　속도는 먼저 오르다가 내려가요. 3개를 추측할 때 가장 빨라요. 그보다 더 가면 추가 드래프트의 기여는 점점 줄어드는데 검증은 점점 비싸져요.<span class="ev ev-est">교육용 추정</span></figcaption></figure></div>
+<p>이 그림의 숫자는 소스 기본값을 공식에 넣어 계산한 거예요. 실측이 아니에요. 추측하지 않으면 한 라운드가 20.5 ms이고 초당 토큰 48.8개예요. 3개를 추측하면 한 라운드가 44.4 ms이고 기댓값이 3.24개라서 초당 72.8개예요.<span class="ev ev-est">교육용 추정</span> 이 그림이 보여 주는 건 모양이에요. 곡선에는 꼭대기가 있고, 꼭대기의 위치는 수락률과 비용이 정해요.</p>
+<p>문턱이 하나 더 있어요. 가장 좋은 윈도우가 추측하지 않는 것보다 5% 넘게 빨라야 컨트롤러가 그 윈도우를 써요. 아니면 차라리 추측하지 않아요.<span class="ev ev-code">코드 사실</span>[S09] 헤더 주석은 이 5%를 계획에서 정한 값이라고 적어요.<span class="ev ev-code">코드 사실</span> 이렇게 하는 이유는 이래요. 수락률 추정 자체에 오차가 있어서, 1~2%만 빨라지는 "이득"은 오차가 만든 착시일 가능성이 커요.</p>
+
+<h2 id="sec-4">19.4 수락률은 변해요: 달리면서 배우기</h2>
+<p>0.86은 출발점일 뿐이에요. 코드를 쓸 때는 뒤에 올 내용을 앞 글에서 짐작하기 쉽지만, 새 시를 쓸 때는 훨씬 짐작하기 어려워요. 업스트림 문서도 같은 프롬프트에서 답이 달라지면 출력 속도가 몇 퍼센트씩 차이 날 수 있다고 해요. 수락되는 드래프트 수가 달라지기 때문이에요.<span class="ev ev-report">업스트림 보고</span>[S03] 그래서 수락률은 달리면서 추정해야 해요. Strata가 쓰는 도구는 지수 이동 평균이에요.</p>
+<aside class="primer" id="c19-ema">
+<h3>지수 이동 평균(EMA)</h3>
+<p>직관: 최근 평균 기온을 알고 싶지만 매일의 기록을 다 저장하고 싶지는 않아요. 방법은 "추정값" 하나만 기억하고, 새 기온이 올 때마다 추정값을 새 기온 쪽으로 조금 옮기는 거예요.</p>
+<div class="equation">새 추정 = 이전 추정 + α × (새 데이터 − 이전 추정)</div>
+<p>이게 <dfn>지수 이동 평균(exponential moving average)</dfn>이에요. α(0과 1 사이)는 갱신 가중치라고 해요. 펼쳐 보면 가장 최근 데이터의 가중치는 α, 그 전 데이터는 α(1 − α), 그 전은 α(1 − α)²…이에요. 오래된 데이터일수록 가중치가 작아지고 지수적으로 줄어요. 이름이 여기서 나왔어요. 수 하나만큼의 메모리가 들고, 갱신 한 번에 곱셈 한 번과 덧셈·뺄셈 두 번이면 돼요.</p>
+<p>α가 트레이드오프를 정해요. α가 크면 추정이 빨리 따라오지만 우연한 결과 한두 번에 쉽게 휘둘려요. α가 작으면 추정이 안정적이지만 상황이 바뀌어도 한참 뒤에야 반응해요. 쓸 만한 척도가 <strong>반감기</strong>예요. 오래된 데이터의 가중치가 절반으로 줄기까지 갱신이 몇 번 필요한지로, ln 0.5 ÷ ln(1 − α)와 같아요. α = 0.05이면 약 13.5번, α = 0.3이면 2번이 안 돼요.</p>
+<p>Strata의 컨트롤러가 바로 이 식으로 자리별 수락률을 갱신해요. 수락은 1, 거부는 0으로 기록해요.<span class="ev ev-code">코드 사실</span>[S09] 헤더 파일에서 α의 기본값은 0.05예요.<span class="ev ev-code">코드 사실</span></p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EC%9D%B4%EB%8F%99%ED%8F%89%EA%B7%A0" target="_blank" rel="noopener noreferrer">위키백과: 이동평균</a> · <a href="https://en.wikipedia.org/wiki/Exponential_smoothing" target="_blank" rel="noopener noreferrer">Wikipedia: Exponential smoothing</a> · <a href="https://www.rfc-editor.org/rfc/rfc6298" target="_blank" rel="noopener noreferrer">RFC 6298: TCP 재전송 타이머</a></p>
+</aside>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 《컴퓨터 네트워크》에서 TCP가 왕복 시간(RTT)을 추정할 때 쓰는 게 바로 EMA예요. SRTT ← (1 − 1/8) × SRTT + 1/8 × 새 RTT 샘플이고, RFC 6298에 나와요. 수락률을 추정하는 일과 네트워크 지연을 추정하는 일은 같은 종류의 문제예요. 데이터에 잡음이 있고, 환경이 변하고, 메모리도 아껴야 해요.</p>
+<p>장부를 적을 때 함정이 하나 있어요. 이번 라운드에 3개를 추측했는데 첫 번째가 바로 거부됐다고 해 볼게요. 2번째, 3번째 드래프트는 어떻게 적을까요? 이 드래프트들은 비교된 적이 아예 없어요. <strong>관측되지 않은</strong> 거지 "실패"가 아니에요. 통계학에서는 이렇게 "결과를 보지 못한" 경우를 <dfn>중도절단(censoring)</dfn>이라고 불러요.</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="그림 19-5: 첫 번째 드래프트가 거부된 뒤, 올바른 기록은 자리 1의 실패만 기록하고, 잘못된 기록은 검증되지 않은 자리 2와 3까지 실패로 기록해요">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">3개를 추측했는데 첫 번째가 거부되면, 뒤의 두 자리는 어떻게 기록할까요?</text>
+<text class="f-text" fill="#182f2b" x="10" y="58" font-size="13" font-weight="600">이번 라운드</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="130" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="167.5" y="49" font-size="12" text-anchor="middle">자리 1</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="66" font-size="12" font-weight="600" text-anchor="middle">거부</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="49" font-size="12" text-anchor="middle">자리 2</text>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="66" font-size="12" text-anchor="middle">비교 안 함</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="300" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="49" font-size="12" text-anchor="middle">자리 3</text>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="66" font-size="12" text-anchor="middle">비교 안 함</text>
+<text class="f-text" fill="#182f2b" x="10" y="112" font-size="13" font-weight="600">올바른 기록</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="129" font-size="12">Strata의 방식</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="120" font-size="12" text-anchor="middle">실패 기록</text>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="120" font-size="12" text-anchor="middle">기록 안 함</text>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="120" font-size="12" text-anchor="middle">기록 안 함</text>
+<text class="f-text" fill="#182f2b" x="10" y="172" font-size="13" font-weight="600">잘못된 기록</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="189" font-size="12">못 봐도 실패 처리</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="180" font-size="12" text-anchor="middle">실패 기록</text>
+<text class="f-warn" fill="#9e5d24" x="252.5" y="180" font-size="12" text-anchor="middle">실패 기록</text>
+<text class="f-warn" fill="#9e5d24" x="337.5" y="180" font-size="12" text-anchor="middle">실패 기록</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 88H390M10 146H390M10 204H390"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="226" font-size="12">잘못 기록하면 p₃ 추정이 0.86³ ≈ 0.64로 미끄러져요.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="244" font-size="12">실제 값은 0.86인데도요</text>
+</svg><figcaption>그림 19-5　실제로 비교된 자리에만 기록해요. "보지 못함"을 "실패"로 적으면 뒤쪽 자리일수록 더 심하게 억울한 누명을 쓰고, 컨트롤러는 긴 윈도우가 이득이 아니라고 착각해요.</figcaption></figure>
+<p>Strata의 <code>observe</code>는 수락된 자리들과 처음 거부된 자리 하나만 갱신해요. 그 뒤의 자리는 전부 그대로 둬요.<span class="ev ev-code">코드 사실</span>[S09] 반대 방향의 경우도 있어요. 한 라운드에 추측한 것이 전부 수락되면, 윈도우 밖의 자리는 시험해 본 적이 없어요. 이 자리들을 영영 갱신하지 않으면 윈도우가 다시는 커지지 못해요. 소스 코드의 해법은 이 자리들의 추정값을 "관측된 가장 깊은 자리"의 추정값 쪽으로 조금 옮기는 거예요.<span class="ev ev-code">코드 사실</span>[S09]</p>
+<p>아래 트래커로 두 가지를 직접 느껴 보세요. α의 트레이드오프와, 기록 방식의 영향이에요.</p>
+<div class="viz" data-viz="draft-ema"><figure class="fig"><svg viewBox="0 0 400 258" role="img" aria-label="그림 19-6: 실제 수락률이 150번째 라운드에서 0.86에서 0.55로 떨어져요. α 0.05의 추정은 매끄럽지만 느리고, α 0.3의 추정은 빠르게 따라가지만 들쭉날쭉해요">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">수락률이 0.86에서 0.55로 떨어질 때 두 α의 추정</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="44" font-size="12" text-anchor="end">1.0</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="119" font-size="12" text-anchor="end">0.5</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="194" font-size="12" text-anchor="end">0</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width=".6" d="M40 40H380M40 115H380M40 190H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="2 3" d="M210 30V190"/>
+<text class="f-muted" fill="#5c6d66" x="214" y="36" font-size="12">주제 전환</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40.0 61.0L43.4 47.2L46.8 42.5L50.2 40.8L53.6 40.3L57.0 62.1L60.4 47.6L63.8 87.6L67.2 101.3L70.6 92.5L74.0 111.6L77.4 86.6L80.8 56.0L84.2 45.5L87.6 73.4L91.0 51.4L94.4 75.4L97.8 52.2L101.2 44.2L104.6 117.9L108.0 66.7L111.4 49.2L114.8 88.1L118.2 56.5L121.6 45.7L125.0 41.9L128.4 85.7L131.8 55.7L135.2 45.4L138.6 41.8L142.0 72.1L145.4 51.0L148.8 120.3L152.2 112.5L155.6 64.9L159.0 48.5L162.4 42.9L165.8 41.0L169.2 62.4L172.6 92.7L176.0 89.6L179.4 57.0L182.8 45.8L186.2 64.1L189.6 48.2L193.0 42.8L196.4 41.0L199.8 40.3L203.2 40.1L206.6 40.0L210.0 62.1L213.4 124.1L216.8 167.4L220.2 160.2L223.6 179.8L227.0 186.5L230.4 143.8L233.8 75.6L237.2 128.7L240.6 101.9L244.0 83.3L247.4 86.3L250.8 87.4L254.2 56.3L257.6 90.6L261.0 155.9L264.4 79.8L267.8 53.6L271.2 111.7L274.6 131.7L278.0 170.0L281.4 106.6L284.8 94.4L288.2 80.7L291.6 130.5L295.0 124.6L298.4 136.1L301.8 104.4L305.2 93.6L308.6 156.9L312.0 133.7L315.4 139.2L318.8 105.5L322.2 107.5L325.6 116.7L329.0 66.3L332.4 80.5L335.8 98.9L339.2 82.3L342.6 131.0L346.0 124.8L349.4 145.6L352.8 121.2L356.2 99.4L359.6 127.4L363.0 101.5L366.4 114.6L369.8 132.7L373.2 148.3L376.6 130.7L380.0 71.1"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M40.0 61.0L43.4 58.0L46.8 55.4L50.2 53.2L53.6 51.3L57.0 56.5L60.4 54.1L63.8 59.6L67.2 64.3L70.6 68.0L74.0 77.9L77.4 79.3L80.8 73.7L84.2 68.9L87.6 71.9L91.0 67.3L94.4 70.5L97.8 66.2L101.2 62.5L104.6 73.9L108.0 69.0L111.4 64.9L114.8 68.9L118.2 64.7L121.6 61.2L125.0 58.2L128.4 63.1L131.8 59.8L135.2 57.0L138.6 54.6L142.0 59.6L145.4 56.8L148.8 69.0L152.2 72.4L155.6 67.8L159.0 63.8L162.4 60.4L165.8 57.5L169.2 61.8L172.6 66.2L176.0 69.6L179.4 65.3L182.8 61.7L186.2 65.4L189.6 61.8L193.0 58.7L196.4 56.0L199.8 53.7L203.2 51.8L206.6 50.1L210.0 55.4L213.4 67.8L216.8 85.3L220.2 93.4L223.6 107.2L227.0 119.0L230.4 121.6L233.8 110.0L237.2 114.6L240.6 111.1L244.0 107.7L247.4 105.2L250.8 103.0L254.2 94.0L257.6 93.8L261.0 107.5L264.4 97.9L267.8 89.7L271.2 96.8L274.6 103.0L278.0 115.4L281.4 111.4L284.8 108.4L288.2 105.4L291.6 110.7L295.0 114.5L298.4 118.1L301.8 114.1L305.2 110.7L308.6 122.0L312.0 124.2L315.4 126.4L318.8 121.2L322.2 117.2L325.6 120.0L329.0 108.6L332.4 106.0L335.8 104.1L339.2 101.7L342.6 107.5L346.0 111.8L349.4 116.2L352.8 112.8L356.2 109.5L359.6 113.9L363.0 110.5L366.4 114.3L369.8 118.0L373.2 121.5L376.6 123.8L380.0 111.8"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="6 4" d="M40 61H210V107.5H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M10 210H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="214" font-size="12">굵은 선: α = 0.05. 매끄럽지만 느려요</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M10 230H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="234" font-size="12">가는 선: α = 0.3. 빠르지만 들쭉날쭉</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="6 4" d="M10 250H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="254" font-size="12">점선: 실제 수락률(컨트롤러는 못 봐요)</text>
+</svg><figcaption>그림 19-6　가로축은 라운드 수(모두 300라운드)이고, 세로축은 첫 번째 드래프트의 수락률 추정이에요. α가 작으면 추정이 안정적이지만 반 박자 느려요. α가 크면 반응은 빠르지만 잡음에 끌려다녀요. 수락 여부는 시뮬레이션한 난수예요.<span class="ev ev-est">교육용 추정</span></figcaption></figure></div>
+<p>뒤쪽 자리일수록 비교될 기회가 적어요. 3번째 드래프트는 앞의 둘이 모두 수락됐을 때만 기록할 기회가 한 번 생겨요. 그래서 깊은 자리의 추정은 얕은 자리보다 느리게 갱신돼요. 트래커에서 주제를 바꾼 뒤 p₃ 곡선이 p₁보다 눈에 띄게 둔한 이유가 여기에 있어요.<span class="ev ev-est">교육용 추정</span></p>
+
+<h2 id="sec-5">19.5 Strata가 실제로 돌리는 건 어느 쪽일까</h2>
+<p>여기까지 설명한 컨트롤러는 <code>src/spec/controller.cpp</code>에 있어요. <code>strata_spec</code> 라이브러리로 컴파일되고, 자체 단위 테스트 <code>controller_test</code>도 있어요.<span class="ev ev-code">코드 사실</span> 그런데 생성 메인 프로그램 <code>generate.cpp</code>(실행 파일 <code>strata</code>의 소스예요)를 열어 보면, 불러오는 건 다른 헤더 파일 <code>draft_policy.hpp</code>이고, 생성 루프가 호출하는 것도 <code>DraftPolicy</code>예요. 이 책이 검사한 엔진 소스에서는 <code>Controller</code>를 호출하는 곳을 찾지 못했어요.<span class="ev ev-code">코드 사실</span> 그림 19-7은 둘을 나란히 놓아요.</p>
+<figure class="fig"><svg viewBox="0 0 400 268" role="img" aria-label="그림 19-7: Controller는 공식 모델로 비용을 추정해 MTP 윈도우를 정하지만 단위 테스트에서만 호출돼요. DraftPolicy는 실측 시간을 쓰고, 룩업 드래프트로 바꿀지만 정하며, 생성 메인 루프가 호출해요">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="185" height="200" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="32" font-size="13" font-weight="600">Controller</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="50" font-size="12">src/spec/controller.cpp</text>
+<text class="f-text" fill="#182f2b" x="22" y="76" font-size="12">MTP 추측 개수를 결정</text>
+<text class="f-text" fill="#182f2b" x="22" y="100" font-size="12">룩업 드래프트도 비교</text>
+<text class="f-text" fill="#182f2b" x="22" y="124" font-size="12">비용: 공식 모델</text>
+<text class="f-text" fill="#182f2b" x="22" y="148" font-size="12">수락률: EMA, α = 0.05</text>
+<text class="f-text" fill="#182f2b" x="22" y="172" font-size="12">문턱: 5% 빨라야 추측</text>
+<text class="f-warn" fill="#9e5d24" x="22" y="196" font-size="12">호출자: 단위 테스트</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="10" width="185" height="200" rx="8"/>
+<text class="f-text" fill="#182f2b" x="217" y="32" font-size="13" font-weight="600">DraftPolicy</text>
+<text class="f-muted" fill="#5c6d66" x="217" y="50" font-size="12">src/spec/draft_policy.cpp</text>
+<text class="f-text" fill="#182f2b" x="217" y="76" font-size="12">MTP 윈도우: --spec</text>
+<text class="f-text" fill="#182f2b" x="217" y="100" font-size="12">룩업 교체 여부만 결정</text>
+<text class="f-text" fill="#182f2b" x="217" y="124" font-size="12">비용: 실측 라운드 시간</text>
+<text class="f-text" fill="#182f2b" x="217" y="148" font-size="12">MTP 산출: 실측 평균</text>
+<text class="f-text" fill="#182f2b" x="217" y="172" font-size="12">문턱: 3% 빨라야 교체</text>
+<text class="f-text" fill="#182f2b" x="217" y="196" font-size="12" font-weight="600">호출자: 생성 메인 루프</text>
+<text class="f-text" fill="#182f2b" x="200" y="236" font-size="12" text-anchor="middle">둘의 목표는 같아요: 1밀리초당 기대 커밋 토큰 수</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="256" font-size="12" text-anchor="middle">차이는 분모예요: 하나는 공식으로, 하나는 초시계로 재요</text>
+</svg><figcaption>그림 19-7　같은 목표 함수, 두 가지 구현이에요. 실제로 생성 루프에서 결정을 내리는 건 오른쪽이에요. 비용을 공식으로 짐작하지 않고, 윈도우 종류마다 실제로 얼마나 걸렸는지 기록해요.</figcaption></figure>
+<p>먼저 MTP 쪽이에요. 생성 루프에서 MTP의 윈도우 길이는 시작 인자 <code>--spec</code>에서 오고, 첫 라운드를 빼면 라운드마다 고정돼요. <code>--spec-min-p</code>를 설정했을 때만 짧아져요. 드래프트 층이 어떤 드래프트에 갖는 확신이 이 문턱보다 낮으면 그 드래프트를 윈도우에 더 넣지 않아요.<span class="ev ev-code">코드 사실</span> 업스트림 문서는 MTP가 한 번에 최대 3개를 추측한다고 해요.<span class="ev ev-report">업스트림 보고</span>[S02]</p>
+<p><code>DraftPolicy</code>가 맡는 건 다른 일, <dfn>프롬프트 룩업(prompt lookup)</dfn>이에요. 지금 쓰는 내용이 컨텍스트의 어느 부분을 반복한다면(예를 들어 코드를 고치면서 원래 있던 몇 줄을 그대로 베낄 때) 지난번에 그 부분 뒤에 뭐가 왔는지 이번에도 대체로 같을 테니, 그걸 바로 드래프트로 써요. 룩업 드래프트는 최대 5개이고, 실측한 수락률과 비용이 모두 이득이라고 할 때만 써요. 업스트림 보고의 효과는 코드 수정에서 6~11% 빨라지고 일반 텍스트에서는 변화 없음이에요.<span class="ev ev-report">업스트림 보고</span>[S02] 생성 루프에는 전제도 하나 있어요. MTP를 켰을 때는 룩업 드래프트의 첫 토큰이 MTP 자신의 첫 드래프트와 같아야 <code>DraftPolicy</code>의 판단을 받아요.<span class="ev ev-code">코드 사실</span></p>
+<p><code>DraftPolicy</code>의 알고리즘도 이 장의 공식이에요. 룩업 쪽은 E(k) = 1 + q + q² + … + qᵏ이고, q는 "얼마나 길게 일치했는가"별로 나눈 구간마다 통계낸 수락률이에요. MTP 쪽은 실측한 라운드당 평균 산출을 바로 써요. 분모는 더 이상 공식이 아니라 윈도우 길이마다 실측한 라운드당 시간이고, α = 0.1인 EMA로 매끄럽게 만들어요. 측정해 보지 않은 길이는 미리 정해 둔 모양 곡선으로 측정해 본 길이에서 환산해요. 룩업 윈도우는 MTP 윈도우보다 3% 넘게 빨라야 선택돼요.<span class="ev ev-code">코드 사실</span></p>
+<p>좋은 엔지니어링 교훈이에요. 비용 모델을 아무리 정교하게 써도 직접 재는 것만 못해요. 기계가 다르고 컨텍스트 길이가 다르면 라운드마다의 시간이 달라져요. 실측값은 자연히 기계를 따라가요.</p>
+
+<h2 id="sec-6">19.6 직접 해 보기: 최적 윈도우 직접 찾기</h2>
+<p>이 장의 인터랙티브 실험 「드래프트를 얼마나 길게 추측할까」를 열어 보세요. 더 단순한 비용식을 써요. 기준 시간에 드래프트마다 고정된 검증·작성 비용을 더하고, 자리마다 같은 수락률 p를 써서 k = 0부터 5까지의 기대 토큰 수, 시간, 순이득을 비교해요.</p>
+<ol>
+<li>p를 0으로 해 보세요. 모든 k의 기댓값이 1이고, 드래프트는 시간만 늘려요. 최적 답은 k = 0이어야 해요.</li>
+<li>p를 1로 해 보세요. 기댓값이 정확히 k + 1이에요. 이때 가장 긴 윈도우가 늘 이기는지 확인해 보세요.</li>
+<li>p는 그대로 두고 드래프트 비용을 키워 보세요. 최적 k가 0으로 물러나는 지점을 찾아 보세요.</li>
+</ol>
+<p>다 하고 나서 이 장의 인터랙티브 그림 두 개와 비교해 보세요. 실험의 비용은 직선이에요. Strata의 비용 모델에서는 전문가 공유 덕분에 CPU 덩어리가 직선보다 느리게 늘고, 밀집 부분의 배율은 윈도우가 토큰 5개가 되는 지점에서 한 단계 크게 뛰어요. 비용 곡선의 모양이 다르면 꼭대기의 위치도 옮겨 가요.</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>한 라운드의 기대 커밋 수는 E = 1 + p₁ + p₁p₂ + …예요. 하나 더 추측할 때마다 그 몫에 수락률이 한 번 더 곱해져서 이득이 줄어요. p = 0.86이면 무한히 추측해도 7.1개를 넘지 못해요.</li>
+<li>최적화할 대상은 속도 = E ÷ 한 라운드의 시간이에요. 윈도우가 넓을수록 검증이 비싸서 속도 곡선에 꼭대기가 생겨요. 추측하지 않는 것보다 어느 정도 더 빨라야 추측할 가치가 있어요.</li>
+<li>수락률은 달리면서 추정해야 하고, EMA를 써요. α가 크면 반응이 빠르지만 흔들리고, 작으면 안정적이지만 느려요. 비교되지 않은 자리는 "보지 못한" 것이라서 실패로 기록하면 안 돼요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: "수락률이 높을수록 속도는 반드시 더 빨라요."</strong></p>
+<p>수락률은 분자의 일부일 뿐이에요. 더 똑똑하지만 더 느린 드래프트 방법으로 바꿨더니, 라운드당 기댓값은 2개에서 2.5개로 늘었는데 라운드당 시간이 10 ms에서 15 ms로 늘었다고 해 볼게요. 속도는 초당 200개에서 약 167개로 떨어져요.<span class="ev ev-est">교육용 추정</span> 드래프트 방법이 좋은지는 1밀리초에 토큰을 몇 개 커밋하는지로 판단해야 해요. 얼마나 맞혔는지만 봐서는 안 돼요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 조건부 확률, 중도절단, 탐색과 검수 기준</summary>
+<h3>기댓값 공식에는 독립 가정이 필요 없어요</h3>
+<p>pᵢ는 "앞의 i − 1개가 모두 수락됐을 때 i번째도 수락될 조건부 확률"로 정의해요. i번째 드래프트가 기여하려면 앞의 i개가 모두 수락돼야 하고, 그 확률은 조건부 확률의 곱셈 공식에서 바로 p₁p₂…pᵢ로 나와요. 자리끼리 독립이라고 주장할 필요가 없어요. 예를 들어 p = [0.8, 0.6, 0.5]이면 E = 1 + 0.8 + 0.48 + 0.24 = 2.52예요. 드래프트 작성과 검증을 합친 한 라운드가 18 ms이면 속도는 약 140 token/s예요. 추측하지 않으면 한 라운드가 8 ms이고 속도는 125 token/s여서, 순이득은 약 12%예요. 이건 교육용 예제이고 Strata의 벤치마크 점수가 아니에요.<span class="ev ev-est">교육용 추정</span></p>
+<p>소스 코드의 <code>expected</code>에는 쓰임새가 두 가지 있어요. MTP는 자리별 배열을 쓰고, 룩업 드래프트는 모든 자리에 같은 q를 써서 등비수열이 돼요.<span class="ev ev-code">코드 사실</span>[S09]</p>
+<h3>비용 모델 항목별로</h3>
+<p><code>step_ms(k)</code>에서 n = k + 1이고, 1에서 K_MAX + 1 사이로 잘라요. 밀집 부분 = <code>dense_ms × dense_ratio[n−1]</code>이에요. CPU 부분 = (1 − 히트율) × <code>cpu_all_miss_ms</code> × U × (1 + <code>extra_use_cost</code> × (n ÷ U − 1))이고, U는 윈도우 안의 서로 다른 전문가 수가 토큰 하나일 때의 몇 배인지를 나타내요. n ÷ U는 전문가 하나를 평균 몇 개 토큰이 쓰는지예요. 드래프트 작성 부분 = k × 드래프트 하나당 시간이에요.<span class="ev ev-code">코드 사실</span>[S09] 헤더 파일의 기본값은 이래요. K_MAX = 8이고, <code>extra_use_cost</code> = 0.25예요. 같은 전문가를 토큰이 하나 더 쓸 때마다 읽기 비용의 25%만 더 든다는 뜻이에요. 룩업 드래프트는 하나에 0.01 ms라서 거의 공짜예요.<span class="ev ev-code">코드 사실</span></p>
+<p>"가중치를 한 번만 읽는다"는 이상적인 경우를 모든 드래프트에 무조건 적용하면 이득을 과대평가하고, 전문가 재사용을 전혀 고려하지 않으면 과소평가해요. U의 구체적인 값은 라우팅에 따라 달라서 직접 재야 해요.</p>
+<h3>사전 값은 물리 상수가 아니에요</h3>
+<p>MTP의 초기 수락률 0.86과, 룩업 드래프트의 일치 길이별 구간 사전 값 {0.35, 0.6, 0.8, 0.92}는 둘 다 출발점일 뿐이에요. 주석에 따르면 앞의 것은 같은 모델에서 잰 값이고, 뒤의 것은 오프라인 재생에서 나왔어요. 둘 다 이후에는 세션마다 학습해요.<span class="ev ev-code">코드 사실</span>[S09] 언어, 양자화, 작업이 바뀌면 드래프트 품질과 전문가 재사용도 달라져요. <code>DraftPolicy</code>의 룩업 사전 값은 별도의 세트예요. {0.75, 0.88, 0.93, 0.96}이고, 사전 값 하나가 관측 4번에 해당해서 실제 데이터 몇 라운드면 덮어쓸 수 있어요. 오래된 관측은 라운드마다 0.97을 곱해 감쇠해요.<span class="ev ev-code">코드 사실</span></p>
+<h3>중도절단, 윈도우 밖의 자리, 그리고 "탐색"</h3>
+<p>첫 드래프트가 거부되면 뒤의 자리들은 "앞부분이 모두 수락됐다"는 조건에 있지 않으니 미관측이에요. 이걸 0으로 기록하면 스스로를 강화하는 고리가 생겨요. 윈도우가 짧을수록 깊은 자리가 더 나빠 보이고, 컨트롤러는 긴 윈도우를 더 시도하기 싫어져요. 전부 수락된 경우는 반대예요. 윈도우 밖의 자리는 한 번도 시험된 적이 없는데, 소스 코드는 이 자리들을 관측된 가장 깊은 자리의 추정값 쪽으로 끌어당겨요. 그러지 않으면 윈도우가 영영 커지지 못해요.<span class="ev ev-code">코드 사실</span>[S09]</p>
+<p><code>Controller</code>의 두 함수만 보면 주의할 경계가 하나 더 있어요. "추측 안 함"을 고르고 나면 <code>observe</code>가 바로 반환해서 추정이 더는 갱신되지 않아요.<span class="ev ev-code">코드 사실</span>[S09] 잡음이 추정을 한 번 문턱 아래로 눌러 버리면, 이 두 함수만으로는 다시는 배울 수 없어서 호출하는 쪽이 따로 탐색해야 해요. (이 장의 모듈에는 이를 보여 주는 테스트가 따로 있어요.) <code>DraftPolicy</code>에는 명시적인 탐색이 있어요. 소요 시간을 재 본 적 없는 룩업 윈도우는 수락률 추정이 0.85 이상이기만 하면 처음 3번을 바로 시험해 봐요. 주석에 따르면 검증이 출력이 변하지 않음을 보장하니, 거는 건 이번 라운드의 속도뿐이에요.<span class="ev ev-code">코드 사실</span></p>
+<h3>드래프트 때문에 출력이 변할까요</h3>
+<p>원리상 변하지 않아요. 커밋되는 모든 토큰은 큰 모델 자신의 선택이니까요. 하지만 업스트림 문서는 부동소수점 수준의 예외를 하나 짚어요. IQ 양자화 모델을 쓸 때 CPU가 토큰 하나의 전문가를 계산할 때와 토큰 여러 개의 전문가를 계산할 때 다른 커널을 쓰고, 반올림이 약간 달라요. 한 전문가를 몇 개 토큰이 공유하는지는 검증 윈도우의 드래프트에 따라 달라지고요. 그래서 온도가 0이어도 같은 프롬프트가 똑같이 그럴듯한 다른 답을 낼 수 있어요. <code>STRATA_IQ_MT_MIN=1</code>로 설정하면 모든 그룹이 다중 토큰 커널을 써서, 답이 더는 드래프트에 달려 있지 않아요.<span class="ev ev-report">업스트림 보고</span>[S03]</p>
+<h3>검수 기준</h3>
+<p>윈도우 컨트롤러를 검증할 때는 예쁜 곡선보다 경계가 더 설득력 있어요.</p>
+<ul>
+<li>드래프트 비용이 아주 높으면 k = 0으로 물러날 수 있어요.</li>
+<li>p = 0이면 추가 드래프트가 가짜 이득을 만들지 않아요.</li>
+<li>p = 1이면 E가 정확히 k + 1이에요.</li>
+<li>미관측 자리는 실패로 세지 않아요. 전부 수락되면 윈도우 밖의 자리를 끌어올릴 수 있어요.</li>
+<li>추측 안 함보다 문턱만큼 빠르지 않으면 계속 추측하지 않아요.</li>
+</ul>
+<p>이 장의 인터랙티브 그림의 계산 모듈은 이 경계에 맞춰 테스트를 썼고, 비용 함수도 소스 기본값과 항목별로 대조했어요. 업스트림의 <code>controller_test</code>가 검사하는 것도 같은 종류의 성질이에요. 사전 값에서 드래프트 2~5개를 고르고, 계속 거부되면 추측을 끄고, 계속 전부 맞히면 윈도우가 넓어져요.<span class="ev ev-code">코드 사실</span></p>
+</details>

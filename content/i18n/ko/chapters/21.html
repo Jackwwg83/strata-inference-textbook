@@ -1,0 +1,296 @@
+<div class="hook"><span class="eyebrow">카드가 두 장인데 왜 두 배가 아닐까</span>
+<p>Strata의 README에는 이런 문장이 있어요. GPU(그래픽 카드) 두세 장이 함께 이 모델을 돌릴 수 있다는 거예요.<span class="ev ev-report">업스트림 보고</span>[S01] 업스트림 문서에는 실측 결과도 있어요. RTX 5080에 RTX 3090을 더하면 긴 프롬프트를 읽는 속도는 약 2할 빨라져요. 그런데 답을 생성하는 속도는 5080 한 장일 때와 거의 비슷해요.</p>
+<p>24 GB짜리 카드를 한 장 더 꽂았는데 답은 빨라지지 않았어요. 돈은 어디로 갔을까요? 이 장에서는 세 가지를 살펴봐요. 두 카드가 일을 어떻게 나누는지, 토큰 하나가 왜 빨라지지 않는지, 두 카드 사이에 실제로 얼마나 많은 데이터가 오가는지예요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> Strata는 48개 층을 앞뒤 두 구간으로 잘라서 카드마다 한 구간씩 맡겨요. 토큰 하나는 여전히 앞 카드를 먼저 지나고 뒤 카드를 지나야 하니까 토큰 하나는 빨라지지 않아요. 진짜 이득은 두 가지예요. 전문가를 두 배 더 캐시할 수 있고, 프롬프트를 읽을 때 두 카드가 파이프라인처럼 동시에 일해요.</p>
+
+<h2 id="sec-1">21.1 카드 두 장이 일을 나누는 방법</h2>
+<p>두 사람이 이사한다고 생각해 보세요. 한 사람은 침실, 한 사람은 거실을 옮길 수 있어요. 둘이 큰 소파 하나를 같이 들 수도 있고, 각자 자기 집을 옮길 수도 있어요. 세 방법 모두 "둘이 함께 한다"고 말하지만, 서로 상의해야 하는 횟수는 완전히 달라요. GPU 여러 장도 마찬가지예요. 흔한 분담 방식은 세 가지이고, 그림 21-1에 있어요.</p>
+<figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="그림 21-1: 멀티 GPU의 세 가지 분담 방식. 레이어 분할은 카드마다 몇 개 층을 맡고, 텐서 병렬은 같은 층을 쪼개서 계산하고, 요청 병렬은 카드마다 모델 한 벌씩 가져요">
+<text class="f-text" fill="#182f2b" x="69" y="18" font-size="13" font-weight="600" text-anchor="middle">레이어 분할</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="35" font-size="12" text-anchor="middle">파이프라인 병렬</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">텐서 병렬</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="35" font-size="12" text-anchor="middle">한 층을 쪼개 계산</text>
+<text class="f-text" fill="#182f2b" x="331" y="18" font-size="13" font-weight="600" text-anchor="middle">요청 병렬</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="35" font-size="12" text-anchor="middle">데이터 병렬</text>
+<rect class="f-accent" fill="#136d5a" x="14" y="50" width="110" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="69" y="66" font-size="12" text-anchor="middle">GPU A</text>
+<text class="f-on" fill="#ffffff" x="69" y="82" font-size="12" text-anchor="middle">0–18층</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M69 90V104"/>
+<rect class="f-soft" fill="#e5f1df" x="14" y="106" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="69" y="122" font-size="12" text-anchor="middle">GPU B</text>
+<text class="f-text" fill="#182f2b" x="69" y="138" font-size="12" text-anchor="middle">19–47층</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="50" width="110" height="96" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="66" font-size="12" text-anchor="middle">같은 층의 행렬</text>
+<rect class="f-accent" fill="#136d5a" x="151" y="74" width="47" height="64" rx="4"/>
+<text class="f-on" fill="#ffffff" x="174.5" y="94" font-size="12" text-anchor="middle">A</text>
+<text class="f-on" fill="#ffffff" x="174.5" y="110" font-size="12" text-anchor="middle">왼쪽</text>
+<text class="f-on" fill="#ffffff" x="174.5" y="126" font-size="12" text-anchor="middle">계산</text>
+<rect class="f-soft" fill="#e5f1df" x="202" y="74" width="47" height="64" rx="4"/>
+<text class="f-text" fill="#182f2b" x="225.5" y="94" font-size="12" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="225.5" y="110" font-size="12" text-anchor="middle">오른쪽</text>
+<text class="f-text" fill="#182f2b" x="225.5" y="126" font-size="12" text-anchor="middle">계산</text>
+<rect class="f-accent" fill="#136d5a" x="276" y="50" width="110" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="331" y="66" font-size="12" text-anchor="middle">GPU A</text>
+<text class="f-on" fill="#ffffff" x="331" y="82" font-size="12" text-anchor="middle">전체 모델 · 요청 1</text>
+<rect class="f-soft" fill="#e5f1df" x="276" y="106" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="331" y="122" font-size="12" text-anchor="middle">GPU B</text>
+<text class="f-text" fill="#182f2b" x="331" y="138" font-size="12" text-anchor="middle">전체 모델 · 요청 2</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M134.5 8V238M265.5 8V238"/>
+<text class="f-text" fill="#182f2b" x="69" y="166" font-size="12" text-anchor="middle">카드 간 통신:</text>
+<text class="f-text" fill="#182f2b" x="69" y="182" font-size="12" text-anchor="middle">윈도우당 1회</text>
+<text class="f-text" fill="#182f2b" x="200" y="166" font-size="12" text-anchor="middle">카드 간 통신:</text>
+<text class="f-text" fill="#182f2b" x="200" y="182" font-size="12" text-anchor="middle">층마다 2회</text>
+<text class="f-text" fill="#182f2b" x="331" y="166" font-size="12" text-anchor="middle">카드 간 통신:</text>
+<text class="f-text" fill="#182f2b" x="331" y="182" font-size="12" text-anchor="middle">거의 필요 없음</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="200" font-size="12" text-anchor="middle">아끼는 건 VRAM</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="200" font-size="12" text-anchor="middle">빠른 연결이 있어야</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="216" font-size="12" text-anchor="middle">이득이에요</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="200" font-size="12" text-anchor="middle">여러 명이 동시에</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="216" font-size="12" text-anchor="middle">쓸 때 알맞아요</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="232" font-size="12" text-anchor="middle">Strata가 쓰는 방식</text>
+</svg><figcaption>그림 21-1　세 방식의 차이는 "얼마나 자주 상의하는가"예요. 레이어 분할은 검증 윈도우마다 카드 사이를 한 번만 건너요. 텐서 병렬은 층마다 동기화해요. 요청 병렬은 거의 대화할 필요가 없지만, 카드마다 모델 전체가 들어가야 해요.</figcaption></figure>
+<p>Strata는 첫 번째 방식을 써요. <dfn>레이어 분할(layer split)</dfn>은 모델의 층을 순서대로 몇 구간으로 잘라서, 카드마다 이어진 한 구간을 맡기는 방식이에요. 업스트림 문서가 아주 직설적으로 말해요. 이건 (층 단위) 파이프라인 병렬이지 텐서 병렬이 아니에요. 토큰 하나는 검증 윈도우마다 한 카드에서 다음 카드로 한 번 넘어가요. 층마다 두 번씩 건너는 게 아니에요.<span class="ev ev-report">업스트림 보고</span></p>
+<p>코드에서는 <code>set_stage</code>라는 함수가 이 일을 맡아요. 각 <dfn>스테이지(stage)</dfn>, 즉 카드 한 장 위의 층 구간은 <code>[layer_begin, layer_end)</code> 범위의 층만 실행해요. 0번 층에서 시작하지 않는 스테이지는 앞 구간에서 데이터를 받아요. 마지막 층에서 끝나지 않는 스테이지는 데이터를 넘겨주고, 출력 헤드도 갖지 않아요.<span class="ev ev-code">코드 사실</span>[S08]</p>
+<aside class="primer" id="c21-parallelism">
+<h3>파이프라인 병렬과 텐서 병렬</h3>
+<p>큰 모델이 카드 한 장에 안 들어갈 때 기본 자르기 방법은 두 가지예요. 가로로 자르는 건 층 단위로 구간을 나누는 방식이고, <dfn>파이프라인 병렬</dfn>이라고 해요. 공장 조립 라인처럼 첫 공정이 끝나면 둘째 공정으로 넘겨요. 세로로 자르는 건 같은 층의 큰 행렬을 몇 조각으로 나누는 방식이고, <dfn>텐서 병렬</dfn>이라고 해요. 둘이 소파를 같이 드는 것과 같아서, 매 걸음마다 "하나, 둘, 셋" 하고 호흡을 맞춰야 해요.</p>
+<p>두 방식은 비용이 드는 자리가 달라요. 파이프라인은 구간과 구간 사이의 경계에서만 데이터를 한 번 넘겨요. 하지만 데이터 한 덩어리는 앞 구간을 끝까지 지나야 다음 구간에 들어갈 수 있어서, 덩어리 하나가 기다리는 시간은 줄일 수 없어요. 텐서 병렬은 같은 층을 정말로 두 카드가 동시에 계산해요. 하지만 층을 계산할 때마다 두 반쪽 결과를 합쳐야 해요. 고전적인 Megatron-LM 방식에서는 Transformer 한 층의 순전파마다 이런 합치기가 두 번 필요해요. 48개 층이면 96번이에요.</p>
+<p>세 번째는 <dfn>데이터 병렬</dfn>(여기서는 요청 병렬)이에요. 카드마다 모델을 한 벌씩 두고 서로 다른 요청을 처리해요. 카드 사이에서 거의 소통할 필요가 없어요. 단, 카드 한 장에 모델 전체가 들어간다는 전제가 필요해요.</p>
+<p>Strata가 마주한 문제는 "카드 한 장에 안 들어간다"예요. 그리고 가정용 컴퓨터의 GPU끼리는 보통 PCIe로만 이어져 있고, 전용 고속 선은 없어요. 그래서 소통이 가장 적은 레이어 분할을 골랐어요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%ED%8C%8C%EC%9D%B4%ED%94%84%EB%9D%BC%EC%9D%B8_%28%EC%BB%B4%ED%93%A8%ED%8C%85%29" target="_blank" rel="noopener noreferrer">위키백과: 파이프라인(컴퓨팅)</a> · <a href="https://ko.wikipedia.org/wiki/%EB%B3%91%EB%A0%AC_%EC%BB%B4%ED%93%A8%ED%8C%85" target="_blank" rel="noopener noreferrer">위키백과: 병렬 컴퓨팅</a> · <a href="https://pytorch.org/docs/stable/distributed.pipelining.html" target="_blank" rel="noopener noreferrer">PyTorch 문서: Pipeline Parallelism</a> · <a href="https://huggingface.co/docs/transformers/perf_train_gpu_many" target="_blank" rel="noopener noreferrer">Hugging Face: 멀티 GPU 병렬 방식 비교</a> · <a href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener noreferrer">Megatron-LM 논문</a></p>
+</aside>
+
+<h2 id="sec-2">21.2 토큰 하나는 여전히 층을 하나씩 줄 서서 지나가요</h2>
+<p>답을 생성할 때 토큰마다 0번 층에서 47번 층까지 가야 해요. 19번 층은 18번 층의 결과를 써야 하고, 18번 층은 17번 층의 결과를 써야 해요. 이 의존 사슬은 끊을 수 없어요. 그래서 앞 카드가 앞 구간을 계산하는 동안 뒤 카드는 기다릴 수밖에 없고, 뒤 카드가 뒤 구간을 계산하는 동안 앞 카드는 놀아요. 그림 21-2를 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 204" role="img" aria-label="그림 21-2: 토큰 하나를 생성할 때 GPU A가 앞 구간 층을 다 계산하고 GPU B에 넘기면 GPU B가 뒤 구간을 계산해요. 두 카드가 번갈아 일하고 번갈아 기다려요">
+<text class="f-muted" fill="#5c6d66" x="8" y="18" font-size="12">토큰 1개를 생성하는 타임라인(예시, 가로가 시간)</text>
+<text class="f-text" fill="#182f2b" x="8" y="56" font-size="12">GPU A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="40" width="330" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="40" width="130" height="24"/>
+<text class="f-on" fill="#ffffff" x="125" y="56" font-size="12" text-anchor="middle">0–18층</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="56" font-size="12" text-anchor="middle">대기</text>
+<text class="f-text" fill="#182f2b" x="8" y="100" font-size="12">GPU B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="84" width="330" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="214" y="84" width="176" height="24"/>
+<text class="f-on" fill="#ffffff" x="302" y="100" font-size="12" text-anchor="middle">19–47층 + 출력 헤드</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="100" font-size="12" text-anchor="middle">대기</text>
+<rect class="f-warn" fill="#9e5d24" x="190" y="68" width="24" height="12"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M190 64L202 68M214 80L214 84"/>
+<text class="f-text" fill="#182f2b" x="60" y="130" font-size="12">인계: 토큰당 51,216 바이트, RAM을 거쳐요</text>
+<text class="f-text" fill="#182f2b" x="8" y="156" font-size="12" font-weight="600">토큰 하나는 A를 지나고 나서 B를 지나요(동시 불가)</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="178" font-size="12">층 번호는 업스트림 로그의 K = 19 분할 기준이고,</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="196" font-size="12">시간의 길이는 예시예요</text>
+</svg><figcaption>그림 21-2　답을 생성할 때 토큰 하나는 앞 카드의 층을 다 지나야 뒤 카드로 들어가요. 두 카드가 번갈아 일하고 번갈아 놀기 때문에, 토큰 하나의 시간이 절반이 되지는 않아요.</figcaption></figure>
+<p>업스트림 문서의 실측도 이 점을 뒷받침해요. RTX 5080에 RTX 3090을 더해도 생성 속도는 5080 한 장일 때와 거의 같고, 코드를 쓸 때만 조금 빨라요.<span class="ev ev-report">업스트림 보고</span>(Coder 모델, 컨텍스트 32K, CPU는 Ryzen 9 9950X3D예요. 한 장일 때 이야기 쓰기는 초당 토큰 83–87개이고, 두 장의 최적 분할은 초당 84개예요. 코드 쓰기는 각각 88–105와 110이에요. 문서에는 엔진 버전이 없고, 결과 디렉터리 날짜는 2026-09-29예요.)</p>
+<p>그럼 두 번째 카드는 뭘 위한 걸까요? <strong>용량</strong>이에요. 10장에서 봤듯이 VRAM에 못 올린 전문가는 CPU가 RAM에서 계산하는데, CPU는 느려요. 레이어 분할을 하면 카드마다 자기 층의 전문가만 캐시하니까, 두 카드가 합쳐서 캐시할 수 있는 전문가가 한 장일 때의 대략 두 배가 돼요. 업스트림 문서에 따르면 Coder 모델은 16 GB와 24 GB 두 장이면 전문가를 거의 다 올릴 수 있고, "속도는 여기서 나와요". 생성할 때 CPU가 거의 필요 없어져요.<span class="ev ev-report">업스트림 보고</span> 그림 21-3은 카드마다 무엇이 올라가 있는지 보여 줘요.</p>
+<figure class="fig"><svg viewBox="0 0 400 288" role="img" aria-label="그림 21-3: 레이어 분할 뒤 카드마다 밀집 가중치 한 벌, 자기 세션 상태, 프롬프트 버퍼, 자기 층의 전문가 캐시를 가져요. 마지막 카드에는 출력 헤드와 드래프트 층도 있어요. RAM의 전문가는 한 벌만 보관해요">
+<text class="f-text" fill="#182f2b" x="102" y="22" font-size="13" font-weight="600" text-anchor="middle">GPU A(메인 카드)</text>
+<text class="f-text" fill="#182f2b" x="297" y="22" font-size="13" font-weight="600" text-anchor="middle">GPU B(마지막 카드)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="30" width="185" height="156" rx="8"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="30" width="185" height="156" rx="8"/>
+<rect class="f-soft" fill="#e5f1df" x="20" y="40" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="56" font-size="12" text-anchor="middle">밀집 가중치 약 3.4 GB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="68" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="84" font-size="12" text-anchor="middle">자기 세션 상태(KV 포함)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="96" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="112" font-size="12" text-anchor="middle">프롬프트 버퍼 약 1.5 GB</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="124" width="165" height="52" rx="4"/>
+<text class="f-on" fill="#ffffff" x="102.5" y="146" font-size="12" text-anchor="middle">0–18층의 전문가 캐시</text>
+<text class="f-on" fill="#ffffff" x="102.5" y="164" font-size="12" text-anchor="middle">남은 VRAM은 전부 여기에</text>
+<rect class="f-soft" fill="#e5f1df" x="215" y="40" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="56" font-size="12" text-anchor="middle">밀집 가중치 약 3.4 GB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="68" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="84" font-size="12" text-anchor="middle">자기 세션 상태(KV 포함)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="96" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="112" font-size="12" text-anchor="middle">프롬프트 버퍼 약 1.5 GB</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="215" y="124" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="140" font-size="12" text-anchor="middle">출력 헤드·드래프트 약 0.8 GB</text>
+<rect class="f-accent" fill="#136d5a" x="215" y="152" width="165" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="297.5" y="168" font-size="12" text-anchor="middle">19–47층의 전문가 캐시</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M102 186V206M297 186V206"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="206" width="380" height="40" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="223" font-size="12" text-anchor="middle">RAM: 전문가는 전부 한 벌만 두고 두 카드가 공유해요</text>
+<text class="f-text" fill="#182f2b" x="200" y="239" font-size="12" text-anchor="middle">아무도 캐시하지 않은 전문가는 CPU가 계산해요</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="266" font-size="12" text-anchor="middle">GB 수치는 Coder 모델 기준 업스트림 문서의 근삿값이고,</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="282" font-size="12" text-anchor="middle">프롬프트 버퍼는 기본 청크 2048 기준이에요</text>
+</svg><figcaption>그림 21-3　밀집 가중치는 카드마다 한 벌씩 두지만, 전문가 캐시는 자기 층 몫만 둬요. 레이어 분할로 얻는 건 주로 "캐시할 수 있는 전문가가 두 배"라는 점이에요.</figcaption></figure>
+<p>대가도 있어요. 밀집 가중치는 카드마다 사본을 한 벌씩 둬야 하고, 카드마다 자기 세션 상태와 프롬프트 버퍼도 있어야 해요. 그래서 업스트림은 VRAM이 8 GB보다 작은 카드는 함께 쓰라고 권하지 않아요.<span class="ev ev-report">업스트림 보고</span></p>
+
+<h2 id="sec-3">21.3 프롬프트를 읽을 때 비로소 파이프라인이 돌아가요</h2>
+<p>프롬프트를 읽을 때는 사정이 달라요. 긴 프롬프트는 읽기 전에 전부 알려져 있어서, Strata가 여러 <dfn>청크(chunk)</dfn>로 잘라 한 청크씩 읽어요. 청크는 16장에서 다뤘어요. 이때는 두 카드가 서로 엇갈릴 수 있어요. 뒤 카드가 c번째 청크를 읽는 동안 앞 카드는 이미 c+1번째 청크를 읽고 있어요. prefill 인터페이스의 주석이 바로 이걸 말해요. 마지막 층에 이르지 않은 스테이지는 데이터를 <strong>두 개</strong>의 고정(pinned) 메모리 버퍼에 복사하고, 다른 스레드에서 다음 스테이지를 시작해요. "그러면 다음 스테이지가 c번째 청크를 읽는 동안 이 스테이지가 c+1번째 청크를 읽을 수 있어요".<span class="ev ev-code">코드 사실</span>[S12]</p>
+<p>빨래가 좋은 비유예요. 세탁기는 한 통을 빠는 데 4분, 건조기는 한 통을 말리는 데 5분이 걸려요. 빨래가 한 통뿐이면 무조건 9분이 걸려요. 빨래가 8통이면 첫 통이 건조기에 들어갈 때 둘째 통이 세탁기에 들어갈 수 있어요. 건조기가 박자를 정해서 5분마다 한 통이 나와요. 전체 시간은 처음 4분에 건조 8번 40분을 더한 44분이에요. 전부 이어서 하면 8 × 9 = 72분이에요.</p>
+<p>처음의 "건조기가 첫 통을 기다리는" 시간과 끝의 "세탁기가 빨 옷이 없는" 시간을 <dfn>버블(bubble)</dfn>이라고 해요. 파이프라인 위의 작업대가 놀고 있다는 뜻이에요. 아래 시뮬레이터는 두 카드를 타임라인으로 그려 줘요. 구간별 시간, 청크 수, 이동 시간을 바꿔서 버블이 어디 생기는지 보세요.</p>
+<div class="viz" data-viz="layer-pipeline"><figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="그림 21-4: 두 카드의 파이프라인 타임라인. a는 4 밀리초, b는 5 밀리초, 청크 4개는 합계 24 밀리초이고, 처음과 끝에 각각 대기 구간이 있어요">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="12">프롬프트 청크 4개: A 4 ms, B 5 ms, 이동 제외</text>
+<text class="f-text" fill="#182f2b" x="8" y="55" font-size="12">GPU A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="36" width="324" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="114" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="181.5" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="249" y="37" width="52.5" height="26"/>
+<text class="f-on" fill="#ffffff" x="86" y="55" font-size="12" text-anchor="middle">1</text>
+<text class="f-on" fill="#ffffff" x="140" y="55" font-size="12" text-anchor="middle">2</text>
+<text class="f-on" fill="#ffffff" x="207.5" y="55" font-size="12" text-anchor="middle">3</text>
+<text class="f-on" fill="#ffffff" x="275" y="55" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="343" y="55" font-size="12" text-anchor="middle">대기</text>
+<text class="f-text" fill="#182f2b" x="8" y="103" font-size="12">GPU B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="84" width="324" height="28"/>
+<text class="f-muted" fill="#5c6d66" x="87" y="103" font-size="12" text-anchor="middle">대기</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="114" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="181.5" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="249" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="316.5" y="85" width="66" height="26"/>
+<text class="f-text" fill="#182f2b" x="147" y="103" font-size="12" text-anchor="middle">1</text>
+<text class="f-text" fill="#182f2b" x="214.5" y="103" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="282" y="103" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="349.5" y="103" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="60" y="130" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="114" y="130" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="181.5" y="130" font-size="12" text-anchor="middle">9</text>
+<text class="f-muted" fill="#5c6d66" x="249" y="130" font-size="12" text-anchor="middle">14</text>
+<text class="f-muted" fill="#5c6d66" x="316.5" y="130" font-size="12" text-anchor="middle">19</text>
+<text class="f-muted" fill="#5c6d66" x="384" y="130" font-size="12" text-anchor="end">24 ms</text>
+<text class="f-text" fill="#182f2b" x="60" y="152" font-size="12">채우기: B가 첫 청크 대기</text>
+<text class="f-text" fill="#182f2b" x="384" y="152" font-size="12" text-anchor="end">비우기: A 종료, B 마무리</text>
+<text class="f-text" fill="#182f2b" x="10" y="178" font-size="12">청크 4개 합계 24 ms = 5 × 4 + 4</text>
+<text class="f-text" fill="#182f2b" x="10" y="196" font-size="12">카드 한 장으로 직렬: 4 × 9 = 36 ms</text>
+</svg><figcaption>그림 21-4　느린 카드가 박자를 정해서 5밀리초마다 청크 하나가 나와요. 총 시간 = a + b + (N − 1) × max(a, b). 청크가 많을수록 처음과 끝의 버블이 차지하는 비율이 작아져요.</figcaption></figure></div>
+<p>시뮬레이터의 결론을 업스트림 실측과 맞춰 볼게요. 같은 5080에 3090을 더한 구성에서 16K 프롬프트를 읽는 속도는 한 장일 때 초당 토큰 1,726–2,017개에서 2,039개로, 28K는 1,970개에서 2,357개로 올라요. 문서는 "카드마다 자기 층을 읽으면서 다른 카드가 다음 청크를 읽는다"고 설명하고, 속도 향상은 약 18%–20%예요.<span class="ev ev-report">업스트림 보고</span>(조건은 앞 절과 같아요.)</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 《컴퓨터 구조》의 명령어 파이프라인과 같은 이야기예요. 5단 파이프라인은 명령어 하나를 빠르게 만들지는 않지만, 매 사이클마다 명령어가 하나씩 끝나게 해 줘요. 처리량은 가장 느린 단계가 정하고, 처음의 채우기와 의존성 때문에 멈추는 구간이 버블이에요. 레이어 분할에서 "단계"는 층 구간이고 "명령어"는 프롬프트 청크 하나예요.</p>
+
+<h2 id="sec-4">21.4 인계하는 꾸러미는 얼마나 크고, 길은 얼마나 넓을까</h2>
+<p>두 카드가 인계할 때 실제로 무엇을 넘길까요? 직관적으로는 토큰 하나가 층과 층 사이를 흐를 때 2560차원 벡터, 즉 숫자 2560개일 것 같아요. 그런데 Strata의 인계는 더 커요. <code>verify.hpp</code>는 인계 버퍼의 토큰마다 세 가지를 담도록 정해요. 잔차 R(hc × n_embd개), 이전 층에서 아직 쓰지 않은 벡터 하나(n_embd개), hc개의 주입 계수예요.<span class="ev ev-code">코드 사실</span>[S08] 모델의 형태 hc = 4, n_embd = 2560 [S04]을 넣으면 이래요.</p>
+<div class="equation">4 × 2560 + 2560 + 4 = 12,804개 float ＝ 51,216 바이트 / 토큰</div>
+<p>왜 2560개만 넘기면 안 될까요? 이 모델의 잔차는 원래 2560차원 벡터 4개이고, 마지막 층의 쓰기 하나는 다음 층 앞부분까지 미뤄져 있기 때문이에요. 다음 스테이지가 "쪼개지 않았을 때처럼" 이어서 계산하려면 이 모두를 받아야 해요. 코드 주석은 이렇게 쪼개도 <strong>비트 단위로 같다</strong>(bit-exact)고 써요. 쪼개든 안 쪼개든 계산 결과가 똑같다는 뜻이에요.<span class="ev ev-code">코드 사실</span>[S08]</p>
+<p>프롬프트를 읽을 때는 잔차 부분만 인계해요. 토큰마다 4 × 2560개의 float, 즉 40,960 바이트예요. 기본 청크는 토큰 2048개니까 2048 × 40,960 = 83,886,080 바이트, 약 84 MB예요.<span class="ev ev-code">코드 사실</span>(<code>src/prefill/prefill.cpp</code>)<span class="ev ev-est">교육용 추정</span> 답을 생성할 때는 검증 윈도우마다 한 번 인계하고, 문서는 "수백 KB, 고정 메모리를 거쳐요"라고 말해요.<span class="ev ev-report">업스트림 보고</span> 토큰당 51,216 바이트로 계산하면 토큰 5개짜리 윈도우는 약 256 KB라서 들어맞아요.</p>
+<p>꾸러미 크기를 알았으니 이제 길이 얼마나 넓은지 봐야 해요. 아래 칼럼이 두 카드 사이의 길을 설명해요.</p>
+<aside class="primer" id="c21-interconnect">
+<h3>인터커넥트 대역폭: PCIe와 NVLink</h3>
+<p>GPU는 메인보드의 <dfn>PCIe</dfn> 슬롯에 꽂혀요. PCIe는 직렬 버스이고, 여러 개의 <dfn>레인(lane)</dfn>이 나란히 모여 있어요. 몇 차선짜리 도로 같아요. "×16"은 16차선, "×4"는 4차선이에요. PCIe는 세대가 올라갈 때마다 차선 하나의 속도가 두 배가 돼요.</p>
+<p>방향별 이론 최대치로 계산하면 PCIe 3.0 ×16은 약 15.8 GB/s, PCIe 4.0 ×16은 약 31.5 GB/s, PCIe 5.0 ×16은 약 63 GB/s예요. ×4 슬롯에 꽂으면 4분의 1만 남아요.</p>
+<p><dfn>NVLink</dfn>는 NVIDIA가 GPU 사이에 놓은 전용 고속 선이에요. 데이터센터의 H100에는 NVLink 4.0 링크가 18개 있어서 양방향 합계 900 GB/s예요. 한 방향으로는 약 450 GB/s로, PCIe 4.0 ×16의 10배가 넘어요. 가정용 듀얼 카드 구성에는 보통 이게 없어서 PCIe만 써요. 그림 21-5가 이 길들을 한곳에 놓고 비교해요.</p>
+<figure class="fig"><svg viewBox="0 0 400 242" role="img" aria-label="그림 21-5: 흔한 인터커넥트의 방향별 이론 대역폭. PCIe 4.0 ×4는 약 7.9, PCIe 3.0 ×16은 약 15.8, PCIe 4.0 ×16은 약 31.5, PCIe 5.0 ×16은 약 63, NVLink 4.0은 약 450 GB/s">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">방향별 이론 최대치, GB/s(막대 길이는 비율대로)</text>
+<text class="f-text" fill="#182f2b" x="10" y="46" font-size="12">PCIe 4.0 ×4</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="34" width="3.9" height="16"/>
+<text class="f-text" fill="#182f2b" x="130" y="47" font-size="12">7.9</text>
+<text class="f-text" fill="#182f2b" x="10" y="76" font-size="12">PCIe 3.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="64" width="7.7" height="16"/>
+<text class="f-text" fill="#182f2b" x="134" y="77" font-size="12">15.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="12">PCIe 4.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="94" width="15.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="142" y="107" font-size="12">31.5</text>
+<text class="f-text" fill="#182f2b" x="10" y="136" font-size="12">PCIe 5.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="124" width="30.8" height="16"/>
+<text class="f-text" fill="#182f2b" x="157" y="137" font-size="12">63</text>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="12">NVLink 4.0</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="154" width="220" height="16"/>
+<text class="f-text" fill="#182f2b" x="346" y="167" font-size="12">450</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="198" font-size="12">NVLink 4.0: H100의 링크 18개 합계예요.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="214" font-size="12">가정용 듀얼 카드는 보통 PCIe만 써요.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="232" font-size="12">PCIe는 세대마다 2배, ×16은 레인 16개가 나란히예요.</text>
+</svg><figcaption>그림 21-5　가정용 메인보드의 길은 훨씬 좁아요. 텐서 병렬은 층마다 동기화하기 때문에 NVLink 같은 고속 선이 없으면 손해가 커요. 레이어 분할은 구간과 구간 사이에서 한 번만 인계하니까 PCIe로 충분해요.</figcaption></figure>
+<p>대역폭 말고 <dfn>지연 시간(latency)</dfn>도 있어요. 바이트 하나만 보내도 시작과 동기화에 드는 고정 비용을 한 번 내야 해요. 큰 꾸러미를 한 번 보내면 지연은 한 번만 내요. 작은 꾸러미를 96번 보내면 지연을 96번 내요. 5장에서 대역폭과 지연을 자세히 다루고, 1장의 <a href="#chapter/01/c01-memory-hierarchy">「메모리 계층 구조」</a> 칼럼에는 계층별 대역폭 비교가 있어요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/PCI_%EC%9D%B5%EC%8A%A4%ED%94%84%EB%A0%88%EC%8A%A4" target="_blank" rel="noopener noreferrer">위키백과: PCI 익스프레스</a> · <a href="https://ko.wikipedia.org/wiki/NVLink" target="_blank" rel="noopener noreferrer">위키백과: NVLink</a> · <a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/overview.html" target="_blank" rel="noopener noreferrer">NVIDIA NCCL 문서: 멀티 GPU 통신 개요</a></p>
+</aside>
+<p>꾸러미와 길을 놓고 계산해 봐요. 아래 계산기는 두 분담 방식의 통신 비용을 여러 연결에서 비교해 줘요. 텐서 병렬 줄은 가상의 비교 대상이고, Strata는 그렇게 하지 않아요.</p>
+<div class="viz" data-viz="link-budget"><figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="그림 21-6: PCIe 4.0 ×16에서 레이어 분할은 윈도우마다 인계에 약 36 마이크로초, 가상의 텐서 병렬은 약 1116 마이크로초가 들어요. 프롬프트 청크 하나의 인계는 약 5.3 밀리초예요">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">PCIe 4.0 ×16, 카드 간 고정 지연 10 µs, 윈도우 5토큰</text>
+<text class="f-text" fill="#182f2b" x="10" y="50" font-size="12">레이어 분할</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="38" width="7.5" height="16"/>
+<text class="f-text" fill="#182f2b" x="134" y="51" font-size="12">약 36 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="70" font-size="12">2회 × (10 µs + 256 KB ÷ 31.5 GB/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="100" font-size="12">텐서 병렬(가상)</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="88" width="230" height="16"/>
+<text class="f-on" fill="#ffffff" x="344" y="101" font-size="12" text-anchor="end">약 1116 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="120" font-size="12">96회 × (10 µs + 51 KB ÷ 31.5 GB/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="150" font-size="12">프롬프트 청크 1개(토큰 2048개)의 인계: 약 5.3 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="170" font-size="12">이 청크를 읽는 시간만 약 1초예요</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="188" font-size="12">(업스트림 약 2,000 token/s 기준)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">지연은 교육용 가정이고 텐서 병렬은 Strata 방식이 아니에요</text>
+</svg><figcaption>그림 21-6　레이어 분할의 통신 비용은 무시해도 될 만큼 작아요. 텐서 병렬의 비용은 주로 동기화 횟수에서 나와요. 매번의 고정 지연이 96번 곱해져요.</figcaption></figure></div>
+<p>계산식은 모두 그림에 있어요.<span class="ev ev-est">교육용 추정</span> 결론은 두 가지예요. 첫째, 답을 생성할 때 레이어 분할은 윈도우마다 인계에 수십 마이크로초만 들어요. 업스트림 실측으로 초당 약 84개 토큰이면 토큰 하나가 약 12밀리초인데, 인계는 그 1%도 안 돼요. 둘째, 프롬프트를 읽을 때 청크 하나의 84 MB 인계는 PCIe 4.0 ×16에서 오가는 데 약 5.3밀리초가 들고, 이 청크 자체를 읽는 데는 1초 가까이 걸려요. 그래서 업스트림 문서가 "NVLink도, 카드끼리 직접 접근하는 기능도 필요 없고, ×4나 심지어 ×1 슬롯에 꽂아도 쓸 수 있어요"라고 자신 있게 말할 수 있어요.<span class="ev ev-report">업스트림 보고</span></p>
+
+<h2 id="sec-5">21.5 카드마다 자기 층만 맡아요</h2>
+<p>층을 자르고 나면 카드마다 자기만의 "기억"도 있어야 해요. 층마다 KV 캐시나 재귀 상태가 필요해요. 초기에는 스테이지마다 48개 층 전부의 상태를 잡아 놓고 그중 한 구간만 실행했어요. <code>session.hpp</code>의 주석은 이걸 "모델 전체 크기 버퍼의 오래된 병"이라고 불러요. 지금은 세션마다 <code>[layer_lo, layer_hi)</code> 범위 층의 상태만 가져요.<span class="ev ev-code">코드 사실</span>[S13]</p>
+<p>틀리기 쉬운 부분이 하나 있어요. 코드 안에서 층은 여전히 <strong>전역</strong> 번호로 매겨지는데, 배열에는 자기 구간의 몇 줄만 들어 있어요. 그래서 g번째 GDN 층의 상태를 가져올 때는 먼저 자기 구간의 첫 GDN 층 번호 <code>gdn_ord0</code>를 빼야 해요. 잘못 빼면 다른 층의 상태를 읽는데 오류도 나지 않아요. 한 구간에 QSA 층이 하나도 없어도, 코드는 여전히 "주" QSA 상태를 하나 잡아 줘요. 회전 위치 임베딩 테이블처럼 모델 전체가 공유하는 것을 거기서 읽어야 하기 때문이에요.<span class="ev ev-code">코드 사실</span>[S13]</p>
+<p>어느 층에서 자를지도 중요해요. 한 구간의 층이 몇 바이트를 차지하는지 계산하는 함수 <code>session_bytes</code>는 순수한 산술이라서, 메모리를 하나도 할당하기 전에 후보 분할에 "견적"을 낼 수 있어요.<span class="ev ev-code">코드 사실</span>[S13] 업스트림 문서에 따르면 기본 자동 모드는 카드 두세 장의 모든 분할을 다 시험해 보고, 카드 캐시에 "인기 전문가"를 가장 많이 담을 수 있는 분할을 골라요. 시작 로그에 선택이 출력돼요. 예를 들면 "K = 19, 캐시가 프로필 항목 12,288개 중 11,767개를 담을 수 있어요"예요.<span class="ev ev-report">업스트림 보고</span></p>
+<p>마지막은 저장이에요. 20장에서 세션 스냅숏을 다뤘어요. 프롬프트를 읽을 때 앞 카드는 뒤 카드보다 청크 하나, 때로는 그 이상 앞서 있어요. 어느 한 시점에 두 카드의 상태를 그냥 이어 붙이면 "앞 구간은 3번 청크까지 읽고 뒷 구간은 2번 청크까지 읽은" 괴물이 나와요. 그림 21-7을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 218" role="img" aria-label="그림 21-7: 프롬프트를 읽을 때 GPU A가 GPU B보다 청크 하나 앞서 있어요. 두 카드의 현재 상태를 그냥 이어 붙이면 일관되지 않은 저장본이 나와요. 올바른 방법은 각 카드가 같은 청크를 다 읽었을 때 각자 저장하는 거예요">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="12">어느 한 시점의 두 카드 진행 상황</text>
+<text class="f-text" fill="#182f2b" x="8" y="48" font-size="12">GPU A</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="30" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="140" y="30" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="216" y="30" width="70" height="26" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="292" y="30" width="70" height="26" rx="3"/>
+<text class="f-on" fill="#ffffff" x="99" y="48" font-size="12" text-anchor="middle">청크 1</text>
+<text class="f-on" fill="#ffffff" x="175" y="48" font-size="12" text-anchor="middle">청크 2</text>
+<text class="f-on" fill="#ffffff" x="251" y="48" font-size="12" text-anchor="middle">청크 3</text>
+<text class="f-text" fill="#182f2b" x="327" y="48" font-size="12" text-anchor="middle">청크 4</text>
+<text class="f-text" fill="#182f2b" x="8" y="92" font-size="12">GPU B</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="74" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="140" y="74" width="70" height="26" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="216" y="74" width="70" height="26" rx="3"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="292" y="74" width="70" height="26" rx="3"/>
+<text class="f-on" fill="#ffffff" x="99" y="92" font-size="12" text-anchor="middle">청크 1</text>
+<text class="f-on" fill="#ffffff" x="175" y="92" font-size="12" text-anchor="middle">청크 2</text>
+<text class="f-text" fill="#182f2b" x="251" y="92" font-size="12" text-anchor="middle">청크 3</text>
+<text class="f-muted" fill="#5c6d66" x="327" y="92" font-size="12" text-anchor="middle">청크 4</text>
+<text class="f-warn" fill="#9e5d24" x="8" y="128" font-size="12">오류: 지금 그냥 잇으면 A는 청크 3 끝, B는 청크 2 끝</text>
+<text class="f-text" fill="#182f2b" x="8" y="152" font-size="12">정답: 각 카드가 같은 청크를 다 읽었을 때 자기 몫을 저장</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="172" font-size="12">Strata는 on_stage_chunk 콜백으로 이때 상태를 가져와요</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="192" font-size="12">진한 색 = 읽기 완료, 연한 바탕 = 읽는 중,</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="210" font-size="12">빈 칸 = 아직 차례가 아님</text>
+</svg><figcaption>그림 21-7　두 카드의 진행이 맞지 않아요. 저장본은 같은 청크의 끝에 맞춰야 해요. 각 카드가 그 청크를 다 읽었을 때 각자 저장하고, 어느 한 시점에 양쪽의 "현재 상태"를 이어 붙이면 안 돼요.</figcaption></figure>
+<p>Strata는 스테이지마다 콜백 <code>on_stage_chunk</code>를 줘요. 카드가 청크 하나를 다 읽어서 자기 상태가 딱 이 청크의 끝에 멈춰 있을 때 이 콜백을 불러요. 주석에는 앞쪽 스테이지가 마지막 스테이지가 보고할 때 "이미 청크 하나 이상 앞서 있다"고 적혀 있어요. 그래서 프롬프트 중간의 저장은 여기서 스테이지마다 자기 몫을 가져와야 해요.<span class="ev ev-code">코드 사실</span>[S12]</p>
+
+<h2 id="sec-6">21.6 직접 해 보기: 버블을 찾고, 카드를 더 꽂을지 생각해 보기</h2>
+<p>이 장에는 따로 실험 페이지가 없어요. 인터랙티브 그림 두 개가 실험대예요. 이렇게 해 보세요.</p>
+<ol>
+<li>「두 카드 파이프라인」에서 a = 4, b = 5로 고정하고 청크 수를 1에서 8까지 늘리면서 매번 총 시간을 적어 보세요. 5N + 4가 맞는지 확인해요. 그다음 이동 시간을 1 ms로 올리고 "토큰 하나만 계산"을 눌러서, 두 카드가 왜 오히려 한 장보다 느린지 보세요.</li>
+<li>a와 b를 아주 불균형하게(예를 들면 2와 8) 늘려서 빠른 카드가 얼마나 오래 노는지 보세요. 업스트림이 "가장 빠른 카드를 첫 번째로 두고, 자동 분할이 캐시 능력에 따라 층을 나누게 하라"고 권하는 이유예요.<span class="ev ev-report">업스트림 보고</span></li>
+<li>「인계 한 번에 걸리는 시간」에서 연결을 바꿔 보고 지연도 바꿔 보세요. 텐서 병렬과 레이어 분할의 차이가 주로 바이트에서 나오는지, 횟수에서 나오는지 보세요.</li>
+</ol>
+<p>업스트림 문서에는 쓸 만한 경험 몇 가지도 있어요. 시뮬레이터의 결론으로 이해해 볼 수 있어요.<span class="ev ev-report">업스트림 보고</span></p>
+<ul>
+<li><strong>훨씬 느린 카드를 머릿수 채우려고 끼우지 마세요.</strong> 5080에 3090을 더한 구성에 RTX 2080 Ti를 한 장 더 넣으면 생성 속도가 오히려 초당 토큰 68개(이야기)와 90개(코드)로 떨어져요. 카드가 하나 늘 때마다 윈도우마다 인계와 대기가 한 번 더 생겨요.</li>
+<li><strong>카드 한 장에 들어가면 쪼개지 마세요.</strong> 0.1.31 버전에 옵션 스위치가 하나 생겼어요. 첫 번째 카드가 모든 프로필 전문가와 컨텍스트를 담을 수 있으면 그 카드만 써요. R9700 32 GB에 RX 9070 XT를 더하고 Coder 모델을 돌렸을 때, 켜면 4K 프롬프트는 초당 토큰 1,244개에서 1,776개로, 생성은 약 51개에서 약 60개로 올라가요. 16K 프롬프트는 약 5% 느려져요.</li>
+<li><strong>오래된 카드는 지원하지 않아요.</strong> 카드마다 컴퓨트 능력 7.5 이상(RTX 20 시리즈 이후)이 필요해요.</li>
+</ul>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>멀티 GPU 분담에는 세 가지가 있어요. 레이어 분할(파이프라인 병렬), 텐서 병렬, 요청 병렬이에요. Strata는 카드 사이 소통이 가장 적은 레이어 분할을 써요. 가정용 PCIe로 충분하기 때문이에요.</li>
+<li>토큰 하나의 층은 하나씩 이어서 계산해야 해서, 레이어 분할로는 토큰 하나가 빨라지지 않아요. 카드 두 장이 주는 이득은 전문가를 두 배 캐시할 수 있다는 점과, 프롬프트를 읽을 때 두 카드가 엇갈려 일한다는 점이에요. 총 시간 = a + b + (N − 1) × max(a, b)예요.</li>
+<li>인계하는 건 수학적 상태 전체예요. 생성할 때는 토큰당 51,216 바이트, 프롬프트를 읽을 때는 청크당 약 84 MB예요. 바이트가 많지 않고 횟수가 적어서 통신 비용이 작아요. 저장은 각 카드가 같은 청크를 다 읽은 순간에 맞춰야 해요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: "GPU를 두 장 꽂으면 생성 속도가 두 배가 돼요."</strong></p>
+<p>같은 토큰의 층은 앞뒤 의존이 있어서 두 카드가 번갈아서만 계산할 수 있어요. 업스트림 실측에서 5080에 3090을 더한 구성의 생성 속도는 5080 한 장일 때와 거의 같고, 2080 Ti를 한 장 더 꽂으면 오히려 느려져요. 두 카드가 속도를 높이는 건 늘어난 VRAM 덕분에 CPU가 전문가를 덜 계산하게 되어서, 그리고 긴 프롬프트를 읽을 때 파이프라인이 돌아서이지, "연산 능력 두 배"가 더해져서가 아니에요.<span class="ev ev-report">업스트림 보고</span></p></div>
+
+<details class="deep"><summary>한 걸음 더: 인계 계약, 이중 버퍼 프로토콜, 두 카드의 이득을 평가하는 방법</summary>
+<h3>인계가 왜 12,804개여야 할까</h3>
+<p><code>Verifier::set_stage</code>의 주석에 따르면, 인계에는 토큰마다 잔차 R(hc × n_embd), 마지막 층이 아직 쓰지 않은 벡터 bo(n_embd), inject(hc)가 있어요. 다음 스테이지는 첫 층을 읽을 때 이 쓰기를 "접어 넣어요". 쪼개지 않은 윈도우 방식과 완전히 같아서, 쪼개도 비트 단위로 같아요. 두 포인터는 모두 장치에서 볼 수 있는 메모리여야 해요(매핑된 고정 메모리이고, 두 스테이지가 서로 다른 카드에 있으면 portable이어야 해요).<span class="ev ev-code">코드 사실</span>[S08] 인계 float 개수는 <code>handoff_floats</code>가 주고, 공식은 <code>hc*n_embd + n_embd + hc</code> 그대로예요.[S08]</p>
+<p>2560차원 "히든 상태"만 보내면 나머지 잔차 세 벌과 미뤄진 쓰기가 사라져요. 결과는 죽지 않고 조용히 틀려요. 교훈은 이거예요. 장치 사이의 통신 형식은 수학적 계약 전체를 반영해야 하고, "히든 차원이 2560이니까" 하고 마음대로 줄이면 안 돼요. 업스트림에는 점검용 모드도 있어요. <code>--layer-split K --split-device 0</code>은 두 스테이지를 같은 카드에서 돌려서 인계가 비트 단위로 같은지 검증하는 용도예요. 속도를 높이는 모드가 아니에요.<span class="ev ev-report">업스트림 보고</span></p>
+<h3>이중 버퍼 인계 프로토콜</h3>
+<p><code>prefill.cpp</code>에서 앞 스테이지는 초기화할 때 <code>cudaHostAlloc(..., cudaHostAllocPortable)</code>로 고정 메모리 두 덩어리를 잡아요. 한 덩어리에는 프롬프트 한 청크의 잔차 행이 통째로 들어가요(chunk × D × 4 바이트, D = 4 × 2560).<span class="ev ev-code">코드 사실</span> 청크를 하나 읽을 때마다 네 가지 일을 순서대로 해요.</p>
+<ol>
+<li>잔차 행을 VRAM에서 현재 인계 버퍼로 복사하고 복사가 끝나기를 기다려요.</li>
+<li><code>on_stage_chunk</code>를 불러요. 이때 이 스테이지의 상태가 딱 이 청크의 끝에 멈춰 있어요.</li>
+<li>다음 스테이지가 이전 청크를 다 읽기를 기다려요. 그래야 곧 덮어쓸 버퍼를 읽는 일이 없어요.</li>
+<li>다른 스레드에서 다음 스테이지가 이 청크를 읽게 시작하고, 다른 버퍼로 바꿔서 다음 청크를 계속 읽어요.</li>
+</ol>
+<p>앞 스테이지의 청크당 시간을 a′(복사해 내보내기 포함), 뒤 스테이지의 청크당 시간을 b′(복사해 들이기 포함)라고 해 봐요. 3번 단계는 이런 뜻이에요. 앞 스테이지가 c+1번째 청크를 읽기 시작하는 순간은 뒤 스테이지가 c번째 청크를 읽기 시작하는 순간과 같아요. 그러면 뒤 스테이지의 이웃한 두 청크의 시작 시각은 max(a′, b′)만큼 떨어져 있고, 첫 청크는 a′에서 시작하고, 마지막 청크는 시작한 뒤 b′ 만에 끝나요. 그래서 총 시간 = a′ + b′ + (N − 1) × max(a′, b′)예요. a′ = 4, b′ = 5, N = 8이면 44 ms이고, 청크별 직렬은 72 ms예요.<span class="ev ev-est">교육용 추정</span> 이 장의 시뮬레이터가 바로 이 모델을 쓰고, <code>tests/viz-21.test.cjs</code>에서 청크마다 의존과 버퍼 규칙을 하나씩 검사해요.</p>
+<p>청크마다의 이동도 핵심 자원을 쓴다면 a′나 b′에 넣어야 해요. 없는 셈 치면 안 돼요. PCIe가 두 카드의 직접 접근을 허용하는지, RAM을 거쳐 돌아가야 하는지, 메인보드 토폴로지와 NUMA 노드 경계를 넘는지가 모두 이 수를 바꿔요. Strata는 가장 보수적인 길을 택했어요. 전부 RAM을 거쳐 중계하고, 카드끼리 직접 접근하는 기능에는 기대지 않아요.</p>
+<h3>전역 번호와 "QSA 층이 없는 구간"</h3>
+<p>세션 상태의 주석은 이렇게 설명해요. <code>qsa_states</code>와 <code>gdn_state</code>는 전역 번호를 유지하고 배열의 행 수만 줄어요. 그래서 층마다 쓰는 쪽에서 <code>gdn_ord0</code>를 빼야 해요. 원래 <code>qsa_states[0]</code>이라고 쓰던 모델 전체 수준의 쓰임(공유 RoPE 테이블, prefill 임시 영역의 정체성, MTP가 빌려 쓰는 rope)은 <code>qsa_states[primary]</code>를 읽도록 바뀌었어요. 한 구간에 QSA 층이 없으면 주 상태를 하나 잡아요. 기본 전체 범위 할당은 예전 모델 전체 할당과 바이트 단위로 똑같아요.<span class="ev ev-code">코드 사실</span>[S13] 테스트는 "어떤 구간에 QSA 층이 없는 경우"와 "분할 지점이 1번 층 근처인 경우" 같은 경계를 따로 다뤄야 해요.</p>
+<h3>저장본은 같은 경계에 속해야 해요</h3>
+<p><code>on_stage_chunk</code>의 계약은 이래요. 스테이지가 청크 하나를 다 읽고, 자기 스트림이 동기화되고, 상태가 이 청크의 끝에 멈춰 있을 때 호출해요. 마지막 스테이지는 <code>on_chunk</code> 전에 호출해요. 호출은 그 스테이지 자신의 스레드에서 일어나고, 현재 장치도 그 스테이지의 카드예요.<span class="ev ev-code">코드 사실</span>[S12] 업스트림 문서가 덧붙여요. 세션 저장은 카드마다의 상태를 저장하고 복원하고, 프롬프트 중간의 저장은 각 카드가 그 청크를 다 읽었을 때 자기 몫을 각자 저장해요.<span class="ev ev-report">업스트림 보고</span> 거꾸로, 마지막 카드가 완료를 보고한 뒤에 앞 카드의 "현재 상태"를 가져오면 더 뒤쪽 청크의 상태를 얻게 되어 저장본이 일관되지 않아요.</p>
+<h3>두 카드가 어디서 빨라졌는지 판단하는 방법</h3>
+<p>"두 장이 한 장보다 빠르다"는 말이 곧바로 "파이프라인 효율이 높다"는 뜻은 아니에요. 늘어난 VRAM이 전문가 히트율을 올리고 CPU 계산을 줄이는 게 주된 이득일 수 있어요. 따로 재야 해요. 카드별 전문가 히트율, CPU 풀의 작업량, 인계 시간, 스테이지별 시간이에요. 업스트림의 자동 분할이 보여 주는 요점도 같아요. "캐시에 인기 전문가를 가장 많이 담는" 분할을 고르고, 균등하게 나눌 때는 가장 꽉 찬 카드에 가장 많은 공간을 남겨 줘요.<span class="ev ev-report">업스트림 보고</span></p>
+<h3>아직 다루지 못했거나 조건이 붙는 경우</h3>
+<ul>
+<li>Windows와 WSL2의 WDDM 드라이버에서는 8 GiB의 전문가 영역만 고정하고, 나머지는 고정 임시 링을 거쳐 스트리밍해요. Linux 드라이버에는 이 상한이 없어요.<span class="ev ev-report">업스트림 보고</span></li>
+<li>카드마다 밀집 가중치 한 벌과 자기 프롬프트 버퍼가 필요해요(기본 청크 2048이면 카드당 약 1.5 GB). 그래서 8 GB보다 작은 카드는 함께 쓰지 않는 게 좋고, NVIDIA와 AMD 카드를 섞어 쓰는 건 지원하지 않아요.<span class="ev ev-report">업스트림 보고</span></li>
+<li>Strata에는 다른 듀얼 카드 모드 <code>--peer-device</code>도 있어요. 두 번째 카드는 전문가 캐시로만 쓰고, 활성값과 결과는 NVLink나 다른 GPU 간 접근 통로로 오가요. 이 모드는 <code>--layer-split</code>과 함께 쓸 수 없어서 둘 중 하나만 골라요.<span class="ev ev-report">업스트림 보고</span></li>
+<li>이상적인 듀얼 카드 토폴로지에서 한 번 돌려 보는 것만으로는 검수가 안 돼요. 요청 취소, 아주 짧은 마지막 청크, 두 번째 카드의 오류, GPU 간 접근이 불가능한 경우도 시험하고, 결과를 카드 한 장일 때와 바이트 단위로 비교해야 해요.</li>
+</ul>
+</details>

@@ -1,0 +1,223 @@
+<div class="hook"><span class="eyebrow">이런 적 있죠</span>
+<p>긴 문서를 채팅 AI에 던지면 첫 질문은 한참 기다려야 답이 나오기 시작해요. 그런데 이어서 질문하면 답이 거의 바로 튀어나와요. Strata 문서에도 같은 말이 있어요. 첫 메시지 뒤에 이 대화를 남겨 두고 새로 추가된 부분만 읽기 때문에, 후속 질문은 몇 초면 답을 시작해요.<span class="ev ev-report">업스트림 보고</span>[S02]</p>
+<p>엔진이 "남겨 두는" 건 정확히 무엇일까요? 두 요청이 한 글자만 달라도, 이미지 한 장만 바뀌어도 재사용해도 될까요? 두 대화가 앞부분은 같고 뒤에서 갈라지면 한 벌을 함께 쓸 수 있을까요? 이 장에서는 접두부 재사용, 스냅샷, 쓰기 시 복사를 살펴봐요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> Strata는 이미 읽은 접두부를 체크포인트(스냅샷의 한 종류)로 저장해요. 새 요청의 토큰, 이미지, steering 모드가 체크포인트와 한 글자도 다르지 않으면, 체크포인트에서 이어서 새로 늘어난 꼬리만 읽어요. 스냅샷에는 실행 상태 전체가 들어가야 해요. KV 캐시만 저장해서는 부족해요.</p>
+
+<h2 id="sec-1">20.1 후속 질문이 빠른 이유: 이미 읽은 것은 다시 읽지 않아요</h2>
+<p>멀티턴 대화에는 특징이 있어요. 요청할 때마다 대화 기록 전체를 다시 보내요. 5번째 턴의 요청은 1번째부터 4번째 턴의 내용 전부로 시작하고, 맨 끝에 새 질문이 와요. 새 내용은 대개 작은 부분이고, 앞의 큰 덩어리는 <dfn>접두부(prefix)</dfn>예요. 지난 요청과 시작 부분이 완전히 같은 그 부분을 말해요.</p>
+<p>매번 첫 토큰부터 읽으면 긴 대화는 갈수록 느려져요. 영리한 방법은 책갈피예요. 지난번에 읽은 곳에 책갈피를 꽂아 두고 이번에는 거기서부터 읽어요. 이 방법을 <dfn>접두부 재사용</dfn>이라고 하고, 엔진에서는 prompt cache(프롬프트 캐시)라고도 많이 불러요.</p>
+<p>얼마나 아낄까요? Strata가 긴 텍스트를 읽는 속도는 초당 1,000토큰 이상이에요.<span class="ev ev-report">업스트림 보고</span>[S02] 소스 코드 주석에는 계산도 있어요. 3만 토큰짜리 시스템 프롬프트를 초당 약 1,000토큰으로 읽으면 약 30초가 걸려요.<span class="ev ev-report">업스트림 보고</span> 그림 20-1이 두 방식을 나란히 비교해요.</p>
+<figure class="fig"><svg viewBox="0 0 400 196" role="img" aria-label="그림 20-1: 접두부 3만 토큰, 새 질문 500토큰. 처음부터 읽으면 약 30.5초, 체크포인트를 재사용해 새로 늘어난 부분만 읽으면 약 0.5초">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="12">요청 전체를 읽는 데 걸리는 시간(막대 길이는 비례, 교육용 추정)</text>
+<text class="f-text" fill="#182f2b" x="20" y="46" font-size="12" font-weight="600">재사용 안 함: 첫 토큰부터 읽기</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="54" width="354" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="374" y="54" width="6" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="90" font-size="12">접두부 30,000토큰 ＋ 새 토큰 500개, 약 30.5초</text>
+<text class="f-text" fill="#182f2b" x="20" y="124" font-size="12" font-weight="600">체크포인트 재사용: 새로 늘어난 부분만 읽기</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="20" y="132" width="354" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="374" y="132" width="6" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="12">체크포인트로 접두부를 잇고, 새 토큰 500개만: 약 0.5초</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="188" font-size="12">초당 약 1,000토큰 기준: 시간 = 토큰 수 ÷ 1,000</text>
+</svg><figcaption>그림 20-1　접두부가 길수록 재사용의 값어치가 커져요. 재사용하지 않으면 30,000 ÷ 1,000 = 30초를 다시 읽는 데 써요. 재사용하면 새 토큰 500개만 읽어서 약 0.5초예요.<span class="ev ev-est">교육용 추정</span></figcaption></figure>
+<p>체크포인트를 잇는 데도 비용이 들어요. 체크포인트는 RAM에 있어서 그래픽 카드로 다시 옮겨야 해요. 체크포인트 하나가 약 118 MB예요(이유는 다음 절에서 설명해요). 10장에서 쓴 PCIe 5.0 이론 대역폭 약 63 GB/s로 계산하면 118 ÷ 63 ≈ 2밀리초예요.<span class="ev ev-est">교육용 추정</span> 30초와 비교하면 무시해도 돼요.</p>
+<p>업스트림 문서는 부작용도 하나 알려 줘요. 프롬프트 캐시를 쓰면 반복된 요청은 꼬리만 읽어요. 계산 경로가 처음부터 읽을 때와 달라서 답이 처음부터 읽을 때와 완전히 같지 않을 수 있어요. 바이트 단위로 같은 출력을 원하면 <code>--prompt-cache 0</code> 같은 옵션으로 꺼야 해요.<span class="ev ev-report">업스트림 보고</span>[S03]</p>
+
+<h2 id="sec-2">20.2 어떤 경우가 "같은 접두부"일까</h2>
+<p>재사용의 전제는 체크포인트가 나타내는 기록이 새 요청의 시작 부분과 <strong>완전히 같다</strong>는 거예요. "비슷해 보인다"는 안 돼요. 토큰이 하나만 달라도 그 뒤 모든 위치의 계산 결과가 따라서 바뀌어요.</p>
+<p>Strata는 <code>conversation_prefix</code>라는 함수로 이 판단을 하고, 세션 캐시에서 체크포인트를 고를 때 검사를 하나 더 해요.<span class="ev ev-code">코드 사실</span>[S10] 합치면 규칙이 네 가지예요.</p>
+<ol>
+<li><strong>steering 모드가 같아요.</strong> <dfn>steering</dfn>은 선택적으로 쓰는 "제어 벡터"예요. 켜면 모델 여러 층의 중간 결과가 바뀌어요. 두 쪽의 모드가 다르면 체크포인트 속 상태는 다른 방식으로 계산된 거라서 그냥 건너뛰어요.</li>
+<li><strong>체크포인트가 요청보다 짧아요.</strong> 요청의 마지막 토큰은 실제로 한 번 읽어야 해요. 그 토큰으로 다음 검증 라운드를 시작하기 때문이에요. 그래서 요청과 길이가 같은 체크포인트는 오히려 쓸 수 없어요.</li>
+<li><strong>접두부 안의 토큰 번호가 하나씩 모두 같아요.</strong></li>
+<li><strong>접두부 안의 이미지 정체가 같아요.</strong> 이미지는 토큰열에서 자리표시 토큰 몇 개일 뿐이고, 같은 자리표시 토큰이 전혀 다른 이미지에 대응할 수 있어요. 그래서 엔진은 이미지마다 정체를 따로 기록해요. 시작 위치와 내용 해시예요.<span class="ev ev-code">코드 사실</span>[S10]</li>
+</ol>
+<div class="viz" data-viz="prefix-match"><figure class="fig"><svg viewBox="0 0 400 362" role="img" aria-label="그림 20-2: 체크포인트를 재사용할 수 있는지는 네 가지 검사를 거쳐요. steering 모드, 길이, 토큰, 이미지가 모두 통과해야 재사용해요">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="31" font-size="13" font-weight="600" text-anchor="middle">새 요청 도착</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="64" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="87" font-size="13" text-anchor="middle">① steering 모드가 같은가?</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="120" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="143" font-size="13" text-anchor="middle">② 체크포인트가 더 짧은가?</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="176" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="199" font-size="13" text-anchor="middle">③ 접두부 토큰이 모두 같은가?</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="232" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="255" font-size="13" text-anchor="middle">④ 이미지 해시가 같은가?</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="292" width="220" height="38" rx="8"/>
+<text class="f-on" fill="#ffffff" x="150" y="316" font-size="13" font-weight="600" text-anchor="middle">모두 통과: 새 꼬리만 읽기</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M150 44V62M150 100V118M150 156V174M150 212V230M150 268V290"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M260 82H284M260 138H284M260 194H284M260 250H284"/>
+<text class="f-warn" fill="#9e5d24" x="290" y="86" font-size="12">아니요: 건너뜀</text>
+<text class="f-warn" fill="#9e5d24" x="290" y="142" font-size="12">아니요: 못 씀</text>
+<text class="f-warn" fill="#9e5d24" x="290" y="198" font-size="12">아니요: 무효</text>
+<text class="f-warn" fill="#9e5d24" x="290" y="254" font-size="12">아니요: 무효</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="354" font-size="12">규칙 출처: conversation_cache.hpp</text>
+</svg><figcaption>그림 20-2　네 가지 검사 중 하나라도 통과하지 못하면 이 체크포인트는 쓸 수 없어요. 엔진은 다른 체크포인트를 시도하거나 처음부터 읽어요.</figcaption></figure></div>
+<p class="bridge"><strong>자료구조를 배운 분께:</strong> "체크포인트가 요청의 접두부인가"를 판단하는 건 문자열 접두사 비교예요. 체크포인트 더미에서 가장 긴 접두부를 찾는 일은 트라이(trie)와 기수 트리(radix tree)가 잘하는 일이에요. Strata의 소스 주석도 기수 트리에 직접 빗대요. 20.4절을 보세요.</p>
+
+<h2 id="sec-3">20.3 스냅샷에는 무엇을 담을까: 노트는 되돌릴 수 있지만 화이트보드는 못 해요</h2>
+<p>체크포인트는 <dfn>스냅샷(snapshot)</dfn>의 한 종류예요. 어느 한 시점의 상태 전체를 찍어 두면 나중에 그 순간으로 돌아갈 수 있어요. 게임의 세이브 파일과 비슷해요. 무엇을 저장할지는 모델이 기록을 "기억하는" 방식에 달려 있어요. Strata가 쓰는 모델의 48개 층에는 두 종류가 있고, 기록을 남기는 방식이 완전히 달라요.<span class="ev ev-code">코드 사실</span>[S04]</p>
+<ul>
+<li><strong>어텐션 층(QSA) 12개는 KV 캐시를 써요.</strong> 토큰을 하나 읽을 때마다 위치 순서대로 한 줄씩 뒤에 기록해요. <strong>노트</strong>와 같아요. 어떤 접두부로 되돌리고 싶으면 뒤의 몇 줄은 신경 쓰지 않아도 돼요. 검증기 설명에 아주 직설적으로 적혀 있어요. 거부된 위치는 나중에 다시 처리할 때, 어떤 쿼리가 읽기 전에 곧바로 덮어써져요.<span class="ev ev-code">코드 사실</span>[S08]</li>
+<li><strong>GDN 층 36개는 재귀 상태를 써요.</strong> 토큰을 하나 읽을 때마다 고정 크기의 상태 덩어리를 <strong>제자리에서</strong> 통째로 덮어써요. <strong>화이트보드</strong>와 같아요.<span class="ev ev-code">코드 사실</span>[S17] 5번째 토큰을 읽고 나면 4번째 토큰일 때의 모습은 지워져서 다시는 계산해 낼 수 없어요.</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="그림 20-3: KV 캐시는 노트처럼 위치 순서대로 한 줄씩 덧붙이니 접두부로 되돌리려면 뒤의 몇 줄을 무시하면 돼요. 재귀 상태는 화이트보드처럼 토큰마다 통째로 덮어써서, 되돌리려면 미리 사진을 찍어 둬야 해요">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">KV 캐시: 노트</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="12" text-anchor="middle">토큰마다 한 줄씩 덧붙여요</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="50" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="64" font-size="12">1번째 토큰</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="74" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="88" font-size="12">2번째 토큰</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="98" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="112" font-size="12">3번째 토큰</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="122" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="136" font-size="12">4번째 토큰</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="30" y="146" width="140" height="20" rx="3"/><text class="f-muted" fill="#5c6d66" x="40" y="160" font-size="12">5번째(옛 분기)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="30" y="170" width="140" height="20" rx="3"/><text class="f-muted" fill="#5c6d66" x="40" y="184" font-size="12">6번째(옛 분기)</text>
+<text class="f-text" fill="#182f2b" x="100" y="214" font-size="12" text-anchor="middle">앞 4개로 되돌리기:</text>
+<text class="f-text" fill="#182f2b" x="100" y="232" font-size="12" text-anchor="middle">뒤의 두 줄은 그냥 두고,</text>
+<text class="f-text" fill="#182f2b" x="100" y="250" font-size="12" text-anchor="middle">다음에 쓸 때 덮어써요</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 10V250"/>
+<text class="f-text" fill="#182f2b" x="300" y="20" font-size="13" font-weight="600" text-anchor="middle">재귀 상태: 화이트보드</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="38" font-size="12" text-anchor="middle">매 토큰이 통째로 덮어써요</text>
+<rect class="f-soft" fill="#e5f1df" x="225" y="50" width="150" height="100" rx="6"/>
+<text class="f-text" fill="#182f2b" x="300" y="94" font-size="12" text-anchor="middle">6번째 토큰을 읽은</text>
+<text class="f-text" fill="#182f2b" x="300" y="114" font-size="12" text-anchor="middle">뒤의 모습</text>
+<text class="f-warn" fill="#9e5d24" x="300" y="176" font-size="12" text-anchor="middle">4번째 토큰으로 되돌리려면?</text>
+<text class="f-warn" fill="#9e5d24" x="300" y="194" font-size="12" text-anchor="middle">이미 지워져서 계산 불가</text>
+<text class="f-text" fill="#182f2b" x="300" y="222" font-size="12" text-anchor="middle">미리 사진을 찍어 둬야 해요:</text>
+<text class="f-text" fill="#182f2b" x="300" y="240" font-size="12" text-anchor="middle">그 사진이 체크포인트예요</text>
+</svg><figcaption>그림 20-3　기억 방식이 둘이면 되돌리는 방식도 둘이에요. 노트는 "뒤의 몇 줄을 안 쓴 척"하면 되돌릴 수 있어요. 화이트보드는 미리 찍어 둔 사진으로만 되돌릴 수 있어요.</figcaption></figure>
+<p>화이트보드는 얼마나 클까요? GDN 층 하나의 상태는 32비트 부동소수점 128 × 48 × 128개이고, 36개 층을 합치면 36 × 128 × 48 × 128 × 4바이트 ≈ 113 MB예요.<span class="ev ev-est">교육용 추정</span>[S04][S17] 대화가 아무리 길어도 이 화이트보드의 크기는 변하지 않아요. KV 노트는 쓸수록 두꺼워져요. 수 하나를 2바이트로 저장하면 12개 층에서 토큰 하나당 12 × 2 × 2 × 256 × 2바이트 ≈ 24.6 KB이고, 3만 토큰이면 약 737 MB예요.<span class="ev ev-est">교육용 추정</span></p>
+<p>그래서 Strata의 체크포인트는 주로 화이트보드를 저장해요. GDN 재귀 상태에, PLE(층별 임베딩)의 기록, 어텐션 indexer의 꼬리 같은 작은 상태 몇 가지를 더하고, 이 접두부의 토큰 번호와 이미지 정체를 기록해요.<span class="ev ev-code">코드 사실</span>[S10] 업스트림 문서는 체크포인트 하나가 약 118 MB라고 해요.<span class="ev ev-report">업스트림 보고</span> 화이트보드의 113 MB와 맞아떨어져요. 대부분이 바로 이 화이트보드예요.</p>
+
+<h2 id="sec-4">20.4 체크포인트 체인: 루트는 고정하고 나머지는 돌려 써요</h2>
+<p>엔진은 언제 사진을 찍을까요? 업스트림 문서에는 이렇게 적혀 있어요. 새 어시스턴트 턴이 시작될 때마다 한 장 찍고, 긴 프롬프트는 토큰 16K개를 읽을 때마다 한 장씩 더 찍어요. 메모리에는 최대 6장까지 남겨요.<span class="ev ev-report">업스트림 보고</span></p>
+<p>이 체크포인트들은 특별한 모양이에요. 그래픽 카드의 KV 캐시는 영역이 하나뿐이라서 한 번에 기록 분기 하나만 담을 수 있어요. 그래서 남겨 두는 체크포인트는 모두 현재 기록의 접두부여야 해요. 길이순으로 늘어놓으면 각각이 다음 것의 접두부가 되어 한 줄로 이어지는 <dfn>체인(chain)</dfn>이 돼요. 소스 주석은 이를 기수 트리에 빗대요. 트리 한 그루를 세션이 담을 수 있는 가지 하나로 납작하게 눌러 놓은 거예요.<span class="ev ev-code">코드 사실</span></p>
+<figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="그림 20-4: 체크포인트 체인. 체크포인트마다 다음 것의 접두부이고, 루트는 시스템 프롬프트의 끝에 있으며 고정돼요. 새 요청은 가장 긴 일치 체크포인트에서 이어서 읽어요">
+<text class="f-muted" fill="#5c6d66" x="20" y="16" font-size="12">대화 하나의 체크포인트(막대 길이 = 접두부 길이, 예시)</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="28" width="90" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="30" y="45" font-size="12">루트 · 고정</text>
+<text class="f-muted" fill="#5c6d66" x="118" y="45" font-size="12">시스템 프롬프트의 끝</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="60" width="170" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="77" font-size="12">2번째 턴 시작</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="92" width="250" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="109" font-size="12">3번째 턴 시작</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="124" width="320" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="141" font-size="12">4번째 턴 시작(가장 긴 체크포인트)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M340 118V188"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="160" width="320" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="340" y="160" width="40" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="177" font-size="12">새 요청: 접두부가 4번째 턴 체크포인트와 일치</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="208" font-size="12">가장 긴 일치 체크포인트에서 이어 읽고, 끝만 읽어요</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="228" font-size="12">최대 6개, 각 약 118 MB</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="244" font-size="12">가득 차면 가장 오래 안 쓴 것부터 버려요(루트 제외)</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="264" font-size="12">새 채팅: 루트에서 이어 읽어요</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="280" font-size="12">시스템 프롬프트 전체를 건너뛰어요</text>
+</svg><figcaption>그림 20-4　체크포인트는 한 줄로 이어지고, 각각이 다음 것의 접두부예요. 루트는 고정돼 있어서 새로 연 채팅도 시스템 프롬프트를 건너뛸 수 있어요.</figcaption></figure>
+<p>체인이 가득 차면 누구를 내보낼까요? 초기 방식은 선입선출이라서 가장 오래된 체크포인트부터 버렸어요. 그런데 가장 오래된 건 대개 시스템 프롬프트의 끝이에요. 같은 클라이언트가 새 채팅을 열 때마다 지나가는 자리예요. 이걸 버리면 새 채팅마다 시스템 프롬프트를 처음부터 다시 읽어야 해요.<span class="ev ev-code">코드 사실</span></p>
+<p>지금 규칙은 이래요. <strong>루트는 고정하고, 나머지는 LRU(가장 오래 쓰지 않은 것)로 돌려 써요.</strong> 소스의 제거 함수는 몇 줄밖에 안 돼요. 용량이 2개 미만이면 고정을 풀고 가장 오래된 것을 버리고, 그렇지 않으면 0번째를 건너뛰고 나머지 중에서 가장 오래 안 쓴 것을 골라요.<span class="ev ev-code">코드 사실</span> 업스트림 문서에는 한 가지가 더 있어요. 처음부터 읽는 프롬프트에서 시스템 프롬프트가 2,048토큰 이상이면 시스템 프롬프트 끝에도 한 장 찍어서 루트가 생기게 해요(엔진 0.1.20부터).<span class="ev ev-report">업스트림 보고</span> LRU 같은 캐시 교체 정책은 12장에서 자세히 다뤄요.</p>
+
+<h2 id="sec-5">20.5 두 대화가 같은 시작을 공유할 때: 쓰기 시 복사</h2>
+<p>더 어려운 상황을 볼게요. 대화 A와 B의 시작이 완전히 같아요(같은 시스템 프롬프트에 같은 문서라고 해 볼게요). 그다음에는 각자 질문해요. 접두부를 함께 쓰고 다른 부분에만 비용을 들일 수 있을까요? 운영체제와 데이터베이스에는 오래전부터 고전적인 답이 있어요.</p>
+<aside class="primer" id="c20-copy-on-write">
+<h3>스냅샷과 쓰기 시 복사</h3>
+<p>데이터 하나의 <dfn>스냅샷</dfn>을 찍는 가장 단순한 방법은 통째로 복사하는 거예요. 데이터가 1 GB면 1 GB를 복사해요. 느리고, 공간도 두 배로 차지해요. 그런데 대개 스냅샷과 원본은 그 뒤로 몇 군데만 바뀌어요.</p>
+<p><dfn>쓰기 시 복사</dfn>(copy-on-write, 줄여서 COW)는 발상을 바꿔요. 먼저 복사하지 않고 두 쪽이 같은 데이터를 함께 써요. 데이터 블록마다 <dfn>참조 카운트</dfn>, 즉 "몇 명이 쓰고 있는가"를 적어 둬요. 공유 중인 블록에 쓰려는 쪽이 <strong>그 블록만</strong> 복사해서 자기 사본을 고쳐요. 아무도 고치지 않은 블록은 영원히 한 벌뿐이에요. 그림 20-5는 3페이지짜리 예예요.</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="그림 20-5: 쓰기 시 복사. 막 분기했을 때 A와 B가 세 페이지를 함께 쓰고, B가 2번 페이지를 고치려 하면 그 페이지만 복사하고 나머지 두 페이지는 계속 함께 써요">
+<text class="f-text" fill="#182f2b" x="100" y="16" font-size="12" font-weight="600" text-anchor="middle">① 막 분기: 모두 공유</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="19" y="28" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102" y="44" font-size="12" text-anchor="middle">A의 페이지 테이블</text>
+<rect class="f-soft" fill="#e5f1df" x="19" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="44" y="90" font-size="12" text-anchor="middle">P1 ×2</text>
+<rect class="f-soft" fill="#e5f1df" x="77" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="102" y="90" font-size="12" text-anchor="middle">P2 ×2</text>
+<rect class="f-soft" fill="#e5f1df" x="135" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="160" y="90" font-size="12" text-anchor="middle">P3 ×2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="19" y="166" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102" y="182" font-size="12" text-anchor="middle">B의 페이지 테이블</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 50V70M102 50V70M160 50V70M44 100V166M102 100V166M160 100V166"/>
+<text class="f-muted" fill="#5c6d66" x="102" y="214" font-size="12" text-anchor="middle">복사한 페이지 0개</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 8V222"/>
+<text class="f-text" fill="#182f2b" x="302" y="16" font-size="12" font-weight="600" text-anchor="middle">② B가 P2를 수정: 그것만 복사</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="214" y="28" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297" y="44" font-size="12" text-anchor="middle">A의 페이지 테이블</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="239" y="90" font-size="12" text-anchor="middle">P1 ×2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="272" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="297" y="90" font-size="12" text-anchor="middle">P2 ×1</text>
+<rect class="f-soft" fill="#e5f1df" x="330" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="355" y="90" font-size="12" text-anchor="middle">P3 ×2</text>
+<rect class="f-accent" fill="#136d5a" x="272" y="118" width="50" height="30" rx="3"/><text class="f-on" fill="#ffffff" x="297" y="138" font-size="12" text-anchor="middle">P2′</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="214" y="166" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297" y="182" font-size="12" text-anchor="middle">B의 페이지 테이블</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M239 50V70M297 50V70M355 50V70M239 100V166M297 148V166M355 100V166"/>
+<text class="f-muted" fill="#5c6d66" x="297" y="214" font-size="12" text-anchor="middle">고친 1페이지만 복사</text>
+</svg><figcaption>그림 20-5　쓰기 시 복사: 먼저 함께 쓰다가 쓰는 쪽이 복사하고, 그것도 쓴 그 페이지만 복사해요. P는 페이지(page)이고 "×2"는 참조 카운트예요.</figcaption></figure>
+<p>가장 유명한 예는 Linux의 <code>fork()</code>예요. 자식 프로세스를 만들 때 페이지 테이블만 복사하고, 부모와 자식이 물리 메모리 페이지 전체를 함께 쓰면서 읽기 전용으로 표시해요. 어느 쪽이든 어떤 페이지에 먼저 쓰면 페이지 폴트가 일어나고, 그때 커널이 그 페이지만 복사해요. 그래서 메모리를 몇 GB 쓰는 프로세스도 fork가 거의 순식간에 끝나요. 파일 시스템 스냅샷과 데이터베이스의 다중 버전 동시성 제어(MVCC)도 같은 발상을 써요.</p>
+<p>이 장으로 돌아와 볼게요. 두 대화의 공통 접두부는 "아무도 고치지 않는 페이지"예요. 접두부 속 KV 페이지가 읽기만 하고 쓰지 않는다면 안심하고 함께 써도 돼요. 아래 시뮬레이터에서 직접 해 보세요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EC%B9%B4%ED%94%BC_%EC%98%A8_%EB%9D%BC%EC%9D%B4%ED%8A%B8" target="_blank" rel="noopener noreferrer">위키백과: 카피 온 라이트</a> · <a href="https://man7.org/linux/man-pages/man2/fork.2.html" target="_blank" rel="noopener noreferrer">Linux 매뉴얼: fork(2)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/" target="_blank" rel="noopener noreferrer">OSTEP(무료 운영체제 교재, 가상 메모리 장)</a> · <a href="https://ko.wikipedia.org/wiki/%EB%8B%A4%EC%A4%91_%EB%B2%84%EC%A0%84_%EB%8F%99%EC%8B%9C%EC%84%B1_%EC%A0%9C%EC%96%B4" target="_blank" rel="noopener noreferrer">위키백과: 다중 버전 동시성 제어</a></p>
+</aside>
+<div class="viz" data-viz="prefix-cow"><figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="그림 20-6: 접두부 17토큰, 페이지당 4토큰, A와 B가 각각 3토큰을 써요. 앞의 4페이지는 두 쪽이 함께 쓰고, 5번째 페이지는 A가 복사하고 B가 제자리에서 써서 모두 6페이지를 차지해요. 전체 복사는 10페이지가 필요해요">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">접두부 17토큰, 페이지당 4토큰, A·B 각 3토큰 씀</text>
+<text class="f-text" fill="#182f2b" x="20" y="68" font-size="13" font-weight="600">A</text>
+<text class="f-text" fill="#182f2b" x="20" y="148" font-size="13" font-weight="600">B</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="60" y="34" width="46" height="130" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="114" y="34" width="46" height="130" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="168" y="34" width="46" height="130" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="222" y="34" width="46" height="130" rx="3"/>
+<g>
+<rect class="f-accent" fill="#136d5a" x="64" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="74" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="84" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="94" y="95" width="7" height="7"/>
+<rect class="f-accent" fill="#136d5a" x="118" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="128" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="138" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="148" y="95" width="7" height="7"/>
+<rect class="f-accent" fill="#136d5a" x="172" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="182" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="192" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="202" y="95" width="7" height="7"/>
+<rect class="f-accent" fill="#136d5a" x="226" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="236" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="246" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="256" y="95" width="7" height="7"/>
+</g>
+<text class="f-muted" fill="#5c6d66" x="83" y="156" font-size="12" text-anchor="middle">×2</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="156" font-size="12" text-anchor="middle">×2</text>
+<text class="f-muted" fill="#5c6d66" x="191" y="156" font-size="12" text-anchor="middle">×2</text>
+<text class="f-muted" fill="#5c6d66" x="245" y="156" font-size="12" text-anchor="middle">×2</text>
+<rect class="f-box" fill="#ffffff" stroke="#9e5d24" stroke-width="2" stroke-dasharray="4 3" x="276" y="34" width="56" height="50" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="281" y="46" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="292" y="46" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="303" y="46" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="314" y="46" width="7" height="7"/>
+<text class="f-warn" fill="#9e5d24" x="304" y="76" font-size="12" text-anchor="middle">복사</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="276" y="114" width="56" height="50" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="281" y="126" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="292" y="126" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="303" y="126" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="314" y="126" width="7" height="7"/>
+<text class="f-muted" fill="#5c6d66" x="304" y="156" font-size="12" text-anchor="middle">직접 씀</text>
+<text class="f-text" fill="#182f2b" x="10" y="190" font-size="12">쓰기 시 복사: 총 6페이지, 복사는 1페이지만</text>
+<text class="f-text" fill="#182f2b" x="10" y="206" font-size="12">(전체 복사는 10페이지)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="226" font-size="12">5번째 페이지는 접두부 토큰이 1개뿐이고 A가 먼저 써서,</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="242" font-size="12">A가 그 페이지를 복사해요</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="262" font-size="12">재귀 상태는 함께 쓸 수 없어요:</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="278" font-size="12">B가 한 덩어리(약 113 MB)를 따로 복사해요</text>
+</svg><figcaption>그림 20-6　접두부로 가득 찬 4페이지는 두 쪽이 함께 써요. 반쯤 찬 5번째 페이지는 양쪽이 모두 써야 해서, 먼저 쓰는 A가 한 벌 복사하고 B는 제자리에서 써요. 주색 작은 사각형은 접두부 토큰이고, 다른 색은 분기 후 새로 쓴 토큰이에요.</figcaption></figure></div>
+<p>시뮬레이터에서 두 가지를 알 수 있어요. 첫째, KV 페이지는 함께 쓸 수 있지만 접두부가 채우지 못한 마지막 페이지는 양쪽이 쓰기 때문에 복사해야 해요. 둘째, 재귀 상태(화이트보드)는 어떻게 해도 함께 쓸 수 없어요. 토큰마다 통째로 덮어쓰니까, 분기할 때 한 덩어리를 통째로 복사해야 해요.</p>
+<p>그럼 Strata는 어떻게 할까요? 두 대화 사이에서 페이지를 공유하지 <strong>않아요</strong>. 소스 코드는 스냅샷 데이터를 담는 버퍼에 이렇게 적어 놨어요. 스냅샷과 그것이 남겨 둔 버퍼는 주인이 하나뿐이라서 공유도, 쓰기 시 복사도 필요 없어요.<span class="ev ev-code">코드 사실</span> 앞에서 말했듯 그래픽 카드의 KV 영역은 한 번에 기록 분기 하나만 담으니까 체인 하나면 충분해요. 쓰기 시 복사는 여기서 우리가 덧붙인 교육용 확장이고, Strata의 구현이 아니에요.</p>
+<p>다만 Strata에는 비슷하게 아끼는 요령이 있어요. 대화 몇 개를 메모리에 "주차"해 둘 수 있어요(이 기능은 기본적으로 꺼져 있고, 직접 켜야 해요). 주차된 대화마다 실행 상태, 체크포인트, 쓴 KV 페이지, 드래프트 층의 KV까지 스냅샷 한 벌을 통째로 저장해요.<span class="ev ev-report">업스트림 보고</span> 대화가 복원되면 바뀌지 않은 KV 페이지는 그대로 남겨 뒀다가 다음에 주차할 때 다시 복사하지 않고 쓸 수 있어요. 대화가 길어지면 뒤에만 덧붙이고 이미 있는 페이지는 옮기지 않아요. 롤백으로 덮어쓴 페이지만 다시 복사해요.<span class="ev ev-report">업스트림 보고</span> 쓰기 시 복사와 정신이 같아요. 바뀌지 않은 건 복사하지 않아요.</p>
+
+<h2 id="sec-6">20.6 직접 해 보기: 저장, 전환, 복원, 그리고 다시 비교</h2>
+<p>스냅샷 복원에는 철칙이 하나 있어요. <strong>통째로 되돌리거나, 분명하게 거부하거나</strong>예요. 절반만 되돌린 상태가 가장 위험해요. 모델은 그래도 그럴듯해 보이지만 사실은 전부 틀린 글을 생성해요. Strata는 먼저 모든 층과 모든 체크포인트를 검증하고, 전부 합격해야 쓰기를 시작해요. 검증을 통과하지 못한 스냅샷은 그래픽 카드를 건드리기 전에 거부해요. 옮기는 도중에 오류가 나면 인터페이스는 호출한 쪽이 이 세션으로 추론을 계속해서는 <strong>안 된다</strong>고 요구해요.<span class="ev ev-code">코드 사실</span></p>
+<p class="bridge"><strong>데이터베이스를 배운 분께:</strong> 트랜잭션의 원자성이에요. 전부 적용되거나, 아예 일어나지 않은 것처럼 되돌아가요. 18장에서 추측 디코딩의 "수락된 접두부만 커밋"을 다뤘는데, 같은 발상을 세션 복원에 쓴 거예요.</p>
+<p>이 장의 인터랙티브 실험 「수락된 접두부만 커밋하기」를 열어 보세요. 장난감 재귀 s ← 0.5s + t로 후보 상태와 커밋된 상태가 왜 다른지, 카운터만 되감으면 왜 잘못된 상태가 남는지 보여 줘요. 두 번째 드래프트를 거부됨으로 설정하고 "카운터는 되돌아갔는데 상태는 안 되돌아간" 지점을 찾아보세요. 화이트보드를 "안 쓴 척"으로는 되돌릴 수 없는 이유가 바로 이거예요.</p>
+<p>더 나아가고 싶다면 그래픽 카드 없이 하는 테스트를 직접 설계해 보세요. 같은 장난감 재귀로 대화 A를 돌리고 스냅샷을 저장해요. 대화 B로 전환해서 돌려요. 그다음 A를 복원해서 이어 가요. 마지막에 "A가 한 번도 떠나지 않았을 때"의 결과와 비트 단위로 비교해요. 둘은 완전히 같아야 해요.</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>접두부 재사용은 "한 글자도 다르지 않을 때"만 인정해요. 토큰 번호, 이미지 정체, steering 모드가 모두 같아야 하고, 체크포인트가 요청보다 짧아야 이어서 읽을 수 있어요.</li>
+<li>KV 캐시는 노트 같아서 되돌릴 때 뒤의 몇 줄을 무시하면 돼요. 재귀 상태는 화이트보드 같아서 토큰마다 통째로 덮어쓰니, 미리 찍어 둔 체크포인트로만 되돌릴 수 있어요. Strata 체크포인트의 대부분은 약 113 MB의 GDN 상태예요.</li>
+<li>쓰기 시 복사는 여러 분기가 아무도 안 고친 페이지를 함께 쓰고, 쓰는 그 페이지만 복사해요. Strata는 "루트는 고정, 나머지는 LRU로 돌려 쓰는" 체크포인트 체인을 쓰고, 주차된 대화는 각자 버퍼를 독점해요. 쓰기 시 복사는 쓰지 않아요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: "KV 캐시를 저장하면 대화 전체를 저장한 거예요."</strong></p>
+<p>Strata가 쓰는 모델에는 한참 부족해요. 48개 층 중 36개 층이 재귀 상태로 기록을 남기는데, 그건 KV 캐시 안에 없어요. 그 밖에 PLE의 기록, 어텐션 indexer의 꼬리, 드래프트 층의 KV, 그리고 이 접두부의 토큰 번호와 이미지 정체도 있어요.<span class="ev ev-code">코드 사실</span>[S10] 하나라도 빠뜨리면 복원된 대화는 조용히 틀린 계산을 해요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 매칭 규칙, 스냅샷 목록, 용량 계산, 복원 계약</summary>
+<h3>매칭 규칙의 소스 코드 세부 사항</h3>
+<p><code>conversation_prefix</code>는 먼저 체크포인트가 비어 있지 않고, 길이가 요청 길이보다 엄격하게 작고, 앞 n개 토큰 번호가 하나씩 같기를 요구해요. 아니면 0을 반환해요. 그다음 요청 속 이미지를 훑어요. 시작 위치가 접두부 밖이면 건너뛰어요. 접두부 안이면 체크포인트에 기록된 이미지와 차례로 같아야 해요(시작 위치와 해시가 모두 같아야 해요). 마지막으로 체크포인트에 기록된 이미지도 딱 맞게 다 소진되어야 해요. 한 장 많아도, 한 장 적어도, 한 장 바뀌어도 0을 반환해요.<span class="ev ev-code">코드 사실</span>[S10]</p>
+<p>세션 캐시가 체크포인트를 고를 때는 가장 최근에 주차한 항목부터 거꾸로 찾아가고, steering 모드가 다른 항목은 바로 건너뛰어요. 항목마다 현재 상태와 체크포인트 하나하나를 모두 따져서 가장 길게 일치하는 것을 골라요. 길이가 같으면 가장 최근에 주차한 분기를 우선하고, 호출한 쪽은 같은 길이일 때 자기가 지금 쓰고 있는 상태를 먼저 써요.<span class="ev ev-code">코드 사실</span>[S10]</p>
+<h3>정체 목록: 업스트림이 이미 검사하는 것과 이 책이 제안하는 것</h3>
+<p>업스트림이 검사하는 것은 토큰, 이미지 정체, steering 모드예요. 스냅샷에는 정수 18개짜리 <code>geometry</code> 배열도 있어요. 소스 주석은 이 배열이 런타임 호환성 검사에만 쓰이고 모델 가중치의 정체도, 디스크 형식도 <strong>아니라고</strong> 분명히 써 놨어요.<span class="ev ev-code">코드 사실</span>[S10] 모양이 같고 가중치가 완전히 다른 두 모델도 geometry는 같아요.</p>
+<p>이 메커니즘을 프로덕션으로 넓힌다면(스냅샷을 디스크에 저장하고, 프로세스 사이에 공유하고, 사용자가 여럿인 경우), 이 책은 정체 키에 적어도 다음을 더하라고 제안해요. 모델 가중치 버전, 토크나이저와 채팅 템플릿, RoPE 설정, 양자화 형식, 장치의 수치 모드, 그리고 권한 범위(누구의 대화는 누구에게만 쓸 수 있는가)예요. 교육용 확장 목록이고, 업스트림에 이미 있는 검사가 아니에요.</p>
+<h3>스냅샷 한 벌의 전체 목록</h3>
+<p>체크포인트(<code>ConversationCheckpoint</code>)에는 토큰 번호, 이미지 정체, GDN 상태, PLE 기록, indexer 꼬리(tails), dead, block_pos 같은 바이트 블록과, 계층형 런타임에서 장치마다 하나씩 있는 하위 체크포인트 <code>stage_parts</code>가 들어 있어요. KV 부분(<code>ConversationKv</code>)에는 형식 번호, 단위 수, 헤드 수, 헤드 차원, 페이지 크기, indexer 행 수가 있고, K와 V, 각각의 양자화 스케일, pooled indexer 행이 있어요. 대화 전체의 스냅샷(<code>SavedConversation</code>)은 여기에 geometry, 층 범위 <code>layer_lo / layer_hi</code>, 현재 상태, 체크포인트 목록, 메인 층과 드래프트 층의 KV, steering 플래그를 더해요.<span class="ev ev-code">코드 사실</span>[S10]</p>
+<p>멀티 GPU의 경계를 주의하세요. 소스 주석에 따르면 일반적인 레이어 분할 체크포인트는 장치별 실행 상태를 남기지만, 대화 전체를 주차하는 기능은 지금 단일 GPU만 지원하고 이런 하위 체크포인트는 거부해요.<span class="ev ev-code">코드 사실</span>[S10] 업스트림 문서도 주차를 켜고 <code>--layer-split</code>까지 쓰면 모델을 불러오기 전에 거부된다고 말해요.<span class="ev ev-report">업스트림 보고</span> "멀티 GPU를 지원한다"에서 "캐시와 복원의 모든 조합이 멀티 GPU를 지원한다"를 끌어낼 수는 없어요.</p>
+<h3>용량 계산: 용량 기준으로 계산하고 언더플로를 막아요</h3>
+<p>스냅샷의 바이트 수는 각 vector의 <code>size()</code>가 아니라 <code>capacity()</code>를 더해요. 이미 확보했지만 아직 다 쓰지 않은 공간도 센다는 뜻이에요.<span class="ev ev-code">코드 사실</span>[S10] 새 스냅샷이 들어갈 수 있는지는 <code>held &lt;= budget_ &amp;&amp; incoming &lt;= budget_ - held &amp;&amp; …</code>로 판단하고, 뺄셈을 하기 전에 음수가 되지 않는지 먼저 확인해요. 부호 없는 정수에서 음수가 나오면 아주 큰 양수로 돌아가 버려서 예산 검사가 있으나 마나 해져요. 재사용을 위해 남겨 둔 KV도 같은 예산에 들어가요.<span class="ev ev-code">코드 사실</span>[S10]</p>
+<p>공간을 비울 때는 재사용용으로 남긴 KV를 먼저 버리고, 그다음 주차한 순서대로 가장 오래된 항목을 제거해요.<span class="ev ev-code">코드 사실</span> 업스트림 문서는 물리 메모리도 <code>--conversation-cache-min-free-mib</code>(기본값 2560)만큼 여유를 남기라고 요구해요. 할당하기 전에 한 번, 찍고 나서 한 번 확인하고, 메모리 정보를 못 얻으면 주차하지 않아요.<span class="ev ev-report">업스트림 보고</span> 대응하는 판단 함수는 "못 얻음"과 "0을 얻음"을 분명히 구분해요. 정보가 없으면 곧바로 거부해요.<span class="ev ev-code">코드 사실</span> 기본 예산은 0이라서 기능이 꺼져 있어요. 문서의 예시는 8 GiB, 슬롯 4개이고, 이것은 상한이지 권장값이 아니라고 밝혀 둬요.<span class="ev ev-report">업스트림 보고</span></p>
+<h3>복원 계약과 영속성</h3>
+<p>스냅샷 인터페이스는 복원 결과를 성공, 스냅샷 무효, 전송 실패 세 가지로 나눠요. 무효인 스냅샷은 CUDA 호출이나 쓰기 이전에 거부돼요. 전송 실패는 상태가 반쯤 남을 수 있어서, 호출한 쪽은 이 세션으로 추론을 계속해서는 <strong>안 돼요</strong>.<span class="ev ev-code">코드 사실</span> 업스트림 문서는 전송이나 동기화 실패를 치명적 오류로 처리하고, 스냅샷은 재시작 후에 남지 않는다고 해요.<span class="ev ev-report">업스트림 보고</span></p>
+<p>스냅샷을 디스크에 저장하려면 흔히 쓰는 안전한 방법은 이래요. 임시 파일에 먼저 쓰고, 다 쓰고 나서 flush하고 체크섬이 맞으면 한 번의 원자적 이름 변경으로 "공개"하고, 파일에 형식 버전을 기록해요. 구체적인 영속성 보장은 파일 시스템에 따라 달라요.[R02] 이것은 교육용 확장이고, Strata는 지금 스냅샷을 영속화하지 않아요.</p>
+<h3>KV 페이지 재사용의 경계</h3>
+<p>스냅샷 인터페이스에는 놓치기 쉬운 주석이 하나 있어요. 토큰 번호가 같다고 해서 KV 바이트가 안 바뀌었다는 것이 <strong>증명되지는 않아요</strong>. "바뀌지 않은 토큰 수"는 실제로 스냅샷에서 이 세션으로 복원됐고 그 뒤 매번 덮어쓸 때마다 이미 차감한 저장소에만 유효해요.<span class="ev ev-code">코드 사실</span> 세션 캐시의 해당 함수는 덮어쓰기를 만날 때마다 "바뀌지 않은 길이"를 처음 더러워진 위치까지 줄이고, 0까지 줄면 그 블록 전체를 버려요.<span class="ev ev-code">코드 사실</span>[S10]</p>
+<p>스냅샷 데이터를 담는 버퍼는 16 MiB짜리 세그먼트로 이뤄져 있고, 덧붙일 때 이미 있는 데이터는 옮기지 않아요. 아주 작은 세그먼트 디렉터리만 움직일 수 있어요.<span class="ev ev-code">코드 사실</span> 이것이 "길어지면 덧붙이기만 하고 이미 있는 페이지는 복사하지 않는다"의 밑바탕이에요.</p>
+<h3>예제: 같은 접두부에서 갈라지면 왜 쓰기 격리가 필요할까</h3>
+<p>세션 A와 B가 앞의 토큰 1000개를 공유해요. 그 뒤 A는 토큰 a를, B는 b를 써요. 읽기 전용인 공유 접두부는 복사하지 않아도 되지만, 1001번째 위치와 바뀌는 재귀 상태는 각자 독립이어야 해요. 두 세션이 같은 쓰기 가능 상태를 곧바로 가리키면 요청 하나가 다른 요청을 조용히 오염시켜요. 교육용 설계라면 "불변 접두부 페이지 + 참조 카운트 + 쓰기 시 복사"를 쓸 수 있어요. GDN 재귀 상태는 분기점에서 한 벌을 통째로 복사해야 해요.</p>
+<h3>테스트 매트릭스와 검수</h3>
+<p>다음 경우마다 "히트해야 함 / 거부해야 함"을 써 보세요. 토큰은 같지만 이미지가 다른 경우, 접두부는 같지만 steering이 다른 경우, 모델 버전이 다른 경우, 요청과 체크포인트의 길이가 딱 같은 경우예요. 표에서 "업스트림이 이미 검사하는 것"과 "확장에서 요구하는 것"을 두 열로 나누세요.</p>
+<p>복원 테스트는 "A → 저장 → B → A 복원 → 계속" 순서로 하고, 결과를 A가 한 번도 떠나지 않았을 때와 비트 단위로 비교해요. 그다음 일부러 잘린 스냅샷, 잘못된 형식, 부족한 예산, 끝나지 않은 커밋을 주입해요. 안전한 실패는 한 가지뿐이에요. 분명하게 거부하고 원래 상태를 지키는 것이지, 그럴듯해 보이는 글을 계속 생성하는 것이 아니에요.</p>
+</details>
