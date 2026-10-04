@@ -1,18 +1,177 @@
-<h2 id="sec-1">13.1 两种常见误解</h2>
-<p>第一种是“CPU 只负责管理，真正计算全在 GPU”。在 Strata 的常见异构路径中，CPU 可以原地计算 RAM 中的缺失专家。[S02][S06] 第二种是“所有缺失专家都先搬到 GPU”。接口还有 CPU、PCIe 可访问来源与缓存等不同路径；具体启用条件须继续追踪配置与调用方，不应把一张简图当作所有模式的执行事实。</p>
-<p>卸载可以移动计算，也可以移动数据。传递一个激活向量让 CPU 使用已有权重，与把整个专家权重搬到 GPU，数据量差异可能很大。比较两者时必须数清真正穿过 PCIe 的字节。</p>
-<h2 id="sec-2">13.2 一个可手算的分工模型</h2>
-<p>假设剩余专家流量总量为 D，比例 f 的工作交给 GPU 经 PCIe 路径，剩余给 CPU。把持续 CPU 处理能力折算成 Bc 字节/秒，PCIe/GPU 分支折算成 Bp，忽略共享瓶颈：</p>
-<div class="equation">T(f) ≈ max((1−f)D/Bc, fD/Bp) + Tjoin</div>
-<p>令两个分支相等，理想平衡点为 <code>f=Bp/(Bc+Bp)</code>。若 Bc=40、Bp=20，得 f=1/3，而不是“一半一半”。这里的 Bp 不是 PCIe 标称带宽，而是包含该分支完整代价的教学有效速率。</p>
-<h2 id="sec-3">13.3 为什么真实最优点可能不在这里？</h2>
-<p>CPU 和 GPU 分支可能同时争用 DRAM；PCIe 传输可能与 KV streaming 竞争；专家大小、token 复用及 GPU 启动成本不同；主机线程和 NUMA 布局也影响 Bc。模型中被假定独立的资源，在机器上可能共享。</p>
-<p>因此这个公式用于提出待验证假设，而不是自动生成可靠默认参数。真正调参应记录各分支完成时间、传输字节、总请求时间，并留出质量约束。参数扫描得到最快配置后，还要在另一组任务上复验。</p>
-<h2 id="sec-4">13.4 串行残差链限制了跨层重叠</h2>
-<p>同一层的专家结果必须与本层路由权重合并，才能正确写回残差。<code>SessionGraphs</code> 的 pre/post 设计就是为了避免把本层 parts 与下一层权重错配。[S13] 先运行下一层并不总是一个合法“优化”。</p>
-<p>假设 GPU 独立工作 2 ms、CPU 专家 8 ms、合并 1 ms。理想重叠阶段约 9 ms，而非 11 ms；若 CPU 工作只能在 GPU 完成后才发布，则仍是 11 ms。仅观察两者都曾运行，无法判断哪一种时间线真正发生。</p>
-<h2 id="sec-5">13.5 用诊断量证明重叠</h2>
-<p>会话接口记录 doorbell 是否在图尚未完成时被主机观察到，例如 <code>rings_mid_graph</code>。[S13] 这类指标比“开启 overlap=true”更有价值。命名配置只是意图，事件时间线才是行为。</p>
-<p>也要避免另一种错误：CPU 占用率降低，未必说明更快；它可能更早算完后在等待，也可能根本没拿到任务。GPU 占用率高，可能包含等待 kernel。要围绕用户可见的关键路径解释利用率。</p>
-<h2 id="sec-6">13.6 实验与验收</h2>
-<p>在异构实验中改变 CPU 和 PCIe 有效速率，记录最优 f。再加入固定 join 成本，看收益上限。实验只使用上面的两分支模型。真实复现要求固定热专家分布、上下文和草稿策略，并保证输出质量不因计算路径改变而被忽略。</p>
+<div class="hook"><span class="eyebrow">一件反直觉的事</span>
+<p>Strata 让显卡和处理器同时干活。听上去像请了两个工人，速度该快一大截。可上游的开发记录里有这样一件事：他们把 CPU 每个 token 要做的专家计算，从 18.2 毫秒砍到了 10.2 毫秒，CPU 确实少干了将近一半。结果呢？生成一个 token 的总时间，纹丝不动。<span class="ev ev-report">上游报告</span>（<code>include/strata/core/hit_hook.hpp</code> 注释）</p>
+<p>省下的 8 毫秒去哪了？这一章从 CPU 和 GPU 的性格讲起，讲到“谁等谁”，最后落在一个词上：关键路径。</p></div>
+<p class="tldr"><strong>一句话：</strong>算专家，大头是读字节，所以 CPU 就地算内存里的专家；同一层里，命中的专家归 GPU、没命中的归 CPU，两边同时算；但层与层之间有数据依赖，只能排队，所以 CPU 的活藏不住，只能靠缓存把它变少。</p>
+
+<h2 id="sec-1">13.1 两种处理器，两种性格</h2>
+<p>CPU 像几位全能的老师傅，GPU 像一个上千人的流水线车间。老师傅人少，但每人都能独立处理复杂的、走一步看一步的活；车间人多，最擅长的是“所有人同时做同一个简单动作”。图 13-1 是一个示意。</p>
+<aside class="primer" id="c13-cpu-gpu">
+<h3>CPU 与 GPU：SIMD 和 SIMT</h3>
+<p><dfn>CPU</dfn>（中央处理器）的核心不多，上游测速机器的 Ryzen 5 7600 有 6 个。<span class="ev ev-report">上游报告</span>[S03] 每个核心都很“聪明”：有大缓存、能预测分支、能乱序执行，适合控制流复杂的程序。CPU 也能一次算多个数：一条 <dfn>SIMD</dfn>（单指令多数据）指令，同时对一排数做同一种运算。AVX-512 指令的寄存器有 512 位，一次能装 16 个 32 位浮点数，也就是 16 条“车道”。Strata 的 CPU 专家内核就用 AVX-512 或 AVX2 写成。<span class="ev ev-report">上游报告</span>[S02]</p>
+<p><dfn>GPU</dfn>（图形处理器）把芯片面积花在大量简单的计算单元上，常见的游戏显卡就有几千个。它的执行方式叫 <dfn>SIMT</dfn>（单指令多线程）：NVIDIA 的 GPU 把 32 个线程编成一组（一个 warp），同一组同时执行同一条指令，各自处理自己的数据。[R01] 它还配了带宽高得多的显存：RTX 5070 的显存约 672 GB/s，而双通道 DDR5-5200 内存约 83 GB/s（第 1 章有对比）。</p>
+<p>两者的共同点是：<strong>同时做很多份互不相干的同样工作</strong>，才能发挥出力气。如果每一步都要等上一步的结果，车道再多也只能一格一格来。下面的模拟器让你亲眼看到这一点。</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="图 13-1：CPU 是少数几个强大的核心，每个核心带 16 路 SIMD；GPU 是几千个简单的计算单元，32 个一组执行同一条指令">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="15" font-weight="600" text-anchor="middle">CPU：6 个强核心</text>
+<rect class="f-accent" fill="#136d5a" x="14" y="34" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="73" y="34" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="132" y="34" width="54" height="54" rx="6"/>
+<rect class="f-accent" fill="#136d5a" x="14" y="94" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="73" y="94" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="132" y="94" width="54" height="54" rx="6"/>
+<text class="f-on" fill="#ffffff" x="41" y="66" font-size="14" text-anchor="middle">核</text><text class="f-on" fill="#ffffff" x="100" y="66" font-size="14" text-anchor="middle">核</text><text class="f-on" fill="#ffffff" x="159" y="66" font-size="14" text-anchor="middle">核</text>
+<text class="f-on" fill="#ffffff" x="41" y="126" font-size="14" text-anchor="middle">核</text><text class="f-on" fill="#ffffff" x="100" y="126" font-size="14" text-anchor="middle">核</text><text class="f-on" fill="#ffffff" x="159" y="126" font-size="14" text-anchor="middle">核</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="174" font-size="14" text-anchor="middle">每核：SIMD 16 路</text>
+<text class="f-text" fill="#182f2b" x="300" y="20" font-size="15" font-weight="600" text-anchor="middle">GPU：几千个小单元</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="214" y="34" width="172" height="114"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.8" d="M214 48H386M214 62H386M214 76H386M214 90H386M214 104H386M214 118H386M214 132H386M228 34V148M242 34V148M256 34V148M270 34V148M284 34V148M298 34V148M312 34V148M326 34V148M340 34V148M354 34V148M368 34V148"/>
+<rect class="f-accent" fill="#136d5a" x="214" y="34" width="172" height="14"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="174" font-size="14" text-anchor="middle">一行 ＝ 一组，同步执行</text>
+<text class="f-text" fill="#182f2b" x="200" y="210" font-size="14" text-anchor="middle">CPU：擅长复杂、走一步看一步的活</text>
+<text class="f-text" fill="#182f2b" x="200" y="236" font-size="14" text-anchor="middle">GPU：擅长海量、同一个动作的活</text>
+</svg><figcaption>图 13-1　两种设计思路。CPU 核少而强，每核带一组 SIMD 车道；GPU 单元多而简单，成组执行同一条指令。示意图，不按比例。</figcaption></figure>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/单指令流多数据流" target="_blank" rel="noopener noreferrer">维基百科：单指令流多数据流</a> · <a href="https://en.wikipedia.org/wiki/Single_instruction,_multiple_threads" target="_blank" rel="noopener noreferrer">Wikipedia: Single instruction, multiple threads</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA CUDA Programming Guide</a></p>
+</aside>
+<div class="viz" data-viz="simd-lanes"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 13-2：16 个数逐个相加要 16 步，用 SIMD 一次 16 个只要 1 步，而累加链即使有 16 条车道也要 16 步">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">处理 16 个数，要几步？</text>
+<text class="f-text" fill="#182f2b" x="20" y="56" font-size="14">逐个相加</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="42" width="256" height="20"/>
+<text class="f-text" fill="#182f2b" x="376" y="80" font-size="14" text-anchor="end">16 步</text>
+<text class="f-text" fill="#182f2b" x="20" y="112" font-size="14">SIMD 16 路</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="98" width="16" height="20"/>
+<text class="f-text" fill="#182f2b" x="144" y="113" font-size="14">1 步</text>
+<text class="f-text" fill="#182f2b" x="20" y="160" font-size="14">累加链</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="146" width="256" height="20"/>
+<text class="f-text" fill="#182f2b" x="376" y="184" font-size="14" text-anchor="end">16 步</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="214" font-size="14">累加链：每一格都要等前一格的结果，</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="232" font-size="14">车道再多也用不上</text>
+</svg><figcaption>图 13-2　能不能并行，看数据之间有没有依赖。互不相干的 16 个加法一步做完；一环扣一环的累加只能一步一步来。</figcaption></figure></div>
+<p class="bridge"><strong>学过计算机组成的同学：</strong>SIMD 就是向量指令（x86 的 SSE、AVX，ARM 的 NEON）；GPU 的 SIMT 可以理解成“硬件自动把一组线程打包成一条宽向量来执行”，分支走向不同时，组内线程要分批执行。</p>
+
+<h2 id="sec-2">13.2 CPU 凭什么也能算专家：大头是读字节</h2>
+<p>GPU 算得快那么多，为什么 Strata 敢让 CPU 算专家？因为算一个专家，难的不是算，而是读。一个专家 1.38 MB，每个参数只乘加一两次，计算单元大部分时间都在等数据从内存送过来。上游的 CPU 专家池注释写得很直接：专家内核受内存带宽限制，6 个核心实测约 42.55 GB/s，速度几乎和核心数成正比。<span class="ev ev-code">代码事实</span>（<code>include/strata/kernels/cpu/pool.hpp</code>）</p>
+<p>既然瓶颈是读字节，那就让字节少走路。第 10 章算过：把没命中的专家经 PCIe 搬到显卡上，一个 token 光搬运就要 10 毫秒以上。反过来，把“活”送到数据身边，要传的东西就少多了，见图 13-3。</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="图 13-3：把 10 个专家搬到 GPU 要传 13.8 MB；把活交给 CPU，只需送过去 10 KB 的输入、拿回 100 KB 的结果">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">做法一：把专家搬到 GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="34" width="110" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="61" font-size="14" text-anchor="middle">内存</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="34" width="110" height="44" rx="6"/>
+<text class="f-on" fill="#ffffff" x="325" y="61" font-size="14" text-anchor="middle">GPU</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M132 56H262"/>
+<path class="f-muted" fill="#5c6d66" d="M268 56l-9-5v10z"/>
+<text class="f-warn" fill="#9e5d24" x="200" y="100" font-size="14" text-anchor="middle">10 × 1.38 MB ＝ 13.8 MB 过 PCIe</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="15" font-weight="600">做法二：把活交给 CPU</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="158" width="110" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="185" font-size="14" text-anchor="middle">CPU ＋ 内存</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="158" width="110" height="44" rx="6"/>
+<text class="f-on" fill="#ffffff" x="325" y="185" font-size="14" text-anchor="middle">GPU</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M268 170H138"/>
+<path class="f-muted" fill="#5c6d66" d="M132 170l9-5v10z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M132 192H262"/>
+<path class="f-muted" fill="#5c6d66" d="M268 192l-9-5v10z"/>
+<text class="f-text" fill="#182f2b" x="200" y="226" font-size="14" text-anchor="middle">送去：本层输入 2560 个数 ≈ 10 KB</text>
+<text class="f-text" fill="#182f2b" x="200" y="250" font-size="14" text-anchor="middle">拿回：10 × 2560 个数 ≈ 100 KB</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="284" font-size="14" text-anchor="middle">专家的 1.38 MB 留在原地，由 CPU 读</text>
+</svg><figcaption>图 13-3　搬数据还是搬计算。专家不动、输入和结果来回跑，过 PCIe 的字节少了一百多倍。<span class="ev ev-est">教学推演</span></figcaption></figure>
+<p>接口是这样约定的：每一层，GPU 把归一化后的输入、选中的 10 个专家编号和它们的权重交给 CPU 这一侧，等着拿回 10 × 2560 个数。<span class="ev ev-code">代码事实</span>[S06] 一个数 4 字节，输入约 10 KB，结果约 100 KB，比 13.8 MB 小了一百多倍。<span class="ev ev-est">教学推演</span></p>
+<p>CPU 这一侧是一个<dfn>专家池</dfn>：每个物理核心一个工作线程，第一个核心留给主循环。每层的 10 个专家分给这些线程同时算；主机要把 10 份结果都收齐、加起来，下一层才能开始，所以每一层都是一道“栅栏”。<span class="ev ev-code">代码事实</span>（<code>pool.hpp</code>）</p>
+<p class="bridge"><strong>学过操作系统的同学：</strong>线程绑在物理核心上，而不是绑在逻辑处理器上。一个物理核心的两个超线程共享同一套执行单元和缓存，两个读内存的线程挤在一起，带宽会减半。源码注释还记录了一次实测：主循环线程没有固定在自己的核心上时，专家池从 36.32 GB/s 掉到 26.9 GB/s。<span class="ev ev-report">上游报告</span>（<code>pool.hpp</code> 注释）</p>
+<p>按上游开发期的测量，在专家缓存出现之前，CPU 每个 token 要读 663.6 MB 专家数据，按约 40 GB/s 算要 16.2 毫秒，而当时一个 token 约 53 毫秒。<span class="ev ev-report">上游报告</span>[S05] CPU 这一份，是整台机器上最大的一笔开销。</p>
+
+<h2 id="sec-3">13.3 一层之内：命中归 GPU，未命中归 CPU，两边同时</h2>
+<p>有了专家缓存，一层里的 10 个专家分成三拨：<span class="ev ev-code">代码事实</span>（<code>src/core/expert_source.cpp</code>、<code>src/program/generate.cpp</code>）</p>
+<ol>
+<li>在显存里的（命中），GPU 直接算。</li>
+<li>没命中的里，按一个比例挑出一部分，GPU 经 PCIe 从锁页内存读过去算。这个比例默认是：Q2_0 模型 0.2，其他原生格式 0.55。</li>
+<li>剩下没命中的，CPU 就地算。</li>
+</ol>
+<p>顺序很讲究：GPU 那一份先决定、先发布，让 GPU 先动起来，CPU 再开始自己的那份。<span class="ev ev-code">代码事实</span>（<code>expert_source.cpp</code> 注释）上游文档提到，把 PCIe 份额设成 0，所有未命中都回到 CPU，生成速度会变慢。<span class="ev ev-report">上游报告</span>[S03]</p>
+<p>下面的模拟器把一层画成时间线。数字是教学推演：每个专家 1.38 MB，CPU 按 40 GB/s、显存按 672 GB/s、PCIe 按 63 GB/s 读；注意力加路由按 0.25 毫秒、合并按 0.05 毫秒假设。</p>
+<div class="viz" data-viz="layer-timeline"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="图 13-4：命中率 65%、PCIe 份额 20% 时一层的时间线。GPU 先算注意力和路由，之后 GPU 和 CPU 同时算专家，CPU 分支更长，是关键路径">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">一层的时间线（命中 65%，PCIe 份额 20%）</text>
+<text class="f-text" fill="#182f2b" x="20" y="58" font-size="14">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="40" width="160" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="230" y="40" width="25" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="293" y="40" width="32" height="26"/>
+<text class="f-on" fill="#ffffff" x="150" y="58" font-size="14" text-anchor="middle">注意力 ＋ 路由</text>
+<text class="f-text" fill="#182f2b" x="20" y="108" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="230" y="90" width="63" height="26"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M293 32V124"/>
+<text class="f-text" fill="#182f2b" x="20" y="152" font-size="14">↑ 0.25 ms 时路由完成，分派专家</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="14">GPU 分支 0.039 ms，CPU 分支 0.098 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="200" font-size="14">虚线：两边汇合，CPU 那边更慢</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="232" font-size="14" font-weight="600">这一层 ＝ 0.25 ＋ max(0.098, 0.039) ＋ 0.05</text>
+</svg><figcaption>图 13-4　一层之内的并行。汇合点由慢的一边决定：只要 CPU 分支更长，GPU 再快也得等。<span class="ev ev-est">教学推演</span></figcaption></figure></div>
+<p>上游第一版就栽在“谁先谁后”上。当时 GPU 算命中的那一步，被放在了 CPU 专家池<strong>之后</strong>：CPU 的活确实少了一半（18.2 降到 10.2 毫秒），可 GPU 的那一半只是从“旁边”挪到了“后面”，整条路径一点没短。后来改成两步：GPU 先在一块单独的缓冲区里开始算命中的专家，CPU 同时算未命中的；CPU 的结果送上 GPU 后，再把两份加在一起。多一块缓冲区、多一次相加，换回了真正的并行。<span class="ev ev-report">上游报告</span>（<code>hit_hook.hpp</code> 注释）你可以在模拟器里关掉“两边同时算”，重现这件事。</p>
+
+<h2 id="sec-4">13.4 层与层之间：依赖把并行挡住了</h2>
+<p>一层之内能并行，那能不能让 CPU 还在算第 l 层时，GPU 先开始第 l + 1 层？不行。第 l + 1 层的输入，就是第 l 层合并完 10 个专家之后的结果。这条线一环扣一环，见图 13-5。</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="图 13-5：每一层内部，10 个专家可以分给 CPU 和 GPU 同时算；但第 l+1 层的输入要等第 l 层合并完成，层与层之间只能排队">
+<rect class="f-accent" fill="#136d5a" x="20" y="10" width="360" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="32" font-size="14" text-anchor="middle">第 l 层：注意力 ＋ 路由（GPU）</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="56" width="174" height="40" rx="7"/>
+<text class="f-text" fill="#182f2b" x="107" y="81" font-size="14" text-anchor="middle">命中的专家（GPU）</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="206" y="56" width="174" height="40" rx="7"/>
+<text class="f-text" fill="#182f2b" x="293" y="81" font-size="14" text-anchor="middle">未命中的专家（CPU）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="108" width="360" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="130" font-size="14" text-anchor="middle">合并 10 份，写回主干</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" d="M200 142V166"/>
+<path class="f-muted" fill="#5c6d66" d="M200 172l-6-9h12z"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="174" width="360" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="196" font-size="14" text-anchor="middle">第 l＋1 层：输入就是上一层的结果</text>
+<text class="f-text" fill="#182f2b" x="20" y="236" font-size="14">横向（同一层内）：可以并行</text>
+<text class="f-text" fill="#182f2b" x="20" y="260" font-size="14">纵向（层与层之间）：只能排队</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="288" font-size="14" font-weight="600">48 层串成一条链，就是关键路径</text>
+</svg><figcaption>图 13-5　数据依赖决定了能并行到什么程度。同一层的专家互不相干，层与层之间环环相扣。</figcaption></figure>
+<aside class="primer" id="c13-dependence">
+<h3>数据依赖与关键路径</h3>
+<p>两个计算之间，如果后一个要用前一个的结果，就叫有<dfn>数据依赖</dfn>（更准确地说是“先写后读”依赖）。有依赖的两步只能先后做；没有依赖的，才可能同时做。</p>
+<p>把所有计算画成一张图：每个计算是一个点，依赖是一条箭头。从起点到终点，最长的那条箭头链叫<dfn>关键路径</dfn>。整件事最快也要这么久，不管你有多少个工人。想变快，只有两个办法：缩短关键路径上的某一步，或者把关键路径上的某一步挪到旁边去，和别的步骤并行。</p>
+<p>反过来，缩短<strong>不在</strong>关键路径上的步骤，一点用都没有。开头那件事就是这样：CPU 少干了 8 毫秒，可那 8 毫秒挪出去以后，GPU 的那份顶了上来，关键路径的长度没变。这和第 5 章的 Amdahl 定律是同一个道理：只优化一部分，整体的收益受其余部分限制。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/关键路径" target="_blank" rel="noopener noreferrer">维基百科：关键路径</a> · <a href="https://en.wikipedia.org/wiki/Data_dependency" target="_blank" rel="noopener noreferrer">Wikipedia: Data dependency</a> · <a href="https://en.wikipedia.org/wiki/Critical_path_method" target="_blank" rel="noopener noreferrer">Wikipedia: Critical path method</a></p>
+</aside>
+<p>Strata 的源码把这件事写成了结论。每一层被拆成两张 GPU 计算图：前一张从注意力算到路由和共享专家，后一张负责合并专家结果、写回主干，要等 CPU 交回结果才能启动，这样第 l 层的专家结果才会配上第 l 层自己的路由权重。代价是：留给 CPU 和 GPU 重叠的时间，只剩共享专家那一小段。注释写道：每层一次的 CPU 专家池，藏不到一条严格串行的残差链后面。<span class="ev ev-code">代码事实</span>[S13]</p>
+<p>缓存的注释给了数字：当时的流水线在 19.035 毫秒的 CPU 工作里只藏住了 1.055 毫秒，96% 都露在关键路径上，“因为残差链是严格串行的”。所以唯一的出路是少读字节：把一部分专家放进显存，让 CPU 只读没命中的。<span class="ev ev-report">上游报告</span>[S05] 这就是第 12 章专家缓存存在的理由。</p>
+
+<h2 id="sec-5">13.5 怎样证明真的并行了</h2>
+<p>“CPU 和 GPU 都在忙”不等于“它们在同时忙”。图 13-6 的两种情况，两边的忙碌总时间一样，总耗时却差很多。</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 13-6：真并行时 CPU 在 GPU 还在算的时候就开始工作；假并行时 GPU 已经算完，CPU 才开始，两边忙碌时间相同，总时间更长">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">真并行</text>
+<text class="f-text" fill="#182f2b" x="20" y="54" font-size="14">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="38" width="160" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="88" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="150" y="72" width="140" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="88" font-size="14">结束</text>
+<text class="f-text" fill="#182f2b" x="20" y="132" font-size="15" font-weight="600">假并行</text>
+<text class="f-text" fill="#182f2b" x="20" y="164" font-size="14">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="148" width="160" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="198" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="230" y="182" width="140" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="228" font-size="14">CPU 开工时 GPU 早已空闲：等于串行</text>
+</svg><figcaption>图 13-6　忙碌时间一样，重叠不一样。只看利用率，分辨不出这两种情况。</figcaption></figure>
+<p>Strata 的会话代码专门数这件事：每一层，主机看到“门铃”（GPU 发出“路由选好了”的信号）时，GPU 的计算图是不是还在运行。还在运行，说明 CPU 有一段和 GPU 重叠的窗口；已经结束了，CPU 就是在 GPU 空闲时干活，整条流水线等于串行。这个计数器叫 <code>rings_mid_graph</code>，注释称它是“判断门铃是不是摆设”的那个诊断量。<span class="ev ev-code">代码事实</span>[S13]</p>
+<p>注释还点破了它为什么必要：两种情况都能算出正确的 token，每层的耗时也一样，区别只表现为“重叠什么都没藏住”。另一个计数器记下从启动计算图到看见门铃的毫秒数，CPU 能用的窗口就是“层的时长减去它”。<span class="ev ev-code">代码事实</span>[S13] 配置里写着“开启重叠”只是意图，事件时间线才是行为。</p>
+
+<h2 id="sec-6">13.6 动手：找平衡点</h2>
+<p>先用本章的「一层之内」模拟器：命中率拖到 0%、再到 65%，看关键路径从 CPU 换到哪里；关掉“两边同时算”，重现上游第一版的教训；按“设为最佳份额”，看两条分支怎样一样长。再去「一次算 16 个」把三种算法都跑一遍。</p>
+<p>然后打开本章的交互实验「CPU / GPU 工作分配」。它只有两条分支：CPU 和“经 PCIe 交给 GPU”。改变两边的有效速率和分工比例，找出总时间最短的那个比例。实验任务：把 PCIe 分支的有效速率减半，解释为什么最佳分工不再是“一人一半”。注意，实验和模拟器都假设两条分支互不抢资源；真实机器上，CPU 读专家和 PCIe 读锁页内存，用的是同一条内存带宽。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>算专家的大头是读字节。让 CPU 就地算内存里的专家，过 PCIe 的只有 10 KB 输入和 100 KB 结果。</li>
+<li>同一层里，命中的专家归 GPU、一部分未命中经 PCIe 归 GPU、其余归 CPU，两边同时算，汇合时等慢的一边。</li>
+<li>层与层之间有数据依赖，48 层是一条关键路径。CPU 的活藏不住，只能靠缓存减少；优化不在关键路径上的步骤，没有用。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“CPU 和 GPU 一起算，速度就能翻倍；CPU 少干一半活，总时间就少一截。”</strong></p>
+<p>只有被省下的那部分在关键路径上，总时间才会变短。上游把 CPU 的活从 18.2 毫秒减到 10.2 毫秒，token 一点没快，因为 GPU 的那份被排到了 CPU 后面。<span class="ev ev-report">上游报告</span> 同样，“GPU 利用率 100%”也说明不了什么：它可能在空转等待，也可能在算一份本可以并行的活。要看的是关键路径和事件时间线。</p></div>
+
+<details class="deep"><summary>深入一层：分工公式、它为什么不准，以及并发里的坑</summary>
+<h3>两条分支的分工公式</h3>
+<p>设剩下要算的专家数据量为 D，比例 f 交给“经 PCIe 的 GPU 分支”，其余交给 CPU。把 CPU 分支的持续处理能力折算成每秒 Bc 字节，PCIe 分支折算成每秒 Bp 字节，假设两者互不影响：</p>
+<div class="equation">T(f) ≈ max((1 − f)·D / Bc, f·D / Bp) ＋ T合并</div>
+<p>两条分支一样长时最快，解得 f = Bp ÷ (Bc ＋ Bp)。若 Bc = 40、Bp = 20，f = 1/3，而不是“一人一半”。<span class="ev ev-est">教学推演</span> 这里的 Bp 不是 PCIe 的标称带宽，而是包含这条分支全部代价的有效速率。</p>
+<h3>为什么真实的最优点不在这里</h3>
+<p>公式假设两条分支各用各的资源，可真实机器上它们会抢：CPU 读专家和 GPU 经 PCIe 读锁页内存，走的是同一组内存通道；PCIe 还可能同时在传长上下文的 KV 页；专家大小、同一专家在一个验证窗口里被几个 token 复用、GPU 启动开销、主机线程绑核，都会改变两边的有效速率。所以 Strata 的默认份额（Q2_0 为 0.2，其他原生格式为 0.55）来自实测，而不是这个公式。<span class="ev ev-code">代码事实</span>（<code>generate.cpp</code>）公式适合用来提出假设；调参要记录每条分支的完成时间、搬运字节和总时间，并在另一组任务上复验。</p>
+<h3>计算对了吗：时间对得上，结果却错了</h3>
+<p><code>hit_hook.hpp</code> 记录了一个教科书级的并发错误。第一版的“GPU 先算命中”这一步，读的是专家池回调里才决定的命中名单，而那个回调在它之后才运行。于是它读到的是<strong>上一层</strong>的名单，把上一层的专家算进了这一层的位置。程序照常产出 token，耗时也正常，可和标准答案比，平均 KL 散度从 9.69×10⁻² 涨到 1.03，最可能的 token 的一致率从 0.867 掉到 0.333。修法是让这一步直接接收本层路由器发布的编号。<span class="ev ev-code">代码事实</span>（<code>hit_hook.hpp</code>）</p>
+<h3>线程池里的一场竞态</h3>
+<p>CPU 专家池等一批任务完成时，最初只等“完成计数 = 任务数”。可在显存很大的卡上，大部分专家都命中，工作线程常常睡着；一批任务太小，睡着的线程还没醒，这批就做完了。醒来的线程可能从<strong>下一批</strong>里抢任务，把同一个任务做两遍，或者在主机清零之后才加计数，于是“完成计数 = 任务数”永远不成立，GPU 一直等下去。修法是给每次领任务带上批次号：任务指针是一个 64 位字，装着“批次 | 任务数 | 序号”，领任务用比较并交换，只有批次对得上才能成功，迟到的线程自然领不到。<span class="ev ev-code">代码事实</span>（<code>pool.hpp</code>）上游文档把这次卡死记作 issue #29，在引擎 0.1.12 修复。</p>
+<h3>注释和设计对不上的地方</h3>
+<p><code>session.hpp</code> 后半段有一段较早的注释，说“重叠来自一层的延迟：专家池的结果由下一层消费”。<span class="ev ev-code">代码事实</span>（<code>session.hpp</code>）而前面关于两张计算图的注释说的正相反：为了不让第 l 层的专家配上第 l + 1 层的路由权重，合并必须留在本层。<span class="ev ev-code">代码事实</span>[S13] 遇到这种矛盾，以当前的调用顺序和测试为准。</p>
+<h3>GPU 和 CPU 算同一个专家，最后几位可能不同</h3>
+<p>GPU 和 CPU 的内核舍入方式不同。哪个专家由谁算，取决于缓存状态和 PCIe 份额，所以同一提示词重复运行，答案可能不逐字节相同。上游文档说，想要可重复的结果，可以把 PCIe 份额设成 0 等几个开关，代价是生成变慢。<span class="ev ev-report">上游报告</span>[S03]</p>
+</details>
