@@ -1,0 +1,237 @@
+<div class="hook"><span class="eyebrow">同じ PC なのに、速さは 2 通り</span>
+<p>Strata の上流の速度表には、数字の列が 2 つあります。RTX 5070 を積んだ同じ PC で、32K token のプロンプトを読むと 1 秒に 2,171 token。ところが答えを書くときは、1 秒に 81.8 token しか進みません。<span class="ev ev-report">上流レポート</span>[S03]</p>
+<p>モデルも同じ、48 層も同じ、GPU（グラフィックスカード）も同じです。それなのに、なぜ「読む」ほうが「書く」より 20 倍以上も速いのでしょうか。カギは 1 つの言葉、「バッチ処理」です。この章では、まとめて計算するとなぜ 1 つずつより速いのか、チャンクはどれくらいの大きさがよいのか、そしてデータの転送と計算を同時に進めるにはどうするのかを説明します。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>答えを書くときは、1 回に 1 token しか計算できません。重みを 1 回読んでも、使うのは 1 回だけです。問題を読むときは、プロンプトの token がすべて分かっています。数千 token をひとかたまりにして計算でき、重みを 1 回読めば、そのかたまり全体で使えます。Strata は 1 チャンクで最大 8,192 token を読みます。そして、現在の層を計算している間に、次の層のエキスパートの転送を始めます。</p>
+
+<h2 id="sec-1">16.1 なぜ「問題を読む」ほうが「答えを書く」より 20 倍以上速いのか</h2>
+<p>まず数字を見ましょう。図 16-1 は、上流が同じ PC で測った 2 つの速度です。</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="図 16-1：上流の実測によるプリフィルとデコードの速度。プリフィルは毎秒 536〜2171 token、デコードは毎秒 74〜93 token">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">上流の実測：同じ PC のプリフィルとデコードの速度（token/s）</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">1K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="36" width="69.1" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="135" y="46" font-size="12">536</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="52" width="11.3" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="77" y="62" font-size="12">87.3</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12">4K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="86" width="167.5" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="233" y="96" font-size="12">1,299</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="102" width="12" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="78" y="112" font-size="12">93.0</text>
+<text class="f-text" fill="#182f2b" x="10" y="148" font-size="12">32K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="136" width="280" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="346" y="146" font-size="12">2,171</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="152" width="10.6" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="77" y="162" font-size="12">81.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="198" font-size="12">128K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="186" width="271.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="338" y="196" font-size="12">2,107</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="202" width="9.5" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="76" y="212" font-size="12">73.7</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="226" width="10" height="10"/><text class="f-muted" fill="#5c6d66" x="24" y="235" font-size="12">プリフィル</text>
+<rect class="f-warn" fill="#9e5d24" x="92" y="226" width="10" height="10"/><text class="f-muted" fill="#5c6d66" x="106" y="235" font-size="12">デコード</text>
+<text class="f-muted" fill="#5c6d66" x="170" y="235" font-size="12">RTX 5070 12 GB、Q2_0、v0.1.26</text>
+</svg><figcaption>図 16-1　同じ PC で、プリフィルはデコードより約 6 倍から 30 倍近く速くなります。バーの長さは比例しています。デコードのバーは短すぎて、ほとんど見えません。データは上流のドキュメントによるものです。[S03]</figcaption></figure>
+<p>測定条件は上流のドキュメントに書かれています。GPU は RTX 5070 12 GB、CPU は Ryzen 5 7600、メモリは 64 GB の DDR5-5200、OS は Windows、エンジンは 0.1.26、モデルは Q2_0 です。デコード時は投機的デコーディングを有効にしています。<span class="ev ev-report">上流レポート</span>[S03]</p>
+<p>差が出る理由は、2 つの段階が本質的に違うからです。<dfn>デコード</dfn>（decode、「答えを書く」段階）では、次の token が何になるかは、前の token が選ばれるまで分かりません。1 つずつ進めるしかありません。<dfn>プリフィル</dfn>（prefill、「問題を読む」段階）では、プロンプトの token がすべて最初から手元にあります。大きなかたまりにして、まとめてモデルに送れます。ただし、「まとめて計算する」ことは「お互いにのぞき見る」ことではありません。5 番目の token が見えるのは、あくまで前の 4 つだけです。モデルの因果のルールは何も変わりません。変わるのは、計算の組み立て方だけです。</p>
+
+<h2 id="sec-2">16.2 なぜまとめて計算すると速いのか：行列ベクトル積と行列積</h2>
+<p>選択式テストを採点する先生を想像してください。答案を 1 枚採点するたびに、棚から模範解答を取り出し、照合したら棚に戻します。答案が 1 枚ずつしか来ないなら、時間の大半は模範解答の出し入れに消えます。一度に 50 枚来るなら、模範解答を 1 回取り出して 50 枚を照合し、戻します。1 枚あたりでは、出し入れの時間はほとんどかかりません。</p>
+<p>モデルでいう「模範解答」が重みです。1 層を計算するたびに、その層の重みを VRAM から計算ユニットへ読み込む必要があります。図 16-2 は、2 つの場合を並べて描いたものです。</p>
+<figure class="fig"><svg viewBox="0 0 400 244" role="img" aria-label="図 16-2：行列ベクトル積では、重みを 1 回読んでも 1 token しか使いません。行列積では、重みを 1 回読めば、ひとかたまりの token 全体で共用できます">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="12" font-weight="600" text-anchor="middle">行列ベクトル積：1 token</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="34" width="100" height="100" rx="4"/>
+<text class="f-text" fill="#182f2b" x="70" y="89" font-size="13" text-anchor="middle">重み W</text>
+<text class="f-text" fill="#182f2b" x="137" y="89" font-size="14" text-anchor="middle">×</text>
+<rect class="f-accent" fill="#136d5a" x="152" y="34" width="12" height="100" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="158" y="152" font-size="12" text-anchor="middle">1 列</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="176" font-size="12" text-anchor="middle">重みを 1 回読んでも、</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="194" font-size="12" text-anchor="middle">使うのは 1 token だけ</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="12" font-weight="600" text-anchor="middle">行列積：C 個の token</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="34" width="100" height="100" rx="4"/>
+<text class="f-text" fill="#182f2b" x="270" y="89" font-size="13" text-anchor="middle">重み W</text>
+<text class="f-text" fill="#182f2b" x="335" y="89" font-size="14" text-anchor="middle">×</text>
+<rect class="f-accent" fill="#136d5a" x="346" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="358" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="370" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="382" y="34" width="9" height="100" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="368" y="152" font-size="12" text-anchor="middle">C 列</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="176" font-size="12" text-anchor="middle">重みを 1 回読めば、</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="194" font-size="12" text-anchor="middle">C 個の token で共用できる</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 30V204"/>
+<text class="f-text" fill="#182f2b" x="200" y="230" font-size="12" text-anchor="middle">計算量は token 数に比例して増え、重みの転送は 1 回で済む</text>
+</svg><figcaption>図 16-2　デコードは「行列ベクトル積」で、重みを 1 回読んでも 1 token の役にしか立ちません。プリフィルは「行列積」で、同じ重みがひとかたまりの token 全体の役に立ちます。</figcaption></figure>
+<aside class="primer" id="c16-batching">
+<h3>バッチ処理：行列ベクトル積と行列積</h3>
+<p>直感：転送と計算は、別々の勘定です。token を 1 つずつ計算すると、そのたびに重み全体を転送します。転送が主な出費になります。token をまとめて計算すると、転送は 1 回だけです。計算量は少しも減りません。つまり、「1 バイト転送するごとにできる計算」が増えるのです。第 5 章で見たとおり、この比を演算強度と呼びます。演算強度は、プログラムがメモリ帯域に縛られるか、演算性能に縛られるかを決めます。</p>
+<p>定義：ある層の重みは、m × n の行列 W です。1 token の入力は、長さ n のベクトル x です。W·x を計算するのが<dfn>行列ベクトル積</dfn>（GEMV）です。m × n 個の重みを読み、乗加算をおよそ 2mn 回行います。C 個の token のベクトルを並べて n × C の行列 X を作り、W·X を計算するのが<dfn>行列積</dfn>（GEMM）です。重みを読む量は同じ m × n 個のまま、計算はおよそ 2mnC 回になります。演算強度は、元のおよそ C 倍に上がります。</p>
+<p>具体的な数字を 1 つ挙げます。Strata の投機的デコーディングのコントローラには、既定の表があります。「n 個の token の密な部分を同時に計算すると、1 token の何倍の時間がかかるか」を記録した表です。2 個なら 1.05 倍、4 個なら 1.45 倍、8 個なら 3.0 倍です。<span class="ev ev-code">コード上の事実</span> つまり、8 token をまとめて計算すると、1 token あたりの平均は、単独で計算したときの 3.0 ÷ 8 ≈ 38% で済みます。<span class="ev ev-est">教育用の試算</span></p>
+<p>この章との関係：プリフィルでは、C が数千になることもあります。だからプリフィルはずっと速いのです。バッチ処理にも代償があります。ひとかたまり全体の中間結果を置く一時的な記憶領域が、もっと必要になります。また、1 チャンクが終わるまでの時間も長くなります。</p>
+<p class="further">もっと読む：<a href="https://ja.wikipedia.org/wiki/%E8%A1%8C%E5%88%97" target="_blank" rel="noopener noreferrer">Wikipedia：行列</a> · <a href="https://ja.wikipedia.org/wiki/%E8%A1%8C%E5%88%97%E3%81%AE%E4%B9%97%E6%B3%95" target="_blank" rel="noopener noreferrer">Wikipedia：行列の乗法</a> · <a href="https://ja.wikipedia.org/wiki/Basic_Linear_Algebra_Subprograms" target="_blank" rel="noopener noreferrer">Wikipedia：BLAS（GEMV と GEMM の由来）</a></p>
+</aside>
+<div class="viz" data-viz="batch-reuse"><figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="図 16-3：n 個の token を 1 回の密な計算に入れると、2 個なら 5% 増し、4 個なら 1.45 倍、8 個なら 3 倍の時間で済みます。1 個ずつ計算する n 倍よりずっと少なくなります">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">n 個の token で密な部分をまとめて計算する時間（1 token の何倍か）</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">n = 1</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="34" width="35" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="101" y="44" font-size="12">1.0 倍</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="49" width="35" height="12" rx="2"/>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">n = 2</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="78" width="36.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="103" y="88" font-size="12">1.05 倍</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="93" width="70" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="136" y="103" font-size="12">2 倍</text>
+<text class="f-text" fill="#182f2b" x="10" y="132" font-size="12">n = 4</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="122" width="50.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="117" y="132" font-size="12">1.45 倍</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="137" width="140" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="206" y="147" font-size="12">4 倍</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">n = 8</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="166" width="105" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="171" y="176" font-size="12">3.0 倍</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="181" width="280" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="346" y="191" font-size="12">8 倍</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="212" font-size="12">濃い色：上流の既定の実測比　薄い地：1 個ずつ計算（n 倍）</text>
+</svg><figcaption>図 16-3　まとめて計算した密な部分は、1 個ずつ計算するよりずっと安く済みます。8 token でも、かかる時間は 3 倍だけです。数字は spec/controller.hpp の既定値で、コメントによると上流の行列ベクトル積の測定に由来します。インタラクティブ版では、n をドラッグして 1 つずつ確かめられます。</figcaption></figure></div>
+<p>Strata は、ほかの場所でも同じ工夫を使っています。投機的デコーディングの検証ウィンドウは、数個の token を一度に送り込みます。ソースコードには、このウィンドウのコストは「密な重みを 1 回だけ読み、T 個の token で共用する」ものだと書かれています。[S08] 混合残差の融合読み出しにも、複数 token 版があります。最大 8 token が重みを共有し、「重みは全員のために 1 回だけ読まれる」とあります。<span class="ev ev-code">コード上の事実</span></p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは、コンピュータアーキテクチャの「メモリアクセスの局所性」と、数値線形代数の BLAS レベル分けの考え方そのものです。BLAS-2（行列ベクトル積）はメモリ帯域に縛られます。BLAS-3（行列積）なら、演算性能を使い切れます。プリフィルは、BLAS-2 の列を 1 つの BLAS-3 にまとめます。</p>
+
+<h2 id="sec-3">16.3 エキスパートをまとめる：エキスパートごとにグループ化</h2>
+<p>密な部分は簡単です。すべての token が同じ重みを使います。エキスパートの部分は少し厄介です。各 token は層ごとに 10 個のエキスパートを選びますが、選ぶものは token ごとに違います。そこで Strata は、まず<strong>エキスパートごとにグループ化</strong>します。同じエキスパートを選んだ token を 1 か所に集めます。そのエキスパートの重みを 1 回読み、1 グループ分を計算し終えます。[S12] 図 16-4 は、縮小した例です。</p>
+<figure class="fig"><svg viewBox="0 0 400 264" role="img" aria-label="図 16-4：6 つの token がそれぞれ 2 つのエキスパートを選びます。エキスパートごとにグループ化し直すと、各エキスパートの重みは 1 回しか読まず、そのエキスパートを選んだ token 全部をまとめて計算します">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12" font-weight="600">token ごとの見方（例：各 token が 2 エキスパートを選ぶ）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="39" y="42" font-size="12" text-anchor="middle">t1</text><text class="f-muted" fill="#5c6d66" x="39" y="58" font-size="12" text-anchor="middle">E3 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="74" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="103" y="42" font-size="12" text-anchor="middle">t2</text><text class="f-muted" fill="#5c6d66" x="103" y="58" font-size="12" text-anchor="middle">E3 E5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="138" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="167" y="42" font-size="12" text-anchor="middle">t3</text><text class="f-muted" fill="#5c6d66" x="167" y="58" font-size="12" text-anchor="middle">E1 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="231" y="42" font-size="12" text-anchor="middle">t4</text><text class="f-muted" fill="#5c6d66" x="231" y="58" font-size="12" text-anchor="middle">E1 E3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="266" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="295" y="42" font-size="12" text-anchor="middle">t5</text><text class="f-muted" fill="#5c6d66" x="295" y="58" font-size="12" text-anchor="middle">E5 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="330" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="359" y="42" font-size="12" text-anchor="middle">t6</text><text class="f-muted" fill="#5c6d66" x="359" y="58" font-size="12" text-anchor="middle">E3 E7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 70V88"/>
+<text class="f-muted" fill="#5c6d66" x="210" y="84" font-size="12">エキスパートごとに再グループ化</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="96" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="113" font-size="12" text-anchor="middle">E1</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="96" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="113" font-size="12" text-anchor="middle">t3</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="96" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="113" font-size="12" text-anchor="middle">t4</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="113" font-size="12" text-anchor="end">1 回読み、2 個計算</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="126" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="143" font-size="12" text-anchor="middle">E3</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="143" font-size="12" text-anchor="middle">t1</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="143" font-size="12" text-anchor="middle">t2</text>
+<rect class="f-soft" fill="#e5f1df" x="164" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="186" y="143" font-size="12" text-anchor="middle">t4</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="236" y="143" font-size="12" text-anchor="middle">t6</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="143" font-size="12" text-anchor="end">1 回読み、4 個計算</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="156" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="173" font-size="12" text-anchor="middle">E5</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="156" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="173" font-size="12" text-anchor="middle">t2</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="156" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="173" font-size="12" text-anchor="middle">t5</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="173" font-size="12" text-anchor="end">1 回読み、2 個計算</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="186" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="203" font-size="12" text-anchor="middle">E7</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="203" font-size="12" text-anchor="middle">t1</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="203" font-size="12" text-anchor="middle">t3</text>
+<rect class="f-soft" fill="#e5f1df" x="164" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="186" y="203" font-size="12" text-anchor="middle">t5</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="236" y="203" font-size="12" text-anchor="middle">t6</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="203" font-size="12" text-anchor="end">1 回読み、4 個計算</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">計算が終わったら、結果を各 token の元の位置に戻し、</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="254" font-size="12">ルーティングの重みで足し合わせる</text>
+</svg><figcaption>図 16-4　エキスパートごとのグループ化：12 回の「エキスパート呼び出し」で、エキスパートの重みを読んだのは 4 回だけです。実際の規模はずっと大きく、再利用もずっと多くなります。</figcaption></figure>
+<p>実際の規模に拡大してみましょう。1 チャンクが 8,192 token で、各 token が層ごとに 10 個のエキスパートを選ぶと、1 層で 81,920 回のエキスパート呼び出しが起こります。一方、各層のエキスパートは 512 個しかありません。平均すると、1 つのエキスパートを 81,920 ÷ 512 = 160 個の token が共用します。<span class="ev ev-est">教育用の試算</span> ソースコードのコメントにも、チャンクが 1,024 token 以上になると、各層の 512 個のエキスパートは「ほぼすべて選ばれる」とあります。<span class="ev ev-code">コード上の事実</span></p>
+<p>グループ化したあと、エキスパートはどこから来るのでしょうか。VRAM にキャッシュされている人気のエキスパートは、そのまま読みます。VRAM にないものは、RAM（メインメモリ）にあるエキスパート領域から送ります。ピン留めメモリの「リングキュー」を通し、専用のコピーストリームを使って GPU へ運びます。[S12] 計算が終わったら、結果を元の token の順に戻し、それぞれのルーティングの重みで足し合わせます。順序を 1 つ間違えると、結果がほかの token に足されてしまいます。</p>
+<p>デコード時の役割分担とは違う点に注意してください。デコードでは、ヒットしなかったエキスパートは、主に CPU が RAM の中でその場で計算します（第 10 章）。プリフィルでは、エキスパートを何百、何千もの token が共用します。GPU へ運んでまとめて計算するほうが得になります。</p>
+
+<h2 id="sec-4">16.4 チャンクの大きさ：大きいほどよいのか</h2>
+<p>プロンプトは<dfn>チャンク</dfn>（chunk）に切られ、1 チャンクずつ読まれます。各チャンクは 48 層すべてを通り抜けてから、次のチャンクへ進みます。[S12] チャンクが大きいほど、重みとエキスパートを多くの token で共用できます。ただし、大きければ大きいほどよいわけではありません。次の教育用モデルが、このトレードオフを描いています。</p>
+<div class="viz" data-viz="prefill-chunk"><figure class="fig"><svg viewBox="0 0 400 220" role="img" aria-label="図 16-5：教育用モデルでは、チャンクを 1 token から 2048 token まで大きくすると、プリフィル速度は急に上がり、その後は上限の毎秒 2500 token に近づきます">
+<text class="f-muted" fill="#5c6d66" x="10" y="14" font-size="12">教育用モデル：チャンクサイズ C とプリフィル速度（32K）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="14" y="179" width="36" height="1"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="62" y="178.5" width="36" height="1.5"/>
+<rect class="f-accent" fill="#136d5a" x="110" y="174" width="36" height="6"/>
+<rect class="f-accent" fill="#136d5a" x="158" y="156.2" width="36" height="23.8"/>
+<rect class="f-accent" fill="#136d5a" x="206" y="85.8" width="36" height="94.2"/>
+<rect class="f-accent" fill="#136d5a" x="254" y="42.1" width="36" height="137.9"/>
+<rect class="f-accent" fill="#136d5a" x="302" y="41.1" width="36" height="138.9"/>
+<rect class="f-accent" fill="#136d5a" x="350" y="40.6" width="36" height="139.4"/>
+<text class="f-text" fill="#182f2b" x="32" y="172" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="80" y="172" font-size="12" text-anchor="middle">27</text>
+<text class="f-text" fill="#182f2b" x="128" y="168" font-size="12" text-anchor="middle">107</text>
+<text class="f-text" fill="#182f2b" x="176" y="150" font-size="12" text-anchor="middle">425</text>
+<text class="f-text" fill="#182f2b" x="224" y="80" font-size="12" text-anchor="middle">1,683</text>
+<text class="f-text" fill="#182f2b" x="272" y="37" font-size="12" text-anchor="middle">2,462</text>
+<text class="f-text" fill="#182f2b" x="320" y="36" font-size="12" text-anchor="middle">2,481</text>
+<text class="f-text" fill="#182f2b" x="368" y="36" font-size="12" text-anchor="middle">2,490</text>
+<text class="f-muted" fill="#5c6d66" x="32" y="196" font-size="12" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="196" font-size="12" text-anchor="middle">16</text>
+<text class="f-muted" fill="#5c6d66" x="128" y="196" font-size="12" text-anchor="middle">64</text>
+<text class="f-muted" fill="#5c6d66" x="176" y="196" font-size="12" text-anchor="middle">256</text>
+<text class="f-muted" fill="#5c6d66" x="224" y="196" font-size="12" text-anchor="middle">1024</text>
+<text class="f-muted" fill="#5c6d66" x="272" y="196" font-size="12" text-anchor="middle">2048</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="196" font-size="12" text-anchor="middle">4096</text>
+<text class="f-muted" fill="#5c6d66" x="368" y="196" font-size="12" text-anchor="middle">8192</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="214" font-size="12">仮定：W = 600 ms、u = 0.4 ms、パイプライン有効</text>
+</svg><figcaption>図 16-5　チャンクが小さいうちは、1 チャンクの計算では重みの転送に見合いません。速度はチャンクサイズにほぼ比例します。チャンクが損益分岐点を超えると、速度は演算性能の上限に張り付きます。数字は教育用モデルによるもので、Strata の実測ではありません。</figcaption></figure></div>
+<p>実際の Strata は、チャンクの大きさをどう選ぶのでしょうか。上流の説明では、長い文章は大きなチャンクで読みます。1 チャンクは最大 8,192 token で、長い文書でも毎秒 1,000 token 以上で読めます。[S02] <code>--prefill auto</code> に設定すると、エンジンは候補表から選びます。借用の上限を超えない範囲で、バッファが最大の段を選びます。既定の最大値は 8,192 です。ユーザーが明示すれば、16,384 や 32,768 まで広げられます。<span class="ev ev-code">コード上の事実</span> サーバー側も、「読み終えるまでどれくらい待つか」を見積もるときは、1 チャンクあたり最大 32,768 token として計算します。[S15]</p>
+<p>チャンクが大きいことの代償は、一時的な VRAM です。8,192 token 分の中間結果は、かなりの場所を取ります。Strata の対処は、エキスパートキャッシュから「借りる」ことです。プリフィルの間、キャッシュの末尾のスロットをいくつかチャンクバッファに貸します。読み終えたら、元のエキスパートを埋め戻します。各リクエストは、自分のプロンプトに必要な大きさだけを借ります。[S12] 図 16-6 は、ソースコードのコメントにある実測値です。</p>
+<figure class="fig"><svg viewBox="0 0 400 198" role="img" aria-label="図 16-6：12 GB の GPU で 32K プロンプトを読むと、チャンクサイズ 4096、6144、8192 で、それぞれ毎秒 791、878、973 token になります">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">上流のコメント：12 GB GPU、Q2_0、32K プロンプト</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">C = 4096</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="35" width="162.6" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="258" y="48" font-size="12">791 token/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">C = 6144</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="75" width="180.4" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="276" y="88" font-size="12">878 token/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="128" font-size="12">C = 8192</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="115" width="200" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="296" y="128" font-size="12">973 token/s</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="164" font-size="12">C = 8192 では、キャッシュのスロットの 69% を貸し出し</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="186" font-size="12">チャンクが大きいほど速いが、借りる VRAM も増える</text>
+</svg><figcaption>図 16-6　実際のエンジンでは、チャンクを 4,096 から 8,192 に増やすと、プリフィルは約 23% 速くなりました。代償として、プリフィルの間、エキスパートキャッシュの大部分が借り出されます。コメントにはエンジンのバージョンが書かれていません。</figcaption></figure>
+<p>速度の向上は 973 ÷ 791 ≈ 1.23 倍です。<span class="ev ev-est">教育用の試算</span> チャンクをさらに大きくすれば、もう少し速くなります。コメントには、RTX 5090 で 32K プロンプトを読んだ例が記録されています。8,192 のチャンクでは毎秒 5,624 token、全体を 1 チャンク（32,768）にすると毎秒 6,465 token です。ただし、VRAM が十分に大きくないとできないので、既定では有効にしていません。<span class="ev ev-code">コード上の事実</span></p>
+<p>チャンクは小さすぎてもいけません。ソースコードのコメントによると、チャンクが約 1,000 token より小さいと、エンジンは別の GPU カーネルに切り替わり、Q2_0 の出力が変わってしまいます。そのため、「すべてのエキスパートを必ず転送する」モードは、下限を 1,024 にしています。<span class="ev ev-code">コード上の事実</span> また、エンジンは各チャンクの開始前に「止めるかどうか」を 1 回確認します。チャンクが大きいほど、リクエストを取り消してから実際に止まるまでの待ち時間も長くなります。[S12]</p>
+
+<h2 id="sec-5">16.5 パイプライン：この層を計算している間に、次の層はもう運ばれている</h2>
+<p>チャンクを切ったら、各チャンクは 48 層を通ります。各層の仕事は 2 つです。その層で使うエキスパートを GPU へ転送することと、計算することです。この 2 つを交互にやると、GPU が計算している間はコピーの経路が遊び、転送している間は GPU が遊びます。Strata は 2 つを重ねます。現在の層がアテンションを計算している間に、次の層のエキスパートが PCIe を通って運ばれてきます。[S02]</p>
+<aside class="primer" id="c16-pipeline">
+<h3>パイプライン：複数の工程を同時に動かす</h3>
+<p>直感：洗濯には「洗う」と「乾かす」の 2 段階があります。洗濯機と乾燥機が 1 台ずつなら、賢いやり方があります。1 かご目を乾燥機に入れるのと同時に、2 かご目を洗濯機に入れるのです。1 かごあたりの時間は変わりません。でも、洗濯物の山全体にかかる時間は、ぐっと短くなります。</p>
+<p>定義：1 つの仕事を、前後につながったいくつかの工程に分けます。各工程は別々の部品が担当します。i 番目の仕事が 2 番目の工程をやっているとき、i+1 番目の仕事はもう 1 番目の工程を始めています。これが<dfn>パイプライン</dfn>です。安定したあとの総時間は、各工程の合計ではなく、いちばん遅い工程で決まります。図 16-7 は、2 工程・4 層の例です。</p>
+<p>パイプラインには前提があります。2 つの工程が別々の部品を使うこと（ここではコピーエンジンと計算ユニット）。そして、間に「運ばれてきたが、まだ計算していないもの」を置くバッファがあることです。バッファが小さすぎると、転送は止まって待つことになります。</p>
+<p class="further">もっと読む：<a href="https://ja.wikipedia.org/wiki/%E3%83%91%E3%82%A4%E3%83%97%E3%83%A9%E3%82%A4%E3%83%B3%E5%87%A6%E7%90%86" target="_blank" rel="noopener noreferrer">Wikipedia：パイプライン処理</a> · <a href="https://ja.wikipedia.org/wiki/%E5%91%BD%E4%BB%A4%E3%83%91%E3%82%A4%E3%83%97%E3%83%A9%E3%82%A4%E3%83%B3" target="_blank" rel="noopener noreferrer">Wikipedia：命令パイプライン</a> · <a href="https://en.wikipedia.org/wiki/Pipeline_(computing)" target="_blank" rel="noopener noreferrer">Wikipedia: Pipeline (computing)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="図 16-7：転送と計算を交互にやると 8 コマの時間がかかります。重ねると 5 コマで済みます">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12" font-weight="600">重ねない：運んでから計算、交互に進める</text>
+<text class="f-text" fill="#182f2b" x="390" y="16" font-size="12" text-anchor="end">8 コマ</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="38" font-size="12">転送</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="58" font-size="12">計算</text>
+<rect class="f-soft" fill="#e5f1df" x="60" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="79.5" y="38" font-size="12" text-anchor="middle">層 1</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="119.5" y="58" font-size="12" text-anchor="middle">層 1</text>
+<rect class="f-soft" fill="#e5f1df" x="140" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="159.5" y="38" font-size="12" text-anchor="middle">層 2</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="199.5" y="58" font-size="12" text-anchor="middle">層 2</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="239.5" y="38" font-size="12" text-anchor="middle">層 3</text>
+<rect class="f-accent" fill="#136d5a" x="260" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="279.5" y="58" font-size="12" text-anchor="middle">層 3</text>
+<rect class="f-soft" fill="#e5f1df" x="300" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="319.5" y="38" font-size="12" text-anchor="middle">層 4</text>
+<rect class="f-accent" fill="#136d5a" x="340" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="359.5" y="58" font-size="12" text-anchor="middle">層 4</text>
+<text class="f-text" fill="#182f2b" x="10" y="96" font-size="12" font-weight="600">重ねる：層 l を計算中に、層 l+1 を転送</text>
+<text class="f-text" fill="#182f2b" x="390" y="96" font-size="12" text-anchor="end">5 コマ</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="118" font-size="12">転送</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="138" font-size="12">計算</text>
+<rect class="f-soft" fill="#e5f1df" x="60" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="79.5" y="118" font-size="12" text-anchor="middle">層 1</text>
+<rect class="f-soft" fill="#e5f1df" x="100" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="119.5" y="118" font-size="12" text-anchor="middle">層 2</text>
+<rect class="f-soft" fill="#e5f1df" x="140" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="159.5" y="118" font-size="12" text-anchor="middle">層 3</text>
+<rect class="f-soft" fill="#e5f1df" x="180" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="199.5" y="118" font-size="12" text-anchor="middle">層 4</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="119.5" y="138" font-size="12" text-anchor="middle">層 1</text>
+<rect class="f-accent" fill="#136d5a" x="140" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="159.5" y="138" font-size="12" text-anchor="middle">層 2</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="199.5" y="138" font-size="12" text-anchor="middle">層 3</text>
+<rect class="f-accent" fill="#136d5a" x="220" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="239.5" y="138" font-size="12" text-anchor="middle">層 4</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="176" font-size="12">Strata：現在の層がアテンションを計算している間に、</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="194" font-size="12">次の層のエキスパートが PCIe で運ばれてくる</text>
+</svg><figcaption>図 16-7　2 つの工程が同じ長さなら、重ねることで 8 コマが 5 コマに縮みます。層の数が増えるほど、「1 つの工程分だけ払う」状態に近づきます。</figcaption></figure>
+<p>Strata のバッファは、あのピン留めメモリのリングキューです。ソースコードのコメントには、そのサイズがどれほど重要かが記録されています。8,192 のチャンクで Q2_0 を読むとき、リングキューが 96 スロットなら毎秒 1,153 token です。384 スロットに増やすと毎秒 1,294 token になります。理由は、「次の層のエキスパートが、現在の層のアテンション段階のうちに届く」からです。<span class="ev ev-code">コード上の事実</span></p>
+<p>GPU が複数あると、パイプラインはもう一段深くなります。各 GPU が連続する層の一部を担当します。前の区間は、1 チャンクの中間結果を後ろの区間に渡したら、すぐ次のチャンクを読み始めます。インターフェースのコメントの言葉では、後ろの区間がチャンク c を読んでいるとき、前の区間はもうチャンク c+1 を読んでいます。[S12]</p>
+<p>最後に、引き継ぎを忘れてはいけません。1 チャンクを読み終えたら、エンジンはセッションの状態を「token を 1 つずつ読んでここまで来たときと同じ姿」にしておく必要があります。GDN の再帰状態と畳み込み履歴、QSA の KV キャッシュと indexer、PLE の履歴です。どれが欠けてもいけません。そうして初めて、デコードが次の token からそのまま続けられます。[S12]</p>
+
+<h2 id="sec-6">16.6 手を動かす：速くて、しかも収まるチャンクを探す</h2>
+<ol>
+<li>まず、上のインタラクティブ図（図 16-5）で遊びましょう。C を 1 から 8192 まで動かして、棒が「上昇」から「頭打ち」に変わる場所を見ます。次にパイプラインをオフにして、C = 1024 でそれぞれ 1 回ずつ再生し、2 回の「1 チャンクあたりの時間」を比べます。</li>
+<li>この本のインタラクティブ実験「チャンク分割と容量のトレードオフ」を開きます。この実験は、明示的に与えた再利用曲線のもとで、チャンクごとの速度と必要な容量を同時に計算します。まず、絶対に最速のチャンクを探します。次に、VRAM の予算を超えるものを除きます。「実行可能な最適」と「絶対的な最適」がどれくらい違うかを比べましょう。実験の再利用曲線と 1 token あたりの容量は人為的なパラメータで、Strata のアロケータではありません。</li>
+<li>考えてみましょう。同じプロンプトを C = 1 で読んだときと C = 8192 で読んだときで、最後の状態は同じになるはずでしょうか。「もう一歩深く」を読んでから答えてください。</li>
+</ol>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>デコードは行列ベクトル積で、重みを 1 回読んでも 1 token の役にしか立ちません。プリフィルは行列積で、重みを 1 回読めばひとかたまり全体の役に立ちます。同じ PC で、プリフィルはデコードより 20 倍以上速くなることがあります。</li>
+<li>エキスパートの部分は、エキスパートごとのグループ化でバッチ化します。同じエキスパートを選んだ token を集め、重みは 1 回だけ読みます。チャンクが大きいほど再利用は増えますが、借りる VRAM も増え、取り消しも遅くなります。Strata の既定は、1 チャンク最大 8,192 token です。</li>
+<li>パイプラインは、転送と計算を重ねます。現在の層を計算している間に、次の層のエキスパートはもう道中にいます。総時間は、いちばん遅い工程で決まります。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「プリフィルでは token が全部分かっているから、お互いに見えてしまう。因果のルールは気にしなくていい。」</strong></p>
+<p>違います。バッチ処理が変えるのは、計算の組み立て方だけです。モデルのルールは変わりません。i 番目の token が見えるのは、その前の token だけです。プリフィルでも因果マスクは使います。再帰層も、チャンク全体を順番どおりに最後まで進めます。入力が「分かっている」ことと、意味の上で「未来を見てよい」ことは、別の話です。</p></div>
+
+<details class="deep"><summary>もう一歩深く：状態の引き継ぎ、丸め誤差の違い、借用 VRAM の安全条件</summary>
+<h3>状態の引き継ぎは、最後のベクトルを残すだけではない</h3>
+<p>1 チャンクを読み終えたとき、引き継ぐ状態には次のものが含まれます。GDN の再帰状態と畳み込み状態、QSA の KV と indexer、PLE の履歴、そしてドラフト層に関わる状態です。[S12][S13] 最後の 1 行の logits だけを残してこれらを捨てると、次のデコードはもう同じ履歴の続きではなくなります。</p>
+<p>強力なテストがあります。同じ token 列を、C = 1、C = 7、C = 32 など違う切り方で読み終えます。そして、チャンク境界での状態と、そのあとの固定された履歴での出力を比べます。いちばんミスが出やすいのは、次のようなサンプルです。長さがちょうどチャンク境界をまたぐもの、最後のチャンクが埋まらないもの、プロンプトが極端に短いもの、読んでいる途中で取り消されるもの、読み終えた直後にデコードへ続くものです。</p>
+<h3>バッチ処理は丸めを変えるが、「浮動小数点だから」は万能の言い訳ではない</h3>
+<p>バッチ計算と 1 つずつの計算では、丸めの経路が違うことがあります。上流のドキュメントに例があります。IQ 系のモデルでは、CPU が 1 token のエキスパートを計算するときは ggml の内積を使います。複数 token を計算するときは、Strata 独自の複数 token 用カーネルを使います。この 2 つは丸めが少し違います。そのため、温度が 0 でも、同じプロンプトからドラフトの違いによって、別の同じくらいもっともらしい回答が出ることがあります。上流は、すべてのグループで複数 token 用カーネルを使うスイッチを用意しています。[S03]</p>
+<p>だから、C = 1 と大きな C の出力が一字一句同じにならなくても、どちらかにバグがあると即断してはいけません。かといって、「ただの浮動小数点の誤差」の一言で見逃してもいけません。同じ固定された履歴の上で、中間テンソル、選ばれたエキスパートと index の番号、誤差がどの層から増え始めるかを比べます。そのうえで、事前に決めた許容誤差と品質基準で判断します。状態の位置、因果マスク、index の番号のような「数値でない契約」は、別に厳密に確認しなければなりません。</p>
+<h3>借用 VRAM の安全条件</h3>
+<p>チャンクバッファがエキスパートキャッシュからスロットを借りると、2 つの問題が起きます。1 つ目。借りている間、貸し出されたスロットにいた元のエキスパートはもういません。ルーティング表は、それらを「ヒット」として扱ってはいけません。ソースコードでは、これらのエキスパートはプリフィルの間 RAM から転送し、読み終えてから埋め戻します。[S12] 2 つ目。埋め戻しが完了してからでないと、そのスロットにどのエキスパートが入っているかを改めて宣言してはいけません。「予算を足しても VRAM を超えない」というだけでは、借用の安全性は証明できません。証明すべきなのは、「どの時点でも、ラベルとスロットの中のバイトが一致している」ことです。</p>
+<h3>ドキュメントに出てくるいくつかのチャンクサイズ</h3>
+<p>上流のあちこちに、違うチャンクサイズが登場します。説明ドキュメントは「最大 8,192 token」と書いています[S02]。詳細ドキュメントの古い段落には、2,048 と書かれたままです。サーバーは待ち時間の見積もりに、上限として 32,768 を使います[S15]。エンジンの自動モードは、既定の最大が 8,192 で、明示すれば 32,768 まで広げられます。<span class="ev ev-code">コード上の事実</span> これらの数字は矛盾していません。答えている問いが違うのです（既定値、過去の値、上限）。式を書くときは、この本ではチャンクサイズを一貫して変数 C と書きます。</p>
+<h3>教育用コスト式の限界</h3>
+<p>この章のインタラクティブ図と実験「チャンク分割と容量のトレードオフ」は、簡略化したコスト式を使っています。形は T ≈ N ÷ r(C) ＋ ⌈N ÷ C⌉ × 1 チャンクあたりの固定コスト で、r(C) は明示的に設定した再利用曲線です。この式が説明できるのは、「固定コストが薄まる」ことと「容量の制約」の 2 つです。Strata の実際のスループットは予測できません。実際の速度は、エキスパートのヒット率、PCIe の帯域、CPU のコピースレッド、コンテキストが長くなるほど増えるアテンションの計算量なども左右します。</p>
+<p>GPU の発展的な実験をするときは、毎回 C だけを変えます。ほかの設定（量子化、KV の形式、ドラフト、入力、キャッシュの状態）は固定したまま、速度と品質の変化を説明しましょう。</p>
+</details>

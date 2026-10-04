@@ -1,0 +1,254 @@
+<div class="hook"><span class="eyebrow">不思議なタイミング</span>
+<p>Strata のソースコードのコメントに、変な話が書いてあります。<code>gdn_gate</code> という GPU の小さなプログラムは、全部で 48 個の数しか処理しないのに、毎回 28 マイクロ秒もかかるのです。作者のコメントは「こんなに小さなカーネルが、本当に 28 マイクロ秒も実行されるはずがない」です。<span class="ev ev-code">コード上の事実</span>[S13]</p>
+<p>48 個の数なら、GPU は一瞬で計算し終えます。余った時間はどこに消えたのでしょう。答えは「受付」です。CPU が GPU に小さなプログラムを 1 つ走らせるたびに、先に提出の手続きを踏まなければなりません。1 つずつ提出すると、トークン 1 個を作るのに約 2,000 回も提出することになります。この章では、GPU が仕事をどう分けるか、受付の手数料がどこから来るか、そして Strata がその 2,000 回の受付を数十回、さらには 1 回まで減らす方法を見ていきます。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>GPU 上の小さなプログラムを「カーネル」と呼びます。カーネルは起動のたびに、数十マイクロ秒の固定コストがかかります。Strata は 2 つの手でこれを減らします。1 つ目は、複数のカーネルを 1 つに融合すること。2 つ目は、1 層ぶんのカーネルを CUDA Graph として記録し、1 回で投入することです。代わりに、グラフは引数を記録時の値で固定してしまいます。だから、毎ステップ変わる「位置」は、アドレスが固定された VRAM 上のバッファに置く必要があります。</p>
+
+<h2 id="sec-1">15.1 GPU の仕事の分け方：スレッド、スレッドブロック、warp</h2>
+<p>大きな採点会場を想像してください。答案が数万枚あり、先生 1 人が 1 枚ずつ採点します。先生たちは多くの試験室に分かれ、各室では 32 人が 1 列に座って、同じ号令を聞きます。「ページをめくって」「第 1 問を見て」「点をつけて」。号令は同じですが、手元の答案は人それぞれです。</p>
+<p>GPU もこうやって働きます。CPU が GPU に渡す小さなプログラムが<dfn>カーネル</dfn>（kernel、GPU カーネル）です。カーネルを 1 回起動すると、GPU は何千何万もの<dfn>スレッド</dfn>を立ち上げます。どのスレッドも同じコードを実行しますが、扱うデータの添字だけが違います。スレッドはまず複数の<dfn>スレッドブロック</dfn>（block）に分かれます。同じブロックのスレッドは同じ計算ユニットの上で動き、小さな高速メモリを共有できます。ブロックの中では、32 スレッドずつが 1 組になって <dfn>warp</dfn> になります。同じ warp の 32 スレッドは、同じ瞬間に同じ命令を実行します。[R01] 図 15-1 は、この 3 つの層をまとめて描いたものです。</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="図 15-1：カーネルを 1 回起動するとグリッドができ、グリッドはスレッドブロックに分かれ、ブロック内の 32 スレッドごとに 1 つの warp になる">
+<defs><pattern id="c15-lane" width="9" height="12" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="7" height="12" rx="1"/></pattern></defs>
+<rect class="f-soft" fill="#e5f1df" x="10" y="8" width="380" height="96" rx="10"/>
+<text class="f-text" fill="#182f2b" x="22" y="28" font-size="13" font-weight="600">1 回の起動 ＝ 1 つのグリッド（grid）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="22" y="40" width="82" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="63" y="62" font-size="12" text-anchor="middle">ブロック 0</text>
+<text class="f-muted" fill="#5c6d66" x="63" y="80" font-size="12" text-anchor="middle">スレッド多数</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="114" y="40" width="82" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="155" y="62" font-size="12" text-anchor="middle">ブロック 1</text>
+<text class="f-muted" fill="#5c6d66" x="155" y="80" font-size="12" text-anchor="middle">スレッド多数</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="206" y="40" width="82" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="247" y="62" font-size="12" text-anchor="middle">ブロック 2</text>
+<text class="f-muted" fill="#5c6d66" x="247" y="80" font-size="12" text-anchor="middle">スレッド多数</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="298" y="40" width="82" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="339" y="62" font-size="12" text-anchor="middle">……</text>
+<text class="f-muted" fill="#5c6d66" x="339" y="80" font-size="12" text-anchor="middle">数は自由</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M63 92V112H200V122"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="124" width="380" height="118" rx="10"/>
+<text class="f-text" fill="#182f2b" x="22" y="144" font-size="13" font-weight="600">1 つのブロック：最大 1024 スレッド</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="167" font-size="12">warp 0</text>
+<rect fill="url(#c15-lane)" x="80" y="157" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="22" y="187" font-size="12">warp 1</text>
+<rect fill="url(#c15-lane)" x="80" y="177" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="22" y="207" font-size="12">warp 2</text>
+<rect fill="url(#c15-lane)" x="80" y="197" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="224" y="232" font-size="12" text-anchor="middle">……1 行 32 マス ＝ 32 スレッド</text>
+<text class="f-text" fill="#182f2b" x="200" y="262" font-size="12" text-anchor="middle">warp：32 スレッドで 1 組、同じ瞬間に同じ命令を実行</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="282" font-size="12" text-anchor="middle">各スレッドは自分の番号で、自分の分のデータを処理</text>
+</svg><figcaption>図 15-1　GPU の 3 層の分担。1 回の起動でグリッドができ、グリッドはスレッドブロックに分かれ、ブロックの中で 32 スレッドずつが 1 つの warp になって、同じ号令を聞きます。</figcaption></figure>
+<p>Strata のあちこちに、この分担が出てきます。たとえば第 17 章で扱う KV のページ切り替えでは、ソースに「1,024 スレッドのブロック 1 つで、選ばれた番号を一通りなめる」と書かれています。<span class="ev ev-code">コード上の事実</span> もう 1 つは GDN 層の漸化式です。ソースのコメントによると、式の各行は状態の特定の 1 列だけを使い、列どうしは無関係です。そのため「1 スレッドが 1 列をまるごと受け持てて、1 ステップのあいだスレッドどうしが待ち合わせる必要がない」のです。[S17]</p>
+<aside class="primer" id="c15-gpu-model">
+<h3>GPU プログラミングモデル：スレッド、スレッドブロック、warp</h3>
+<p>イメージ：CPU は数人の万能な教授で、1 人ひとりが複雑な分岐や判断をこなせます。GPU は数千人のティーチングアシスタントで、号令どおりの簡単な作業しかできませんが、人数が圧倒的です。GPU を速く使うには、仕事を何千何万もの<strong>互いに依存しない</strong>小さなタスクに分ける必要があります。</p>
+<p>定義：プログラマはカーネル関数を書き、起動するときに「ブロックをいくつ、1 ブロックあたりスレッドをいくつ」と指定します。CUDA では <code>vecAdd&lt;&lt;&lt;4, 256&gt;&gt;&gt;(A, B, C)</code> と書きます。4 ブロック、各 256 スレッドで、合計 1,024 スレッドです。各スレッドは <code>threadIdx.x + blockDim.x × blockIdx.x</code> で、自分が担当する要素の番号を計算します。現在の NVIDIA GPU では、1 つのスレッドブロックは最大 1,024 スレッドで、ブロック内のスレッドは 32 個ずつ warp になります。[R01]</p>
+<p>具体的な話：warp が VRAM を読むとき、32 スレッドが<strong>隣り合う</strong>アドレスを読めば、ハードウェアはそれを少数のメモリトランザクションにまとめられます。これを<dfn>コアレスアクセス</dfn>（coalesced access）と呼びます。アドレスが互いに遠く離れていると、トランザクションが何回にも分かれ、そのたびに一部のバイトしか使えません。次の節の Strata の例で、差がどれほど大きいかが分かります。</p>
+<p>この章とのつながり：カーネルは、CPU が GPU に渡す最小の仕事の単位です。カーネルが小さく、数が多いほど、「受け渡し」そのもののコストが目立ってきます。</p>
+<p class="further">さらに読む：<a href="https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html" target="_blank" rel="noopener noreferrer">NVIDIA CUDA プログラミングガイド：プログラミングモデル</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/intro-to-cuda-cpp.html" target="_blank" rel="noopener noreferrer">NVIDIA：CUDA C++ 入門（vecAdd の例つき）</a> · <a href="https://ja.wikipedia.org/wiki/CUDA" target="_blank" rel="noopener noreferrer">Wikipedia：CUDA</a> · <a href="https://en.wikipedia.org/wiki/Thread_block_(CUDA_programming)" target="_blank" rel="noopener noreferrer">Wikipedia: Thread block</a></p>
+</aside>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>warp は SIMT（単一命令・複数スレッド）の実行単位です。1 つの命令が 32 スレッドを動かす点は SIMD のベクトル命令に似ています。ただし各スレッドは自分のレジスタとプログラムカウンタを持ち、別々の分岐に進めます。その代わり、分岐の両側を順番に実行するコストを払います。SIMD と SIMT の違いは第 13 章で詳しく扱います。</p>
+
+<h2 id="sec-2">15.2 隣のスレッドが隣のアドレスを読む：データの並べ方が大事</h2>
+<p>数学は同じでも、データの並べ方で速度が何倍も変わります。図 15-2 で 2 つの読み方を比べてみましょう。</p>
+<figure class="fig"><svg viewBox="0 0 400 324" role="img" aria-label="図 15-2：隣のスレッドが隣のアドレスを読むとトランザクション 1 回ですべて使える。隣のスレッドが遠く離れると、32 バイトのうち 4 バイトしか使えない">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">コアレスアクセス：隣が隣を読む</text>
+<circle class="f-soft" fill="#e5f1df" cx="44" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="44" y="46" font-size="12" text-anchor="middle">0</text>
+<circle class="f-soft" fill="#e5f1df" cx="88" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="88" y="46" font-size="12" text-anchor="middle">1</text>
+<circle class="f-soft" fill="#e5f1df" cx="132" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="132" y="46" font-size="12" text-anchor="middle">2</text>
+<circle class="f-soft" fill="#e5f1df" cx="176" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="176" y="46" font-size="12" text-anchor="middle">3</text>
+<circle class="f-soft" fill="#e5f1df" cx="220" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="220" y="46" font-size="12" text-anchor="middle">4</text>
+<circle class="f-soft" fill="#e5f1df" cx="264" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="264" y="46" font-size="12" text-anchor="middle">5</text>
+<circle class="f-soft" fill="#e5f1df" cx="308" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="308" y="46" font-size="12" text-anchor="middle">6</text>
+<circle class="f-soft" fill="#e5f1df" cx="352" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="352" y="46" font-size="12" text-anchor="middle">7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 52L40 84M88 52L66 84M132 52L92 84M176 52L118 84M220 52L144 84M264 52L170 84M308 52L196 84M352 52L222 84"/>
+<rect class="f-accent" fill="#136d5a" x="28" y="86" width="208" height="22" rx="3"/>
+<text class="f-on" fill="#ffffff" x="132" y="101" font-size="12" text-anchor="middle">連続した 32 バイト、すべて有効</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="132" font-size="12">8 スレッドが 4 バイトずつ読む。トランザクション 1 回で足りる</text>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="13" font-weight="600">ストライドアクセス：隣が遠く離れている</text>
+<circle class="f-soft" fill="#e5f1df" cx="44" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="44" y="194" font-size="12" text-anchor="middle">0</text>
+<circle class="f-soft" fill="#e5f1df" cx="88" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="88" y="194" font-size="12" text-anchor="middle">1</text>
+<circle class="f-soft" fill="#e5f1df" cx="132" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="132" y="194" font-size="12" text-anchor="middle">2</text>
+<circle class="f-soft" fill="#e5f1df" cx="176" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="176" y="194" font-size="12" text-anchor="middle">3</text>
+<circle class="f-soft" fill="#e5f1df" cx="220" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="220" y="194" font-size="12" text-anchor="middle">4</text>
+<circle class="f-soft" fill="#e5f1df" cx="264" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="264" y="194" font-size="12" text-anchor="middle">5</text>
+<circle class="f-soft" fill="#e5f1df" cx="308" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="308" y="194" font-size="12" text-anchor="middle">6</text>
+<circle class="f-soft" fill="#e5f1df" cx="352" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="352" y="194" font-size="12" text-anchor="middle">7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 200L28 232M88 200L72 232M132 200L116 232M176 200L160 232M220 200L204 232M264 200L248 232M308 200L292 232M352 200L336 232"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="26" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="26" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="70" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="114" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="114" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="158" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="158" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="202" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="246" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="246" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="290" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="334" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="334" y="234" width="5" height="22"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="280" font-size="12">8 回取得。32 バイト中 4 バイトだけ使う（茶色）</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="306" font-size="12">書き換え前の Strata の GDN はこれ：隣と約 24.5 KB 離れる</text>
+</svg><figcaption>図 15-2　同じ 8 個の数を読んでも、並べ方しだいで転送量は 8 倍違います。warp のスレッドが隣り合うアドレスを読めば、ハードウェアは 1 回のトランザクションにまとめられます。</figcaption></figure>
+<p>Strata の GDN 層も、この落とし穴にはまりました。融合版カーネルのコメントによると、元の書き方では 1 つの warp が状態の 1 列を担当し、32 スレッドが 128 行を縦に進んでいました。ところが状態は「行、ヘッド、列」の順に置かれているので、隣り合う 2 スレッドが読むデータは約 24.5 KB も離れています。その結果、32 バイトのセクタを 1 つ取っても使うのは 4 バイトだけで、6.3 MB の状態を運ぶのに 1 層あたり 47.6 マイクロ秒かかっていました。<span class="ev ev-code">コード上の事実</span></p>
+<p>書き換え後は、1 つのスレッドブロックが 1 つのヘッドを丸ごと受け持ちます。512 スレッドが「行グループ、列」の順に並び、1 行の 128 列がちょうど 512 バイトの連続読み出しになります。<span class="ev ev-code">コード上の事実</span> 考え方は図 15-2 と同じで、隣のスレッドに隣のアドレスを読ませます。GDN の基本カーネルもこの原則を守っています。状態は (i, h, j) の順に置かれ、j が最も速く変わるので、i を固定すると、1 つの warp が j 方向に読むのは連続したメモリです。[S17]</p>
+<p>データの並べ方は「タダで」選べます。状態は実行時のバッファであって、モデルの重みではないので、好きに並べてよいからです。ただしソースは念を押しています。2 つの並べ方は同じ 3 つの数で添字を付けるので、読む側と書く側で並べ方がずれると、プログラムは普通に動くまま、結果だけが静かにおかしくなります。[S17]</p>
+
+<h2 id="sec-3">15.3 カーネルを起動するたびに「受付の手数料」がかかる</h2>
+<p>冒頭の不思議な話に戻りましょう。CPU が GPU にカーネルを走らせるには、ドライバを通ります。引数を検査し、コマンドを梱包し、投入キューに入れます。これらの手続きは CPU 上で行われ、時間がかかります。これを<dfn>起動オーバーヘッド</dfn>（launch overhead）と呼びます。カーネル本体の計算が数マイクロ秒なのに、手続きに十数〜二十マイクロ秒かかると、GPU は 1 つ計算し終えるたびに、次が来るまで待たされます。図 15-3 は、この「待ち」を描いたものです。</p>
+<div class="viz" data-viz="kernel-launch"><figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="図 15-3：小さなカーネル 8 個を 3 つの方式で投入する。1 つずつ起動すると 165 マイクロ秒、2 つずつ融合すると 90 マイクロ秒、CUDA Graph なら 60 マイクロ秒">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">1 つずつ起動</text>
+<text class="f-text" fill="#182f2b" x="390" y="18" font-size="12" text-anchor="end">165 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="37" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="26" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="116.4" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="152.7" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="189.1" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="225.5" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="261.8" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="298.2" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="334.5" y="27" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="57" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="46" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="152.7" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="189.1" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="225.5" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="261.8" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="298.2" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="334.5" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="370.9" y="47" width="8.6" height="12"/>
+<text class="f-text" fill="#182f2b" x="10" y="92" font-size="13" font-weight="600">2 つずつ融合</text>
+<text class="f-text" fill="#182f2b" x="390" y="92" font-size="12" text-anchor="end">90 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="111" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="100" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="116.4" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="152.7" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="189.1" y="101" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="131" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="120" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="152.7" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="189.1" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="225.5" y="121" width="17.7" height="12"/>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="13" font-weight="600">CUDA Graph</text>
+<text class="f-text" fill="#182f2b" x="390" y="166" font-size="12" text-anchor="end">60 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="185" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="174" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="175" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="205" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="194" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="195" width="72.7" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">例：カーネル 8 個、各 5 µs。投入 1 回 20 µs（茶色）</text>
+</svg><figcaption>図 15-3　小さなカーネルの時間は、投入待ちに消えます。1 つずつ起動すると、GPU の行はほとんど隙間です。融合は投入回数を減らし、CUDA Graph は投入を 1 回だけにして、ノードを次々に走らせます。数字は教育用の仮定です。</figcaption></figure></div>
+<p>これは仮の話ではありません。Strata のコメントは、はっきり結論を書いています。「このエンジンは帯域幅ではなく、起動オーバーヘッドで制限されている」。GDN 層のカーネルはどれも約 0.028 ミリ秒と測定されました。48 個の数しか処理しない <code>gdn_gate</code> も同じで、これはこのマシンでの普通の起動 1 回ぶんのコストです。1 つの GDN 層ではおよそ 19 回、完全な層ブロックでは約 45 回の起動が起こります。<span class="ev ev-code">コード上の事実</span>[S13] コメントには、測定に使った GPU とドライバのバージョンが書かれていません。以下の数字は桁感をつかむためだけに使ってください。</p>
+<p>計算してみましょう。別のコメントによると、カーネルを 1 つずつ起動する場合、トークン 1 個あたり約 2,000 回の起動になり、ドライバ呼び出し 1 回のコストは実測で 10〜22 マイクロ秒です。<span class="ev ev-code">コード上の事実</span> 「受付」だけで、トークン 1 個あたり 2,000 × 10 µs ＝ 20 ミリ秒から、2,000 × 22 µs ≈ 44 ミリ秒かかります。速度に直すと、GPU がまったく計算しなくても、最大で毎秒 23〜50 トークンです。<span class="ev ev-est">教育用の試算</span></p>
+<aside class="primer" id="c15-launch-fusion">
+<h3>カーネルの起動オーバーヘッドと演算子融合</h3>
+<p>イメージ：病院では、受付に並ぶ必要があります。小さな検査のたびに受付をやり直すと、午前中が受付窓口で終わってしまいます。対策は 2 つあります。1 つ目は、いくつかの検査を 1 回にまとめること（<dfn>演算子融合</dfn>、operator fusion）。2 つ目は、医師が検査リストを一式まとめて出し、看護師がリストどおりに実行すること（<dfn>CUDA Graph</dfn>）です。</p>
+<p>定義：起動オーバーヘッドは、CPU がカーネルを準備して投入する固定コストで、カーネルがどれだけ計算するかにはほとんど関係しません。カーネル 1 つの計算に w マイクロ秒、投入に L マイクロ秒かかるとします。n 個のカーネルを 1 つずつ投入すると、w &lt; L なら総時間はおよそ n × L + w で、GPU はほとんどの時間を待ちます。w ≥ L なら総時間はおよそ L + n × w で、投入は計算の裏に隠れます。<span class="ev ev-est">教育用の試算</span></p>
+<p>融合の利点は、受付が減ることだけではありません。複数の演算子を 1 つのカーネルにまとめると、途中結果をレジスタやオンチップメモリに置いたままにでき、VRAM に書き戻して読み直す必要がなくなります。代わりに、そのカーネルは複雑になり、レジスタをより多く使うかもしれません。すると GPU 上で同時に動かせるスレッドが減ります。CUDA Graph はカーネル自体を変えません。一連の操作と依存関係を記録しておき、あとで 1 回の投入で丸ごと再生します。節約できるのは CPU 側の投入コストです。[R01]</p>
+<p>この章とのつながり：Strata は両方の手を使っています。次の節で具体的な数字を見ます。</p>
+<p class="further">さらに読む：<a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html" target="_blank" rel="noopener noreferrer">NVIDIA CUDA プログラミングガイド：CUDA Graphs</a> · <a href="https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/" target="_blank" rel="noopener noreferrer">PyTorch ブログ：CUDA Graphs による高速化</a> · <a href="https://en.wikipedia.org/wiki/Loop_fission_and_fusion" target="_blank" rel="noopener noreferrer">Wikipedia: Loop fusion（コンパイラにある同じ発想）</a></p>
+</aside>
+
+<h2 id="sec-4">15.4 2 つの節約術：融合と CUDA Graph</h2>
+<p>図 15-4 で 2 つの手を並べて比べます。融合は GPU 上で何を走らせるかを変え、グラフは CPU がどう投入するかを変えます。</p>
+<figure class="fig"><svg viewBox="0 0 400 334" role="img" aria-label="図 15-4：融合は 3 つのカーネルを 1 つにして、途中結果をオンチップに残す。CUDA Graph は 5 回の投入を 1 回にするが、ノードは元の 5 つのカーネルのまま">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">演算子融合：複数のカーネルを 1 つに</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="65" y="54" font-size="12" text-anchor="middle">畳み込み+SiLU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="54" font-size="12" text-anchor="middle">L2 ノルム（q）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="335" y="54" font-size="12" text-anchor="middle">L2 ノルム（k）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M120 49H143M255 49H278"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="86" font-size="12">起動 3 回。途中結果を VRAM に書いて読み直す</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 92V104"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="106" width="380" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="128" font-size="12" text-anchor="middle">1 つのカーネル：畳み込み + SiLU + L2 ノルム 2 回</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="158" font-size="12">起動 1 回。途中結果はオンチップに残る</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="174" font-size="12">（Strata の fused_gdn_conv_l2）</text>
+<text class="f-text" fill="#182f2b" x="10" y="192" font-size="13" font-weight="600">CUDA Graph：1 回記録して、何度も再生</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="202" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="102" y="222" font-size="12" text-anchor="middle">グラフなし：1 つずつ投入</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="232" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="243" font-size="12" text-anchor="middle">カーネル 1 を投入</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="250" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="261" font-size="12" text-anchor="middle">カーネル 2 を投入</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="268" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="279" font-size="12" text-anchor="middle">カーネル 3 を投入</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="286" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="297" font-size="12" text-anchor="middle">カーネル 4 を投入</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="304" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="315" font-size="12" text-anchor="middle">カーネル 5 を投入</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="202" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="297" y="222" font-size="12" text-anchor="middle">グラフあり：全体を 1 回で投入</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M233 266H361"/>
+<circle class="f-accent" fill="#136d5a" cx="233" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="265" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="297" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="329" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="361" cy="266" r="10"/>
+<text class="f-muted" fill="#5c6d66" x="297" y="300" font-size="12" text-anchor="middle">ノードは元の 5 カーネルのまま</text>
+<text class="f-muted" fill="#5c6d66" x="297" y="316" font-size="12" text-anchor="middle">節約するのは CPU 側の投入</text>
+</svg><figcaption>図 15-4　融合は GPU 上で走るものを変えます。複数の演算子が 1 つのカーネルになり、途中結果は VRAM に落ちません。グラフは CPU の投入方法を変えます。一連を 1 回で渡し、各ノードは今までどおり 1 つのカーネルです。2 つの手は重ねて使えます。</figcaption></figure>
+<p><strong>融合。</strong>Strata には、ファイル名に <code>fused_</code> が付いたカーネルがたくさんあります。たとえば <code>fused_gdn_conv_l2</code> は、元の「畳み込み + SiLU」と 2 回の L2 ノルム、合計 3 回の起動を 1 つのカーネルで置き換えます。<code>fused_gdn_ab</code> は、2 回の行列ベクトル積と 2 つの要素ごとのカーネルを置き換えます。<span class="ev ev-code">コード上の事実</span> 混合残差の読み出しは、もとは 1 回につき 6 個のカーネルを使い、トークン 1 個あたり 96 回走っていましたが、融合後は 2 個のカーネルに減りました。<span class="ev ev-code">コード上の事実</span></p>
+<p><strong>CUDA Graph。</strong>Strata は各層のカーネルを 1 枚のグラフに記録します。コメントに実測値があります。同じ層ブロックの 43 ノードは、1 つずつ起動すると 2.393 ミリ秒、グラフに記録して再生すると 1.585 ミリ秒で済み、1.51 倍速くなりました。しかも節約できたのは「すべて起動オーバーヘッド」です。<span class="ev ev-code">コード上の事実</span>[S13] 別のコメントはもっと率直です。再生と 1 つずつの起動では算術がまったく同じで、違いは「約 2,000 回のカーネル起動が 48 回のグラフ起動になる」ことだけだ、と書かれています。<span class="ev ev-code">コード上の事実</span></p>
+<p>もう一歩進めるでしょうか。進めます。Windows のディスプレイドライバモードでは、グラフの起動 1 回そのものにも約 0.3〜0.4 ミリ秒かかります。層ごとのループではトークン 1 個につきグラフを 96 回起動し、実測でトークン 1 個に 48.6 ミリ秒かかりました。GPU 上の本当のカーネル時間は 12 ミリ秒しかありません。そこで Strata は「トークン全体を 1 枚のグラフ」にする版も書き、48 層をすべて入れました。<span class="ev ev-code">コード上の事実</span> 図 15-5 に 3 つの段階を並べます。</p>
+<figure class="fig"><svg viewBox="0 0 400 202" role="img" aria-label="図 15-5：トークン 1 個ごとの投入回数。約 2000 回のカーネル起動から、48〜96 回のグラフ起動、そして 1 回のトークン全体グラフへ">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">1 トークンごとの投入回数（棒の長さは対数目盛り）</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">カーネルを 1 つずつ起動</text>
+<text class="f-text" fill="#182f2b" x="390" y="44" font-size="12" text-anchor="end">約 2,000 回</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="52" width="344" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="10" y="94" font-size="12">層ごとにグラフ化（1 層に 1〜2 枚）</text>
+<text class="f-text" fill="#182f2b" x="390" y="94" font-size="12" text-anchor="end">48〜96 回</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="102" width="239" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="10" y="144" font-size="12">トークン全体を 1 枚のグラフに</text>
+<text class="f-text" fill="#182f2b" x="390" y="144" font-size="12" text-anchor="end">1 回</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="152" width="80" height="16" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="12">数値は session.hpp のコメントより。棒は対数目盛り</text>
+</svg><figcaption>図 15-5　Strata は投入回数を段階的に減らします。まず層ごとにグラフ化し、次にトークン全体を 1 枚のグラフにします。投入が 1 回減るたびに、数十から数百マイクロ秒の固定コストが減ります。</figcaption></figure>
+<p>最初からトークン全体を記録しないのはなぜでしょう。各層の途中で、CPU 側のエキスパートプールと受け渡しをするからです。GPU がルーティングの段階まで計算して、はじめて CPU はどのエキスパートを計算すべきか分かります。Strata が最初に「1 層」をグラフの単位にしたのは、層と層のあいだにホストが割り込めるようにして、GPU が次の区間を走るあいだに CPU のエキスパートプールが同時に動けるようにするためです。[S13] トークン全体のグラフでは、GPU 上の単一スレッドのカーネルが、ホストがフラグを書くのをデバイス側で待ちます。ホストはもうドライバを呼びません。<span class="ev ev-code">コード上の事実</span></p>
+
+<h2 id="sec-5">15.5 グラフは引数を固定してしまう：凍った位置</h2>
+<p>CUDA Graph には癖があります。記録するとき、カーネルの<strong>引数</strong>がそのままグラフの中にコピーされ、以後の再生ではそのコピーが使われます。Strata は、これを確かめる小さな実験を用意しています。グラフは再生のたびに入力バッファのデータを読み直しますが、カーネルの引数は読み直しません。<span class="ev ev-code">コード上の事実</span></p>
+<p>困るのは、トークンごとに変わる引数があることです。典型は<strong>位置</strong>、つまり「何番目のトークンか」です。位置を KV キャッシュに書き込むカーネルの引数として渡すと、記録時には 0 だったので、以後の再生でもずっと 0 のままです。下のシミュレータでこの過程をゆっくり見られます。まず「値でグラフに記録」を選び、<strong>1 ステップ</strong>ずつ数トークン進めてみてください。</p>
+<div class="viz" data-viz="graph-freeze"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="図 15-6：位置を値でグラフに記録すると 4 つのトークンがすべて位置 0 に書かれる。カーネルが step バッファから位置を読めば、それぞれ別のマスに書かれる">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">誤り：位置を引数としてグラフに記録</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="28" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="53" font-size="13" text-anchor="middle">t3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="58" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="106" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="298" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="346" y="28" width="44" height="40" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="32" y="84" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="80" y="84" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="128" y="84" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="176" y="84" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="224" y="84" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="272" y="84" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="320" y="84" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="368" y="84" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="102" font-size="12">t0〜t3 はすべて位置 0 に書かれ、後の書き込みが上書き</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="118" font-size="12">アテンションが見えるのは 1 マスだけ</text>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="13" font-weight="600">正しい：カーネルが step バッファから位置を読む</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="169" font-size="13" text-anchor="middle">t0</text>
+<rect class="f-accent" fill="#136d5a" x="58" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="80" y="169" font-size="13" text-anchor="middle">t1</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="128" y="169" font-size="13" text-anchor="middle">t2</text>
+<rect class="f-accent" fill="#136d5a" x="154" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="176" y="169" font-size="13" text-anchor="middle">t3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="298" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="346" y="144" width="44" height="40" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="32" y="200" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="80" y="200" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="128" y="200" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="176" y="200" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="224" y="200" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="272" y="200" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="320" y="200" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="368" y="200" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="224" font-size="12">step バッファ：アドレスは固定、中身は毎ステップ更新</text>
+</svg><figcaption>図 15-6　同じグラフでも、書き方は 2 通りあります。位置が引数として固定されると、すべてのトークンが 0 番のマスに集まります。位置をアドレス固定の VRAM バッファに置くと、グラフが覚えるのはアドレスで、中身は毎ステップ ホストが書き換えます。</figcaption></figure></div>
+<p>Strata の <code>qsa.hpp</code> は、このミスの結果を具体的に書いています。位置が凍ると、どのトークンも 0 番のマスに書き込まれ、スコアリングと選択は 1 マスしか見ず、アテンションは常に 1 マスぶんの履歴しか見ません。コメントの評価は「クラッシュより悪い」です。出力は有限で、もっともらしい数になり、症状は「モデルが文脈を使えない」のとそっくりです。人は KV キャッシュや選択アルゴリズム、重みを疑い、グラフだけは思いつきません。<span class="ev ev-code">コード上の事実</span>[S18]</p>
+<p>その直し方は「6 つの関数シグネチャを変えるのではなく、VRAM を 1 か所用意する」ことです。毎ステップ変わる 4 つの数を、小さな <dfn>step バッファ</dfn>に入れます。</p>
+<ul>
+<li><code>step[0] = pos</code>：新しいトークンの位置</li>
+<li><code>step[1] = n_kv = pos + 1</code>：キャッシュに何マス入っているか</li>
+<li><code>step[2] = n_bid</code>：4 マスのブロックがいくつ埋まったか</li>
+<li><code>step[3] = width</code>：このステップで何マス選ぶか。min(n_kv, 2051) に等しい。[S18]</li>
+</ul>
+<p>各カーネルは、この VRAM から必要な数を読みます。引数リストはトークンのあいだ完全に変わらないので、QSA の経路全体をグラフに記録できます。ホストは毎ステップ、小さなコピーを 1 回するだけで、この VRAM の中身を書き換えます。<span class="ev ev-code">コード上の事実</span>[S18] 4 つの数は互いに依存しています。1 か所にまとめて、1 つのコードが一括で計算すれば、「pos だけ直して n_kv を直し忘れる」ことは起こりません。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは C 言語の「値渡し」と「ポインタ渡し」の違いそのものです。グラフが記録したのが値なら、いつまでもその値のままです。記録したのがポインタなら、参照を外すたびに新しい中身が読めます。ただし条件として、ポインタの指す先のメモリがずっと有効でなければならず、これはグラフ自身では検査できません。</p>
+<p>同じ理屈はサンプリングにも使われています。温度や top-p といったパラメータはリクエストごとに違いうるので、Strata はサンプリングを、記録されるグラフの<strong>外</strong>に置きます。そうしないと、これらのパラメータが「グラフに永久に焼き付けられて」しまいます。<span class="ev ev-code">コード上の事実</span>[S08]</p>
+
+<h2 id="sec-6">15.6 手を動かす：ボトルネックと凍結を自分で見つける</h2>
+<p>この章の 2 つのインタラクティブな図は、小さな実験として使えます。</p>
+<ol>
+<li><strong>起動オーバーヘッドのタイムライン</strong>（図 15-3）：まず既定のパラメータで再生し、3 つの方式の総時間と GPU のビジー率を書き留めます。次に、カーネル 1 つの計算時間 w を 5 µs から 40 µs までゆっくり上げ、「グラフがもう目立って速くない」点を探します。それはおよそ w が L に近づくあたりで現れます。カーネルが投入より長くなれば、投入コストは自然に隠れるからです。</li>
+<li><strong>凍った位置</strong>（図 15-6）：2 つの書き方で、それぞれ 4 トークンずつ進めます。KV のマスと「アテンションが見えるマス数」を比べます。そして考えてみてください。「エラーが出たか、出力が有限の数か」だけを確かめるなら、誤った書き方に気づけるでしょうか。</li>
+</ol>
+<p>本物の GPU で確かめたいなら、<code>state[pos] = token</code> だけを行う小さなグラフを書き、pos = 0、1、2 で再生して、3 つの位置すべてに書き込まれたかを確認します。最後の戻り値が「成功」なのを見るだけでは足りません。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>GPU は何千何万ものスレッドで働きます。スレッドはブロックに分かれ、ブロックの中で 32 スレッドずつが 1 つの warp になります。隣のスレッドに隣のアドレスを読ませると、転送が無駄になりません。</li>
+<li>カーネルは起動のたびに固定コストがかかります。Strata はもともとトークン 1 個あたり約 2,000 回起動していました。融合でカーネルの数を減らし、CUDA Graph で投入を層ごとに 1 回、さらにトークンごとに 1 回まで減らします。</li>
+<li>グラフはカーネルの引数を固定してしまいます。毎ステップ変わる値（位置、n_kv、選択幅）は、アドレスが固定された VRAM バッファに置き、カーネルが毎回読みに行く必要があります。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「CUDA Graph は、たくさんのカーネルを 1 つの大きなカーネルに合体させるもの」</strong></p>
+<p>違います。グラフは一連の操作とその依存関係を記録するだけです。再生すると、各ノードは今までどおり独立したカーネルで、途中結果も今までどおり VRAM に書き戻されます。節約できるのは CPU 側の投入コストです。計算そのものを 1 つのカーネルにまとめるのは演算子融合で、そのためにはカーネルを書き直す必要があります。2 つは別々の問題を解くもので、Strata は両方を使っています。[R01]</p></div>
+
+<details class="deep"><summary>もう一歩深く：融合のコスト、グラフ記録の 3 つの義務、受け入れ検査の方法</summary>
+<h3>融合はタダではない</h3>
+<p>複数の演算子を 1 つのカーネルに書くと、起動回数が減り、途中結果の書き読みも減ります。代わりに、カーネルの中で同時に生きる変数が増え、各スレッドがより多くのレジスタを使います。レジスタの総量は決まっているので、スレッドあたりの使用量が増えると、同時に常駐できるスレッドが減ります。GPU がメモリアクセスの待ちを隠すための「控えのスレッド」も減ります。これを占有率（occupancy）の低下と呼びます。実装も複雑になり、テストも難しくなります。だから融合は測定結果で決めます。たとえば Strata の混合残差の融合読み出しにはいくつかの変種があります。エンジンは GPU ごとに、まずランダムな重みで一通り走らせ、基準の書き方とビット単位で一致する最新の変種だけを採用します。<span class="ev ev-code">コード上の事実</span></p>
+<p>教育用の計算例：ある層で起動が 20 回、1 回あたりホストのコストが 5 µs なら、起動だけで約 100 µs です。1 回に数マイクロ秒しか計算しない小さな演算子には、これは大きな額です。各カーネルの計算自体が数ミリ秒なら、同じ 100 µs は端数にすぎません。これらは仮定の値で、「最適化する価値があるか」を判断するためのもので、実測ではありません。<span class="ev ev-est">教育用の試算</span></p>
+<h3>グラフ記録の 3 つの義務</h3>
+<p><code>graph.hpp</code> は 3 つのことを、インターフェースの前提として書いています。どれも専用の小さな実験から来ています。<span class="ev ev-code">コード上の事実</span></p>
+<ol>
+<li><strong>待機はドライバを呼ぶ必要があり、メモリを読むだけではいけない。</strong>Windows のディスプレイドライバモデルでは、コマンドの投入がバッチにまとめられます。メモリを読むだけでドライバを呼ばないスピンループは、500 ミリ秒で 5,907,703 回転しても、カーネルがまったく走り始めませんでした。コードがドライバを呼んで、はじめてデータが反転しました。そこで待機は、イベントを繰り返し問い合わせる形に変えました。1 回の問い合わせは約 0.021 ミリ秒で、これは「同期」ではなく「問い合わせ」です。</li>
+<li><strong>グラフは入力バッファを読み直すが、カーネルの引数は読み直さない。</strong>8 回の再生で毎回ピン留めメモリの入力を替えても、結果は追従しました。一方、引数は記録時にノードへコピーされ、二度と読まれません。毎ステップ変わる値（位置、ページテーブルの基底アドレス、トークン番号）は、引数ではなく VRAM 上の<strong>データ</strong>にする必要があります。</li>
+<li><strong>アドレスの固定は呼び出し側の責任。</strong>グラフが持つのはグラフであって、メモリではありません。記録されるコードが使うバッファはすべて、記録の前に確保しておき、あとで再確保してはいけません。</li>
+</ol>
+<p>ほかに 2 つの防御も覚えておくとよいでしょう。記録結果がノード 0 個ならすぐエラーにします。「何もしないグラフ」は永遠に静かに再生され、エラーも出力も出さないからです。記録の本体に CUDA エラーが残っていたら、その記録を捨て、壊れたグラフをインスタンス化しません。<span class="ev ev-code">コード上の事実</span></p>
+<h3>1 つの実行経路をすべてだと思わない</h3>
+<p>Strata には、何種類ものグラフが同時にあります。<code>SessionGraphs</code> は層ごとに 1 枚か 2 枚（ルーティング前の区間と、エキスパート合流後の区間）です。[S13] 投機的デコーディングの検証ウィンドウ用のマルチトークングラフ（第 18 章）[S08]、トークン全体の <code>TokenGraph</code>、区間ごとの計時に使うプレフィックスグラフもあります。あるヘッダファイルに「1 層に 1 枚のグラフ」と書かれているのを読んで、「このエンジンは大きなグラフを決して記録しない」と断言してはいけません。ソースには、参照経路、デバッグ経路、高速経路、デバイスの能力で選ばれる実装がよく共存しています。呼び出しの文脈と有効になる条件は、結論の一部です。これはコンパイラの授業で習う「同じ関数に複数の特殊化版がある」のと同じことです。</p>
+<h3>受け入れ検査：アドレス、数値、状態の 3 点</h3>
+<p>グラフの最適化では、最低でも 3 つを検証します。毎ステップ変わる値が毎回正しく更新されること。記録されたアドレスが、すべての再生のあいだ有効であること。再生後の状態が、グラフを使わない参照経路と一致すること。典型的なライフサイクルの落とし穴は、リクエストの終了時にバッファを解放しながら、グラフオブジェクトを次のリクエスト用に残してしまうことです。次の再生で、解放済みのメモリを読み書きしてしまいます。</p>
+<p>テストも、誤りが「見える」ものでなければなりません。同じプロンプトと同じ温度で 1 回繰り返すだけでは、引数の切り替えが正しいことの証明になりません。もっとよい方法は、logits を固定し、連続する 2 つのリクエストで貪欲デコーディングと高い温度（または別の固定乱数）を使い、グラフを使わない参照実装と、実際に使われた引数と結果を比べることです。2 つ目のリクエストは、1 つ目とは違う、しかも予測できる分岐を通らなければなりません。</p>
+<p>プロファイラが必要になるのは、上級の GPU 課題です。起動時間、カーネル時間、レジスタ使用量、再生時間を記録し、さらにエンドツーエンドの A/B 比較で、局所的な最適化がクリティカルパスを本当に縮めたかを判断します。Strata のコメントには反例があります。ある回に、グラフを使わないモードで測った区間ごとの計時が、グラフ化後の同じ作業の実コストより 4 倍高く、最適化の方向を危うく誤らせるところでした。<span class="ev ev-code">コード上の事実</span></p>
+</details>

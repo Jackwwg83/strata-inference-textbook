@@ -1,0 +1,166 @@
+<div class="hook"><span class="eyebrow">ちょっとズルい高速化</span>
+<p>Strata のドキュメントは、高速化の手段をこう紹介しています。小さくて速いアシスタントが、先に数語を推測する。大きなモデルは、その推測をまとめて 1 回で検査する。賛成できるものだけを残し、そのあとで次の 1 語を自分で書く。「アシスタントは推測するだけで、どの語もすべて大きなモデルが決めます。だから回答の品質は変わらず、1.6〜1.8 倍速くなるだけです。」<span class="ev ev-report">上流レポート</span>[S02]</p>
+<p>推測するだけで、なぜ答えを変えずに計算が速くなるのでしょうか。推測が外れたら、どうなるのでしょうか。外れた推測をもとに計算してしまった結果は、どうやって「取り消す」のでしょうか。この章では、Strata の検証ウィンドウを使って、この 3 つの疑問に答えます。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>ドラフト層が最大 3 個の token を先に推測します。ターゲットモデルは、それらを 1 つのウィンドウに入れて 1 回で計算します。左から右へ比べていき、最初に食い違った所までを受理し、残りはすべて破棄します。食い違った所ではターゲットが自分の選択を出すので、1 ラウンドで必ず 1 個以上進みます。これは、CPU の投機実行や、データベースの「まず仮書きし、次にコミットし、誤りならロールバックする」と同じ考え方です。</p>
+
+<h2 id="sec-1">18.1 先に推測して、あとで検証する：外れても損はしない</h2>
+<p>第 16 章で見たとおり、複数の token をまとめて計算するほうが、1 個ずつ計算するよりずっと安上がりです。重みを 1 回読むだけで済むからです。ところが答えを書くときは、次の token が決まるまで、その次の token は分かりません。まとめて計算できないのです。<dfn>投機的デコーディング</dfn>（speculative decoding）は、これを次のように解決します。まず、安い方法で次の数 token を<strong>推測</strong>します。次に「前回の結果 ＋ これらの推測」を 1 つのバッチにして、大きなモデルに 1 回で計算させます。大きなモデルは、各位置で「ここなら私はこう書く」と答えを出します。それを推測と見比べれば、どれが当たったかが分かります。</p>
+<p>推測を担当するのが<dfn>ドラフト</dfn>（draft）、最終判断を下す大きなモデルが<dfn>ターゲットモデル</dfn>（target）です。Strata のドラフトは、モデルに最初から付いている MTP（マルチトークン予測）層から来ます。最大 3 個を推測します。回答が前の文を繰り返しているとき（コードの修正や原文の引用など）は、前の文から最大 5 個を「コピーして」くることもできます。これを prompt lookup と呼びます。1 回の検証で 48 層すべてを通り、1 ラウンドあたり平均 2.4〜3.2 個の token が進みます。[S02] 図 18-1 で比べてみましょう。</p>
+<figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="図 18-1：通常の生成は 1 ラウンドに 1 token しか出ない。先読み検証は 1 回で 4 行を検証し、今回はドラフト 2 個を受理、ターゲット自身の 1 個を足して合計 3 個進む">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">通常の生成：1 回 48 層を通って 1 token だけ</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="28" width="88" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="54" y="44" font-size="12" text-anchor="middle">第 1 ラウンド</text><text class="f-muted" fill="#5c6d66" x="54" y="61" font-size="12" text-anchor="middle">→ 1 個</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="106" y="28" width="88" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="150" y="44" font-size="12" text-anchor="middle">第 2 ラウンド</text><text class="f-muted" fill="#5c6d66" x="150" y="61" font-size="12" text-anchor="middle">→ 1 個</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="28" width="88" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="246" y="44" font-size="12" text-anchor="middle">第 3 ラウンド</text><text class="f-muted" fill="#5c6d66" x="246" y="61" font-size="12" text-anchor="middle">→ 1 個</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="298" y="28" width="88" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="342" y="44" font-size="12" text-anchor="middle">第 4 ラウンド</text><text class="f-muted" fill="#5c6d66" x="342" y="61" font-size="12" text-anchor="middle">→ 1 個</text>
+<text class="f-text" fill="#182f2b" x="10" y="100" font-size="13" font-weight="600">先読み検証：1 回で 4 行を検証、今回は 3 個進む</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="110" width="380" height="44" rx="8"/>
+<rect class="f-accent" fill="#136d5a" x="18" y="117" width="86" height="30" rx="5"/><text class="f-on" fill="#ffffff" x="61" y="137" font-size="12" text-anchor="middle">前回の結果</text>
+<rect class="f-accent" fill="#136d5a" x="111" y="117" width="86" height="30" rx="5"/><text class="f-on" fill="#ffffff" x="154" y="137" font-size="12" text-anchor="middle">ドラフト 1 ✓</text>
+<rect class="f-accent" fill="#136d5a" x="204" y="117" width="86" height="30" rx="5"/><text class="f-on" fill="#ffffff" x="247" y="137" font-size="12" text-anchor="middle">ドラフト 2 ✓</text>
+<rect class="f-warn" fill="#9e5d24" x="297" y="117" width="86" height="30" rx="5"/><text class="f-on" fill="#ffffff" x="340" y="137" font-size="12" text-anchor="middle">ドラフト 3 ✗</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="178" font-size="12">ドラフト 2 個を受理。3 番目の枠はターゲットが自分で選ぶ</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="196" font-size="12">→ このラウンドは 3 個進む</text>
+</svg><figcaption>図 18-1　同じ 48 層を 1 回通るあいだに、通常の生成は 1 token しか出せません。先読み検証なら 1〜k＋1 個を出せます。外れた推測は無駄になるだけで、答えには入りません。</figcaption></figure>
+<p>なぜ、1 ラウンドで何個か多く検証しても、それほど負担にならないのでしょうか。ソースコードに勘定が書いてあります。1 つのウィンドウのコストは、「密な重みを 1 回だけ読み、T 個の token で共有する」ことに、「T 個の token それぞれがヒットしなかったエキスパートの和集合を、CPU で計算する」ことを足したものです。実際のデコード記録で集計すると、CPU で計算するミス側のエキスパートは、T ＝ 2 のとき 1 token の場合の 1.75 倍、T ＝ 3 のとき 2.4 倍、T ＝ 4 のとき 3.05 倍でした。[S08] token を 1 個多く検証する限界コストは、もう 1 ラウンド回すコストよりずっと小さいのです。</p>
+<p>推測がどれだけ当たるかで、得られる利益が直接決まります。ソースコードのコメントによると、MTP 層が貪欲デコーディング（greedy）の結果を当てる割合は、1 ステップ目が 0.89、2 ステップ目が 0.86、3 ステップ目が 0.85 です。<span class="ev ev-code">コード上の事実</span> 上流のドキュメントも、出力速度は文章によって変わると注意しています。ドラフトが受理されるほど速くなり、同じプロンプトでも回答が違えば、速度が数パーセントも違うことがあります。[S03] 毎回いくつ推測するか、そもそも推測する価値があるかは、第 19 章の話題です。</p>
+
+<h2 id="sec-2">18.2 受理するのは連続した先頭部分だけ</h2>
+<p>比べるルールは 1 つだけです。<strong>左から右へ、最初に食い違った所までを受理する</strong>。ウィンドウの 0 行目を、前回のラウンドで確定した token x とします。その後ろがドラフト d₁、d₂、d₃ です。ターゲットモデルは「x の後なら a を書く」「x、d₁ の後なら b を書く」……と計算します。これを順に比べます。</p>
+<ul>
+<li>ターゲットは x の後に a を選び、ドラフト d₁ ＝ a なので、受理。</li>
+<li>ターゲットは x、a の後に b を選び、ドラフト d₂ ＝ b なので、受理。</li>
+<li>ターゲットは x、a、b の後に e を選び、ドラフト d₃ ≠ e なので、ここで停止。d₃ は破棄し、ターゲット自身の e に置き換えます。</li>
+</ul>
+<p>Strata の生成ループでは、このルールがたった 1 行のコードです。<code>while (a &lt; T - 1 &amp;&amp; window[a + 1] == outv[a]) ++a;</code> のすぐあとに <code>ver.commit(a + 1)</code> が続きます。<span class="ev ev-code">コード上の事実</span> ここで <code>outv[t]</code> は、ウィンドウの t 行目の後にターゲットが選ぶ token です。a は受理したドラフトの数です。食い違った所でターゲット自身が選んだ token も出力されます。だから 1 ラウンドで a ＋ 1 個進み、最低でも 1 個は進みます。投機コントローラのコメントにも「この検証の 1 回で、必ず 1 つの token をコミットする」とあります。[S09]</p>
+<p>最初の食い違いより後のドラフトは、たとえ「正しそう」に見えても、なぜ必ず破棄するのでしょうか。それは、間違った token の後ろで推測したものだからです。前提がすでに崩れています。下のシミュレータは、まさにこの場面を用意してあります。<strong>ステップ</strong>実行で第 2 ラウンドを進めてみましょう。</p>
+<div class="viz" data-viz="spec-verify"><figure class="fig"><svg viewBox="0 0 400 228" role="img" aria-label="図 18-2：ウィンドウの 1 つ目のドラフト「私たち」は受理される。2 つ目のドラフト「が」はターゲットの「は」と食い違う。3 つ目のドラフト「公園」は元の文と同じでも破棄される">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="13">出力済み：今日は晴れです。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="42" font-size="12">ウィンドウ：0 行目は前回の結果、続くのがドラフト</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="50" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="53" y="70" font-size="13" text-anchor="middle">。</text>
+<rect class="f-accent" fill="#136d5a" x="102" y="50" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="145" y="70" font-size="13" text-anchor="middle">私たち</text>
+<rect class="f-warn" fill="#9e5d24" x="194" y="50" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="237" y="70" font-size="13" text-anchor="middle">が</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="50" width="86" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="329" y="70" font-size="13" text-anchor="middle">公園</text>
+<text class="f-muted" fill="#5c6d66" x="145" y="96" font-size="12" text-anchor="middle">受理</text><text class="f-muted" fill="#5c6d66" x="237" y="96" font-size="12" text-anchor="middle">不一致</text><text class="f-muted" fill="#5c6d66" x="329" y="96" font-size="12" text-anchor="middle">破棄</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="118" font-size="12">各行の後にターゲットモデルが選ぶ token</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="126" width="86" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="53" y="146" font-size="13" text-anchor="middle">私たち</text>
+<rect class="f-warn" fill="#9e5d24" x="102" y="126" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="145" y="146" font-size="13" text-anchor="middle">は</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="194" y="126" width="86" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="237" y="146" font-size="13" text-anchor="middle">…</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="126" width="86" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="329" y="146" font-size="13" text-anchor="middle">…</text>
+<text class="f-text" fill="#182f2b" x="10" y="182" font-size="12">「公園」は元の文と同じでも、誤った「が」の後なので破棄</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">commit(2)：先頭 2 行を残す。出力は「私たち は」</text>
+</svg><figcaption>図 18-2　最初に食い違った所まで比べます。2 つ目のドラフト「が」は誤りで、ターゲットはここで「は」と書きます。3 つ目のドラフトは、たまたま元の文と同じでも、誤った語の後で推測したものなので、必ず破棄します。</figcaption></figure></div>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>このルールの正しさは、数学的帰納法で証明できます。確定済みの履歴 H が、貪欲生成の結果に等しいとします。d₁ が H の後のターゲットの選択に等しければ、H＋d₁ もまだ貪欲生成の結果に等しくなります。以下同様に、最初の食い違いまで続きます。食い違い以降のドラフトは、誤った履歴をもとにしています。帰納の鎖が切れているので、受理する理由はありません。正しさは、先頭から続く部分に沿って<strong>連鎖的</strong>に成り立ちます。ウィンドウの各位置が、個別にチェックを付けられるわけではありません。</p>
+<p>貪欲デコーディング（各ステップで確率が最大の token を取る方法）なら、Strata の検証ウィンドウは、さらに強い保証を与えます。ウィンドウの t 行目の結果は、通常の 1 個ずつの生成のその位置の結果と<strong>ビット単位で一致</strong>します。ウィンドウ内の各カーネルは、1 token 用のカーネルそのものか、token ごとの演算が 1 token 版と完全に同じだからです。そのため、「ドラフトが受理された」ことは「通常の生成でもそれを書いた」ことと、ちょうど同じ意味になります。[S08]</p>
+
+<h2 id="sec-3">18.3 投機実行：CPU は昔からやっている</h2>
+<p>「先に推測して進め、外れたら取り消す」という方法は、言語モデルが発明したものではありません。現代の CPU は、毎秒数十億回もこれをやっています。</p>
+<aside class="primer" id="c18-speculation">
+<h3>投機実行と分岐予測</h3>
+<p>イメージ：食堂で並んでいると、前の人がまだ「麺にするかご飯にするか」決めていないのに、店の人は、その人のいつもの注文から先に麺を作り始めます。当たれば待ち時間が減ります。外れたら麺を脇に置いて作り直すだけです。無駄になることはあっても、間違った料理を出すことはありません。</p>
+<p>定義：CPU はパイプライン（第 16 章で見ました）で命令を実行します。<code>if</code> のような分岐に来たとき、条件がまだ計算できていないと、次にどの命令を取ってくるべきか決まりません。<dfn>分岐予測器</dfn>は、過去の履歴から進む向きを推測します。CPU はその向きに実行を続けます。これが<dfn>投機実行</dfn>です。大事なのは、投機実行の結果は一時的な場所に置き、<strong>正式な状態には書き込まない</strong>ことです。条件が計算できたあと、当たっていれば結果を「リタイア」（コミット）します。外れていれば、パイプライン中のそれらの命令を捨て、正しい向きからやり直します。</p>
+<p>具体的な数字：現代のプロセッサでは、分岐予測の的中率はふつう 9 割を超えます。だから「たまに少し無駄にする」ほうが、「毎回止まって待つ」より、ずっと得です。外れたときの損失は、パイプラインが長いほど大きくなります。</p>
+<p>この章との関係：ドラフトが分岐予測、検証ウィンドウが投機実行、<code>commit(a + 1)</code> がリタイアに当たります。どちらも同じ規律を守ります。推測の結果は、照合が済むまで有効にしてはいけません。</p>
+<p class="further">参考リンク：<a href="https://ja.wikipedia.org/wiki/投機的実行" target="_blank" rel="noopener noreferrer">Wikipedia：投機的実行</a> · <a href="https://ja.wikipedia.org/wiki/分岐予測" target="_blank" rel="noopener noreferrer">Wikipedia：分岐予測</a> · <a href="https://ja.wikipedia.org/wiki/命令パイプライン" target="_blank" rel="noopener noreferrer">Wikipedia：命令パイプライン</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="図 18-3：CPU の分岐予測と投機的デコーディングの 5 つの段階の対応：先に推測、推測どおりに実行、照合、当たればコミット、外れれば取り消し">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">段階</text>
+<text class="f-text" fill="#182f2b" x="160" y="18" font-size="13" font-weight="600" text-anchor="middle">CPU の分岐予測</text>
+<text class="f-text" fill="#182f2b" x="320" y="18" font-size="13" font-weight="600" text-anchor="middle">投機的デコーディング</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="28" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="48" font-size="12">推測</text><text class="f-text" fill="#182f2b" x="160" y="48" font-size="12" text-anchor="middle">分岐の向きを予測</text><text class="f-text" fill="#182f2b" x="320" y="48" font-size="12" text-anchor="middle">ドラフトが k 個推測</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="62" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="82" font-size="12">先に実行</text><text class="f-text" fill="#182f2b" x="160" y="82" font-size="12" text-anchor="middle">予測した向きで実行</text><text class="f-text" fill="#182f2b" x="320" y="82" font-size="12" text-anchor="middle">全行まとめて 48 層</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="96" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="116" font-size="12">照合</text><text class="f-text" fill="#182f2b" x="160" y="116" font-size="12" text-anchor="middle">条件が出たら比べる</text><text class="f-text" fill="#182f2b" x="320" y="116" font-size="12" text-anchor="middle">ターゲットと比較</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="130" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="150" font-size="12">当たり</text><text class="f-text" fill="#182f2b" x="160" y="150" font-size="12" text-anchor="middle">結果をリタイアして有効に</text><text class="f-text" fill="#182f2b" x="320" y="150" font-size="12" text-anchor="middle">commit(a+1) で確定</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="164" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="184" font-size="12">外れ</text><text class="f-text" fill="#182f2b" x="160" y="184" font-size="12" text-anchor="middle">パイプラインを空にして再開</text><text class="f-text" fill="#182f2b" x="320" y="184" font-size="12" text-anchor="middle">残りを破棄・上書き可</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">共通の規律：推測の結果は、照合するまで有効にしない</text>
+</svg><figcaption>図 18-3　CPU の投機実行と投機的デコーディングは、一対一に対応します。どちらも「推測」と「有効にする」を分けています。推測は大胆でいい。有効にするのは、照合のあとです。</figcaption></figure>
+
+<h2 id="sec-4">18.4 まず仮書き、次にコミット：トランザクション式の状態管理</h2>
+<p>難しいのは「取り消し」です。検証ウィンドウが T 行を計算するとき、モデルのさまざまな状態が書き換わるかもしれません。KV キャッシュが T 枠増えます。GDN の再帰状態が先へ進みます。インデクサにキーがいくつか増えます。先頭の 2 行しか受理しなかったなら、残りの変更は、何もなかったことにしなければなりません。これは、データベースの「トランザクション」がまさに解決する問題です。</p>
+<aside class="primer" id="c18-transaction">
+<h3>トランザクションのコミットとロールバック</h3>
+<p>イメージ：銀行の振込は 2 段階です。A 口座から 100 引き、B 口座に 100 足します。1 段階目が終わったところで停電したら、どうなるでしょう。銀行は、2 つの段階を 1 つの<dfn>トランザクション</dfn>にまとめます。全部が有効になるか、何も起きなかったことになるか、のどちらかです。</p>
+<p>定義：トランザクションの実行中の変更は、まず一時的な場所（ログやコピー）に記録します。外からは見えません。すべての検査に通ったら<dfn>コミット</dfn>（commit）して、変更を一度に有効にします。途中で失敗したら<dfn>ロールバック</dfn>（rollback）して、一時的な変更を捨て、トランザクション開始前の状態に戻します。ロールバックの実現方法は、よくあるものが 2 つあります。1 つ目は、先に<strong>スナップショット</strong>を保存し、失敗したら復元する方法です。2 つ目は、<strong>入力</strong>を記録しておき、確定してから入力どおりにやり直す方法です。ファイルシステムの「ジャーナル」（journaling）も、この考え方を使っています。</p>
+<p>具体例：Strata の <code>commit(n)</code> は、「ウィンドウ全体をコミットするか、全部ロールバックするか」ではありません。「先頭の n 行だけをコミットする」のです。教科書のトランザクションより細かい仕組みです。1 つのウィンドウの中で、前半は有効になり、後半はロールバックされます。</p>
+<p>この章との関係：状態ごとに、取り消し方が違います。次に 1 つずつ見ていきます。</p>
+<p class="further">参考リンク：<a href="https://ja.wikipedia.org/wiki/トランザクション" target="_blank" rel="noopener noreferrer">Wikipedia：トランザクション</a> · <a href="https://ja.wikipedia.org/wiki/ロールバック" target="_blank" rel="noopener noreferrer">Wikipedia：ロールバック</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/file-journaling.pdf" target="_blank" rel="noopener noreferrer">OSTEP：Crash Consistency: FSCK and Journaling（PDF）</a></p>
+</aside>
+<p>Strata の検証ウィンドウは、この点をはっきり書いています。ウィンドウの実行中は、T 個すべての位置について K/V とインデクサのキーを追記しますが、GDN の状態には<strong>触りません</strong>。そのあと <code>commit(n)</code> が先頭 n 個の token を有効にします。状態ごとに、それぞれのやり方があります。[S08]</p>
+<figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="図 18-4：4 種類の状態について、検証ウィンドウ内とコミット時の扱い。GDN は保存した入力を再生、インデクサはスナップショットを復元してから追記、PLE は対応するスナップショットに戻す、KV は余分に書いた枠を後で上書きする">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">状態</text>
+<text class="f-muted" fill="#5c6d66" x="116" y="18" font-size="12">ウィンドウ内</text>
+<text class="f-muted" fill="#5c6d66" x="222" y="18" font-size="12">コミット時（n = a + 1）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="28" width="380" height="32" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="49" font-size="12" font-weight="600">GDN 再帰</text><text class="f-text" fill="#182f2b" x="116" y="49" font-size="12">触らない</text><text class="f-text" fill="#182f2b" x="222" y="49" font-size="12">入力を再生（先頭 n 個）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="64" width="380" height="32" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="85" font-size="12" font-weight="600">インデクサ末尾</text><text class="f-text" fill="#182f2b" x="116" y="85" font-size="12">T 個のキーを追記</text><text class="f-text" fill="#182f2b" x="222" y="85" font-size="12">復元してから追記</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="100" width="380" height="32" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="121" font-size="12" font-weight="600">PLE 履歴</text><text class="f-text" fill="#182f2b" x="116" y="121" font-size="12">行ごとに保存</text><text class="f-text" fill="#182f2b" x="222" y="121" font-size="12">n−1 行目の後に設定</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="136" width="380" height="32" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="157" font-size="12" font-weight="600">KV キャッシュ</text><text class="f-text" fill="#182f2b" x="116" y="157" font-size="12">T 枠すべて書く</text><text class="f-text" fill="#182f2b" x="222" y="157" font-size="12">余分な枠は次で上書き</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="194" font-size="12">取り消し方は 3 通り：再生、復元、上書き待ち</text>
+</svg><figcaption>図 18-4　同じ「先頭 n 行をコミットする」でも、4 種類の状態は 3 通りの方法を使います。「カウンタを 1 つ減らす」だけでは、どれもまとめられません。</figcaption></figure>
+<ul>
+<li><strong>GDN 再帰状態</strong>：ウィンドウの中では、状態をまったく書き換えません。各行の入力だけを保存します。コミットのとき、保存した入力で先頭 n 個の token を再生すると、状態は正しい位置まで進みます。「入力を記録し、確定してからやり直す」方法です。</li>
+<li><strong>インデクサのキー</strong>：まずウィンドウの前に保存したスナップショットを復元し、そのあと受理したキーを追記し直します。コメントに理由が書いてあります。拒否されたキーが、現在のブロックがこのあと使うスロットに入っているかもしれないからです。「スナップショット ＋ やり直し」の方法です。</li>
+<li><strong>PLE 履歴</strong>：n−1 個目の token の後のスナップショットを、そのまま設定します。</li>
+<li><strong>KV キャッシュ</strong>：余分に書いた枠には、何もしません。それらの位置は次のラウンドで処理し直され、どのクエリが読むより前に、新しい値が上書きされます。[S08] 第 17 章の KV ストリーミングも同じ決まりに従います。新しい token は、いつもメモリ上の正本に書きます。だから「ドラフトを拒否した」あとも、無効にすべき VRAM のスロットはありません。<span class="ev ev-code">コード上の事実</span></li>
+</ul>
+<p>ウィンドウの「行数」と「受理したドラフトの数」は、1 だけ違います。ウィンドウの 0 行目は前回のラウンドで確定した token で、これもこのラウンドで状態に書き込む必要があるからです。ドラフトを a 個受理したときにコミットするのは、a ＋ 1 行です。生成ループのコメントには、こうあります。「ウィンドウの先頭 a ＋ 1 個の token は、今セッションに入った。最後の出力はまだ入っていない。それは次のラウンドの 0 行目だ。」<span class="ev ev-code">コード上の事実</span> ドラフト層の位置カウンタも、このずれに合わせて数えます。位置 p のウィンドウで a 個のドラフトを受理すると、次のウィンドウは p ＋ a ＋ 1 から始まります。[S07]</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>新しい種類のシーケンス状態を足すたびに、4 つの問いに答えなければなりません。ウィンドウの実行中に、それに書き込むか。<code>commit(n)</code> で、どうやって先頭部分だけを残すか。拒否された部分は、どうやって無効にするか。非同期の読み書きは、誰が完了を確認するか。これは、データベースに新しいテーブルを足すとき、そのログと復旧を考え抜かなければならないのと同じことです。</p>
+
+<h2 id="sec-5">18.5 サンプリング時の検証：ターゲットの抽選結果と完全に一致させる</h2>
+<p>貪欲デコーディングなら、比べるのは簡単です。その行で確率が最大の token が、ドラフトと同じかどうかを見ればいいのです。でもチャットでは、温度付きのサンプリングがよく使われます。毎ステップ、確率に従って 1 つ引きます。抽選の結果はそもそも乱数です。どうやって比べるのでしょうか。</p>
+<p>Strata は、ターゲットモデルの抽選を<strong>再現できる</strong>ようにしました。ウィンドウの t 行目の乱数は、「シード」とその行の絶対位置で決まります。そのうえで、サンプリングの全工程（繰り返しペナルティ、top-k、top-p、min-p、温度、最後に累積分布で 1 つ引く）を通します。ドラフトが受理されるのは、その行の抽選結果と<strong>完全に等しい</strong>ときだけです。したがって、出力はシードだけで決まり、ドラフトが何かには依存しません。ドラフトが決めるのは、1 ラウンドで何ステップ進めるかだけです。[S07] 各行の繰り返しペナルティも、「その行より前にあるはずの履歴」で個別に用意されます。通常の 1 個ずつの生成で数えるものと同じです。[S08]</p>
+<p>ターゲットの抽選に「ぶつかりやすい」ドラフトを作るには、どうすればいいでしょうか。Strata には、デフォルトで無効の「結合ドラフト」モードがあります。ドラフト層は、いちばん自信のある token をコミットするのをやめます。代わりに、ターゲットと同じサンプリングの工程を使い、ターゲットが<strong>これから使うのと同じ乱数</strong>を添えて抽選します。2 つの分布が近ければ、同じ乱数で累積分布から引いたとき、結果が一致する確率は、「最大値を取って、乱数で引いたサンプルにぶつける」ときよりずっと高くなります。ターゲットの抽選は変わらないので、出力される文字も変わりません。[S07] 図 18-5 は、この考え方の模式図です。</p>
+<figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="図 18-5：ターゲット分布とドラフト分布を 2 本の累積バーに描いた図。同じ乱数 u = 0.42 は、どちらのバーでも token A に落ちる">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">確率を 1 本の帯に並べ、乱数 u の落ちる区間で選ぶ（例）</text>
+<text class="f-text" fill="#182f2b" x="64" y="34" font-size="12">ターゲット p</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="38" width="160" height="24"/><text class="f-on" fill="#ffffff" x="144" y="55" font-size="12" text-anchor="middle">A 0.50</text>
+<rect class="f-soft" fill="#e5f1df" x="224" y="38" width="96" height="24"/><text class="f-text" fill="#182f2b" x="272" y="55" font-size="12" text-anchor="middle">B 0.30</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="38" width="48" height="24"/><text class="f-text" fill="#182f2b" x="344" y="55" font-size="12" text-anchor="middle">C</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="368" y="38" width="16" height="24"/>
+<text class="f-text" fill="#182f2b" x="64" y="90" font-size="12">ドラフト q</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="94" width="144" height="24"/><text class="f-on" fill="#ffffff" x="136" y="111" font-size="12" text-anchor="middle">A 0.45</text>
+<rect class="f-soft" fill="#e5f1df" x="208" y="94" width="112" height="24"/><text class="f-text" fill="#182f2b" x="264" y="111" font-size="12" text-anchor="middle">B 0.35</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="94" width="48" height="24"/><text class="f-text" fill="#182f2b" x="344" y="111" font-size="12" text-anchor="middle">C</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="368" y="94" width="16" height="24"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" stroke-dasharray="4 3" d="M198 30V126"/>
+<text class="f-text" fill="#182f2b" x="198" y="144" font-size="12" text-anchor="middle">同じ u = 0.42：どちらも A に落ちる</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="172" font-size="12">2 つの分布が近いと、同じ u は同じ token に落ちやすい</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="194" font-size="12">採否はターゲットの抽選結果だけで決まる：違えば破棄</text>
+</svg><figcaption>図 18-5　結合ドラフト：ドラフトとターゲットが、同じ乱数で累積分布から抽選します。分布が近いほど、同じ token にぶつかりやすくなります。審判はいつも、ターゲットの抽選結果です。</figcaption></figure>
+<p>注意してください。これは、投機的デコーディングの古典的な論文の方法とは別物です。古典的な方法では、min(1, p ÷ q) の確率でドラフトを受理します。拒否されたときは、修正した分布から 1 つ引き直します。こうして、出力の分布がターゲットと完全に一致することを保証します。[R04] この本で読んだ Strata のコードが使うのは、「ターゲットの抽選結果と完全に等しい」ことで、この式ではありません。2 つの方法は、分布の論証も、乱数の組み立て方も、実装の条件も違います。混ぜて書いてはいけません。</p>
+<p>ドラフトが何を推測できるかには、現実的な制限もあります。MTP ドラフト層は、語彙の一部の中からしか token を提案できません。エンジン 0.1.27 以降、この部分集合に、中国語・日本語・韓国語の token がすべて加わりました。上流の実測では、これらの言語の回答が 15〜38% 速くなりました（Q2_0、RTX 5070）。[S03] 日本語のユーザーが得ている高速化の一部は、ここから来ています。</p>
+
+<h2 id="sec-6">18.6 手を動かす：先頭部分を自分でコミットする</h2>
+<ol>
+<li>この章のシミュレータ（図 18-2）で 5 ラウンド続けて走らせ、1 ラウンドあたりの平均出力 token 数を記録します。次に k を 1 と 5 に変えて、それぞれ走らせます。3 回の平均を比べましょう。考えてみてください。k が大きいほど、全部当たったときの利益は増えますが、検証も高くつきます。では最適な k は、何で決まるでしょうか。（答えは第 19 章にあります。）</li>
+<li>この本のインタラクティブ実験「受理された接頭辞だけをコミットする」を開きます。実際の状態の代わりに、おもちゃの再帰 s ← 0.5s ＋ t を使います。2 つ目のドラフトを拒否させてから、答えてください。位置カウンタだけを戻して再帰状態を復元しないと、どんなエラーが残るでしょうか。この実験は、ウィンドウ 0 行目のずれまでは再現していません。</li>
+<li>図 18-4 を見ながら、「シーケンス内の統計バッファを新しく足す」ときのチェックリストを書きます。そのあと、この章の練習問題の模範解答と比べましょう。</li>
+</ol>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>ドラフトが推測し、ターゲットが最終判断をします。比較は左から右へ、最初の食い違いまでを受理します。食い違いより後のドラフトは、たまたま正しくても破棄します。1 ラウンドで a ＋ 1 個の token が進み、最低でも 1 個です。</li>
+<li>CPU の投機実行と同じ規律です。推測の結果は、照合の前に有効にしてはいけません。Strata は <code>commit(a + 1)</code> で、ウィンドウの先頭部分だけを有効にします。</li>
+<li>取り消しは、状態ごとに設計します。GDN は保存した入力を再生し、インデクサはスナップショットを復元してから追記し、PLE は対応するスナップショットに戻し、KV は余分に書いた枠が上書きされるのを待ちます。位置を 1 つ戻すだけでは足りません。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「ドラフト層は小さくて精度が低いから、使うと回答の品質が落ちる。」</strong></p>
+<p>落ちません。ドラフトは提案するだけです。どの token も、ターゲットモデル自身の選択（または再現できる抽選結果）と完全に等しくなければ、残りません。推測が下手なら、1 ラウンドに進む量が減って速度が落ちるだけで、書かれる文字は変わりません。[S02][S07] 上流は、知っておくべき例外も記録しています。IQ 系列のモデルを使うと、CPU が 1 token を計算するときと、複数 token を計算するときで、エキスパートが 2 種類のカーネルを使い分けます。丸めが少し違うので、温度 0 でも、同じプロンプトがドラフトの違いによって、同じくらいもっともらしい別の回答になることがあります。すべてのグループで複数 token 用カーネルを使うスイッチを入れれば、答えはドラフトに依存しなくなります。[S03]</p></div>
+
+<details class="deep"><summary>もう一歩深く：オフセット、非同期コミット、受け入れチェックリスト</summary>
+<h3>ウィンドウ内のいくつかのカウントを、1 つに混ぜない</h3>
+<p>確定済みの長さを 100 とします。ウィンドウの 0 行目は、位置 100 の token x です。ドラフト d₁、d₂、d₃ は位置 101〜103 を占めます。d₁ だけが受理された（a ＝ 1）なら、2 行（位置 100 と 101）をコミットします。位置 101 の後のターゲットの選択が、次のウィンドウの 0 行目になり、次のウィンドウは位置 102 から始まります。[S07] 数学的には「このラウンドは、ターゲットが 1 つ進めることに、受理したドラフトの数を足したものが進む」と言えます。実装では、ウィンドウの開始位置、行番号、次の位置、<code>commit(n_keep)</code> の意味を 1 つずつ確認します。「受理したドラフトの数」と「コミットした行数」を、同じ変数として扱ってはいけません。結合ドラフトの乱数カウントにも、同じずれがあります。MTP の c 番目の枠で作ったドラフトは、カウンタ c ＋ 1 の行で検証されます。[S07]</p>
+<h3>各行のペナルティ履歴</h3>
+<p>繰り返しペナルティは、「この行より前にどの token が出たか」を数えます。ウィンドウの t 行目より前の履歴は、確定済みの内容に、ドラフト 1〜t を足したものです。Strata は、ウィンドウの各行に対して履歴を個別に用意します。0.1.19 より前は 0 行目の分しか用意しておらず、ドラフトの行は、まだ書かれていないスロットを読んでいました。[S08] この種のバグでは、プログラムは落ちません。ペナルティを有効にしているときだけ、結果が通常の生成と、静かにずれていきます。</p>
+<h3>非同期コミット</h3>
+<p>GPU が 1 枚のとき、<code>commit()</code> は、グラフの実行が終わるのを待たずに、デフォルトで戻ります。次のウィンドウは同じストリームの後ろに並びます。ドラフト層は、コミットが書いたものを読みません。そのため、コミットと次のラウンドのドラフトを重ねることができます。別のストリームやホストからセッションを読み書きする人（新しいリクエスト、チェックポイント、スナップショット、プリフィルの経路、実行終了）は、先に <code>wait_commit()</code> を呼ばなければなりません。[S08] これは、第 14 章の「同期と非同期」のもう 1 つの例です。速い経路は待ち時間を省きます。その代わり、横から読むすべての人が、自分で待つことを覚えていなければなりません。</p>
+<h3>ドラフト層の「手抜き」が、出力に影響しない理由</h3>
+<p>MTP ドラフト層の実装は、いくつかの点で簡略化されています。大きな射影は Q8_0 に量子化されています。アテンションは、見たことのあるすべての枠に対して密に計算します。512 個のエキスパートすべてが VRAM に常駐します（708 MB）。ソースコードにははっきり書いてあります。これらの選択はドラフトの品質にだけ影響し、出力には影響しません。出力される token はすべて、検証ウィンドウが決めるからです。投機的に書き込んだ枠は、インデクサの状態にも触れません。その位置が処理し直されるとき、そのまま上書きされます。<span class="ev ev-code">コード上の事実</span></p>
+<h3>受け入れチェックリスト</h3>
+<p>投機的デコーディングのテストは、平均受理率だけを見てはいけません。最低でも、次をカバーします。すべて拒否、すべて受理、途中で拒否、コンテキスト上限の近く、終了記号に当たる、途中でキャンセル、繰り返しペナルティが有効、リクエスト間でサンプリングパラメータを切り替える。比べる相手は「同じ固定履歴で、投機を使わない基準の結果」です。ロジット、コミット後の状態、最終的な token が、すべて一致しなければなりません。新しいシーケンス状態を足すときは、18.4 節の 4 つの問いに 1 つずつ答え、対応するテストを足します。</p>
+</details>

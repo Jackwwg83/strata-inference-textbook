@@ -1,0 +1,191 @@
+<div class="hook"><span class="eyebrow">ソースコードの小さな書き間違い</span>
+<p>Strata の <code>qsa.hpp</code> には、32K コンテキストの KV キャッシュの大きさを計算したコメントが 1 行あります。12 層 × 2 ヘッド × 256 次元 × 2（K と V）× 2 バイト × 32,768 ＝「805 MiB」。[S18]</p>
+<p>電卓で確かめてみましょう。結果は 805,306,368 バイトです。これは 805 <strong>MB</strong> であり、768 <strong>MiB</strong> でもありますが、805 MiB ではありません。推論エンジンを書く達人でも、単位ではつまずきます。この章では 2 つの問いに答えます。モデルが会話を「覚えておく」のに何バイト必要か。そのバイトはどこに置かれるのか。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>Strata で会話とともに増える KV キャッシュが必要なのは、12 個のアテンション層だけです。FP16 で保存すると 1 トークンあたり 24,576 バイトで、128K コンテキストはちょうど 3 GiB になります。容量を計算するときは、GB（10⁹ バイト）と GiB（2³⁰ バイト）を区別してください。差は 7.4% あります。Strata は KV を 4 トークンごとのページに切り、ページテーブルで管理します。コンテキストが 64K を超えると、VRAM はよく使うページだけを持ち、完全な履歴は RAM に置きます。</p>
+
+<h2 id="sec-1">17.1 モデルの「記憶」はどこにある：KV キャッシュ</h2>
+<p>チャット AI と 1 時間話しても、AI は最初に話したことを覚えています。モデルは、1 文字書くたびに会話全体を頭から読み直したりしません。それでは遅すぎるからです。代わりに、読んだ各トークンについて、各アテンション層で計算した 2 つのものを保存しておきます。<dfn>K</dfn>（キー。「見つけてもらう」ための札）と <dfn>V</dfn>（バリュー。見つかったときに取り出す中身）です。この保存データを <dfn>KV キャッシュ</dfn>と呼びます。第 8 章では、アテンションが Q を K に突き合わせ、重みに応じて V を取り出す仕組みを学びました。ここで気にするのは 1 点だけです。会話が 1 トークン伸びるたびに、各アテンション層の KV キャッシュも 1 マス増えます。</p>
+<p>Strata が使うモデルは 48 層ありますが、すべての層に KV キャッシュがあるわけではありません。4 層に 1 層、つまり 4 番目の層だけが QSA アテンション層で、合計 12 層です。残りの 36 層は GDN 層です。GDN 層はサイズが固定の再帰状態で履歴を覚えるので、会話が長くなっても増えません。[S04] 図 17-1 に並べました。</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="図 17-1：48 層のうち 4 層に 1 層が QSA アテンション層で、合計 12 層。この KV は会話とともに増える。残り 36 層は GDN 層で、状態のサイズは固定">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">48 層のうち、記憶が増え続けるのはどれ</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="14" y="30" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="45" y="30" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76" y="30" width="26" height="24" rx="3"/><rect class="f-accent" fill="#136d5a" x="107" y="30" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="138" y="30" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="169" y="30" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="30" width="26" height="24" rx="3"/><rect class="f-accent" fill="#136d5a" x="231" y="30" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="262" y="30" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="293" y="30" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="324" y="30" width="26" height="24" rx="3"/><rect class="f-accent" fill="#136d5a" x="355" y="30" width="26" height="24" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="14" y="60" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="45" y="60" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76" y="60" width="26" height="24" rx="3"/><rect class="f-accent" fill="#136d5a" x="107" y="60" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="138" y="60" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="169" y="60" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="60" width="26" height="24" rx="3"/><rect class="f-accent" fill="#136d5a" x="231" y="60" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="262" y="60" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="293" y="60" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="324" y="60" width="26" height="24" rx="3"/><rect class="f-accent" fill="#136d5a" x="355" y="60" width="26" height="24" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="14" y="90" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="45" y="90" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76" y="90" width="26" height="24" rx="3"/><rect class="f-accent" fill="#136d5a" x="107" y="90" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="138" y="90" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="169" y="90" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="90" width="26" height="24" rx="3"/><rect class="f-accent" fill="#136d5a" x="231" y="90" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="262" y="90" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="293" y="90" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="324" y="90" width="26" height="24" rx="3"/><rect class="f-accent" fill="#136d5a" x="355" y="90" width="26" height="24" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="14" y="120" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="45" y="120" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76" y="120" width="26" height="24" rx="3"/><rect class="f-accent" fill="#136d5a" x="107" y="120" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="138" y="120" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="169" y="120" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="120" width="26" height="24" rx="3"/><rect class="f-accent" fill="#136d5a" x="231" y="120" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="262" y="120" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="293" y="120" width="26" height="24" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="324" y="120" width="26" height="24" rx="3"/><rect class="f-accent" fill="#136d5a" x="355" y="120" width="26" height="24" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="166" font-size="12">1 マスが 1 層。左から右、上から下へ第 0〜47 層</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="176" width="12" height="12"/><text class="f-text" fill="#182f2b" x="28" y="187" font-size="12">QSA 層 × 12：KV は会話とともに増える</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="196" width="12" height="12"/><text class="f-text" fill="#182f2b" x="28" y="207" font-size="12">GDN 層 × 36：サイズは固定</text>
+</svg><figcaption>図 17-1　48 層のうち KV キャッシュが必要なのは 12 個の QSA 層だけです（第 3、7、…、47 層）。残り 36 個の GDN 層は状態のサイズが固定で、会話が長くなっても変わりません。</figcaption></figure>
+<p>GDN 層の状態はどのくらいの大きさでしょうか。ソースにあるサイズでは、1 層あたり 128 × 48 × 128 の再帰状態に、10,240 × 3 の畳み込み履歴を足したものです。どれも 4 バイトの浮動小数点数で、合計は 3,268,608 バイトです。36 層で約 1.18 億バイト、つまり 112.2 MiB になります。<span class="ev ev-code">コード上の事実</span> 会話が 1K でも 256K でも、この数は変わりません。「話すほど大きくなる」のは、12 個の QSA 層の KV だけです。</p>
+
+<h2 id="sec-2">17.2 計算してみよう：1 トークンは何バイトか</h2>
+<p>1 つのトークンは、1 つの QSA 層で K を 1 つと V を 1 つ保存します。各層には KV ヘッドが 2 つあり、1 ヘッドは 256 次元です。[S04] 16 ビット浮動小数点数（FP16、1 つの数が 2 バイト）で保存すると、1 トークンの KV は次のとおりです。</p>
+<p style="text-align:center"><strong>12 層 × 2 ヘッド × 256 次元 × 2（K、V）× 2 バイト ＝ 24,576 バイト ＝ 24 KiB</strong></p>
+<p>これにコンテキスト長を掛けると、会話 1 件の KV になります。128K コンテキストは 131,072 トークンなので、24,576 × 131,072 ＝ 3,221,225,472 バイト、ちょうど 3 GiB です。<span class="ev ev-est">教育用の試算</span></p>
+<p>Strata は、既定では FP16 で保存しません。コンテキストが 4K を超えると、既定で 8 ビット整数（INT8）で KV を保存します。4 ビット（Q4_0）と、「K は 8 ビット、V は 4 ビット」（K8V4）は選択肢です。[S03] ビット幅が小さい形式は、スケール係数（第 4 章で学びました）も保存するので、バイト数は単純に半分にはなりません。図 17-2 は、ソースの形式どおりに計算した結果です。</p>
+<figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="図 17-2：1 トークンあたりの KV バイト数。FP16 は 24576、INT8 は 12672、K8V4 は 9792、Q4_0 は 6912">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">1 トークンの KV（QSA 12 層の合計、バイト）</text>
+<text class="f-text" fill="#182f2b" x="10" y="45" font-size="12">FP16</text>
+<rect class="f-warn" fill="#9e5d24" x="70" y="32" width="230" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="306" y="45" font-size="12">24,576</text>
+<text class="f-text" fill="#182f2b" x="10" y="81" font-size="12">INT8</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="68" width="118.6" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="194" y="81" font-size="12">12,672（既定）</text>
+<text class="f-text" fill="#182f2b" x="10" y="117" font-size="12">K8V4</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="104" width="91.6" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="167" y="117" font-size="12">9,792</text>
+<text class="f-text" fill="#182f2b" x="10" y="153" font-size="12">Q4_0</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="140" width="64.7" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="141" y="153" font-size="12">6,912</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="180" font-size="12">INT8：64 個ごとにスケール係数 1 つ</text><text class="f-muted" fill="#5c6d66" x="10" y="198" font-size="12">Q4_0：32 個で 18 バイト（棒の長さは比例）</text>
+</svg><figcaption>図 17-2　ビット幅が半分になっても、バイト数はちょうど半分にはなりません。スケール係数も場所を取るからです。INT8 は FP16 より 48% 少なく、K8V4 は INT8 よりさらに 23% 少なくなります。</figcaption></figure>
+<p>これらの数は、どれもソースと突き合わせて確かめられます。INT8 形式は、64 個の数ごとに FP16 のスケール係数を 1 つ付けます。1 層・1 トークンあたり、符号 1,024 バイトにスケール係数 32 バイトで、12 層の合計は 12,672 バイトです。コメントにも「FP16 の 24,576 ではなく」と書いてあります。Q4_0 は 32 個の数を 18 バイトに詰め、1 ヘッドで 144 バイトです。<span class="ev ev-code">コード上の事実</span> K8V4 は、K を INT8、V を Q4_0 にしたものです。計算すると INT8 より 22.7% 少なく、上流のドキュメントにある「8 ビットより 23% 少ない」と合います。[S03]</p>
+<p>省いたバイトはタダではありません。4 ビット KV は、長い文書で perplexity（パープレキシティ、低いほど良い）が 8〜12% 上がります。そのため、上流は今も 8 ビットを既定にしています。[S03] 置き場所だけを変えて数値は変えない方法と、数値を変えてしまう量子化は、性質の違う 2 種類の「節約」です。</p>
+
+<h2 id="sec-3">17.3 GB か GiB か：7% の差がある単位の罠</h2>
+<p>バイト数が出たら、「何 G」に直すときに、冒頭の落とし穴にはまります。</p>
+<aside class="primer" id="c17-gib">
+<h3>GB と GiB：10 進と 2 進の「千」</h3>
+<p>直感：ふだん「千」といえば 1,000 です。しかしコンピュータは 2 進でアドレスを指定するので、2¹⁰ ＝ 1,024 のほうが扱いやすく、昔は 1,024 バイトも「1 KB」と呼びました。2 種類の「千」が混ざり、桁が上がるたびに差が広がります。G の段階では、差は 7.4% になります。</p>
+<p>定義：国際規格は 2 つの接頭辞を分けました。10 進の kB、MB、GB は、それぞれ 10³、10⁶、10⁹ バイトです。2 進の KiB、MiB、GiB は、それぞれ 2¹⁰ ＝ 1,024、2²⁰ ＝ 1,048,576、2³⁰ ＝ 1,073,741,824 バイトです。したがって 1 GiB ≈ 1.074 GB、1 GB ≈ 0.931 GiB です。</p>
+<p>具体例：805,306,368 バイト ＝ 805.3 MB ＝ 768 MiB。ディスクメーカーやネットワーク速度は、ふつう 10 進を使います。OS のメモリ表示や多くのプログラムのログは 2 進を使いますが、それでも「GB」と書かれがちです。NVIDIA の CUDA ドキュメントですら、表の「KB」は 1,024 バイト、つまり KiB のことだと、わざわざ注記しています。[R01]</p>
+<p>この章との関係：VRAM の予算を立てるときは、まず単位をそろえます。7% と聞くと小さく感じますが、12 GB なら 0.9 GB 近くになります。上流のドキュメントによれば、VRAM が 1 GB 増えるごとに、エキスパートを約 700 個多く置けます。[S02]</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/2進接頭辞" target="_blank" rel="noopener noreferrer">Wikipedia：2進接頭辞</a> · <a href="https://ja.wikipedia.org/wiki/ギガバイト" target="_blank" rel="noopener noreferrer">Wikipedia：ギガバイト</a> · <a href="https://ja.wikipedia.org/wiki/二進法" target="_blank" rel="noopener noreferrer">Wikipedia：二進法</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html" target="_blank" rel="noopener noreferrer">NVIDIA：Compute Capability の表（KB は KiB を指すという注記）</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 186" role="img" aria-label="図 17-3：1 GiB は 1 GB より 7.4% 長い。805306368 バイトは 805.3 MB であり、768 MiB でもある">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">1 GB と 1 GiB は長さが違う（棒は比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">1 GB</text>
+<rect class="f-soft" fill="#e5f1df" x="70" y="30" width="260.8" height="18" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="70" y="66" font-size="12">= 1,000,000,000 バイト（10⁹）</text>
+<text class="f-text" fill="#182f2b" x="10" y="94" font-size="12">1 GiB</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="80" width="280" height="18" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="70" y="116" font-size="12">= 1,073,741,824 バイト（2³⁰）、7.4% 多い</text>
+<text class="f-text" fill="#182f2b" x="10" y="150" font-size="12">例：805,306,368 バイト = 805.3 MB = 768 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="174" font-size="12">コメントは「805 MiB」：数字と単位が別の系統</text>
+</svg><figcaption>図 17-3　同じバイト数でも、GB と GiB では数字が変わります。いちばん多い間違いは、一方の単位の数字に、もう一方の単位を付けてしまうことです。</figcaption></figure>
+<p>Strata のソースには、こうした例がいくつも見つかります。冒頭の KV のコメントは 805 MB を 805 MiB と書いています。同じ行の「FP32 で 1.6 GiB」は、実際は 1.61 GB、つまり 1.5 GiB です。インデクサのコメントは、32K コンテキストで「50 MiB」と言っています。ところが、そこに書かれた 1 トークンあたり 1.5 KiB で計算すると 48 MiB、つまり 50.3 MB です。[S18] 一方、INT8 のファイルは「262K で 3.3 GB、6.4 ではなく」と書いています。12,672 × 262,144 ≈ 3.32 × 10⁹ バイトで、10 進の GB を使っており、前後が一貫しています。<span class="ev ev-code">コード上の事実</span> 他人の数字を読むときは、まず「これはどちらの G か」と確かめましょう。</p>
+<p>「K」にも同じ問題があります。上流はモデルの完全なコンテキストを「262K」と言いますが、これは 262,144 トークン、つまり 256 × 1,024 のことです。<span class="ev ev-est">教育用の試算</span> この本の図で「256K」と書くときも、同じ数を指します。</p>
+<p>次の予算計算機は、同じバイト数を GB と GiB の両方で表示します。コンテキスト長と会話の数を動かし、形式も切り替えてみてください。</p>
+<div class="viz" data-viz="kv-budget"><figure class="fig"><svg viewBox="0 0 400 170" role="img" aria-label="図 17-4：FP16 の KV の、会話 1 件あたりの大きさ。32K は 0.81 GB（0.75 GiB）、128K は 3.22 GB（3 GiB）、256K は 6.44 GB（6 GiB）">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">FP16 の KV：会話 1 件でどれだけ必要か（棒は比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="42" font-size="12">32K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="29" width="32.5" height="16" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="60" y="62" font-size="12">805,306,368 バイト = 0.81 GB = 0.75 GiB</text>
+<text class="f-text" fill="#182f2b" x="10" y="90" font-size="12">128K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="77" width="130" height="16" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="60" y="110" font-size="12">3,221,225,472 バイト = 3.22 GB = 3 GiB</text>
+<text class="f-text" fill="#182f2b" x="10" y="138" font-size="12">256K</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="125" width="260" height="16" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="60" y="158" font-size="12">6,442,450,944 バイト = 6.44 GB = 6 GiB</text>
+</svg><figcaption>図 17-4　コンテキストが 4 倍になれば、KV も 4 倍になります。256K コンテキストを FP16 で保存すると 6 GiB で、12 GB の GPU には、これとモデルの両方は入りません。インタラクティブ版では、形式の切り替え、ストリーミングのオン・オフ、会話数の追加ができます。</figcaption></figure></div>
+<p>予算計算機では、2 点に注目してください。1 点目。Strata のサービスは、一度に<strong>1 件</strong>の会話しか実行せず、リクエストは到着順に並びます。[S15] 複数の会話を切り替えたいときは「駐車」機能をオンにすると、ほかの会話の状態を、RAM 上の上限付きキャッシュに保存できます。上流の例では上限は 8 GiB で、既定ではオフです。<span class="ev ev-report">上流レポート</span> 2 点目。モデルの重みはすべての会話で共有されますが、KV と GDN 状態は会話ごとに 1 つずつ必要です。</p>
+
+<h2 id="sec-4">17.4 ページング：履歴を 4 トークンごとのページに切る</h2>
+<p>KV キャッシュは、ひと続きの大きな配列ではありません。Strata は KV を小さなかたまりに切り、1 つを<dfn>ページ</dfn>と呼びます。そして<dfn>ページテーブル</dfn>に、「第何ページがどの物理位置にあるか」を記録します。OS がメモリを管理する方法とそっくりです。</p>
+<aside class="primer" id="c17-paging">
+<h3>KV キャッシュとページング管理</h3>
+<p>直感：図書館の本は、番号順に書架に並んでいます。「37 番の本」が欲しいときは、まず目録カードを引きます。カードには、どの書架のどの段にあるかが書いてあります。本の置き場所を動かしても、カードを書き換えれば、読者は同じように見つけられます。「分館へ移動済み」と書かれた本は、まず取り寄せてから貸し出します。</p>
+<p>定義：<dfn>ページング</dfn>は、論理的に連続したデータを、同じ大きさのページに切ります。<dfn>ページテーブル</dfn>は、「論理ページ番号」を「物理位置」に翻訳します。プログラムは論理番号だけでアクセスし、データが実際にどこにあるかはページテーブルが決めます。OS はこれで仮想メモリを実現します。ページはメモリにあっても、ディスクに追い出されていてもよく、アクセスしたときに無ければ先に読み込みます。これをページフォールトと呼びます。ページテーブルのおかげで「論理的には連続、物理的にはバラバラ」も可能になり、最悪の場合に備えて連続した 1 つの大きな領域を確保しておく必要がなくなります。</p>
+<p>具体的な数字：Strata の 1 ページは 4 トークンで、アテンションのインデクサの 1 ブロックにちょうど対応します。INT8 形式では、1 ページに 4 トークン分、2 ヘッドの K と V が入り、合計 4,224 バイトです。<span class="ev ev-code">コード上の事実</span> c 番目のトークンの物理行番号は、まず <code>page = table[c ÷ ページサイズ]</code> を引き、そこにページ内オフセットを足して求めます。[S18]</p>
+<p>この章との関係：ページテーブルがあれば、KV の一部を VRAM に、一部を RAM に置いても、アテンションのコードを変えずに済みます。次の節で、まさにそれをやります。</p>
+<p class="further">さらに読む：<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-paging.pdf" target="_blank" rel="noopener noreferrer">OSTEP：Paging: Introduction（PDF）</a> · <a href="https://ja.wikipedia.org/wiki/ページング方式" target="_blank" rel="noopener noreferrer">Wikipedia：ページング方式</a> · <a href="https://ja.wikipedia.org/wiki/ページテーブル" target="_blank" rel="noopener noreferrer">Wikipedia：ページテーブル</a> · <a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener noreferrer">論文：vLLM の PagedAttention</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="図 17-5：6 個の論理ブロックがページテーブルで 4 つの VRAM スロットに対応づけられる。VRAM にないブロックは、ページテーブルでは横線で表す">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">連続した履歴（B = ブロック、各 4 トークン）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="28" width="58" height="28" rx="5"/><text class="f-text" fill="#182f2b" x="39" y="47" font-size="12" text-anchor="middle">B0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="74" y="28" width="58" height="28" rx="5"/><text class="f-text" fill="#182f2b" x="103" y="47" font-size="12" text-anchor="middle">B1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="138" y="28" width="58" height="28" rx="5"/><text class="f-text" fill="#182f2b" x="167" y="47" font-size="12" text-anchor="middle">B2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="28" width="58" height="28" rx="5"/><text class="f-text" fill="#182f2b" x="231" y="47" font-size="12" text-anchor="middle">B3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="266" y="28" width="58" height="28" rx="5"/><text class="f-text" fill="#182f2b" x="295" y="47" font-size="12" text-anchor="middle">B4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="330" y="28" width="58" height="28" rx="5"/><text class="f-text" fill="#182f2b" x="359" y="47" font-size="12" text-anchor="middle">B5</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="76" font-size="12">ページテーブル（値 = スロット番号）</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="82" width="58" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="39" y="99" font-size="12" text-anchor="middle">→ 2</text>
+<rect class="f-soft" fill="#e5f1df" x="74" y="82" width="58" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="103" y="99" font-size="12" text-anchor="middle">→ 0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="138" y="82" width="58" height="24" rx="4"/><text class="f-muted" fill="#5c6d66" x="167" y="99" font-size="12" text-anchor="middle">—</text>
+<rect class="f-soft" fill="#e5f1df" x="202" y="82" width="58" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="231" y="99" font-size="12" text-anchor="middle">→ 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="266" y="82" width="58" height="24" rx="4"/><text class="f-muted" fill="#5c6d66" x="295" y="99" font-size="12" text-anchor="middle">—</text>
+<rect class="f-soft" fill="#e5f1df" x="330" y="82" width="58" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="359" y="99" font-size="12" text-anchor="middle">→ 1</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M39 106L246 150M103 106L54 150M231 106L342 150M359 106L150 150"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="150" width="88" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="54" y="166" font-size="12" text-anchor="middle">スロット 0</text><text class="f-on" fill="#ffffff" x="54" y="183" font-size="13" text-anchor="middle">ブロック 1</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="150" width="88" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="150" y="166" font-size="12" text-anchor="middle">スロット 1</text><text class="f-on" fill="#ffffff" x="150" y="183" font-size="13" text-anchor="middle">ブロック 5</text>
+<rect class="f-accent" fill="#136d5a" x="202" y="150" width="88" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="246" y="166" font-size="12" text-anchor="middle">スロット 2</text><text class="f-on" fill="#ffffff" x="246" y="183" font-size="13" text-anchor="middle">ブロック 0</text>
+<rect class="f-accent" fill="#136d5a" x="298" y="150" width="88" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="342" y="166" font-size="12" text-anchor="middle">スロット 3</text><text class="f-on" fill="#ffffff" x="342" y="183" font-size="13" text-anchor="middle">ブロック 3</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="214" font-size="12">「—」：このブロックは VRAM になく、完全なコピーは RAM にある</text>
+</svg><figcaption>図 17-5　ページテーブルは、論理ブロックを VRAM のスロットに翻訳します。ブロックの物理的な置き場所は自由で、読み出すコードはページテーブルだけを見ます。</figcaption></figure>
+<p>Strata のページは、なぜ 4 トークンというように小さく、しかもそれ以上小さくないのでしょうか。ソースに理由があります。このエンジンが同時に扱う会話は少数で、何百何千もの会話ではありません。粒度を細かくしすぎても得るものはなく、トークンごとに間接参照が 1 回増えるだけです。[S18] ページの大きさは、結果に影響してはいけません。テストでは、ページサイズを 1、4、512 の 3 通りにし、さらにページテーブルの順序をシャッフルして、アテンションの出力が<strong>完全に同じ</strong>であることを要求します。[S18] つまり、ページテーブルが決めるのは「どこに置くか」だけで、「何が読めるか」は変えてはいけません。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは『オペレーティングシステム』のページングとページフォールト処理そのものです。違うのは、「メモリ / ディスク」が「VRAM / RAM」に、「プロセスのアドレス空間」が「会話 1 件の KV」に変わっただけです。vLLM の PagedAttention も同じ考え方で、大量の同時リクエストをさばきます。Strata は同時実行が少ないので、ページの主な用途は「部分常駐」です。</p>
+
+<h2 id="sec-5">17.5 VRAM にはよく使うページだけ：KV ストリーミング</h2>
+<p>QSA アテンションは、毎ステップで履歴の全部を読むわけではありません。最も関係が深い約 2,000 か所だけを選んで計算します（第 8 章）。毎ステップ一部しか読まないなら、履歴の全部を VRAM に置く必要はありません。64K コンテキストからは、Strata は既定で完全な KV を RAM に置き、VRAM にはアテンションが最もよく読む部分だけを残します。既定は 32,768 か所です。[S02][S03]</p>
+<p>やり方は 3 段階です。どれも GPU 上で、録画済みのグラフの中で行われます。</p>
+<ol>
+<li>1,024 スレッドの 1 つのスレッドブロックが、このステップで選ばれたブロックを一通りなぞります。すでに VRAM にあるブロックには「このステップで使った」印を付けます。無いブロックは、ミスのリストに記録します。</li>
+<li>同じスレッドブロックが、ミスごとにスロットを 1 つ選びます。使うのは <dfn>CLOCK</dfn> アルゴリズム（「セカンドチャンス」とも呼ばれます）です。針がスロットの上をぐるぐる回り、最近使われたものは一度だけ見逃します。このステップで使用中のスロットは、決して選びません。そのあとページテーブルを書き換えます。古いブロックは「無し」に、新しいブロックはこのスロットを指すようにします。</li>
+<li>コピーカーネルが、足りないブロックを RAM から PCIe 経由でスロットに読み込みます。<span class="ev ev-code">コード上の事実</span></li>
+</ol>
+<p>次のシミュレータで、この 3 段階をゆっくり再生します。12 ブロック、スロット 4 つで、<strong>ステップ</strong>を押して 8 回のクエリを進めましょう。</p>
+<div class="viz" data-viz="kv-paging"><figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="図 17-6：RAM には 12 ブロックすべてがあり、VRAM の 4 スロットにはブロック 0、5、2、3 が入っている。ページテーブルが各ブロックのスロットを記録し、針はスロット 2 にある">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="13" font-weight="600">RAM：完全な履歴（各ブロック 4 トークン）</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="26" width="28" height="26" rx="3"/><text class="f-on" fill="#ffffff" x="24" y="44" font-size="12" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="41.5" y="26" width="28" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="55.5" y="44" font-size="12" text-anchor="middle">1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="73" y="26" width="28" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="87" y="44" font-size="12" text-anchor="middle">2</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="104.5" y="26" width="28" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="118.5" y="44" font-size="12" text-anchor="middle">3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="136" y="26" width="28" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="150" y="44" font-size="12" text-anchor="middle">4</text>
+<rect class="f-accent" fill="#136d5a" x="167.5" y="26" width="28" height="26" rx="3"/><text class="f-on" fill="#ffffff" x="181.5" y="44" font-size="12" text-anchor="middle">5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="199" y="26" width="28" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="213" y="44" font-size="12" text-anchor="middle">6</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230.5" y="26" width="28" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="244.5" y="44" font-size="12" text-anchor="middle">7</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="262" y="26" width="28" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="276" y="44" font-size="12" text-anchor="middle">8</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="293.5" y="26" width="28" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="307.5" y="44" font-size="12" text-anchor="middle">9</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="325" y="26" width="28" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="339" y="44" font-size="12" text-anchor="middle">10</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="356.5" y="26" width="28" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="370.5" y="44" font-size="12" text-anchor="middle">11</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="70" font-size="12" text-anchor="middle">→0</text><text class="f-muted" fill="#5c6d66" x="55.5" y="70" font-size="12" text-anchor="middle">—</text><text class="f-muted" fill="#5c6d66" x="87" y="70" font-size="12" text-anchor="middle">→2</text><text class="f-muted" fill="#5c6d66" x="118.5" y="70" font-size="12" text-anchor="middle">→3</text><text class="f-muted" fill="#5c6d66" x="150" y="70" font-size="12" text-anchor="middle">—</text><text class="f-muted" fill="#5c6d66" x="181.5" y="70" font-size="12" text-anchor="middle">→1</text><text class="f-muted" fill="#5c6d66" x="213" y="70" font-size="12" text-anchor="middle">—</text><text class="f-muted" fill="#5c6d66" x="244.5" y="70" font-size="12" text-anchor="middle">—</text><text class="f-muted" fill="#5c6d66" x="276" y="70" font-size="12" text-anchor="middle">—</text><text class="f-muted" fill="#5c6d66" x="307.5" y="70" font-size="12" text-anchor="middle">—</text><text class="f-muted" fill="#5c6d66" x="339" y="70" font-size="12" text-anchor="middle">—</text><text class="f-muted" fill="#5c6d66" x="370.5" y="70" font-size="12" text-anchor="middle">—</text>
+<text class="f-text" fill="#182f2b" x="10" y="100" font-size="13" font-weight="600">VRAM：スロット 4 つ（クエリ 3 回目のあと）</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="110" width="88" height="44" rx="5"/><text class="f-on" fill="#ffffff" x="54" y="128" font-size="13" text-anchor="middle">ブロック 0</text><text class="f-on" fill="#ffffff" x="54" y="146" font-size="12" text-anchor="middle">参照 1</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="110" width="88" height="44" rx="5"/><text class="f-on" fill="#ffffff" x="150" y="128" font-size="13" text-anchor="middle">ブロック 5</text><text class="f-on" fill="#ffffff" x="150" y="146" font-size="12" text-anchor="middle">参照 1</text>
+<rect class="f-accent" fill="#136d5a" x="202" y="110" width="88" height="44" rx="5"/><text class="f-on" fill="#ffffff" x="246" y="128" font-size="13" text-anchor="middle">ブロック 2</text><text class="f-on" fill="#ffffff" x="246" y="146" font-size="12" text-anchor="middle">参照 0</text>
+<rect class="f-accent" fill="#136d5a" x="298" y="110" width="88" height="44" rx="5"/><text class="f-on" fill="#ffffff" x="342" y="128" font-size="13" text-anchor="middle">ブロック 3</text><text class="f-on" fill="#ffffff" x="342" y="146" font-size="12" text-anchor="middle">参照 0</text>
+<text class="f-warn" fill="#9e5d24" x="246" y="174" font-size="12" text-anchor="middle">▲ 針</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="190" font-size="12">この回の選択はブロック 0 と 5：0 はヒット、</text><text class="f-muted" fill="#5c6d66" x="10" y="207" font-size="12">5 はミスで、ブロック 1 を追い出した</text>
+</svg><figcaption>図 17-6　VRAM のスロットは 4 つ、RAM のブロックは 12 個です。アテンションが選んだブロックが VRAM にないとき、CLOCK がスロットを 1 つ選んで追い出します。追い出されたブロックも、RAM には完全なコピーが残っています。</figcaption></figure></div>
+<p>この設計で最も大事な決まりは、「正本は 1 つだけ」です。新しいトークンの K と V は、<strong>必ず</strong> RAM のコピーに書きます。そのブロックがたまたま VRAM にあるときだけ、ついでにスロットにも書きます。こうすればスロットは決して古くならず、無効化は何も要りません。投機的デコーディングがドラフトを棄却したとき（第 18 章）も、駐車した会話を復元するときも、要りません。<span class="ev ev-code">コード上の事実</span> 会話を駐車するときに保存するのも、置き換え可能な VRAM スロットではなく、RAM にある正本です。[S10]</p>
+<p>節約した VRAM は、どこへ行ったのでしょうか。エキスパートを置くのに使います。上流の実測では、262K コンテキストで KV ストリーミングをオンにすると、VRAM 上のエキスパートが 1,589 個から 3,872 個に増え、生成速度は毎秒 50.9 トークンから 62.6 トークンに上がりました。代わりに、コンテキストのトークン 1 つにつき RAM を約 13.7 KB 使います。[S03] 図 17-7 は、INT8 形式でこの収支を見積もったものです。</p>
+<figure class="fig"><svg viewBox="0 0 400 204" role="img" aria-label="図 17-7：262K コンテキストの INT8 KV。ストリーミングなしでは VRAM に全部の 3.32 GB を置く。ストリーミングありでは VRAM に 0.42 GB だけを置き、完全な 3.32 GB は RAM にある">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">262K・INT8 の KV の置き場所（棒は比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="46" font-size="12">通常</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="32" width="280" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="120" y="47" font-size="12">VRAM 3.32 GB</text>
+<text class="f-text" fill="#182f2b" x="10" y="86" font-size="12">ストリーミング</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="72" width="35" height="20" rx="3"/><text class="f-text" fill="#182f2b" x="151" y="87" font-size="12">VRAM 0.42 GB（32,768 マス）</text>
+<rect class="f-soft" fill="#e5f1df" x="110" y="98" width="280" height="20" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="113" font-size="12">RAM：完全な 3.32 GB</text>
+<text class="f-text" fill="#182f2b" x="10" y="144" font-size="12">空いた VRAM にエキスパートを多く置ける：</text><text class="f-text" fill="#182f2b" x="10" y="160" font-size="12">上流の実測で 1,589 → 3,872 個</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="180" font-size="12">速度 50.9 → 62.6 token/s</text><text class="f-muted" fill="#5c6d66" x="10" y="196" font-size="12">（RTX 5070、Q2_0、エンジン 0.1.5）</text>
+</svg><figcaption>図 17-7　ストリーミングは履歴を削除せず、RAM に移すだけです。VRAM にはよく使うページだけを残します。バイト数は INT8 形式からの推算です（教育用の試算）。速度とエキスパート数は上流のドキュメントによります（メイン KV のみ）。[S03]</figcaption></figure>
+<p>1 つ制限があります。K8V4 形式は KV ストリーミングを使いません。上流のドキュメントには、この混合形式はストリーミングしないと明記されています。そのため、主に VRAM の大きな GPU 向きです。[S03] 2 つの「メモリ節約」スイッチは、当然のように重ねられるわけではありません。</p>
+
+<h2 id="sec-6">17.6 手を動かす：自分のパソコンの KV 予算を立てる</h2>
+<ol>
+<li>この章の KV 予算計算機（図 17-4）を使います。まず FP16 と 32K を選び、805,306,368 バイト ＝ 805.3 MB ＝ 768 MiB を確かめます。次に 128K まで動かし、ちょうど 3 GiB になることを確かめます。</li>
+<li>この本のインタラクティブ実験「履歴状態の予算計算機」を開きます。コンテキストを 32K から 128K に変え、アクティブなシーケンスを 5 本にして、項目ごとにバイト数と GiB を確認します。実験の量子化メタデータの比率は人為的な見積もりで、すべての形式の組み合わせがサポートされることを意味しません。</li>
+<li>ページテーブルシミュレータ（図 17-6）で 8 回のクエリを最後まで進め、ヒット率を記録します。考えてみましょう。アテンションが毎ステップで選ぶブロックが、スロットより多かったら、どうなるでしょうか。Strata のインターフェースは、スロット数が 1 回の呼び出しで選ばれる全ブロックを収められることを要求します。収まらないときは、カウンタにオーバーフローフラグを立て、呼び出し側が確認できるようにします。<span class="ev ev-code">コード上の事実</span></li>
+</ol>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>Strata で会話とともに増える KV は、12 個の QSA 層のものだけです。1 トークンあたり、FP16 は 24,576 バイト、INT8 は 12,672 バイトです。36 個の GDN 層の状態は、約 112 MiB で固定です。</li>
+<li>GB は 10⁹ バイト、GiB は 2³⁰ バイトで、差は 7.4% です。805,306,368 バイトは 805 MB であり、768 MiB でもあります。一方の数字にもう一方の単位を付けるのが、いちばん多い間違いです。</li>
+<li>KV は 4 トークンごとのページに分け、ページテーブルで管理します。64K 以上では、完全な KV は RAM にあり、VRAM にはよく使うページだけを置きます。ミスしたときは CLOCK で入れ替えます。履歴は削除されず、置き場所が変わっただけです。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「VRAM に 32K 分の KV しかないから、モデルは直近の 32K トークンしか覚えていない。」</strong></p>
+<p>違います。「VRAM に置く」ことと「保持する」ことは別です。完全な履歴は常に RAM にあります。アテンションがどのブロックを選んでも、ページテーブルがそのブロックを VRAM に入れ替えてから読むので、読み出される数値は、全部を VRAM に置いた場合とまったく同じです。[S03] VRAM に常駐させる量が左右するのは速度だけで、モデルが何を見られるかは変わりません。履歴が本当に失われるのは、コンテキストの上限を超えたときだけです。Strata のサービスは、そのようなリクエストを黙って切り詰めることなく、はっきり拒否します。[S15]</p></div>
+
+<details class="deep"><summary>もう一歩深く：容量の式の各因子、予算のピーク、重ねられないスイッチ</summary>
+<h3>式の文字は、1 つずつ確かめる</h3>
+<p>一般的なグループ化クエリアテンション（GQA）では、生の KV のペイロードは M ＝ L × T × H<sub>kv</sub> × d × (b<sub>K</sub> ＋ b<sub>V</sub>) バイトです。L は<strong>KV が必要な層の数</strong>で、ここでは 48 ではなく 12 です。T は位置の数で、実際に使った数か、あらかじめ確保した数かを明確にします。H<sub>kv</sub> は KV ヘッドの数（2）で、クエリヘッドの数（24）ではありません。d は 1 ヘッドの次元数（256）です。b<sub>K</sub> と b<sub>V</sub> は要素あたりのバイト数で、量子化形式ではスケール係数も均して含めます。[S04][S18]</p>
+<p>12 層を 48 層と数え間違えると、結果は 4 倍大きくなります。「安全側の見積もりだから問題ない」と言う人もいます。それは違います。誤った帰属は、ボトルネックの読み違い、ハードウェアの買い間違い、役に立つ機能の無効化につながります。安全側であることは、正しいモデルであることとは違います。余裕は、構造的な誤りの中に隠さず、別の項目として書き出すべきです。ソースにも似た教訓があります。初期には、インデクサのキーの保存量をクエリヘッド数（4）で計算した回がありました。しかし、キャッシュされるキーは共有ヘッド 1 つだけで、4 倍大きく見積もっていました。この誤りが 1 回残ったのは、予算が「より厳しく」なるので、かえって安全に見えたからです。[S04]</p>
+<h3>メイン KV 以外に何があるか</h3>
+<p>メイン KV は、請求書の 1 項目にすぎません。QSA はインデクサのキーも保存します。FP32 で、4 トークンにつき 1 つ、12 層の合計で 1 トークンあたり 1.5 KiB です。[S18] ソースの別の箇所のコメントによれば、FP16 の KV と FP32 のインデクサキーを合わせると、エンジンは 1 トークンあたり実際に約 29 KB を確保し、262K では 7.65 GB になります。12 GB の GPU には入らず、これが INT8 に切り替えた理由です。<span class="ev ev-code">コード上の事実</span> 完全な予算には、少なくとも次も含まれます。常駐する非エキスパートの重み、人気のエキスパート、GDN 状態、畳み込みと PLE の状態、ドラフト層、一時バッファ、CUDA Graph とフレームワークのオーバーヘッド、予備の領域。RAM 側には、全エキスパート、ストリーミング KV の正本、駐車した会話、OS に必要な余裕もあります。[S03][S06]</p>
+<h3>予算は合計だけでなくピークで見る</h3>
+<p>プリフィル（「問題を読む」段階）とデコード（「答えを書く」段階）では、メモリの必要量が違うので、別々に計算します。第 16 章で述べたとおり、プリフィルではブロックバッファをエキスパートキャッシュから借ります。同じ VRAM を 2 重に数えてはいけません。しかし、2 つの寿命が本当に重なるなら、大きいほうだけを楽観的に取ってもいけません。予算の式は実際の確保と一致させ、起動後と実行中のピークで検証します。</p>
+<h3>メモリ節約のスイッチは、気軽に重ねられない</h3>
+<p>K8V4 と KV ストリーミングは、同時には効きません。上流のドキュメントには、K8V4 はストリーミングの経路を通らないと明記されています。[S03] 両方の効果が掛け算になると仮定し、構成を検証していない表は、偽の容量と速度を示します。</p>
+<p>同じように、4 ビット量子化は数値を変えるので、品質の評価が必要です（上流では perplexity が 8〜12% 上がると測定）。一方、データの置き場所だけを変える方法（ストリーミング、ページング）は数値を変えないので、必要なのはマッピングとコピーの正しさの検査です。[S03] 2 種類の「節約」を、同じ「無損失」というラベルでひとまとめにしてはいけません。</p>
+<h3>複数の会話の予算</h3>
+<p>読み取り専用のモデルの重みは共有できます。シーケンスの状態は、ふつう会話ごとに 1 つずつ必要です。教育用の近似は、合計 ≈ 共有の重み ＋ Σ 各会話の状態 ＋ 一時バッファ ＋ 予備です。複数のリクエストがまったく同じ接頭辞を持つなら、物理ページの共有とコピーオンライトで領域を節約できます。ただし、厳密な同一性の判定、参照カウント、書き込み時の分離が必要で、これは第 20 章の話題です。2 つの文章が似て見えるというだけで、再利用してはいけません。Strata の駐車機能は、トークンの接頭辞が完全に等しいこと、画像の同一性が一致すること、ブートストラップモードが同じであることを求め、そのときだけ再利用します。[S10]</p>
+<p>容量を報告するときは、4 つの数を区別します。設定した上限、実際のトークン長、確保済みの容量、現在常駐しているワーキングセットです。「5 件の会話は最大 128K」と「5 件の会話が実際に 128K をすべて使い切る」は別のことです。</p>
+<h3>受け入れ検査</h3>
+<p>予算を超えたときは、システムは、はっきり拒否するか、サポートされた退避先を選ばなければなりません。黙ってコンテキストを短くしたり、履歴を捨てたりしてはいけません。Strata のサーバーは、「プロンプトに最大生成長を足すとコンテキストを超える」リクエストに 400 エラーを返し、切り詰めることは決してしません。[S15] 受け入れ検査では、RAM のピークと VRAM のピークの両方を測ります。何も動いていないときの VRAM のスクリーンショット 1 枚で済ませてはいけません。</p>
+</details>
