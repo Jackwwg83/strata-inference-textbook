@@ -46,12 +46,60 @@
       lChain: (i, p, a, s) => i === 0 ? `<span class="c">第 1 步</span>：结果[0] = a[0] = ${s}` : `<span class="c">第 ${i + 1} 步</span>：结果[${i}] = ${p} + ${a} = ${s}，必须等第 ${i} 步的结果`,
       lDone: (mode, n) => `<span class="y">// ${mode}：共 ${n} 步</span>`,
       sStepsK: '这种算法要几步', sStepsF: { scalar: '<b>= n = 16</b>', simd: '<b>= ⌈n ÷ 16⌉ = 1</b><br>512 位 ÷ 32 位 = 16 条车道', chain: '<b>= n = 16</b><br>车道再多也用不上' },
-      sCmpK: '已跑过的算法', sCmpNone: '还没有跑完任何一种',
+      sCmpK: '已跑过的算法', sCmpNone: '还没有跑完任何一种', sCmpRow: (mode, n) => `<b>${mode}</b>：${n} 步`,
       sVerdict: '① 逐个相加 16 步，SIMD 只要 1 步：数据互不相干，就能同时算。<br>② 累加链有 16 条车道也要 16 步：每一格都要等前一格，这叫<b>数据依赖</b>。<br>③ 模型的 48 层就是这样一条链：第 l + 1 层的输入是第 l 层的输出。同一层里的 10 个专家互不相干，可以分给 CPU 和 GPU 同时算；层与层之间不行。',
       sTry: [
         '先跑 <b>逐个相加</b>，再跑 <b>SIMD 一次 16 个</b>：结果一样，步数从 16 变成 1。',
         '跑 <b>累加链</b>：注意每一步只有一格在算，其他车道都在等。',
         '三种都跑完，读结论。想一想：模型里哪些计算像“逐个相加”，哪些像“累加链”？',
+      ],
+    },
+    en: {
+      code: 'LAYER_TIMELINE', title: 'Within one layer: GPU and CPU compute at once', tag: 'Teaching estimate · bandwidths at theoretical peak',
+      intro: 'One layer goes like this: the GPU first computes attention and routing and picks 10 experts. Those in VRAM (hits) go to the GPU, some of the misses go to the GPU over PCIe, and the rest go to the CPU. Both sides must finish before they join and move on to the next layer. Drag the sliders to change the hit rate and the PCIe share, and see which side becomes the <b>critical path</b>. Expert counts are averages, so they can have decimals.',
+      lgGpu: 'GPU: attention, routing, merge', lgMoe: 'GPU: hit experts + experts sent over PCIe', lgCpu: 'CPU: the other missed experts', lgPcie: 'PCIe transfer',
+      steps: ['Attention + routing', 'Dispatch experts', 'Both sides compute', 'Join', 'Merge and write back'],
+      lane: { gpu: 'GPU', cpu: 'CPU', pcie: 'PCIe' },
+      axis: (ms) => `${ms} ms`,
+      crit: (who, ms) => `Critical path: ${who === 'cpu' ? 'CPU branch' : 'GPU branch'} (${ms} ms)`,
+      critSerial: (ms) => `Serial: CPU first, then GPU (${ms} ms total)`,
+      hLabel: 'Hit rate h', fLabel: 'PCIe share f',
+      bPlay: '▶ Play one layer', bBest: 'Set best share', bOverlapOn: 'Both sides at once: on', bOverlapOff: 'Both sides at once: off (CPU, then GPU)',
+      ready: '<span class="c">$</span> ready. Drag a slider, or press [ ▶ Play one layer ]',
+      l0: (pre) => `<span class="c">[GPU]</span> attention + routing, about ${pre} ms (teaching assumption). The router picks 10 experts`,
+      l1: (hits, pcie, cpu) => `<span class="y">Dispatch</span>: ${hits} in VRAM (hits) → GPU; ${pcie} over PCIe → GPU; ${cpu} → CPU`,
+      l2: (g, c, ov) => ov ? `<span class="m">Parallel</span>: GPU branch ${g} ms and CPU branch ${c} ms run at the same time` : `<span class="m">Serial</span>: the GPU waits for the CPU to finish its ${c} ms, then computes its own ${g} ms`,
+      l3: (who, ms) => `<span class="c">Join</span>: wait for the slower side. This time it is the ${who === 'cpu' ? 'CPU' : 'GPU'}, at ${ms} ms`,
+      l4: (t, tok) => `<span class="c">→</span> merge the 10 results and write back. This layer: ${t} ms; 48 layers: about ${tok} ms`,
+      sLayerK: 'Time for this layer', sLayerF: (ov) => ov ? '<b>= attention/routing + max(CPU, GPU) + merge</b><br>both sides at once; the slower one counts' : '<b>= attention/routing + CPU + GPU + merge</b><br>one after the other; the two add up',
+      sTokK: 'One token (48 layers)', sTokF: '<b>= 48 × time per layer</b><br>excludes drafts, sampling and other costs',
+      sBranchK: 'CPU branch / GPU branch', sBranchF: (cpu, pcie) => `<b>CPU: ${cpu} × 1.3824 MB ÷ 40 GB/s</b><br>GPU: hits read from VRAM (672 GB/s),<br>${pcie} over PCIe (63 GB/s)`,
+      sBestK: 'PCIe share that makes both sides finish together', sBestF: '<b>f* makes CPU time = GPU time</b><br>holds only if the two sides do not compete for bandwidth',
+      try: [
+        'Drag the hit rate to <b>0%</b>: the CPU must compute all 10 experts, and the CPU branch is the critical path. Then drag it to <b>65%</b> (close to the held-out hit rate upstream measured during development). How much faster is this layer?',
+        'Turn <b>Both sides at once</b> off: the GPU has to wait for the CPU to finish first. The higher the hit rate, the lighter the CPU, but the GPU\'s share now sits behind the CPU. That is exactly the lesson of the first upstream version.',
+        'Press <b>Set best share</b>: the two branches become equally long. Then drag f to 100%: the GPU branch becomes the critical path, and the whole layer gets slower.',
+      ],
+
+      sCode: 'SIMD_LANES', sTitle: '16 at a time, or waiting step by step', sTag: 'Computer architecture · AVX-512 does 16 floats at once',
+      sIntro: 'The same 16 numbers, three algorithms. <b>One by one</b>: one instruction does one addition. <b>SIMD</b>: one instruction does 16 additions at once, because the cells are independent. <b>Running sum</b>: each cell needs the result of the one before, so however many lanes you have, it goes one cell at a time. Pick one and press <b>Step</b>.',
+      sLgIn: 'Input', sLgNow: 'Being computed this step', sLgDone: 'Done', sLgWait: 'Waiting for the cell before',
+      modes: { scalar: 'One by one', simd: 'SIMD, 16 at a time', chain: 'Running sum' },
+      modeTitle: { scalar: 'out[i] = a[i] + b[i]: one at a time', simd: 'out[i] = a[i] + b[i]: 16 at a time', chain: 'out[i] = out[i−1] + a[i]: waits for i−1' },
+      outLabel: 'out', stepText: (n, total) => `Step ${n} / ${total}`,
+      bStep: '▶ Step', bAll: '▶▶ Run to end', bReset: 'Reset',
+      sReady: '<span class="c">$</span> ready. Pick an algorithm and press [ ▶ Step ]',
+      lScalar: (i, a, b, s) => `<span class="c">Step ${i + 1}</span>: ${a} + ${b} = ${s}; one instruction computed just 1 number`,
+      lSimd: '<span class="c">Step 1</span>: one vector add instruction; 16 lanes finish 16 additions at once',
+      lChain: (i, p, a, s) => i === 0 ? `<span class="c">Step 1</span>: out[0] = a[0] = ${s}` : `<span class="c">Step ${i + 1}</span>: out[${i}] = ${p} + ${a} = ${s}; it must wait for the result of step ${i}`,
+      lDone: (mode, n) => `<span class="y">// ${mode}: ${n} steps in total</span>`,
+      sStepsK: 'Steps this algorithm needs', sStepsF: { scalar: '<b>= n = 16</b>', simd: '<b>= ⌈n ÷ 16⌉ = 1</b><br>512 bits ÷ 32 bits = 16 lanes', chain: '<b>= n = 16</b><br>extra lanes do not help' },
+      sCmpK: 'Algorithms run so far', sCmpNone: 'None has run to the end yet', sCmpRow: (mode, n) => `<b>${mode}</b>: ${n} ${n === 1 ? 'step' : 'steps'}`,
+      sVerdict: '① One by one takes 16 steps; SIMD takes just 1: when the data are independent, they can be computed at once.<br>② The running sum takes 16 steps even with 16 lanes: each cell must wait for the one before. This is called <b>data dependence</b>.<br>③ The model\'s 48 layers form exactly such a chain: the input of layer l + 1 is the output of layer l. The 10 experts within one layer are independent, so they can be split between the CPU and the GPU and computed at once; across layers, they cannot.',
+      sTry: [
+        'Run <b>One by one</b> first, then <b>SIMD, 16 at a time</b>: the results are the same, but the steps drop from 16 to 1.',
+        'Run <b>Running sum</b>: notice that only one cell computes in each step while the other lanes wait.',
+        'Run all three and read the conclusion. Think about it: which computations in the model look like "one by one", and which look like a "running sum"?',
       ],
     },
   });
@@ -213,7 +261,7 @@
         done[mode] = total();
         term.log(T.lDone(T.modes[mode], total()));
         $('[data-s=s-cmp-v]').textContent = Object.keys(done).length + ' / 3';
-        $('[data-s=s-cmp-f]').innerHTML = Object.entries(done).map(([m, n]) => `<b>${T.modes[m]}</b>：${n} 步`).join('<br>');
+        $('[data-s=s-cmp-f]').innerHTML = Object.entries(done).map(([m, n]) => T.sCmpRow(T.modes[m], n)).join('<br>');
         if (Object.keys(done).length === 3) { const v = $('.viz-verdict'); v.innerHTML = T.sVerdict; v.hidden = false; }
       }
       async function guard(fn) {

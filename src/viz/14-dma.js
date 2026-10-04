@@ -16,7 +16,7 @@
       copyLabel: '每块拷贝', compLabel: '每块计算', ms: (v) => `${v} ms`,
       bPlay: '▶ 播放', bWaitOn: '不等信号就覆盖：关', bWaitOff: '不等信号就覆盖：开',
       totalText: (t, s) => `总用时 ${t} ms（全串行要 ${s} ms）`,
-      badText: (list) => `✗ 第 ${list} 块读到了被覆盖的数据`, okText: '✓ 每一块都读到了自己的数据',
+      badText: (list) => `✗ 第 ${list.join('、')} 块读到了被覆盖的数据`, okText: '✓ 每一块都读到了自己的数据',
       ready: '<span class="c">$</span> ready. 调好参数，按 [ ▶ 播放 ]',
       lCopy: (t, i, b) => `<span class="c">t=${t}</span> 开始拷贝第 ${i} 块 → 缓冲区 ${b}`,
       lWait: (t, i, b, prev, until) => `<span class="y">t=${t}</span> 想把第 ${i} 块拷进 ${b}，可第 ${prev} 块还在用它：等“用完”信号，到 t=${until} 才开始`,
@@ -40,7 +40,7 @@
       pSteps: ['申请缓冲区', '交给 DMA', '搬了一半', '内存紧张', '继续搬', '完成'],
       vLabel: '虚拟页（程序看到的）', fLabel: '物理页框（真实内存）',
       vPage: (i) => `页 ${i}`, frame: (i) => `框 ${i}`,
-      dmaText: (fr, done) => `DMA 拿到的页框：${fr}；已搬 ${done} 页`,
+      dmaText: (fr, done) => `DMA 拿到的页框：${fr.join('、')}；已搬 ${done} 页`,
       bStep: '▶ 单步', bReset: '重置', bPinOff: '锁页：关', bPinOn: '锁页：开',
       pReady: '<span class="c">$</span> ready. 按 [ ▶ 单步 ]',
       pLog: {
@@ -62,6 +62,64 @@
         '锁页关着，单步走完：第 4 步页表变了，第 5 步结果出错。注意 DMA 手里的号码从头到尾没变。',
         '打开 <b>锁页</b> 再走一遍：第 4 步操作系统不能动这几页，结果正确。',
         '想一想：Strata 启动时为什么要把几十 GB 的专家锁进内存？锁页多了，系统其他部分会怎样？',
+      ],
+    },
+    en: {
+      code: 'DOUBLE_BUFFER', title: 'Double buffering: copy while you compute', tag: 'Teaching estimate · 6 chunks',
+      intro: '6 chunks of data must be copied from RAM to the GPU and then computed. The copy engine and the compute units are two separate pieces of hardware and can work at the same time, but every chunk must first be put into a <b>buffer</b>. With 1 buffer you can only "copy, then compute, then copy again"; with 2, one buffer is being filled while the other is being computed. Then try turning on "overwrite without waiting": the next chunk is written into a buffer that is still being read.',
+      lgBufs: ['Buffer A', 'Buffer B', 'Buffer C'], lgBad: 'Read overwritten data',
+      steps: ['Copy into a free buffer', 'Signal "copied"', 'Compute', 'Signal "used"', 'Buffer reusable'],
+      laneCopy: 'Copy', laneComp: 'Calc',
+      bufLabel: 'Buffers', bufN: (n) => (n === 1 ? '1 buffer' : `${n} buffers`),
+      copyLabel: 'Copy per chunk', compLabel: 'Compute per chunk', ms: (v) => `${v} ms`,
+      bPlay: '▶ Play', bWaitOn: 'Overwrite without waiting: off', bWaitOff: 'Overwrite without waiting: on',
+      totalText: (t, s) => `Total ${t} ms (fully serial: ${s} ms)`,
+      badText: (list) => `✗ ${list.length === 1 ? 'Chunk' : 'Chunks'} ${list.join(', ')} read overwritten data`, okText: '✓ Every chunk read its own data',
+      ready: '<span class="c">$</span> ready. Set the sliders, then press [ ▶ Play ]',
+      lCopy: (t, i, b) => `<span class="c">t=${t}</span> start copying chunk ${i} → buffer ${b}`,
+      lWait: (t, i, b, prev, until) => `<span class="y">t=${t}</span> chunk ${i} wants buffer ${b}, but chunk ${prev} is still using it: wait for the "used" signal, start at t=${until}`,
+      lClobber: (t, i, b, prev, until) => `<span class="m">t=${t}</span> no waiting: chunk ${i} is written straight into ${b}; but chunk ${prev} computes until t=${until}, so the second half of its read sees chunk ${i}'s data`,
+      lComp: (t, i) => `<span class="c">t=${t}</span> chunk ${i} copied ("copied" signal), compute starts`,
+      lDone: (t) => `<span class="y">// t=${t} all chunks computed</span>`,
+      sTotK: 'Total time', sTotF: (n, c, k, b) => b >= 2 ? `<b>≈ ${c} + (${n} − 1) × max(${c}, ${k}) + ${k}</b><br>first copy + slower part in between + last compute` : `<b>= ${n} × (${c} + ${k})</b><br>only 1 buffer: copy and compute take turns`,
+      sSerK: 'Fully serial (for comparison)', sSerF: '<b>= chunks × (copy + compute)</b>',
+      sBadK: 'Chunks read wrong', sBadF: '<b>The overwrite began before the previous reader finished</b><br>the program still runs to the end with no error',
+      vOk: (t, s) => `① Total time <b>${t} ms</b>, shorter than the fully serial ${s} ms: the copying is hidden behind the computing.<br>② Before every overwrite, the producer waited for the previous reader's "used" signal, so every chunk is correct.<br>③ More buffers cannot beat "slowest part × chunks": you cannot remove the bottleneck, only hide the other part behind it.`,
+      vBad: (t, n) => `① Without waiting, the total is <b>${t} ms</b>, no faster than waiting properly: compute was the bottleneck anyway.<br>② Yet <b>${n}</b> chunk(s) read overwritten data, and the program still ran to the end without any error.<br>③ Double buffering is correct not because you "allocated two blocks of memory", but because of the two signals: read only after the copy is done, write only after it has been used.`,
+      try: [
+        'Play with <b>1 buffer</b>, then with <b>2 buffers</b>: at 3 ms copy and 5 ms compute, the total drops from 48 ms to 33 ms.',
+        'Pick <b>3 buffers</b>: it barely gets faster. Compute is the slowest part, and the extra buffer just sits idle.',
+        'Go back to 2 buffers, turn on <b>Overwrite without waiting</b> and play again: how many chunks get a ✗? Set copy to 6 ms and compute to 2 ms and try again. Why is everything fine "by luck" this time?',
+      ],
+
+      pCode: 'PIN_DMA', pTitle: 'DMA and pinning: what if the address moves?', pTag: 'Computer principles · Sketch',
+      pIntro: 'A program sees <b>virtual addresses</b>. The operating system uses the page table to translate each virtual page into a real physical page frame, and it may move a page at any time. The DMA engine ignores the page table and trusts only the physical frames it got when the job started. Press <b>Step</b> to watch "memory runs short halfway through a copy", then turn on pinning and compare.',
+      pLgOurs: 'Frames that hold our buffer', pLgOther: 'Frames another program uses', pLgFree: 'Free frames', pLgDma: 'Frame DMA is reading now',
+      pSteps: ['Allocate buffer', 'Hand to DMA', 'Half copied', 'Memory runs short', 'Copy continues', 'Done'],
+      vLabel: 'Virtual pages (what the program sees)', fLabel: 'Physical page frames (real memory)',
+      vPage: (i) => `Page ${i}`, frame: (i) => `#${i}`,
+      dmaText: (fr, done) => `DMA's frames: ${fr.join(', ')} · ${done} pages copied`,
+      bStep: '▶ Step', bReset: 'Reset', bPinOff: 'Pinning: off', bPinOn: 'Pinning: on',
+      pReady: '<span class="c">$</span> ready. Press [ ▶ Step ]',
+      pLog: {
+        alloc: 'The program allocates a 4-page buffer. The page table maps pages 0–3 to physical frames 2, 5, 3, 7: the addresses the program sees are contiguous, but the real locations are scattered',
+        handoff: 'The driver hands these 4 physical frame numbers to the DMA engine. From now on DMA trusts only this list and no longer looks at the page table',
+        copying: 'DMA starts copying: pages 0 and 1 are already on the GPU',
+        pressureMove: '<span class="m">Memory runs short</span>: the OS moves page 2 to frame 6 and gives frame 3 to another program. The page table is updated, but the list DMA holds has not changed',
+        pressurePinned: '<span class="c">Memory runs short</span>: the OS wants to move pages, but these 4 pages are <b>pinned</b>, so it has to touch other pages. The frames stay 2, 5, 3, 7',
+        resumeBad: '<span class="m">DMA continues</span>: it reads frame 3 by the old number and gets another program\'s data. Page 2 on the GPU is wrong, and nothing reports an error',
+        resumeOk: '<span class="c">DMA continues</span>: frames 3 and 7 are still ours, so pages 2 and 3 are copied correctly',
+        finish: 'Copy finished',
+      },
+      sPtK: 'Page table now (pages 0–3 → frames)', sDmaK: 'Frames DMA holds', sResK: 'Result',
+      sPtF: '<b>The OS maintains the page table</b><br>it can change it at any time', sDmaF: '<b>Taken at the start, never changes</b>', sResF: '<b>Correct only if</b> no page<br>moves during the copy',
+      resOk: 'Correct', resBad: 'Page 2 is wrong', resNa: '—',
+      vPinOff: 'Without pinning, the OS moved a page in the middle of the copy, DMA read by the old address, and it got someone else\'s data. In the other direction (writing from the GPU back to RAM), it would also corrupt another program\'s memory. That is why DMA requires <b>pinned memory</b>.',
+      vPinOn: 'With pinning, the OS promises not to move or swap out these pages until they are unpinned, so DMA can safely read and write by the frame numbers it got at the start. The cost: nobody else can use this memory.',
+      pTry: [
+        'With pinning off, step to the end: at step 4 the page table changes, and at step 5 the result is wrong. Note that the numbers DMA holds never change.',
+        'Turn <b>pinning</b> on and walk through again: at step 4 the OS cannot touch these pages, and the result is correct.',
+        'Think about it: why does Strata pin tens of GB of experts into RAM at startup? With that much pinned, what happens to the rest of the system?',
       ],
     },
   });
@@ -118,7 +176,7 @@
           put(70, c.compStart, c.compEnd, c.corrupted ? 'var(--a2)' : bufColors[c.buf], c.corrupted ? '✗' : c.i + 1);
         });
         totalT.textContent = T.totalText(res.total, res.serial);
-        badT.textContent = res.corrupted.length ? T.badText(res.corrupted.map(i => i + 1).join('、')) : T.okText;
+        badT.textContent = res.corrupted.length ? T.badText(res.corrupted.map(i => i + 1)) : T.okText;
         badT.style.fill = res.corrupted.length ? 'var(--a2)' : 'var(--ink)';
         $('[data-s=d-tot-v]').textContent = res.total + ' ms';
         $('[data-s=d-tot-f]').innerHTML = T.sTotF(N, +cR.value, +kR.value, B);
@@ -222,7 +280,7 @@
           fTexts[f].style.fill = fill === 'var(--frame)' ? 'var(--ink)' : 'var(--paper)';
         });
         if (s) st.frames.forEach((f, p) => Viz.svg('path', { d: `M${vx(p)} 48L${fx(f)} 106`, style: 'stroke:var(--muted);stroke-width:1.5;fill:none' }, links));
-        dmaT.textContent = s && s.key !== 'alloc' ? T.dmaText(st.dmaFrames.join('、'), st.done) : '';
+        dmaT.textContent = s && s.key !== 'alloc' ? T.dmaText(st.dmaFrames, st.done) : '';
         resT.textContent = s && (s.key === 'resume' || s.key === 'finish') ? (s.ok ? '✓ ' + T.resOk : '✗ ' + T.resBad) : '';
         resT.style.fill = s && !s.ok ? 'var(--a2)' : 'var(--ink)';
       }
