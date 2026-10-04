@@ -1,0 +1,248 @@
+<div class="hook"><span class="eyebrow">Quizá lo hayas notado</span>
+<p>En una página de chat, la respuesta aparece palabra por palabra. Si te saltas la página y llamas a la API de tu Strata local desde la línea de comandos, ves otra cosa: línea tras línea de <code>data: {…}</code>, una línea en blanco entre cada una, y una última línea que dice <code>data: [DONE]</code>.</p>
+<p>Esas líneas son <dfn>SSE</dfn> (Server-Sent Events, «eventos enviados por el servidor»). Salen del servidor como un flujo de <strong>bytes</strong>. Antes de llegar a ti, la red los corta en bloques del tamaño que quiera. Un carácter chino puede quedar partido por la mitad, y un mensaje puede llegar en dos partes. Este capítulo explica cómo volver a unir esos pedazos en una frase completa y sin caracteres rotos.</p></div>
+<p class="tldr"><strong>En una línea:</strong> entre un token que emite el modelo y el texto en tu pantalla hay tres puertas. Los bytes se convierten en caracteres (UTF-8), los caracteres en eventos (la línea en blanco de SSE) y los eventos en estructura (JSON). Ante cada puerta, primero se reúne una unidad completa y solo después se procesa.</p>
+
+<h2 id="sec-1">23.1 Entre el modelo y tu aplicación hay una capa de servicio</h2>
+<p>El motor de inferencia solo entiende IDs de token: le das una lista de IDs y emite IDs nuevos, uno tras otro. Tu aplicación habla otro idioma: envía un mensaje de chat en JSON y espera recibir trozos de texto. El traductor intermedio es la <dfn>capa de servicio</dfn>. La figura 23-1 muestra la capa de servicio de Strata.</p>
+<figure class="fig"><svg viewBox="0 0 400 408" role="img" aria-label="Figura 23-1: la capa de servicio de Strata tiene tres niveles, el servicio HTTP, el front end de texto y la frontera del motor; solo debajo de ellos está el proceso residente del motor">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="8" width="360" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="14" font-weight="600" text-anchor="middle">Tu aplicación</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="48" font-size="12" text-anchor="middle">Web de chat, asistentes de código, SDK de OpenAI…</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="84" width="360" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="106" font-size="14" font-weight="600" text-anchor="middle">Servicio HTTP: serve/server.py</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="124" font-size="12" text-anchor="middle">Enruta, revisa la API key, encola, escribe SSE</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="160" width="360" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="182" font-size="14" font-weight="600" text-anchor="middle">Front end de texto: serve/frontend.py</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="200" font-size="12" text-anchor="middle">Plantilla · pensamiento, texto, herramientas</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="236" width="360" height="50" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="258" font-size="14" font-weight="600" text-anchor="middle">Frontera del motor: Engine.generate</text>
+<text class="f-on" fill="#ffffff" x="200" y="276" font-size="12" text-anchor="middle">Entran IDs de token, salen IDs, uno a uno</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="312" width="360" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="334" font-size="14" font-weight="600" text-anchor="middle">Proceso residente strata --serve</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="352" font-size="12" text-anchor="middle">Carga los pesos una vez · usa stdin/stdout</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 58V82M200 134V158M200 210V234M200 286V310"/>
+<text class="f-muted" fill="#5c6d66" x="208" y="75" font-size="12">HTTP + JSON</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="151" font-size="12">lista de mensajes</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="227" font-size="12">IDs de token</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="303" font-size="12">una línea por mensaje</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="382" font-size="12" text-anchor="middle">Las tres capas de arriba solo manejan texto;</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="400" font-size="12" text-anchor="middle">solo la de abajo usa la GPU</text>
+</svg><figcaption>Figura 23-1　La capa de servicio de Strata. El servicio HTTP y el front end de texto solo manejan texto, así que se pueden probar sin GPU. El cálculo de verdad ocurre en el proceso residente de abajo.</figcaption></figure>
+<p><code>serve/server.py</code> declara su trabajo desde el principio: sobre «cualquier motor que convierta IDs de token en tokens», ofrece APIs en dos estilos, OpenAI y Anthropic. Los endpoints incluyen <code>POST /v1/chat/completions</code> (estilo OpenAI, con y sin streaming), <code>POST /v1/messages</code> (estilo Anthropic), <code>GET /v1/models</code>, <code>GET /health</code> y otros. <span class="ev ev-code">Hecho de código</span>[S15]</p>
+<p>Su contrato con el motor es una sola función: <code>Engine.generate(prompt_ids, max_new, sampling, cancel)</code>, que devuelve un iterador que produce IDs de token uno a uno. El <code>StrataEngine</code> real mantiene en marcha un proceso <code>strata --serve</code> y habla con él por entrada y salida estándar. <code>MockEngine</code> emite tokens según un guion, de modo que cada ruta de la API se puede probar en una máquina sin GPU. [S15]</p>
+<p>La primera frase de <code>serve/frontend.py</code> dice: «Todo lo de aquí es texto: ni modelo, ni GPU». Hace tres cosas. Convierte los formatos de petición de OpenAI y Anthropic en la lista de mensajes que quiere la plantilla de chat. Renderiza el prompt con la plantilla Jinja del propio modelo, y se comprobó con 10 ejemplos que coincide con el resultado de Hugging Face. Y divide el flujo de salida, trozo a trozo, en pensamiento, texto y llamadas a herramientas, y <strong>nunca envía media etiqueta</strong>. <span class="ev ev-code">Hecho de código</span>[S16]</p>
+<p class="bridge"><strong>Si estudiaste informática:</strong> es una versión de bolsillo de la idea de capas de Redes de computadoras. Cada capa habla solo con la de arriba y la de abajo, y mientras la interfaz esté acordada, el interior de una capa se puede cambiar con libertad. <code>MockEngine</code> puede sustituir al motor real precisamente porque la frontera es una sola función, <code>generate</code>.</p>
+
+<h2 id="sec-2">23.2 Cómo se puede enviar una respuesta mientras se escribe</h2>
+<p>Una petición web normal es una pregunta y una respuesta. El navegador envía una solicitud, el servidor prepara la respuesta <strong>entera</strong> y la devuelve de una vez. Con un modelo grande, eso significa esperar decenas de segundos antes de ver la primera palabra. Una <dfn>respuesta en streaming</dfn> funciona distinto: la misma respuesta se divide en muchos trozos pequeños y cada trozo sale en cuanto está escrito. La figura 23-2 compara las dos.</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="Figura 23-2: una respuesta normal se envía solo cuando toda la respuesta está escrita; una respuesta en streaming envía cada trozo en cuanto está listo, así que la primera palabra aparece mucho antes">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">Respuesta normal: termina y se envía todo</text>
+<text class="f-muted" fill="#5c6d66" x="175" y="42" font-size="12" text-anchor="middle">Esperando… (el modelo genera)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 60H390"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="44" width="8" height="16"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="32" y="48" width="286" height="8"/>
+<rect class="f-accent" fill="#136d5a" x="322" y="44" width="66" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="6" y="78" font-size="12">solicitud</text>
+<text class="f-muted" fill="#5c6d66" x="392" y="78" font-size="12" text-anchor="end">respuesta completa</text>
+<text class="f-text" fill="#182f2b" x="10" y="120" font-size="13" font-weight="600">Streaming (SSE): cada trozo sale al estar listo</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 160H390"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="144" width="8" height="16"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="92" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="114" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="136" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="158" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="180" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="202" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="224" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="246" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="268" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="290" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="312" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="334" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="356" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="378" y="144" width="12" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="6" y="178" font-size="12">solicitud</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="178" font-size="12">primera palabra</text>
+<text class="f-muted" fill="#5c6d66" x="392" y="178" font-size="12" text-anchor="end">última palabra</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">Sin escala: mismo total, primera palabra antes.</text>
+</svg><figcaption>Figura 23-2　El streaming no hace que el modelo calcule más rápido, pero te deja ver la primera palabra mucho antes. En una respuesta de varios cientos de tokens, la experiencia cambia mucho.</figcaption></figure>
+<aside class="primer" id="c23-http-sse">
+<h3>HTTP y streaming (SSE)</h3>
+<p><dfn>HTTP</dfn> es el conjunto de reglas con que hablan los navegadores y los servidores. Un intercambio tiene dos mitades. El cliente envía una <strong>solicitud</strong> (qué ruta visitar y qué datos llevar) y el servidor devuelve una <strong>respuesta</strong> (un código de estado, como 200 para éxito, 400 para una solicitud incorrecta o 401 para una autenticación fallida, más algunas cabeceras y un cuerpo). La cabecera <code>Content-Type</code> le dice al otro lado en qué formato está el cuerpo.</p>
+<p>Una respuesta normal escribe su cuerpo de una vez. <dfn>SSE</dfn>, en cambio, pone el <code>Content-Type</code> de la respuesta en <code>text/event-stream</code> y deja la conexión abierta. El servidor escribe un trozo cuando lo tiene, y cada trozo se llama <dfn>evento</dfn>. El formato es muy simple:</p>
+<ul>
+<li>cada evento se compone de unas pocas líneas, y las que empiezan por <code>data:</code> llevan los datos;</li>
+<li>una <strong>línea en blanco</strong> termina el evento;</li>
+<li>una línea que empieza por dos puntos es un comentario, y el cliente simplemente la ignora;</li>
+<li>una línea opcional <code>event:</code> le pone nombre al evento.</li>
+</ul>
+<p>Un ejemplo: el servidor escribe <code>data: hola</code>, un salto de línea y una línea en blanco, y el cliente recibe un evento cuyo contenido es «hola». El estándar exige además lo siguiente. El flujo de eventos debe ir en UTF-8. Una línea puede terminar en LF, CR o CRLF. Varias líneas <code>data</code> de un mismo evento se unen con saltos de línea. Y si el flujo se corta a mitad de un evento, ese medio evento se descarta y nunca se entrega como si estuviera completo. [R05]</p>
+<p>Relación con Strata: si añades <code>"stream": true</code> a <code>/v1/chat/completions</code>, la respuesta vuelve como SSE. Si no lo pones, recibes un único objeto JSON cuando termina la generación.</p>
+<p class="further">Para seguir leyendo: <a href="https://developer.mozilla.org/es/docs/Web/HTTP/Guides/Overview" target="_blank" rel="noopener noreferrer">MDN: Generalidades del protocolo HTTP</a> · <a href="https://developer.mozilla.org/es/docs/Web/API/Server-sent_events/Using_server-sent_events" target="_blank" rel="noopener noreferrer">MDN: Usar eventos enviados por el servidor</a> · <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html" target="_blank" rel="noopener noreferrer">Estándar HTML: Server-sent events (en inglés)</a> · <a href="https://es.wikipedia.org/wiki/Protocolo_de_transferencia_de_hipertexto" target="_blank" rel="noopener noreferrer">Wikipedia: Protocolo de transferencia de hipertexto</a></p>
+</aside>
+<p>El código de SSE de Strata es corto. Primero devuelve el estado 200 con las cabeceras <code>Content-Type: text/event-stream</code> y <code>Cache-Control: no-cache</code>, más <code>X-Accel-Buffering: no</code>, que pide a los proxies inversos como nginx que no retengan los eventos y reenvíen cada uno en cuanto llega. <span class="ev ev-code">Hecho de código</span> Después, cada trozo de la respuesta se escribe como <code>data: </code> más un trozo de JSON más una línea en blanco. Cuando todo termina, escribe <code>data: [DONE]</code>. La figura 23-3 desarma ese flujo de bytes.</p>
+<figure class="fig"><svg viewBox="0 0 400 312" role="img" aria-label="Figura 23-3: el flujo de bytes SSE que escribe Strata. Cada evento es data más un trozo de JSON más una línea en blanco; un comentario keep-alive que empieza por dos puntos lo ignora el cliente; el flujo termina con data: [DONE]">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">↵ = un salto de línea; ↵↵ = línea en blanco</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="44" font-size="12" font-family="monospace">data: {…"delta":{"role":"assistant",…}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="68" font-size="12">Evento 1: empieza el asistente; aún sin texto</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="82" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="100" font-size="12" font-family="monospace">data: {…"delta":{"content":"Hola"}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="124" font-size="12">Evento = data: + trozo de JSON + línea en blanco</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="138" width="380" height="26" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="18" y="156" font-size="12" font-family="monospace">: keep-alive↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="180" font-size="12">Comentario con «:»: se ignora, solo señal de vida</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="194" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="212" font-size="12" font-family="monospace">data: {…"delta":{"content":", mundo"}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="236" font-size="12">Más texto. El pensamiento va en reasoning_content</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="250" width="380" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="18" y="268" font-size="12" font-family="monospace">data: [DONE]↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="294" font-size="12">Fin: convención de OpenAI, no forma parte de SSE</text>
+</svg><figcaption>Figura 23-3　Un fragmento del flujo de bytes SSE que escribe Strata (los campos como id y model del JSON se abrevian con «…»). El cliente usa la línea en blanco para saber cuándo un evento está completo.</figcaption></figure>
+<p>Fíjate en la línea <code>: keep-alive</code> del medio. Mientras lee un prompt muy largo, el motor puede pasar varios minutos sin emitir un token. En ese tiempo Strata produce un «latido» cada 10 segundos, y la capa HTTP lo escribe como un comentario SSE. <span class="ev ev-code">Hecho de código</span> El cliente ignora los comentarios, pero como siguen llegando bytes, no da la conexión por muerta. Además, al escribir, el servidor descubre de paso si el otro lado ya se fue (el capítulo 24 lo explica a fondo).</p>
+
+<h2 id="sec-3">23.3 Un carácter chino, tres bytes</h2>
+<p>La red conoce bytes, no caracteres. Toma un evento simplificado, <code>data: {"delta":"你好"}</code> («hola» en chino). Con la línea en blanco del final son 26 bytes en el cable, y los dos caracteres <code lang="zh">你</code> y <code lang="zh">好</code> ocupan 3 bytes cada uno. Aquí está el problema: el tamaño de cada «bloque» que una conexión TCP entrega al programa lo deciden la red y el sistema operativo, y no tiene nada que ver con los límites de los caracteres. Los 3 bytes de un carácter chino pueden quedar fácilmente con el primer byte en este bloque y los otros dos en el siguiente.</p>
+<aside class="primer" id="c23-utf8">
+<h3>UTF-8: cuántos bytes ocupa un carácter</h3>
+<p>Cada carácter de una computadora tiene un número, llamado <dfn>punto de código</dfn>. Por ejemplo, el carácter chino <code lang="zh">中</code> («medio») es U+4E2D. <dfn>UTF-8</dfn> es un conjunto de reglas para escribir puntos de código como bytes. Los caracteres comunes, como las letras inglesas, ocupan solo 1 byte, igual que en el viejo ASCII. La mayoría de los caracteres chinos ocupan 3 bytes. Los emoji ocupan 4.</p>
+<p>Lo ingenioso es que cada byte «lleva su propia identificación», como muestra la figura 23-4. La cantidad de unos al principio del primer byte indica cuántos bytes ocupa el carácter. Cada byte siguiente empieza por <code>10</code> y se llama <dfn>byte de continuación</dfn>. Así, cuando un decodificador lee <code>E4</code> (binario 1110 0100), sabe que deben seguir dos bytes de continuación. Si el bloque termina justo ahí, lo correcto es <strong>retener E4</strong> y unirlo con el bloque siguiente cuando llegue.</p>
+<p><code>codecs.getincrementaldecoder</code> de Python y <code>TextDecoder</code> del navegador (con <code>stream: true</code>) son <dfn>decodificadores incrementales</dfn> de este tipo. Si en cambio decodificas cada bloque por separado, medio carácter se convierte en el carácter de sustitución � y ya nunca se puede recomponer.</p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/UTF-8" target="_blank" rel="noopener noreferrer">Wikipedia: UTF-8</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/API/TextDecoder" target="_blank" rel="noopener noreferrer">MDN: TextDecoder (en inglés)</a> · <a href="https://docs.python.org/es/3/library/codecs.html" target="_blank" rel="noopener noreferrer">Documentación de Python: codecs</a> · <a href="https://www.rfc-editor.org/rfc/rfc3629" target="_blank" rel="noopener noreferrer">RFC 3629: UTF-8 (en inglés)</a></p>
+<figure class="fig"><svg viewBox="0 0 400 254" role="img" aria-label="Figura 23-4: el punto de código U+4E2D se divide en tres bytes, E4 B8 AD; los bits marcadores al principio de cada byte indican su lugar dentro del carácter">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle"><tspan lang="zh">中</tspan> = U+4E2D = 0100 111000 101101 (16 bits)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="36" width="110" height="40" rx="6"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="36" width="110" height="40" rx="6"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="270" y="36" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">1110</tspan> 0100</text>
+<text class="f-text" fill="#182f2b" x="200" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">10</tspan>111000</text>
+<text class="f-text" fill="#182f2b" x="325" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">10</tspan>101101</text>
+<text class="f-text" fill="#182f2b" x="75" y="96" font-size="13" font-weight="600" text-anchor="middle">E4</text>
+<text class="f-text" fill="#182f2b" x="200" y="96" font-size="13" font-weight="600" text-anchor="middle">B8</text>
+<text class="f-text" fill="#182f2b" x="325" y="96" font-size="13" font-weight="600" text-anchor="middle">AD</text>
+<text class="f-muted" fill="#5c6d66" x="75" y="114" font-size="12" text-anchor="middle">inicial: 3 bytes</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="114" font-size="12" text-anchor="middle">continuación</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="114" font-size="12" text-anchor="middle">continuación</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="128" width="380" height="96" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="148" font-size="12" font-family="monospace">0xxxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="148" font-size="12">1 byte: inglés, dígitos</text>
+<text class="f-text" fill="#182f2b" x="20" y="170" font-size="12" font-family="monospace">110xxxxx 10xxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="170" font-size="12">2 bytes: p. ej. é</text>
+<text class="f-text" fill="#182f2b" x="20" y="192" font-size="12" font-family="monospace">1110xxxx 10xxxxxx 10xxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="192" font-size="12">3 bytes: chino habitual</text>
+<text class="f-text" fill="#182f2b" x="20" y="214" font-size="12" font-family="monospace">11110xxx 10xxxxxx ×3</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="214" font-size="12">4 bytes: p. ej. emoji</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="244" font-size="12" text-anchor="middle">Bits marcados = papel; los demás = punto de código</text>
+</svg><figcaption>Figura 23-4　UTF-8 divide <code lang="zh">中</code> en tres bytes, E4 B8 AD. Solo con el primer byte ya sabes cuántos bytes tiene el carácter, así que un decodificador puede saber si un bloque termina con medio carácter.</figcaption></figure>
+</aside>
+<p>El propio Strata tiene que resolver esto, y en un punto más temprano: un token del modelo no siempre es un carácter entero. El <code>Detokenizer</code> de <code>serve/server.py</code> pasa los bytes de cada token a un decodificador UTF-8 incremental. Los caracteres completos salen de inmediato, y el medio carácter que queda partido entre tokens se retiene hasta que los tokens siguientes lo completan. <span class="ev ev-code">Hecho de código</span> Un comentario del código también lleva las cuentas. El método antiguo volvía a decodificar <strong>todos</strong> los IDs generados por cada token nuevo. Eso costaba 2 milisegundos extra por token cuando la respuesta llegaba a 8K tokens y 4 milisegundos a 16K. La decodificación incremental cuesta una cantidad constante por token.</p>
+<p>Cuando el servidor ya escribió los bytes, el cliente tiene que resolver el mismo problema otra vez, con una capa más encima: los eventos también se cortan. El cortador de abajo parte un flujo SSE de 126 bytes en bloques aleatorios y deja que dos clientes lo reciban lado a lado:</p>
+<div class="viz" data-viz="sse-chunk-split"><figure class="fig"><svg viewBox="0 0 400 256" role="img" aria-label="Figura 23-5: los tres bytes de un carácter chino quedan cortados entre dos bloques. Un cliente descuidado decodifica cada bloque por separado y obtiene basura; un cliente correcto retiene E4 y decodifica el carácter cuando llegan los tres bytes">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">Un carácter, <tspan lang="zh">你</tspan>, cortado entre dos bloques</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="70" y="34" width="38" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="89" y="54" font-size="13" text-anchor="middle">"</text>
+<rect class="f-warn" fill="#9e5d24" x="112" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="54" font-size="13" text-anchor="middle">E4</text>
+<rect class="f-accent" fill="#136d5a" x="168" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="187" y="54" font-size="13" text-anchor="middle">BD</text>
+<rect class="f-accent" fill="#136d5a" x="210" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="229" y="54" font-size="13" text-anchor="middle">A0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="252" y="34" width="38" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="54" font-size="13" text-anchor="middle">…</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="3 3" d="M159 28V72"/>
+<text class="f-muted" fill="#5c6d66" x="100" y="86" font-size="12" text-anchor="middle">fin del bloque 3</text>
+<text class="f-muted" fill="#5c6d66" x="240" y="86" font-size="12" text-anchor="middle">inicio del bloque 4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="100" width="185" height="116" rx="8"/>
+<text class="f-text" fill="#182f2b" x="20" y="122" font-size="13" font-weight="600">Cliente descuidado</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="12">Bloque 3 solo: E4 → �</text>
+<text class="f-text" fill="#182f2b" x="20" y="168" font-size="12">Bloque 4: BD A0 → ��</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="190" font-size="12"><tspan lang="zh">你</tspan> se pierde</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="208" font-size="12">para siempre</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="100" width="185" height="116" rx="8"/>
+<text class="f-text" fill="#182f2b" x="215" y="122" font-size="13" font-weight="600">Cliente correcto</text>
+<text class="f-text" fill="#182f2b" x="215" y="146" font-size="12">Bloque 3: retiene E4</text>
+<text class="f-text" fill="#182f2b" x="215" y="168" font-size="12">Bloque 4: E4 BD A0 → <tspan lang="zh">你</tspan></text>
+<text class="f-text" fill="#182f2b" x="215" y="190" font-size="12">¿Línea en blanco? Recién</text>
+<text class="f-text" fill="#182f2b" x="215" y="208" font-size="12">entonces, el JSON</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="244" font-size="12" text-anchor="middle">Interactivo: avanza por los 126 bytes bloque a bloque</text>
+</svg><figcaption>Figura 23-5　Los límites de los bloques ignoran los límites de los caracteres. Si decodificas cada bloque por separado, medio carácter se vuelve basura que ya no se puede recomponer. Un decodificador incremental retiene los bytes incompletos y emite el carácter solo cuando está entero. (El carácter es <code lang="zh">你</code>, «tú», con bytes E4 BD A0.)</figcaption></figure></div>
+<p>Juega unas cuantas rondas y verás que el cliente descuidado no solo pierde caracteres. También tira a la basura los eventos que quedaron cortados, tratándolos como datos malos. Y falla distinto cada vez. Los errores que aparecen y desaparecen así son los más difíciles de rastrear.</p>
+
+<h2 id="sec-4">23.4 JSON: lo que lleva un evento es estructura</h2>
+<p>SSE solo recorta los eventos y no le importa lo que llevan dentro. Detrás de <code>data:</code>, Strata pone un trozo de JSON.</p>
+<aside class="primer" id="c23-json">
+<h3>JSON: un formato de datos que leen tanto personas como programas</h3>
+<p><dfn>JSON</dfn> describe datos estructurados con muy pocas reglas. Las llaves <code>{}</code> contienen un conjunto de pares «nombre: valor», los corchetes <code>[]</code> contienen una lista, y un valor puede ser una cadena, un número, <code>true</code>/<code>false</code>, <code>null</code> u otro nivel anidado. Por ejemplo, <code>{"delta":{"content":"hola"}}</code> significa: el content dentro de delta es «hola».</p>
+<p>Analizar JSON tiene un requisito estricto: <strong>el texto debe estar completo</strong>. Si falta una llave de cierre o media comilla, el analizador da error. Por eso primero se recorta un evento completo en la línea en blanco y solo después se analiza.</p>
+<p>Un carácter no ASCII dentro de una cadena JSON se puede escribir de dos formas: como bytes UTF-8 directos o como un escape del tipo <code>\u4e2d</code>. Las dos significan lo mismo, pero el número de bytes es distinto. Mira la figura 23-6.</p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/JSON" target="_blank" rel="noopener noreferrer">Wikipedia: JSON</a> · <a href="https://developer.mozilla.org/es/docs/Web/JavaScript/Reference/Global_Objects/JSON" target="_blank" rel="noopener noreferrer">MDN: JSON</a> · <a href="https://docs.python.org/es/3/library/json.html" target="_blank" rel="noopener noreferrer">Documentación de Python: json (incluye ensure_ascii)</a> · <a href="https://www.rfc-editor.org/rfc/rfc8259" target="_blank" rel="noopener noreferrer">RFC 8259</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="Figura 23-6: los mismos dos caracteres chinos ocupan 18 bytes escritos como UTF-8 directo y 24 bytes escritos como escapes \u; 100 caracteres chinos ocupan 300 y 600 bytes">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">Dos formas de escribir el mismo JSON</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="32" width="380" height="28" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="51" font-size="12" font-family="monospace" lang="zh">{"delta":"中文"}</text>
+<text class="f-text" fill="#182f2b" x="380" y="51" font-size="12" text-anchor="end">18 bytes</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="68" width="380" height="28" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="87" font-size="12" font-family="monospace">{"delta":"\u4e2d\u6587"}</text>
+<text class="f-text" fill="#182f2b" x="380" y="87" font-size="12" text-anchor="end">24 bytes</text>
+<text class="f-text" fill="#182f2b" x="10" y="124" font-size="12" font-weight="600">Respuesta de 100 caracteres chinos, solo texto:</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="134" width="100" height="16"/>
+<text class="f-text" fill="#182f2b" x="118" y="147" font-size="12">UTF-8 directo: 300 bytes</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="160" width="200" height="16"/>
+<text class="f-text" fill="#182f2b" x="218" y="173" font-size="12">Con escape: 600 bytes</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="202" font-size="12">Por carácter: 3 bytes directos, 6 con escape \uXXXX</text>
+</svg><figcaption>Figura 23-6　Los eventos de streaming de Strata usan <code>ensure_ascii=False</code> y escriben UTF-8 directo, así que el texto chino ocupa la mitad de bytes que en la forma con escapes. El precio: la red puede cortar los bytes de un mismo carácter, y el cliente debe decodificar de forma incremental. (<code lang="zh">中文</code> significa «chino».)</figcaption></figure>
+<p>Cuando Strata escribe un evento de streaming, llama a <code>json.dumps(c, ensure_ascii=False)</code>, así que el chino sale en UTF-8 directo. <span class="ev ev-code">Hecho de código</span> Si pasara a usar escapes, el cable llevaría solo bytes ASCII y ya no habría «medios caracteres». Pero el texto chino duplicaría su tamaño, el estándar SSE ya exige decodificar como UTF-8 y los eventos seguirían pudiendo cortarse. Por eso lo correcto es que el cliente decodifique de forma incremental con honestidad, y no esquivar el problema con escapes.</p>
+<p>Encadena las tres puertas y el orden no puede cambiar:</p>
+<ol>
+<li><strong>Bytes → caracteres</strong>: decodificación UTF-8 incremental, reteniendo los bytes incompletos;</li>
+<li><strong>Caracteres → eventos</strong>: reúne el texto en un búfer, recorta un evento completo solo en una línea en blanco y descarta los comentarios;</li>
+<li><strong>Eventos → estructura</strong>: analiza como JSON el <code>data</code> completo y extrae el texto.</li>
+</ol>
+<p class="bridge"><strong>Si estudiaste informática:</strong> sigue la misma idea que el flujo «flujo de caracteres → analizador léxico → analizador sintáctico» de Compiladores. Cada etapa trabaja solo cuando la anterior le entrega una <strong>unidad completa</strong>. TCP solo garantiza el orden de los bytes, nunca que esté completa ninguna unidad de un nivel superior.</p>
+
+<h2 id="sec-5">23.5 La salida del modelo también se «reúne antes de enviarla»</h2>
+<p>El mismo problema aparece otra vez dentro del servidor. Este modelo «piensa» antes de responder. Su pensamiento va entre <code>&lt;think&gt;</code> y <code>&lt;/think&gt;</code>. Cuando necesita una herramienta, escribe etiquetas como <code>&lt;tool_call&gt;&lt;function=nombre&gt;&lt;parameter=param&gt;valor&lt;/parameter&gt;…</code>. Esas etiquetas son para programas y nunca deberían aparecer en tu pantalla.</p>
+<p>El problema es que las etiquetas también pueden quedar cortadas: un paso emite <code>&lt;/th</code> y solo el siguiente emite <code>ink&gt;</code>. El <code>OutputParser</code> de <code>frontend.py</code> existe justo para esto: retiene una etiqueta cortada hasta que está completa y entonces la procesa. Así, el cliente nunca ve etiquetas a medias como <code>&lt;tool_</code> o <code>&lt;/thi</code>. <span class="ev ev-code">Hecho de código</span>[S16]</p>
+<div class="viz" data-viz="think-tag-holdback"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="Figura 23-7: dos fragmentos de la salida del modelo cortan por la mitad la etiqueta de fin de pensamiento. El parser retiene la primera mitad, reconoce la etiqueta completa cuando llega el siguiente fragmento y pone el texto que sigue en la respuesta">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Dos fragmentos que el modelo emite seguidos</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="180" height="30" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="46" font-size="13">Pienso. <tspan class="f-warn" fill="#9e5d24">&lt;/th</tspan></text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="26" width="180" height="30" rx="5"/>
+<text class="f-text" fill="#182f2b" x="220" y="46" font-size="13"><tspan class="f-warn" fill="#9e5d24">ink&gt;</tspan>Claro, </text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 60V78"/>
+<rect class="f-soft" fill="#e5f1df" x="20" y="80" width="360" height="30" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="100" font-size="13" font-weight="600" text-anchor="middle">Parser: retiene un posible inicio de etiqueta</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 110V126"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="128" width="120" height="58" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="70" y="148" font-size="12" text-anchor="middle">Pensamiento</text>
+<text class="f-text" fill="#182f2b" x="70" y="172" font-size="13" text-anchor="middle">Pienso.</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="128" width="120" height="58" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="148" font-size="12" text-anchor="middle">Retenido</text>
+<text class="f-warn" fill="#9e5d24" x="200" y="172" font-size="13" text-anchor="middle">&lt;/th</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="128" width="120" height="58" rx="6"/>
+<text class="f-on" fill="#ffffff" x="330" y="148" font-size="12" text-anchor="middle">Respuesta</text>
+<text class="f-on" fill="#ffffff" x="330" y="172" font-size="13" text-anchor="middle">Claro,</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="210" font-size="12" text-anchor="middle">Juntos forman un &lt;/think&gt; completo:</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="228" font-size="12" text-anchor="middle">lo que sigue ya es la respuesta</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="246" font-size="12" text-anchor="middle">Interactivo: envía 6 fragmentos, uno a uno</text>
+</svg><figcaption>Figura 23-7　El parser retiene solo los pocos caracteres que «podrían iniciar una etiqueta» y envía de inmediato todo el demás texto. Así no se filtra ninguna etiqueta a medias y la pantalla no se retrasa.</figcaption></figure></div>
+<p>El <code>OutputParser</code> real hace dos cosas que este componente omite. Primera: informa del progreso de la llamada a la herramienta mientras se escribe. Envía un evento de inicio en cuanto aparece el nombre de la herramienta y los argumentos trozo a trozo, para que el cliente no se quede esperando minutos mientras el modelo escribe un archivo grande. <span class="ev ev-code">Hecho de código</span> Segunda: trata con cuidado los saltos de línea alrededor de las etiquetas, para que la salida en streaming y la salida de una sola vez resulten exactamente iguales.</p>
+<p>Las llamadas a herramientas también tocan la seguridad. Que el modelo escriba el nombre de una función no significa que el sistema permita ejecutarla. La salida del modelo es <strong>entrada no confiable</strong>, y antes de ejecutar nada hay que revisar los argumentos y los permisos. Strata ofrece herramientas MCP solo a las solicitudes que las piden de forma explícita (con <code>"strata_mcp": true</code>). Cualquier otro cliente ve exactamente la misma API de antes. [S15] El capítulo 24 continúa con «quién puede hacer que el modelo haga qué».</p>
+
+<h2 id="sec-6">23.6 Manos a la obra: corta el mismo flujo en cualquier tamaño</h2>
+<p>Abre el laboratorio de este capítulo, «Los bloques de bytes no son eventos». Corta un flujo SSE con texto chino en bloques de tamaño fijo de 1 a 32 bytes y luego lo reconstruye con las tres puertas correctas. Prueba tres cosas, en orden:</p>
+<ol>
+<li>Ve de 1 byte hasta 32 bytes. Con cada tamaño de bloque, el texto reconstruido debe ser exactamente el mismo. Si un solo tamaño da un resultado distinto, el analizador tiene un error.</li>
+<li>Activa los finales de línea CRLF. SSE permite tres tipos de final de línea, y el analizador debe aceptar los tres.</li>
+<li>Vigila el búfer «sin terminar». Cuando el flujo se corta a mitad de un evento, ese medio evento debe quedar pendiente o dar error. No debe hacerse pasar por completo.</li>
+</ol>
+<p>Después vuelve a las dos figuras interactivas de este capítulo y corre el tamaño de bloque en 1 byte y en 64 bytes. Lo verás más directo: cuanto más pequeños los bloques, más evidente es el fallo del método descuidado. Cuanto más grandes, más hondo se esconde el error.</p>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>La capa de servicio de Strata convierte la solicitud JSON de la aplicación en IDs de token, vuelve a convertir en texto los tokens que emite el motor y lo devuelve como flujo de eventos SSE. Entre ella y el motor hay una sola interfaz, <code>Engine.generate</code>.</li>
+<li>Para ir de bytes a texto hay tres puertas: decodificación UTF-8 incremental, corte de eventos en las líneas en blanco y análisis de JSON completo. Los límites de los bloques de red no tienen nada que ver con ninguno de esos tres límites, así que antes de cada puerta hay que reunir una unidad completa.</li>
+<li>Las etiquetas de la salida del modelo también se cortan. El <code>OutputParser</code> de Strata retiene cualquier cola que pueda iniciar una etiqueta y nunca envía media etiqueta. Una llamada a herramienta cuenta solo cuando está totalmente escrita.</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «Si cuentas los eventos SSE, sabes cuántos tokens generó el modelo».</strong></p>
+<p>Las dos cantidades no guardan una relación fija. El primer evento de Strata solo anuncia que «el asistente empieza a hablar» y no lleva ningún token. Mientras se lee un prompt largo aparecen comentarios keep-alive. Cuando un token trae solo medio carácter chino, ese paso no tiene texto que enviar. Y mientras se retiene una etiqueta, puede que un momento no salga nada. Al revés, el texto de un evento puede venir de varios tokens. Para contar tokens, lee el campo <code>usage</code> al final de la respuesta, no cuentes eventos.</p></div>
+
+<details class="deep"><summary>Más a fondo: las reglas exactas de las tres fronteras, qué cubre «compatible» y cómo probarlo</summary>
+<h3>Las tres fronteras, tal como las detalla el estándar</h3>
+<p>Los requisitos del estándar SSE para un analizador se resumen en unas pocas reglas [R05]. El flujo de eventos se decodifica como UTF-8. Una línea puede terminar en CRLF, en un LF suelto o en un CR suelto. Una línea en blanco despacha un evento. Varias líneas <code>data</code> de un mismo evento se unen con LF. Una línea que empieza por dos puntos es un comentario. Y cuando el flujo termina, el medio evento que no acabó con una línea en blanco se descarta.</p>
+<p>De ahí sale el orden de implementación: <strong>decodificación incremental de bytes → acumular texto y enmarcarlo en los límites de evento → analizar la carga de data</strong>. Si llamas a <code>JSON.parse</code> con cada bloque que lees, te muerden tanto los cortes de caracteres como los cortes de eventos. El laboratorio de este libro implementa solo un subconjunto de solo data, admite LF y CRLF, y no implementa la reconexión automática de EventSource ni los campos <code>id</code> y <code>retry</code>, así que no es un cliente SSE completo.</p>
+<h3>Ejemplo resuelto: un carácter chino en tres bloques</h3>
+<p>Los tres bytes de <code lang="zh">中</code>, E4 B8 AD, caen en tres bloques de red. Decodificar cada bloque como texto completo da tres caracteres de sustitución. Un decodificador incremental que lee E4 sabe que aún faltan dos bytes y lo retiene. Tras B8 todavía falta uno. Solo después de AD emite <code lang="zh">中</code>. De la misma forma, los dos saltos de línea que siguen a <code>data: {"delta":"中"}</code> pueden cortarse en cualquier punto: en los dos puntos, en una comilla o entre los dos saltos. El número de bloques de red y el número de tokens no tienen una relación fija.</p>
+<h3>«Compatible con OpenAI» significa un subconjunto de la API</h3>
+<p>«Compatible» hay que leerlo según qué endpoints, qué campos y qué semántica se implementan. Una ruta con pinta de <code>/v1/...</code> no prueba una compatibilidad total. Este libro describe solo los endpoints y fronteras que se listan al principio de <code>serve/server.py</code> [S15] y no ha auditado uno por uno todos los campos del protocolo. Unos detalles que el código fuente confirma: el delta del primer evento es <code>{"role":"assistant","content":""}</code>; el pensamiento va en el campo <code>reasoning_content</code>; y una terminación causada por una cancelación se informa al cliente como <code>stop</code>.</p>
+<h3>¿Y si aparece un error cuando el flujo ya empezó?</h3>
+<p>El código de estado HTTP vive en las cabeceras de la respuesta, y una vez enviadas ya no pueden cambiar. Por eso Strata atrapa antes de que empiece el flujo lo que puede. Si la longitud del prompt más la longitud máxima de salida supera el contexto, rechaza la solicitud con un 400 y nunca trunca en silencio. [S15] Si el motor informa de un error solo después de que empezó el flujo (por ejemplo, el proceso del motor termina de forma inesperada), el estado ya es 200. Entonces Strata escribe en el flujo un evento con un campo <code>error</code> y luego escribe <code>data: [DONE]</code> para cerrar con normalidad. La API de estilo Anthropic escribe en cambio un evento <code>event: error</code>. <span class="ev ev-code">Hecho de código</span> Los clientes deben revisar el contenido de los eventos, no solo el código de estado.</p>
+<h3>El sandbox de plantillas solo cubre la capa de plantillas</h3>
+<p><code>frontend.py</code> renderiza la plantilla de chat con el <code>ImmutableSandboxedEnvironment</code> de Jinja. [S16] Es una defensa concreta de la capa de plantillas que limita lo que puede hacer el código de la plantilla. No demuestra de forma automática que también sea seguro ejecutar herramientas, obtener URLs de imágenes o leer archivos locales. Cada tipo de acceso a recursos necesita su propio modelo de amenazas. Strata tiene una comprobación más para las herramientas MCP: solo la propia página web de Strata (o un origen que la configuración declare de confianza de forma explícita), y enviando JSON, puede dejar que el modelo use esas herramientas, porque las herramientas corren con tus permisos en esta computadora. <span class="ev ev-code">Hecho de código</span></p>
+<h3>Cómo probarlo y los límites de la evidencia</h3>
+<p>Prueba del analizador SSE: corta dos eventos JSON con texto chino en bloques de 1 a 32 bytes y exige que cada tamaño reconstruya exactamente el mismo resultado. Añade como casos de prueba CRLF, data de varias líneas y un último evento truncado. Un evento truncado debe quedar sin terminar o dar error, y nunca fingir éxito.</p>
+<p><code>MockEngine</code> puede verificar las respuestas con y sin streaming, la cancelación, los argumentos de las herramientas y los eventos de cierre ante un error, pero no puede demostrar la calidad ni el rendimiento real de la inferencia en GPU. [S15] Esa es la ventaja de las pruebas por capas, y también el límite de su evidencia.</p>
+</details>

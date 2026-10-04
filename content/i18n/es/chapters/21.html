@@ -1,0 +1,283 @@
+<div class="hook"><span class="eyebrow">Dos tarjetas, pero no el doble de rápido</span>
+<p>El README de Strata tiene una línea sobre esto: dos o tres tarjetas gráficas pueden ejecutar el modelo juntas. <span class="ev ev-report">Informe upstream</span>[S01] La documentación de upstream da un conjunto de mediciones: una RTX 5080 más una RTX 3090 leen prompts largos un 20% más rápido, pero generan respuestas a más o menos la misma velocidad que la 5080 sola.</p>
+<p>Añadiste una tarjeta gráfica entera de 24 GB y las respuestas no se hicieron más rápidas. ¿A dónde se fue el dinero? Este capítulo explica tres cosas: cómo se reparten el trabajo dos tarjetas, por qué un solo token no puede ir más rápido y cuántos datos tienen que viajar de verdad entre las dos tarjetas.</p></div>
+<p class="tldr"><strong>En una línea:</strong> Strata corta las 48 capas en una mitad delantera y una trasera, una por tarjeta. Un token sigue teniendo que pasar por la primera tarjeta y luego por la segunda, así que un solo token no se acelera. Las ganancias reales son que dos tarjetas pueden guardar en caché el doble de expertos, y que al leer un prompt las dos tarjetas trabajan a la vez como un pipeline.</p>
+
+<h2 id="sec-1">21.1 ¿Cómo pueden dos tarjetas repartirse el trabajo?</h2>
+<p>Imagina a dos personas haciendo una mudanza. Una puede cargar el dormitorio mientras la otra carga la sala; las dos pueden levantar juntas el mismo sofá grande; o cada una puede mudar una casa distinta. Las tres cuentan como «dos personas trabajando juntas», pero la cantidad de coordinación es completamente distinta. Con varias GPU pasa igual: hay tres formas habituales de repartir, que muestra la figura 21-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="Figura 21-1: tres formas de repartir el trabajo entre GPU. La división por capas da a cada tarjeta algunas capas, el paralelismo de tensores parte la misma capa, el paralelismo de solicitudes da a cada tarjeta una copia completa del modelo">
+<text class="f-text" fill="#182f2b" x="69" y="18" font-size="13" font-weight="600" text-anchor="middle">Por capas</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="35" font-size="12" text-anchor="middle">pipeline paralelo</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">Por tensores</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="35" font-size="12" text-anchor="middle">divide una capa</text>
+<text class="f-text" fill="#182f2b" x="331" y="18" font-size="13" font-weight="600" text-anchor="middle">Por solicitudes</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="35" font-size="12" text-anchor="middle">paralelo de datos</text>
+<rect class="f-accent" fill="#136d5a" x="14" y="50" width="110" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="69" y="66" font-size="12" text-anchor="middle">GPU A</text>
+<text class="f-on" fill="#ffffff" x="69" y="82" font-size="12" text-anchor="middle">Capas 0–18</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M69 90V104"/>
+<rect class="f-soft" fill="#e5f1df" x="14" y="106" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="69" y="122" font-size="12" text-anchor="middle">GPU B</text>
+<text class="f-text" fill="#182f2b" x="69" y="138" font-size="12" text-anchor="middle">Capas 19–47</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="50" width="110" height="96" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="66" font-size="12" text-anchor="middle">Una capa</text>
+<rect class="f-accent" fill="#136d5a" x="151" y="74" width="47" height="64" rx="4"/>
+<text class="f-on" fill="#ffffff" x="174.5" y="102" font-size="12" text-anchor="middle">A</text>
+<text class="f-on" fill="#ffffff" x="174.5" y="120" font-size="12" text-anchor="middle">izq.</text>
+<rect class="f-soft" fill="#e5f1df" x="202" y="74" width="47" height="64" rx="4"/>
+<text class="f-text" fill="#182f2b" x="225.5" y="102" font-size="12" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="225.5" y="120" font-size="12" text-anchor="middle">der.</text>
+<rect class="f-accent" fill="#136d5a" x="276" y="50" width="110" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="331" y="66" font-size="12" text-anchor="middle">A: solicitud 1</text>
+<text class="f-on" fill="#ffffff" x="331" y="82" font-size="12" text-anchor="middle">modelo completo</text>
+<rect class="f-soft" fill="#e5f1df" x="276" y="106" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="331" y="122" font-size="12" text-anchor="middle">B: solicitud 2</text>
+<text class="f-text" fill="#182f2b" x="331" y="138" font-size="12" text-anchor="middle">modelo completo</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M134.5 8V208M265.5 8V208"/>
+<text class="f-text" fill="#182f2b" x="69" y="168" font-size="12" text-anchor="middle">Cruces: 1/ventana</text>
+<text class="f-text" fill="#182f2b" x="200" y="168" font-size="12" text-anchor="middle">Cruces: 2/capa</text>
+<text class="f-text" fill="#182f2b" x="331" y="168" font-size="12" text-anchor="middle">Cruces: casi 0</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="186" font-size="12" text-anchor="middle">Ahorra VRAM</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="186" font-size="12" text-anchor="middle">Enlace rápido</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="186" font-size="12" text-anchor="middle">Muchos usuarios</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="204" font-size="12" text-anchor="middle">Strata usa esta</text>
+</svg><figcaption>Figura 21-1　Los tres repartos difieren en «con qué frecuencia deben coordinarse las tarjetas». Una división por capas cruza entre tarjetas una sola vez por ventana de verificación; el paralelismo de tensores debe sincronizar en cada capa; el paralelismo de solicitudes casi no necesita hablar, pero cada tarjeta debe guardar el modelo entero.</figcaption></figure>
+<p>Strata usa el primero: una <dfn>división por capas</dfn> (layer split), que corta las capas del modelo en orden en unos pocos segmentos, y cada tarjeta se encarga de un segmento consecutivo. La documentación de upstream lo dice claro: es paralelismo de pipeline (por capas), no paralelismo de tensores; un token pasa de una tarjeta a la siguiente una vez por ventana de verificación, no dos veces por capa. <span class="ev ev-report">Informe upstream</span></p>
+<p>En el código, esto cae en una función llamada <code>set_stage</code>. Cada <dfn>etapa</dfn> (stage; el segmento de capas de una tarjeta) ejecuta solo las capas <code>[layer_begin, layer_end)</code>: una etapa que no empieza en la capa 0 recibe los datos del segmento anterior; una etapa que termina antes de la última capa pasa sus datos y no lleva cabeza de salida. <span class="ev ev-code">Hecho de código</span>[S08]</p>
+<aside class="primer" id="c21-parallelism">
+<h3>Paralelismo de pipeline y paralelismo de tensores</h3>
+<p>Cuando un modelo grande no cabe en una tarjeta, hay dos formas básicas de cortarlo. Córtalo en horizontal, en segmentos de capas, y tienes <dfn>paralelismo de pipeline</dfn>: como una cadena de montaje, cuando la primera estación termina pasa el trabajo a la segunda. Córtalo en vertical, partiendo la gran matriz de una capa en trozos, y tienes <dfn>paralelismo de tensores</dfn>: como dos personas levantando juntas un sofá, deben gritar «uno, dos, tres» en cada paso para mantenerse sincronizadas.</p>
+<p>Los dos cortes pagan sus costos en sitios distintos. Un pipeline pasa datos solo una vez en cada frontera entre segmentos, pero un dato debe terminar el segmento anterior antes de entrar en el siguiente, así que la espera de un único dato no se puede ahorrar. El paralelismo de tensores sí permite que dos tarjetas calculen la misma capa a la vez, pero después de cada capa hay que combinar las dos mitades. En el enfoque clásico de Megatron-LM, el paso hacia adelante de cada capa Transformer hace esta combinación dos veces. Con 48 capas, son 96 veces.</p>
+<p>Hay una tercera forma, el <dfn>paralelismo de datos</dfn> (aquí llamado paralelismo de solicitudes): cada tarjeta guarda una copia completa del modelo y atiende solicitudes distintas. Casi no necesita comunicación entre tarjetas, siempre que una tarjeta pueda guardar el modelo entero.</p>
+<p>El problema de Strata es que «el modelo no cabe en una tarjeta», y las tarjetas gráficas de una computadora doméstica suelen conectarse solo por PCIe, sin un enlace de alta velocidad dedicado. Por eso eligió la división por capas, que necesita la menor comunicación.</p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/Segmentaci%C3%B3n_%28electr%C3%B3nica%29" target="_blank" rel="noopener noreferrer">Wikipedia: Segmentación (electrónica)</a> · <a href="https://es.wikipedia.org/wiki/Computaci%C3%B3n_paralela" target="_blank" rel="noopener noreferrer">Wikipedia: Computación paralela</a> · <a href="https://pytorch.org/docs/stable/distributed.pipelining.html" target="_blank" rel="noopener noreferrer">Documentación de PyTorch: Pipeline Parallelism</a> (en inglés) · <a href="https://huggingface.co/docs/transformers/perf_train_gpu_many" target="_blank" rel="noopener noreferrer">Hugging Face: comparación del paralelismo multi-GPU</a> (en inglés) · <a href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener noreferrer">El artículo de Megatron-LM</a> (en inglés)</p>
+</aside>
+
+<h2 id="sec-2">21.2 Un token sigue teniendo que hacer cola capa por capa</h2>
+<p>Al generar una respuesta, cada token debe viajar de la capa 0 a la capa 47. La capa 19 necesita el resultado de la capa 18, y la capa 18 el de la capa 17. Esta cadena de dependencias no se puede romper. Así que, mientras la primera tarjeta calcula la mitad delantera, la segunda solo puede esperar; mientras la segunda calcula la mitad trasera, la primera está ociosa. Mira la figura 21-2.</p>
+<figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="Figura 21-2: al generar un token, la GPU A calcula las capas delanteras y se las pasa a la GPU B para las traseras; las dos tarjetas se turnan para trabajar y se turnan para esperar">
+<text class="f-muted" fill="#5c6d66" x="8" y="18" font-size="12">Cronología de un token (esquema, de izq. a der.)</text>
+<text class="f-text" fill="#182f2b" x="8" y="56" font-size="12">GPU A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="40" width="330" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="40" width="130" height="24"/>
+<text class="f-on" fill="#ffffff" x="125" y="56" font-size="12" text-anchor="middle">Capas 0–18</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="56" font-size="12" text-anchor="middle">espera</text>
+<text class="f-text" fill="#182f2b" x="8" y="100" font-size="12">GPU B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="84" width="330" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="214" y="84" width="176" height="24"/>
+<text class="f-on" fill="#ffffff" x="302" y="100" font-size="12" text-anchor="middle">Capas 19–47 + cabeza</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="100" font-size="12" text-anchor="middle">espera</text>
+<rect class="f-warn" fill="#9e5d24" x="190" y="68" width="24" height="12"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M190 64L202 68M214 80L214 84"/>
+<text class="f-text" fill="#182f2b" x="60" y="130" font-size="12">Traspaso: 51.216 bytes/token, por la RAM</text>
+<text class="f-text" fill="#182f2b" x="8" y="156" font-size="12" font-weight="600">Mismo token: por A y luego por B, nunca a la vez</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="178" font-size="12">Corte en K = 19 (log de upstream); barras de esquema</text>
+</svg><figcaption>Figura 21-2　Al generar, un token debe terminar las capas de la primera tarjeta antes de entrar en la segunda. Las dos tarjetas se turnan para trabajar y para esperar, así que el tiempo de un solo token no se reduce a la mitad.</figcaption></figure>
+<p>Las mediciones de upstream lo confirman: con una RTX 5080 más una RTX 3090, la velocidad de generación es más o menos la misma que con la 5080 sola, y algo mayor al escribir código. <span class="ev ev-report">Informe upstream</span> (Modelo Coder, contexto de 32K, CPU Ryzen 9 9950X3D; una tarjeta escribe cuentos a 83–87 tokens por segundo y el mejor reparto con dos tarjetas a 84; para código las cifras son 88–105 y 110. La documentación no indica la versión del motor; la carpeta de resultados tiene fecha 2026-09-29.)</p>
+<p>Entonces, ¿para qué sirve la segunda tarjeta? Para la <strong>capacidad</strong>. El capítulo 10 explicó que los expertos que no están en la VRAM van a la CPU, que los calcula en la RAM, despacio. Tras una división por capas, cada tarjeta guarda en caché expertos solo de sus propias capas, así que juntas las dos tarjetas pueden guardar en caché aproximadamente el doble de expertos que una. La documentación de upstream dice que, para el modelo Coder, una tarjeta de 16 GB más una de 24 GB pueden alojar casi todos los expertos, y que «de ahí viene la velocidad»: durante la generación casi no hace falta la CPU. <span class="ev ev-report">Informe upstream</span> La figura 21-3 muestra lo que hay en cada tarjeta.</p>
+<figure class="fig"><svg viewBox="0 0 400 272" role="img" aria-label="Figura 21-3: tras una división por capas, cada tarjeta guarda su propia copia de los pesos densos, su propio estado de sesión, un búfer de prompt y la caché de expertos de sus propias capas; la última tarjeta guarda además la cabeza de salida y la capa de borrador; los expertos de la RAM se guardan una sola vez">
+<text class="f-text" fill="#182f2b" x="102" y="22" font-size="13" font-weight="600" text-anchor="middle">GPU A (principal)</text>
+<text class="f-text" fill="#182f2b" x="297" y="22" font-size="13" font-weight="600" text-anchor="middle">GPU B (la última)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="30" width="185" height="156" rx="8"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="30" width="185" height="156" rx="8"/>
+<rect class="f-soft" fill="#e5f1df" x="20" y="40" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="56" font-size="12" text-anchor="middle">Pesos densos, ~3,4 GB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="68" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="84" font-size="12" text-anchor="middle">Estado propio + KV</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="96" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="112" font-size="12" text-anchor="middle">Búfer prompt, ~1,5 GB</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="124" width="165" height="52" rx="4"/>
+<text class="f-on" fill="#ffffff" x="102.5" y="146" font-size="12" text-anchor="middle">Caché expertos 0–18</text>
+<text class="f-on" fill="#ffffff" x="102.5" y="164" font-size="12" text-anchor="middle">usa toda la VRAM libre</text>
+<rect class="f-soft" fill="#e5f1df" x="215" y="40" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="56" font-size="12" text-anchor="middle">Pesos densos, ~3,4 GB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="68" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="84" font-size="12" text-anchor="middle">Estado propio + KV</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="96" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="112" font-size="12" text-anchor="middle">Búfer prompt, ~1,5 GB</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="215" y="124" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="140" font-size="12" text-anchor="middle">Cabeza+borrador 0,8 GB</text>
+<rect class="f-accent" fill="#136d5a" x="215" y="152" width="165" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="297.5" y="168" font-size="12" text-anchor="middle">Caché expertos 19–47</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M102 186V206M297 186V206"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="206" width="380" height="40" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="223" font-size="12" text-anchor="middle">RAM: una copia de cada experto, para ambas GPU;</text>
+<text class="f-text" fill="#182f2b" x="200" y="239" font-size="12" text-anchor="middle">la CPU calcula los que ninguna GPU tiene</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="264" font-size="12" text-anchor="middle">Tamaños de upstream (Coder); chunks de 2.048 tokens</text>
+</svg><figcaption>Figura 21-3　Cada tarjeta guarda su propia copia de los pesos densos, pero cada una guarda en caché expertos solo de sus propias capas. Lo que compra sobre todo la división por capas es «el doble de expertos cacheables».</figcaption></figure>
+<p>Ojo al costo: cada tarjeta necesita su propia copia de los pesos densos, además de su propio estado de sesión y su propio búfer de prompt. Por eso upstream desaconseja incorporar tarjetas con menos de 8 GB de VRAM. <span class="ev ev-report">Informe upstream</span></p>
+
+<h2 id="sec-3">21.3 Al leer el prompt es cuando el pipeline empieza a girar</h2>
+<p>Leer un prompt es otra historia. Un prompt largo se conoce por completo antes de empezar a leerlo, y Strata lo corta en muchos <dfn>chunks</dfn> y los lee uno a uno (el capítulo 16 trató la división en chunks). Ahora las dos tarjetas pueden escalonarse: mientras la segunda tarjeta lee el chunk c, la primera ya está leyendo el chunk c+1. El comentario de la interfaz de prefill dice exactamente esto: una etapa que no es la última copia sus datos en <strong>dos</strong> búferes de memoria fijada (pinned) y lanza la etapa siguiente en otro hilo, «para que la etapa siguiente lea el chunk c mientras esta etapa lee el chunk c+1». <span class="ev ev-code">Hecho de código</span>[S12]</p>
+<p>La colada es una buena analogía. La lavadora tarda 4 minutos por carga y la secadora 5 minutos por carga. Con una sola carga, necesitas 9 minutos pase lo que pase. Con 8 cargas, la segunda carga entra en la lavadora en cuanto la primera entra en la secadora. La secadora marca el ritmo: sale una carga cada 5 minutos. El total son los primeros 4 minutos más 8 pasadas de secadora de 40 minutos, 44 minutos en total. Hacerlo todo una tras otra tomaría 8 × 9 = 72 minutos.</p>
+<p>El tramo del principio en que «la secadora espera la primera carga» y el tramo del final en que «a la lavadora no le queda nada por lavar» se llaman <dfn>burbujas</dfn>: momentos en que una estación del pipeline está ociosa. El simulador siguiente dibuja las dos tarjetas como una línea de tiempo. Cambia el tiempo de cada segmento, el número de chunks y el tiempo de transferencia, y mira dónde están las burbujas:</p>
+<div class="viz" data-viz="layer-pipeline"><figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="Figura 21-4: línea de tiempo de un pipeline de dos tarjetas. Con a en 4 milisegundos, b en 5 milisegundos y 4 chunks, tarda 24 milisegundos, con tramos ociosos al principio y al final">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="12">4 chunks: A 4 ms c/u, B 5 ms c/u, sin traspaso</text>
+<text class="f-text" fill="#182f2b" x="8" y="55" font-size="12">GPU A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="36" width="324" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="114" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="181.5" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="249" y="37" width="52.5" height="26"/>
+<text class="f-on" fill="#ffffff" x="86" y="55" font-size="12" text-anchor="middle">1</text>
+<text class="f-on" fill="#ffffff" x="140" y="55" font-size="12" text-anchor="middle">2</text>
+<text class="f-on" fill="#ffffff" x="207.5" y="55" font-size="12" text-anchor="middle">3</text>
+<text class="f-on" fill="#ffffff" x="275" y="55" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="343" y="55" font-size="12" text-anchor="middle">espera</text>
+<text class="f-text" fill="#182f2b" x="8" y="103" font-size="12">GPU B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="84" width="324" height="28"/>
+<text class="f-muted" fill="#5c6d66" x="87" y="103" font-size="12" text-anchor="middle">espera</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="114" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="181.5" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="249" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="316.5" y="85" width="66" height="26"/>
+<text class="f-text" fill="#182f2b" x="147" y="103" font-size="12" text-anchor="middle">1</text>
+<text class="f-text" fill="#182f2b" x="214.5" y="103" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="282" y="103" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="349.5" y="103" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="60" y="130" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="114" y="130" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="181.5" y="130" font-size="12" text-anchor="middle">9</text>
+<text class="f-muted" fill="#5c6d66" x="249" y="130" font-size="12" text-anchor="middle">14</text>
+<text class="f-muted" fill="#5c6d66" x="316.5" y="130" font-size="12" text-anchor="middle">19</text>
+<text class="f-muted" fill="#5c6d66" x="384" y="130" font-size="12" text-anchor="end">24 ms</text>
+<text class="f-text" fill="#182f2b" x="60" y="152" font-size="12">Llenado: B espera</text>
+<text class="f-text" fill="#182f2b" x="384" y="152" font-size="12" text-anchor="end">Vaciado: A acabó</text>
+<text class="f-text" fill="#182f2b" x="10" y="178" font-size="12">4 chunks: 24 ms = 5 × 4 + 4; en serie: 4 × 9 = 36 ms</text>
+</svg><figcaption>Figura 21-4　La tarjeta más lenta marca el ritmo: un chunk cada 5 milisegundos. Tiempo total = a + b + (N − 1) × max(a, b). Cuantos más chunks, menor es la parte que ocupan las burbujas del principio y del final.</figcaption></figure></div>
+<p>Comprueba la conclusión del simulador con las mediciones de upstream: con la misma 5080 más 3090, leer un prompt de 16K pasa de 1.726–2.017 tokens por segundo con una tarjeta a 2.039, y un prompt de 28K de 1.970 a 2.357. La documentación lo explica como «cada tarjeta lee sus propias capas mientras la otra lee el chunk siguiente», una aceleración de aproximadamente un 18%–20%. <span class="ev ev-report">Informe upstream</span> (Mismas condiciones que la sección anterior.)</p>
+<p class="bridge"><strong>Si estudiaste informática:</strong> es lo mismo que el pipeline de instrucciones de organización de computadoras. Un pipeline de 5 etapas no hace más rápida una sola instrucción; hace que termine una instrucción por ciclo. El throughput lo fija la etapa más lenta, y el llenado del principio y las paradas por dependencias son las burbujas. En una división por capas, una «etapa» es un segmento de capas y una «instrucción» es un chunk de prompt.</p>
+
+<h2 id="sec-4">21.4 ¿Qué tamaño tiene el paquete y qué ancho tiene la carretera?</h2>
+<p>¿Qué pasa exactamente entre las dos tarjetas en un traspaso? Intuitivamente, lo que fluye de capa en capa para un token es un vector de 2.560 dimensiones, es decir, 2.560 números. El traspaso de Strata es mayor. <code>verify.hpp</code> especifica que el búfer de traspaso guarda tres cosas por token: el residual R (hc × n_embd números), un vector que la capa anterior aún no ha escrito de vuelta (n_embd números) y hc coeficientes de inyección. <span class="ev ev-code">Hecho de código</span>[S08] Metamos la geometría del modelo hc = 4 y n_embd = 2560 [S04]:</p>
+<div class="equation">4 × 2560 + 2560 + 4 = 12.804 floats = 51.216 bytes / token</div>
+<p>¿Por qué no pasar simplemente 2.560 números? Porque el residual de este modelo son en sí 4 vectores de 2.560 dimensiones, y una escritura de vuelta de la última capa se aplaza al comienzo de la capa siguiente. Para que la etapa siguiente continúe «como si nada se hubiera dividido», necesita todo. Un comentario del código dice que esta división es <strong>exacta bit a bit</strong>: dividido o no, los números calculados son exactamente los mismos. <span class="ev ev-code">Hecho de código</span>[S08]</p>
+<p>Al leer un prompt, el traspaso lleva la parte del residual: 4 × 2560 floats por token, 40.960 bytes. Un chunk contiene 2.048 tokens por defecto, así que son 2.048 × 40.960 = 83.886.080 bytes, unos 84 MB. <span class="ev ev-code">Hecho de código</span> (<code>src/prefill/prefill.cpp</code>) <span class="ev ev-est">Estimación didáctica</span> Al generar, la documentación dice que hay un traspaso por ventana de verificación, «unos cientos de KB, retransmitidos por memoria fijada». <span class="ev ev-report">Informe upstream</span> A 51.216 bytes por token, una ventana de 5 tokens son unos 256 KB, lo que concuerda.</p>
+<p>Ahora que sabemos el tamaño del paquete, necesitamos el ancho de la carretera. El recuadro siguiente trata las carreteras entre dos tarjetas.</p>
+<aside class="primer" id="c21-interconnect">
+<h3>Ancho de banda de interconexión: PCIe y NVLink</h3>
+<p>Una tarjeta gráfica se enchufa en una ranura <dfn>PCIe</dfn> de la placa base. PCIe es un bus serie hecho de varios <dfn>carriles</dfn> (lanes) en paralelo, como una autopista con varios carriles: «×16» significa 16 carriles y «×4» significa 4. Cada generación de PCIe duplica la velocidad de un solo carril.</p>
+<p>En el pico teórico, por sentido: PCIe 3.0 ×16 son unos 15,8 GB/s, PCIe 4.0 ×16 unos 31,5 GB/s y PCIe 5.0 ×16 unos 63 GB/s. En una ranura ×4 obtienes solo una cuarta parte.</p>
+<p><dfn>NVLink</dfn> es el enlace dedicado de alta velocidad de NVIDIA entre tarjetas gráficas. Un H100 de centro de datos tiene 18 enlaces NVLink 4.0, 900 GB/s en los dos sentidos combinados, unos 450 GB/s por sentido: más de diez veces PCIe 4.0 ×16. Las configuraciones domésticas de dos GPU normalmente no lo tienen y deben ir por PCIe. La figura 21-5 compara estas carreteras.</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="Figura 21-5: ancho de banda teórico por sentido de interconexiones comunes. PCIe 4.0 ×4 unos 7,9, PCIe 3.0 ×16 unos 15,8, PCIe 4.0 ×16 unos 31,5, PCIe 5.0 ×16 unos 63, NVLink 4.0 unos 450 GB/s">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Pico teórico por sentido, GB/s (barras a escala)</text>
+<text class="f-text" fill="#182f2b" x="10" y="46" font-size="12">PCIe 4.0 ×4</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="34" width="3.9" height="16"/>
+<text class="f-text" fill="#182f2b" x="130" y="47" font-size="12">7,9</text>
+<text class="f-text" fill="#182f2b" x="10" y="76" font-size="12">PCIe 3.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="64" width="7.7" height="16"/>
+<text class="f-text" fill="#182f2b" x="134" y="77" font-size="12">15,8</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="12">PCIe 4.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="94" width="15.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="142" y="107" font-size="12">31,5</text>
+<text class="f-text" fill="#182f2b" x="10" y="136" font-size="12">PCIe 5.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="124" width="30.8" height="16"/>
+<text class="f-text" fill="#182f2b" x="157" y="137" font-size="12">63</text>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="12">NVLink 4.0</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="154" width="220" height="16"/>
+<text class="f-text" fill="#182f2b" x="346" y="167" font-size="12">450</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="198" font-size="12">NVLink 4.0: 18 enlaces en un H100; en casa, PCIe</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">Cada generación de PCIe duplica; ×16 = 16 carriles</text>
+</svg><figcaption>Figura 21-5　Las carreteras de una placa base doméstica son mucho más estrechas. El paralelismo de tensores debe sincronizar en cada capa y sufre mucho sin un enlace rápido como NVLink; una división por capas hace un solo traspaso entre segmentos, y PCIe sobra.</figcaption></figure>
+<p>Además del ancho de banda está la <dfn>latencia</dfn>: hasta un solo byte paga una sobrecarga fija de arranque y sincronización. Envía un paquete grande y pagas la latencia una vez; envía 96 paquetes pequeños y la pagas 96 veces. El capítulo 5 trata en detalle el ancho de banda y la latencia, y el recuadro <a href="#chapter/01/c01-memory-hierarchy">«La jerarquía de memoria»</a> del capítulo 1 compara el ancho de banda de cada nivel.</p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/PCI_Express" target="_blank" rel="noopener noreferrer">Wikipedia: PCI Express</a> · <a href="https://es.wikipedia.org/wiki/NVLink" target="_blank" rel="noopener noreferrer">Wikipedia: NVLink</a> · <a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/overview.html" target="_blank" rel="noopener noreferrer">Documentación de NVIDIA NCCL: visión general de la comunicación multi-GPU</a> (en inglés)</p>
+</aside>
+<p>Ahora junta el paquete y la carretera. La calculadora siguiente compara el costo de comunicación de los dos repartos en distintos enlaces. La fila del paralelismo de tensores es una comparación hipotética; Strata no hace esto:</p>
+<div class="viz" data-viz="link-budget"><figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="Figura 21-6: en PCIe 4.0 ×16, la división por capas traspasa en unos 36 microsegundos por ventana y una división hipotética por tensores toma unos 1116 microsegundos; traspasar un chunk de prompt toma unos 5,3 milisegundos">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">PCIe 4.0 ×16, 10 µs por cruce, ventana de 5 tokens</text>
+<text class="f-text" fill="#182f2b" x="10" y="50" font-size="12">Por capas</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="38" width="7.5" height="16"/>
+<text class="f-text" fill="#182f2b" x="134" y="51" font-size="12">unos 36 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="70" font-size="12">2 × (10 µs + 256 KB ÷ 31,5 GB/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="100" font-size="12">Tensor paralelo</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="88" width="230" height="16"/>
+<text class="f-on" fill="#ffffff" x="344" y="101" font-size="12" text-anchor="end">unos 1.116 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="120" font-size="12">Hipótesis: 96 × (10 µs + 51 KB ÷ 31,5 GB/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="150" font-size="12">Traspaso de un chunk (2.048 tokens): ~5,3 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="170" font-size="12">Leer ese chunk toma ~1 s (upstream ~2.000 tokens/s)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="12">Latencia supuesta; tensor paralelo: solo comparación</text>
+</svg><figcaption>Figura 21-6　El costo de comunicación de la división por capas es tan pequeño que puede ignorarse; el costo del paralelismo de tensores viene sobre todo del número de sincronizaciones, con la latencia fija multiplicada por 96.</figcaption></figure></div>
+<p>Todas las fórmulas están en la figura. <span class="ev ev-est">Estimación didáctica</span> Dos conclusiones. Primera, durante la generación, el traspaso por ventana de la división por capas toma solo decenas de microsegundos; a los ~84 tokens por segundo medidos por upstream, un token toma unos 12 milisegundos, así que el traspaso es menos del 1% de eso. Segunda, al leer un prompt, traspasar un chunk de 84 MB toma unos 5,3 milisegundos de ida y vuelta en PCIe 4.0 ×16, mientras que leer ese chunk toma casi 1 segundo. Eso es lo que permite a la documentación de upstream decir «no hace falta NVLink, no hace falta acceso directo GPU a GPU, y funciona incluso en ranuras ×4 o ×1». <span class="ev ev-report">Informe upstream</span></p>
+
+<h2 id="sec-5">21.5 Cada tarjeta se ocupa solo de sus capas</h2>
+<p>Tras dividir las capas, cada tarjeta sigue necesitando su propia «memoria»: la caché KV o el estado recurrente de cada capa. El primer enfoque hacía que cada etapa asignara estado para las 48 capas, aunque ejecutara solo un segmento. Un comentario de <code>session.hpp</code> lo llama «el viejo problema del búfer del tamaño del modelo entero». Ahora cada sesión es dueña solo del estado de las capas <code>[layer_lo, layer_hi)</code>. <span class="ev ev-code">Hecho de código</span>[S13]</p>
+<p>Aquí hay un detalle fácil de pasar por alto. Las capas del código siguen numeradas por su índice <strong>global</strong>, pero los arreglos guardan solo las filas de este segmento. Así que, para obtener el estado de la g-ésima capa GDN, primero restas el índice de la primera capa GDN del segmento, <code>gdn_ord0</code>. Si te equivocas en la resta, lees el estado de otra capa, sin que se informe de ningún error. Si un segmento no tiene ninguna capa QSA, el código igualmente asigna un estado QSA «principal», porque de ahí se leen cosas compartidas de todo el modelo, como la tabla de incrustaciones de posición rotatoria. <span class="ev ev-code">Hecho de código</span>[S13]</p>
+<p>Dónde cortar también importa. La función que calcula cuántos bytes ocupa un segmento de capas, <code>session_bytes</code>, es aritmética pura, así que puede «dar un precio» a un reparto candidato antes de asignar memoria alguna. <span class="ev ev-code">Hecho de código</span>[S13] La documentación de upstream dice que el modo auto por defecto prueba todos los repartos para dos o tres tarjetas y elige el que permite a las cachés de las tarjetas alojar más «expertos calientes». El log de arranque imprime la elección, por ejemplo «K = 19, la caché aloja 11.767 de 12.288 entradas del perfil». <span class="ev ev-report">Informe upstream</span></p>
+<p>Por último, guardar. El capítulo 20 trató las instantáneas de sesión. Mientras se lee un prompt, la primera tarjeta suele ir un chunk o más por delante de la segunda. Si simplemente unes los estados de las dos tarjetas en un momento dado, obtienes un monstruo con «la mitad delantera en el chunk 3 y la trasera en el chunk 2». Mira la figura 21-7.</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="Figura 21-7: al leer un prompt, la GPU A va un chunk por delante de la GPU B. Unir los estados actuales de las dos tarjetas da un guardado incoherente; lo correcto es que cada tarjeta guarde su parte cuando termina el mismo chunk">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="12">Progreso de las dos GPU en un instante</text>
+<text class="f-text" fill="#182f2b" x="8" y="48" font-size="12">GPU A</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="30" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="140" y="30" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="216" y="30" width="70" height="26" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="292" y="30" width="70" height="26" rx="3"/>
+<text class="f-on" fill="#ffffff" x="99" y="48" font-size="12" text-anchor="middle">Chunk 1</text>
+<text class="f-on" fill="#ffffff" x="175" y="48" font-size="12" text-anchor="middle">Chunk 2</text>
+<text class="f-on" fill="#ffffff" x="251" y="48" font-size="12" text-anchor="middle">Chunk 3</text>
+<text class="f-text" fill="#182f2b" x="327" y="48" font-size="12" text-anchor="middle">Chunk 4</text>
+<text class="f-text" fill="#182f2b" x="8" y="92" font-size="12">GPU B</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="74" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="140" y="74" width="70" height="26" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="216" y="74" width="70" height="26" rx="3"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="292" y="74" width="70" height="26" rx="3"/>
+<text class="f-on" fill="#ffffff" x="99" y="92" font-size="12" text-anchor="middle">Chunk 1</text>
+<text class="f-on" fill="#ffffff" x="175" y="92" font-size="12" text-anchor="middle">Chunk 2</text>
+<text class="f-text" fill="#182f2b" x="251" y="92" font-size="12" text-anchor="middle">Chunk 3</text>
+<text class="f-muted" fill="#5c6d66" x="327" y="92" font-size="12" text-anchor="middle">Chunk 4</text>
+<text class="f-warn" fill="#9e5d24" x="8" y="128" font-size="12">Mal: unir ahora mezcla A en el chunk 3 y B en el 2</text>
+<text class="f-text" fill="#182f2b" x="8" y="152" font-size="12">Bien: cada GPU guarda su parte tras el mismo chunk</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="172" font-size="12">Strata toma el estado aquí con on_stage_chunk</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="192" font-size="12">Oscuro = hecho; claro = leyendo; vacío = pendiente</text>
+</svg><figcaption>Figura 21-7　El progreso de las dos tarjetas está desfasado. Un guardado debe alinearse con el final del mismo chunk, y cada tarjeta guarda su parte cuando termina ese chunk; no puedes unir el «estado actual» de ambos lados en un momento dado.</figcaption></figure>
+<p>Strata da a cada etapa un callback, <code>on_stage_chunk</code>, al que se llama cuando una tarjeta termina un chunk y su propio estado está justo al final de ese chunk. El comentario señala que, para cuando la última etapa informa, las etapas anteriores «ya van un chunk o más por delante», así que un guardado a mitad de un prompt debe tomar aquí la parte de cada etapa. <span class="ev ev-code">Hecho de código</span>[S12]</p>
+
+<h2 id="sec-6">21.6 Manos a la obra: encuentra las burbujas y piensa si conviene añadir una tarjeta</h2>
+<p>Este capítulo no tiene una página de laboratorio aparte; las dos figuras interactivas son el banco de trabajo. Prueba esto:</p>
+<ol>
+<li>En «pipeline de dos tarjetas», fija a = 4 y b = 5, arrastra el número de chunks de 1 a 8, anota cada total y comprueba 5N + 4. Luego pon el tiempo de transferencia en 1 ms y mira «un solo token»: verás por qué dos tarjetas acaban siendo más lentas que una.</li>
+<li>Haz a y b muy desiguales (digamos 2 y 8) y mira cuánto tiempo está ociosa la tarjeta rápida. Por eso upstream aconseja «poner primero la tarjeta más rápida y dejar que el reparto automático asigne capas según la capacidad de caché». <span class="ev ev-report">Informe upstream</span></li>
+<li>En «cuánto tarda un traspaso», cambia de enlace y modifica la latencia, y mira si la diferencia entre el paralelismo de tensores y la división por capas viene sobre todo de los bytes o del número de cruces.</li>
+</ol>
+<p>La documentación de upstream también da algunas lecciones prácticas que puedes entender mediante las conclusiones del simulador. <span class="ev ev-report">Informe upstream</span></p>
+<ul>
+<li><strong>No añadas una tarjeta mucho más lenta solo para sumar números.</strong> Añadir una RTX 2080 Ti a la 5080 más 3090 hizo bajar la generación a 68 (cuentos) y 90 (código) tokens por segundo. Cada tarjeta extra añade otra ronda de traspaso y espera a cada ventana.</li>
+<li><strong>Si una tarjeta puede alojarlo, no dividas.</strong> La versión 0.1.31 añadió un interruptor opcional: cuando la primera tarjeta puede alojar todos los expertos del perfil y el contexto, usa solo esa tarjeta. Al ejecutar el modelo Coder en una R9700 de 32 GB más una RX 9070 XT, activarlo subió un prompt de 4K de 1.244 a 1.776 tokens por segundo y la generación de unos 51 a unos 60; un prompt de 16K se hizo un 5% más lento.</li>
+<li><strong>Las tarjetas viejas no son compatibles.</strong> Cada tarjeta necesita capacidad de cómputo 7.5 o superior (serie RTX 20 y posteriores).</li>
+</ul>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>Hay tres formas de repartir entre tarjetas: división por capas (paralelismo de pipeline), paralelismo de tensores y paralelismo de solicitudes. Strata usa la división por capas porque necesita la menor comunicación entre tarjetas, y el PCIe doméstico basta.</li>
+<li>Las capas de un token deben calcularse una tras otra, así que una división por capas no lo acelera. Dos tarjetas aportan el doble de expertos cacheables y un trabajo escalonado al leer prompts: tiempo total = a + b + (N − 1) × max(a, b).</li>
+<li>El traspaso lleva el estado matemático completo: 51.216 bytes por token al generar, unos 84 MB por chunk al leer un prompt. Pocos bytes, pocos cruces, así que el costo de comunicación es pequeño; los guardados deben alinearse con el momento en que cada tarjeta termina el mismo chunk.</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «Enchufa dos tarjetas gráficas y la generación va el doble de rápido».</strong></p>
+<p>Las capas de un token dependen unas de otras en orden, así que las dos tarjetas solo pueden turnarse. En las mediciones de upstream, una 5080 más una 3090 genera a más o menos la misma velocidad que la 5080 sola, y añadir una 2080 Ti la hace más lenta. Cuando dos tarjetas aceleran algo, es porque la VRAM extra deja que la CPU calcule menos expertos y porque los prompts largos se leen como un pipeline, no porque «el cómputo de dos tarjetas se sume». <span class="ev ev-report">Informe upstream</span></p></div>
+
+<details class="deep"><summary>Más a fondo: el contrato de traspaso, el protocolo de doble búfer y cómo evaluar la ganancia de dos tarjetas</summary>
+<h3>Por qué el traspaso debe ser de 12.804 números</h3>
+<p>El comentario de <code>Verifier::set_stage</code> lo detalla: cada token del traspaso lleva el residual R (hc × n_embd), el vector bo de la última capa que aún no se ha escrito de vuelta (n_embd) e inject (hc); la etapa siguiente «incorpora» esta escritura de vuelta al leer su primera capa, exactamente como lo haría una ventana sin dividir, así que la división es exacta bit a bit. Los dos punteros deben ser memoria visible para el dispositivo (memoria fijada mapeada, que además debe ser portable cuando las dos etapas están en dos tarjetas). <span class="ev ev-code">Hecho de código</span>[S08] El número de floats del traspaso sale de <code>handoff_floats</code>, y la fórmula es exactamente <code>hc*n_embd + n_embd + hc</code>. [S08]</p>
+<p>Pasar solo el «estado oculto» de 2.560 dimensiones perdería las otras tres copias del residual y la escritura de vuelta aplazada. No fallaría nada; simplemente calcularía algo erróneo en silencio. La lección: un formato de comunicación entre dispositivos debe reflejar el contrato matemático completo, y no puedes recortarlo a la ligera porque «el tamaño oculto es 2.560». Upstream también ofrece un modo de comprobación: <code>--layer-split K --split-device 0</code> ejecuta las dos etapas en la misma tarjeta, solo para verificar que el traspaso es exacto bit a bit; no es un modo de velocidad. <span class="ev ev-report">Informe upstream</span></p>
+<h3>El protocolo de traspaso con doble búfer</h3>
+<p>En <code>prefill.cpp</code>, la etapa anterior asigna al arrancar dos bloques de memoria fijada con <code>cudaHostAlloc(..., cudaHostAllocPortable)</code>, cada uno lo bastante grande para las filas de residual de todo un chunk de prompt (chunk × D × 4 bytes, D = 4 × 2560). <span class="ev ev-code">Hecho de código</span> Tras cada chunk, hace cuatro cosas en orden:</p>
+<ol>
+<li>Copia las filas de residual de la VRAM al búfer de traspaso actual y espera a que termine la copia;</li>
+<li>Llama a <code>on_stage_chunk</code>, mientras el estado de esta etapa está justo al final del chunk;</li>
+<li>Espera a que la etapa siguiente termine el chunk anterior (para que ya no lea el búfer que está a punto de sobrescribirse);</li>
+<li>Lanza la etapa siguiente en otro hilo para leer este chunk, luego cambia al otro búfer y sigue con el chunk siguiente.</li>
+</ol>
+<p>Sea a′ lo que toma la etapa anterior por chunk (incluida la copia hacia fuera) y b′ lo que toma la etapa posterior por chunk (incluida la copia hacia dentro). El paso 3 significa que el momento en que la etapa anterior empieza el chunk c+1 es igual al momento en que la etapa posterior empieza el chunk c. De ahí se sigue que la etapa posterior empieza chunks consecutivos con una separación de max(a′, b′), empieza el primer chunk en a′ y termina el último chunk b′ después de empezarlo, así que tiempo total = a′ + b′ + (N − 1) × max(a′, b′). Con a′ = 4, b′ = 5 y N = 8 son 44 ms, frente a 72 ms con un chunk tras otro. <span class="ev ev-est">Estimación didáctica</span> El simulador de este capítulo usa exactamente este modelo, y <code>tests/viz-21.test.cjs</code> comprueba las dependencias y las reglas de los búferes chunk por chunk.</p>
+<p>Si la transferencia de cada chunk también ocupa un recurso crítico, pertenece a a′ o a b′; no puedes fingir que no existe. Que PCIe permita o no a las dos tarjetas acceder una a otra directamente, que los datos deban dar un rodeo por la RAM, la topología de la placa base y el cruce de nodos NUMA cambian este número. Strata eligió la carretera más conservadora: retransmitirlo todo por la RAM y no depender nunca del acceso GPU a GPU.</p>
+<h3>Índices globales y «un segmento sin capa QSA»</h3>
+<p>Los comentarios del estado de sesión lo explican: <code>qsa_states</code> y <code>gdn_state</code> conservan índices globales y los arreglos simplemente tienen menos filas, así que cada usuario por capa debe restar <code>gdn_ord0</code>; los usos de todo el modelo que antes leían <code>qsa_states[0]</code> (la tabla RoPE compartida, la identidad de preparación del prefill, el rope que toma prestado MTP) ahora leen <code>qsa_states[primary]</code>; un segmento sin capa QSA igualmente asigna un estado principal. La asignación por defecto de rango completo es idéntica byte a byte a la antigua asignación del modelo entero. <span class="ev ev-code">Hecho de código</span>[S13] Las pruebas deben cubrir específicamente casos límite como «un segmento sin capa QSA» y «un punto de corte cerca de la capa 1».</p>
+<h3>Un guardado debe pertenecer a una sola frontera</h3>
+<p>El contrato de <code>on_stage_chunk</code>: se llama cuando una etapa termina un chunk, su propio stream se ha sincronizado y su estado está al final de ese chunk; la última etapa lo llama antes de <code>on_chunk</code>; se ejecuta en el propio hilo de esa etapa, con la tarjeta de esa etapa como dispositivo actual. <span class="ev ev-code">Hecho de código</span>[S12] La documentación de upstream añade que un guardado de sesión almacena y restaura el estado de todas las tarjetas, y que un guardado a mitad de un prompt hace que cada tarjeta almacene su propia parte cuando termina ese chunk. <span class="ev ev-report">Informe upstream</span> Dicho al revés: si esperas a que la última tarjeta informe de que terminó y luego tomas el «estado actual» de la tarjeta anterior, obtienes algún chunk posterior, y el guardado es incoherente.</p>
+<h3>Cómo saber de dónde viene la aceleración de dos tarjetas</h3>
+<p>«Dos tarjetas son más rápidas que una» no demuestra por sí solo que «el pipeline sea muy eficiente». La VRAM extra sube la tasa de aciertos de expertos y recorta el trabajo de la CPU, y esa bien puede ser la ganancia principal. Mide por separado: la tasa de aciertos de expertos de cada tarjeta, la carga del pool de la CPU, el tiempo de traspaso y el tiempo de cada etapa. El propio reparto automático de upstream muestra dónde está el foco: elige el reparto que «deja a la caché alojar más expertos calientes», y en un empate deja más margen en la tarjeta más llena. <span class="ev ev-report">Informe upstream</span></p>
+<h3>Casos aún no cubiertos, o cubiertos con condiciones</h3>
+<ul>
+<li>Con el driver WDDM de Windows y WSL2, solo se fija una región de expertos de 8 GiB, y el resto pasa por un anillo de preparación fijado; el driver de Linux no tiene ese límite. <span class="ev ev-report">Informe upstream</span></li>
+<li>Cada tarjeta debe guardar una copia de los pesos densos y su propio búfer de prompt (unos 1,5 GB cada uno con los chunks de 2.048 tokens por defecto), así que no se recomiendan tarjetas de menos de 8 GB; no se admite mezclar tarjetas NVIDIA y AMD. <span class="ev ev-report">Informe upstream</span></li>
+<li>Strata tiene otro modo de dos tarjetas, <code>--peer-device</code>: la segunda tarjeta actúa solo como caché de expertos, con las activaciones y los resultados yendo y viniendo por NVLink u otra ruta GPU a GPU; es mutuamente excluyente con <code>--layer-split</code>, así que solo puedes elegir uno. <span class="ev ev-report">Informe upstream</span></li>
+<li>La aceptación no puede basarse en una sola ejecución exitosa en una topología ideal de dos tarjetas. Prueba también solicitudes canceladas, un último chunk muy corto, un error en la segunda tarjeta y acceso GPU a GPU no disponible, y luego compara los resultados byte a byte con una sola tarjeta.</li>
+</ul>
+</details>

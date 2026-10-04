@@ -1,0 +1,276 @@
+<div class="hook"><span class="eyebrow">Quizá lo hayas notado</span>
+<p>Las páginas de chat tienen un botón «Detener». Lo pulsas y el texto se congela de inmediato. Pero, ¿se detuvo de verdad la tarjeta gráfica (GPU)?</p>
+<p>El código fuente de Strata tiene un comentario muy sincero (incidencias #430 y #431). Antes, cuando un cliente colgaba, la solicitud seguía ocupando el motor hasta terminar la respuesta, o hasta leer todo el prompt. La pantalla hacía rato que se había detenido, y la GPU seguía trabajando para alguien que ya se había ido. Este capítulo trata tres cosas: cómo nace y cómo termina una solicitud, cómo viaja la orden de «detener» capa por capa hasta la GPU y quién tiene permiso para poner a trabajar tu GPU.</p></div>
+<p class="tldr"><strong>En una línea:</strong> una solicitud atraviesa cuatro capas: el navegador, la conexión HTTP, el proceso servidor y el proceso motor. «Detener» es una señal que hay que pasar hacia abajo y confirmar en cada capa. La «autenticación» decide quién puede enviar solicitudes.</p>
+
+<h2 id="sec-1">24.1 Pulsaste «Detener». ¿Qué se detuvo de verdad?</h2>
+<p>Entre tu clic y el momento en que la GPU deja de calcular para esta solicitud hay varias capas. Cada capa entiende algo distinto por «detenido». Mira la figura 24-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 320" role="img" aria-label="Figura 24-1: una solicitud atraviesa cinco capas, y cada capa entiende algo distinto por detenido. Que una capa de arriba se detenga no significa que se hayan detenido las de abajo">
+<text class="f-muted" fill="#5c6d66" x="75" y="18" font-size="12" text-anchor="middle">Capa</text>
+<text class="f-muted" fill="#5c6d66" x="152" y="18" font-size="12">¿Cuándo está «detenida» esta capa?</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="28" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="55" font-size="13" font-weight="600" text-anchor="middle">Navegador</text>
+<text class="f-text" fill="#182f2b" x="152" y="55" font-size="12">Ya no muestra palabras nuevas</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="84" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="111" font-size="13" font-weight="600" text-anchor="middle">Conexión HTTP</text>
+<text class="f-text" fill="#182f2b" x="152" y="111" font-size="12">Cerrada; el servidor ya no escribe</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="140" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="167" font-size="13" font-weight="600" text-anchor="middle">Proc. servidor</text>
+<text class="f-text" fill="#182f2b" x="152" y="167" font-size="12">Solicitud marcada «cancelada»</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="196" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="223" font-size="13" font-weight="600" text-anchor="middle">Proceso motor</text>
+<text class="f-text" fill="#182f2b" x="152" y="223" font-size="12">Recibe STOP y escribe su DONE</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="252" width="130" height="44" rx="8"/>
+<text class="f-on" fill="#ffffff" x="75" y="279" font-size="13" font-weight="600" text-anchor="middle">GPU</text>
+<text class="f-text" fill="#182f2b" x="152" y="279" font-size="12">Termina lo que tiene y queda libre</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="314" font-size="12" text-anchor="middle">La parada baja; arriba detenido ≠ abajo detenido</text>
+</svg><figcaption>Figura 24-1　«Detener» significa algo distinto en cada capa. La del navegador se detiene primero y la de la GPU, la última. En cada capa intermedia alguien tiene que pasar la señal hacia abajo.</figcaption></figure>
+<p>Para precisarlo, dibujemos primero una <dfn>máquina de estados</dfn> para la solicitud. En cada momento la solicitud está exactamente en un estado, y solo ciertos eventos pueden llevarla a otro. Esta es la versión didáctica de este libro:</p>
+<ul>
+<li><strong>En cola</strong>: la solicitud llegó, pero el motor está atendiendo a otra. Strata atiende una secuencia a la vez, y los que llegan después esperan en una cola FIFO (primero en entrar, primero en salir). [S15]</li>
+<li><strong>Prefill</strong>: el motor lee tu prompt chunk a chunk (el prefill, «leer el prompt», del capítulo 1).</li>
+<li><strong>Decode</strong>: escribe la respuesta token a token (decode, «escribir la respuesta»).</li>
+<li><strong>Completada / Cancelada / Fallida</strong>: tres estados finales. Toda solicitud debe terminar en uno de ellos; ninguna puede quedar colgada.</li>
+<li><strong>Cancelando</strong>: ya se dio la orden de «detener», pero el motor todavía no confirmó que paró. Este estado intermedio es el más fácil de pasar por alto.</li>
+</ul>
+<p>Estos nombres de estado son una abstracción de este libro, no una enumeración del código upstream. Lo que Strata registra de verdad es si una solicitud está «en cola» o «generando», más una breve nota de fase como «leyendo el prompt» o «respondiendo». <span class="ev ev-code">Hecho de código</span> El simulador de abajo ralentiza todo el proceso:</p>
+<div class="viz" data-viz="request-lifecycle"><figure class="fig"><svg viewBox="0 0 400 280" role="img" aria-label="Figura 24-2: la máquina de estados didáctica de una solicitud. En cola, prefill, decode y completada es el camino normal; cancelando es el estado intermedio tras cancelar el prefill o el decode, y solo tras la confirmación pasa a cancelada; la pérdida del motor lleva a fallida">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="16" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="64" y="39" font-size="14" text-anchor="middle">En cola</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="152" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="200" y="39" font-size="14" text-anchor="middle">Prefill</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="288" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="39" font-size="14" text-anchor="middle">Decode</text>
+<rect class="f-accent" fill="#136d5a" x="152" y="104" width="96" height="36" rx="8"/><text class="f-on" fill="#ffffff" x="200" y="127" font-size="14" font-weight="600" text-anchor="middle">Cancelando</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="288" y="104" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="127" font-size="14" text-anchor="middle">Completada</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="152" y="192" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="200" y="215" font-size="14" text-anchor="middle">Cancelada</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="288" y="192" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="215" font-size="14" text-anchor="middle">Fallida</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M112 34H150M248 34H286M336 52V102M200 52V102M296 52L240 104M200 140V190M64 52V210H150"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M248 130L300 192"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="248" font-size="12" text-anchor="middle">Discontinua: motor perdido; entra el watchdog</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="268" font-size="12" text-anchor="middle">Interactivo: pulsa «Cancelar» en cualquier estado</text>
+</svg><figcaption>Figura 24-2　La máquina de estados didáctica de una solicitud. Cuando se cancela el prefill o el decode, la solicitud entra primero en «Cancelando» y cuenta como «Cancelada» solo cuando el motor confirma que paró. Hay solo tres estados finales: Completada, Cancelada y Fallida.</figcaption></figure></div>
+<p class="bridge"><strong>Si estudiaste informática:</strong> el diagrama de estados de procesos de Sistemas operativos (listo, en ejecución, bloqueado, terminado) se dibuja igual. La ventaja de una máquina de estados es que se puede revisar caso por caso: ¿adónde va cada estado ante cada evento? ¿Hay algún estado que nunca llegue a un final?</p>
+
+<h2 id="sec-2">24.2 Procesos e hilos: quién hace realmente el trabajo</h2>
+<p>Para saber adónde debe llegar la orden de «detener», primero hay que saber quién hace el trabajo.</p>
+<aside class="primer" id="c24-process-thread">
+<h3>El ciclo de vida de procesos e hilos</h3>
+<p>Un <dfn>proceso</dfn> es un programa en ejecución. El sistema operativo le da un bloque de memoria propio y separado, además de recursos como archivos abiertos y conexiones de red. Por defecto, dos procesos no pueden ver la memoria del otro. Solo pueden pasarse mensajes por canales como las <dfn>tuberías</dfn> (pipes) o la red. Cuando un proceso termina, el sistema operativo recupera toda la RAM y la VRAM que tenía.</p>
+<p>Un <dfn>hilo</dfn> es una línea de ejecución dentro de un proceso. Un proceso puede tener varios hilos. Comparten la misma memoria, lo que facilita intercambiar datos, pero también facilita que se estorben entre sí.</p>
+<p>Ambos tienen un ciclo de vida: creado, en ejecución, en espera (de datos de red, por ejemplo) y terminado. Hay dos formas de terminar: <strong>acabar por cuenta propia</strong> o <strong>ser terminado por otro</strong>. En los sistemas tipo Unix, un proceso puede enviarle una señal a otro. SIGTERM significa «por favor, sal», y el receptor tiene ocasión de ordenar antes. SIGKILL significa «termina ya», y el receptor no tiene ninguna oportunidad de limpiar.</p>
+<p>Relación con Strata: el servidor y el motor son <strong>dos procesos</strong> que se pasan texto línea a línea por tuberías. Dentro del servidor, varios hilos se reparten el trabajo, como muestra la figura 24-3.</p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/Proceso_%28inform%C3%A1tica%29" target="_blank" rel="noopener noreferrer">Wikipedia: Proceso (informática)</a> · <a href="https://es.wikipedia.org/wiki/Hilo_%28inform%C3%A1tica%29" target="_blank" rel="noopener noreferrer">Wikipedia: Hilo (informática)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-intro.pdf" target="_blank" rel="noopener noreferrer">OSTEP: The Abstraction: The Process (en inglés)</a> · <a href="https://docs.python.org/es/3/library/subprocess.html" target="_blank" rel="noopener noreferrer">Documentación de Python: subprocess</a> · <a href="https://man7.org/linux/man-pages/man7/signal.7.html" target="_blank" rel="noopener noreferrer">man 7 signal (en inglés)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figura 24-3: el proceso servidor de Strata contiene hilos de solicitud, un hilo vigilante y un hilo lector, que se turnan para usar el motor mediante un cerrojo FIFO; el motor es otro proceso, y ambos se pasan líneas de texto por la entrada y la salida estándar">
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="10" width="380" height="170" rx="10"/>
+<text class="f-text" fill="#182f2b" x="20" y="31" font-size="13" font-weight="600">Proceso servidor Python: serve/server.py</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="76" y="62" font-size="13" font-weight="600" text-anchor="middle">Solicitud</text>
+<text class="f-muted" fill="#5c6d66" x="76" y="79" font-size="12" text-anchor="middle">un hilo por</text>
+<text class="f-muted" fill="#5c6d66" x="76" y="94" font-size="12" text-anchor="middle">conexión</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="144" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="62" font-size="13" font-weight="600" text-anchor="middle">Vigilante</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="79" font-size="12" text-anchor="middle">mira la conexión</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="94" font-size="12" text-anchor="middle">cada 0,5 s</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="268" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="324" y="62" font-size="13" font-weight="600" text-anchor="middle">Lector</text>
+<text class="f-muted" fill="#5c6d66" x="324" y="79" font-size="12" text-anchor="middle">encola la salida</text>
+<text class="f-muted" fill="#5c6d66" x="324" y="94" font-size="12" text-anchor="middle">del motor</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="116" width="360" height="48" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="145" font-size="13" text-anchor="middle">Cerrojo FIFO: una solicitud a la vez</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 180V228M250 228V180"/>
+<path class="f-muted" fill="#5c6d66" d="M100 232l-5-8h10z"/>
+<path class="f-muted" fill="#5c6d66" d="M250 176l-5 8h10z"/>
+<text class="f-muted" fill="#5c6d66" x="108" y="200" font-size="12">stdin: GEN, STOP, QUIT</text>
+<text class="f-muted" fill="#5c6d66" x="258" y="222" font-size="12">stdout: T, PP, DONE</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="234" width="380" height="56" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="257" font-size="13" font-weight="600" text-anchor="middle">Proceso motor: strata --serve</text>
+<text class="f-on" fill="#ffffff" x="200" y="278" font-size="12" text-anchor="middle">Maneja pesos, caché de expertos y VRAM</text>
+</svg><figcaption>Figura 24-3　El servidor y el motor son dos procesos que se pasan texto línea a línea por tuberías. Cada hilo del servidor tiene su propio trabajo, y el cerrojo FIFO garantiza que solo una solicitud use el motor a la vez.</figcaption></figure>
+<p>El servidor inicia <code>strata --serve</code> con <code>subprocess.Popen</code> de Python y conecta tanto su entrada estándar como su salida estándar a tuberías. <span class="ev ev-code">Hecho de código</span> Cuando el motor termina de cargar los pesos, escribe primero unas líneas <code>INFO</code> y luego una línea <code>READY</code> con la longitud de contexto. Si esa línea trae además <code>stop</code>, esa versión del motor admite detenerse a mitad de camino. Solo cuando el servidor lee <code>READY</code> considera al motor «vivo». Después, el servidor escribe una línea <code>GEN</code> para enviar una solicitud, y el motor responde con <code>T</code> (un token), <code>PP</code> (progreso del prefill), <code>DONE</code> (terminado) o <code>ERR</code> (error).</p>
+<p>Un hilo lector dedicado mete cada línea de salida del motor en una cola. Así, el hilo que atiende la solicitud puede esperar la línea siguiente «con un tiempo límite». Si no llega nada, puede enviar un latido y revisar la bandera de cancelación, en lugar de esperar a ciegas para siempre. <span class="ev ev-code">Hecho de código</span></p>
+<p>El proceso del motor también puede morir de forma inesperada. El código tiene una excepción propia, <code>EngineDied</code>, y su comentario nombra la causa más común: en Linux, que el OOM killer lo termine cuando se agota la memoria. [S15] En ese caso, la solicitud en curso termina con un error, y cuando llega la siguiente, el servidor reinicia el motor con el mismo comando.</p>
+<p>Apagar el motor con normalidad también requiere cuidado. El servidor sigue tres pasos y espera como máximo 20 segundos en cada uno. Mira la figura 24-4.</p>
+<figure class="fig"><svg viewBox="0 0 400 272" role="img" aria-label="Figura 24-4: apagar el proceso del motor lleva tres pasos: primero se escribe QUIT para que salga por su cuenta, luego terminate y luego kill; si sigue vivo tras los tres, se informa de un error">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">Apagar el motor: primero por las buenas</text>
+<rect class="f-soft" fill="#e5f1df" x="8" y="32" width="86" height="90" rx="8"/>
+<text class="f-text" fill="#182f2b" x="51" y="54" font-size="13" font-weight="600" text-anchor="middle">QUIT</text>
+<text class="f-text" fill="#182f2b" x="51" y="76" font-size="12" text-anchor="middle">que el motor</text>
+<text class="f-text" fill="#182f2b" x="51" y="92" font-size="12" text-anchor="middle">libere su</text>
+<text class="f-text" fill="#182f2b" x="51" y="108" font-size="12" text-anchor="middle">memoria</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="106" y="32" width="86" height="90" rx="8"/>
+<text class="f-text" fill="#182f2b" x="149" y="54" font-size="13" font-weight="600" text-anchor="middle">terminate</text>
+<text class="f-text" fill="#182f2b" x="149" y="76" font-size="12" text-anchor="middle">señal de</text>
+<text class="f-text" fill="#182f2b" x="149" y="92" font-size="12" text-anchor="middle">terminación</text>
+<text class="f-text" fill="#182f2b" x="149" y="108" font-size="12" text-anchor="middle">(SIGTERM)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="204" y="32" width="86" height="90" rx="8"/>
+<text class="f-text" fill="#182f2b" x="247" y="54" font-size="13" font-weight="600" text-anchor="middle">kill</text>
+<text class="f-text" fill="#182f2b" x="247" y="76" font-size="12" text-anchor="middle">fuerza el</text>
+<text class="f-text" fill="#182f2b" x="247" y="92" font-size="12" text-anchor="middle">cierre, sin</text>
+<text class="f-text" fill="#182f2b" x="247" y="108" font-size="12" text-anchor="middle">limpieza</text>
+<rect class="f-warn" fill="#9e5d24" x="302" y="32" width="90" height="90" rx="8"/>
+<text class="f-on" fill="#ffffff" x="347" y="54" font-size="13" font-weight="600" text-anchor="middle">Sigue vivo</text>
+<text class="f-on" fill="#ffffff" x="347" y="76" font-size="12" text-anchor="middle">da error;</text>
+<text class="f-on" fill="#ffffff" x="347" y="92" font-size="12" text-anchor="middle">no finge</text>
+<text class="f-on" fill="#ffffff" x="347" y="108" font-size="12" text-anchor="middle">liberación</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M94 77H104M192 77H202M290 77H300"/>
+<text class="f-muted" fill="#5c6d66" x="51" y="142" font-size="12" text-anchor="middle">espera 20 s</text>
+<text class="f-muted" fill="#5c6d66" x="149" y="142" font-size="12" text-anchor="middle">espera 20 s</text>
+<text class="f-muted" fill="#5c6d66" x="247" y="142" font-size="12" text-anchor="middle">espera 20 s</text>
+<text class="f-text" fill="#182f2b" x="10" y="178" font-size="12">Por qué se pide primero con educación: el motor</text>
+<text class="f-text" fill="#182f2b" x="10" y="196" font-size="12">fija decenas de GB de RAM; liberarlos en orden es</text>
+<text class="f-text" fill="#182f2b" x="10" y="214" font-size="12">más seguro que dejar que el SO los arranque.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="240" font-size="12">En Windows el motor va en un «objeto de trabajo»:</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="258" font-size="12">al salir el servidor, el SO cierra también el motor.</text>
+</svg><figcaption>Figura 24-4　Tres pasos para apagar el motor. Cada paso tiene 20 segundos. Si fallan los tres, el servidor informa con franqueza de que «el motor no ha salido», en lugar de fingir que la VRAM y la RAM ya volvieron.</figcaption></figure>
+<p>Un comentario explica por qué el primer paso es <code>QUIT</code>: el motor libera su memoria por sí mismo, y desbloquear decenas de GB de memoria fijada (pinned) tarda un rato. <span class="ev ev-code">Hecho de código</span> Si fallan los tres pasos, el servidor lanza <code>EngineStuck</code> y <strong>conserva</strong> su registro del proceso. No afirma que la VRAM y la RAM del proceso ya se hayan devuelto. Además, en Windows el servidor mete el motor en un objeto de trabajo configurado como «matar al cerrar». Así, aunque simplemente cierres la ventana de la consola, el motor termina con ella y no se convierte en un proceso huérfano que nadie vigila. <span class="ev ev-code">Hecho de código</span></p>
+
+<h2 id="sec-3">24.3 Cancelación: pasar la orden de «detener» capa por capa</h2>
+<aside class="primer" id="c24-cancel">
+<h3>Cancelación: por qué solo se puede decir «por favor, detente»</h3>
+<p>La forma más directa de cancelar es cortar desde fuera el hilo que trabaja. Pero eso es peligroso: puede estar sosteniendo un cerrojo, a mitad de escribir una estructura de datos o usando un bloque de VRAM. Si lo cortas, el cerrojo nunca se libera, los datos quedan medio nuevos y medio viejos, y todos los que vienen después se equivocan.</p>
+<p>Por eso la mayoría de los sistemas reales usan <dfn>cancelación cooperativa</dfn>. Desde fuera solo se pone una <dfn>bandera de cancelación</dfn>, y quien trabaja mira la bandera en <dfn>puntos de control</dfn> acordados. Cuando la ve, ordena todo y sale por su cuenta. <code>threading.Event</code> de Python, <code>context</code> de Go y <code>CancellationToken</code> de C# siguen esta idea.</p>
+<p>De ahí salen dos reglas. Primera: la cancelación no es instantánea. En el peor caso hay que esperar al siguiente punto de control. Segunda: cuanto más separados estén los puntos de control, más lenta es la cancelación. Por eso «se dio la orden de detener» y «se detuvo de verdad» son cosas distintas, y el tramo entre ambas es el estado «Cancelando» de la figura 24-2.</p>
+<p class="further">Para seguir leyendo: <a href="https://docs.python.org/es/3/library/threading.html" target="_blank" rel="noopener noreferrer">Documentación de Python: threading (objetos Event)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/threads-intro.pdf" target="_blank" rel="noopener noreferrer">OSTEP: Concurrency: An Introduction (en inglés)</a> · <a href="https://es.wikipedia.org/wiki/Multihilo" target="_blank" rel="noopener noreferrer">Wikipedia: Multihilo</a></p>
+</aside>
+<p>La cancelación de Strata es cooperativa. Al empezar cada solicitud, el servidor crea un <code>threading.Event</code> como bandera de cancelación. Hay dos caminos para activarla:</p>
+<ul>
+<li><strong>Falla una escritura</strong>: si ocurre un error mientras el servidor escribe un evento SSE en la conexión, significa que el cliente se fue, y la bandera se activa de inmediato. El comentario dice: «Client went away: stop the engine». <span class="ev ev-code">Hecho de código</span></li>
+<li><strong>Un hilo vigilante</strong>: que falle una escritura no basta. Mientras se lee un prompt largo, el servidor escribe un comentario keep-alive muy de vez en cuando, y la primera escritura tras colgar suele «tener éxito». Por eso cada solicitud tiene su propio hilo vigilante que revisa la conexión cada 0,5 segundos. Si la conexión aparece como «legible» pero no entrega datos, el otro lado la cerró y se activa la bandera. <span class="ev ev-code">Hecho de código</span> Esta es justo la corrección de #430 y #431 que se mencionó al principio.</li>
+</ul>
+<p>Una vez activada la bandera, surte efecto en los puntos de control. Mira la figura 24-5.</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="Figura 24-5: seis pasos desde que el cliente cuelga hasta que se libera el FIFO: notar la caída, activar la bandera de cancelación, el bucle de generación escribe STOP, el motor se detiene en un punto de control, se lee el DONE de esta solicitud, se libera el FIFO">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="8" width="360" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">① El cliente cuelga (pulsaste Detener)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="56" width="360" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="79" font-size="13" text-anchor="middle">② El vigilante nota la caída (≤ 0,5 s)</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="104" width="360" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="127" font-size="13" text-anchor="middle">③ Se activa la bandera cancel</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="152" width="360" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="175" font-size="13" text-anchor="middle">④ El bucle de espera la ve y escribe STOP</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="200" width="360" height="36" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="223" font-size="13" text-anchor="middle">⑤ El motor se detiene en el punto de control</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="248" width="360" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="271" font-size="13" text-anchor="middle">⑥ Lee su DONE y libera el FIFO</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V54M200 92V102M200 140V150M200 188V198M200 236V246"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="310" font-size="12" text-anchor="middle">Decode: cada token es un punto de control: rápido</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="330" font-size="12" text-anchor="middle">Prefill: acabar el chunk actual; quizá 10+ s</text>
+</svg><figcaption>Figura 24-5　Los seis pasos de la cancelación. Los tres primeros tardan menos de un segundo. El paso ⑤ espera a que el motor llegue a un punto de control, así que la fase en la que cancelas decide cuánto esperas.</figcaption></figure>
+<p>¿Dónde está el punto de control del paso ⑤? En el decode, el bucle mira la bandera cada vez que produce un token. En el prefill, el motor lee chunk a chunk. <code>should_stop</code> de <code>prefill.hpp</code> se comprueba una vez <strong>antes de empezar cada chunk</strong>, y si devuelve verdadero el prefill termina antes con el mensaje de error «cancelled». <span class="ev ev-code">Hecho de código</span>[S12] El comentario del servidor también lo dice: un STOP enviado durante el prefill solo se ve cuando termina de leerse el chunk actual. Un chunk puede contener hasta 32.768 tokens. [S15] La «espera en el peor caso» de la figura interactiva se calcula con esto.</p>
+<p>El paso ⑥ es igual de importante. Tras enviar STOP, el servidor sigue leyendo la salida del motor hasta recibir el <code>DONE</code> <strong>de esta misma solicitud</strong>, y mantiene el cerrojo FIFO todo ese tiempo. El comentario explica el motivo: si lo soltara antes, quedaría en la cola del motor un <code>DONE</code> sobrante de la solicitud anterior, y la siguiente lo tomaría como su propia señal de fin. <span class="ev ev-code">Hecho de código</span> Este paso también tiene un límite de tiempo: la espera del eco de STOP nunca es ilimitada, porque durante la espera el FIFO sigue ocupado y todos los de atrás están en cola.</p>
+<p>El <code>MockEngine</code> que se usa en las pruebas sigue el mismo contrato: antes de emitir cada token, mira la bandera de cancelación. [S15] Así, la lógica de cancelación se puede probar en una máquina sin GPU.</p>
+
+<h2 id="sec-4">24.4 ¿Y si se cuelga? El watchdog</h2>
+<p>La cancelación depende de que el motor «coopere». ¿Qué pasa si el motor se congela y no dice nada? El servidor necesita un <dfn>watchdog</dfn> (perro guardián): si pasa un tiempo sin señales de vida, decide que algo salió mal.</p>
+<p>Lo difícil es saber «cuánto es demasiado». Durante el decode, el motor escribe una línea por cada token, así que es muy charlatán. Mientras lee un prompt larguísimo, puede quedarse callado durante minutos. Un watchdog de talla única, o bien mata un motor que está ocupado leyendo un prompt, o bien espera eternamente a uno que de verdad se congeló. Strata da un límite distinto para cada fase [S15]:</p>
+<ul>
+<li>Límite base de 300 segundos: mientras una solicitud está en curso, si el motor no produce ninguna salida durante más que eso, se lo declara perdido. La configuración puede cambiarlo; 0 significa esperar para siempre.</li>
+<li>Primer chunk del prefill: sobre los 300 segundos, se suma el tiempo que tardaría este chunk en «el ordenador más lento, que lee solo 50 tokens por segundo».</li>
+<li>Tras leer un chunk: el siguiente puede tardar hasta 3 veces lo que tardó realmente el anterior, pero no menos de 300 segundos.</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="Figura 24-6: los límites del watchdog. 300 segundos durante el decode; unos 955 segundos para el primer chunk del prefill; tras leer un chunk, siguen siendo 300 segundos en una computadora rápida y unos 983 segundos en una lenta">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">Silencio que se tolera al motor (s, a escala)</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">Decode: el reloj se reinicia con cada token</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="50" width="90" height="14"/>
+<text class="f-text" fill="#182f2b" x="106" y="62" font-size="12">300</text>
+<text class="f-text" fill="#182f2b" x="10" y="92" font-size="12">Primer chunk de prefill: 300 + 32768 ÷ 50</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="98" width="286.6" height="14"/>
+<text class="f-text" fill="#182f2b" x="302" y="110" font-size="12">≈ 955</text>
+<text class="f-text" fill="#182f2b" x="10" y="140" font-size="12">Chunks siguientes, PC rápido: max(300, 3 × 15.1)</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="146" width="90" height="14"/>
+<text class="f-text" fill="#182f2b" x="106" y="158" font-size="12">300</text>
+<text class="f-text" fill="#182f2b" x="10" y="188" font-size="12">Chunks siguientes, PC lento: max(300, 3 × 327.7)</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="194" width="294.9" height="14"/>
+<text class="f-text" fill="#182f2b" x="310" y="206" font-size="12">≈ 983</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">Chunk = 32.768 tokens; rápido 2171/s, lento 100/s</text>
+</svg><figcaption>Figura 24-6　El límite del watchdog sigue la fase del trabajo. Cuando una computadora lenta lee un chunk grande del prompt, el límite se estira por sí solo hasta más de diez minutos, para no matar por error a un motor que está trabajando. <span class="ev ev-est">Estimación didáctica</span></figcaption></figure>
+<p>Los números de la figura salen de sustituir las constantes del código. <span class="ev ev-est">Estimación didáctica</span> Primer chunk: 300 + 32768 ÷ 50 ≈ 955 segundos. Una computadora rápida, a la velocidad medida upstream de 2171 tokens por segundo, lee un chunk de 32.768 tokens en unos 15,1 segundos. Tres veces eso son 45,3 segundos, menos de 300, así que el límite sigue en 300 segundos. Una computadora lenta, a 100 tokens por segundo, necesita 327,7 segundos por chunk, y tres veces eso son unos 983 segundos.</p>
+<p>¿Qué pasa tras un tiempo agotado? El comentario lo llama «los dos lados desincronizados»: el hilo principal del motor espera el siguiente comando, mientras que el servidor espera que termine esta solicitud. El servidor termina el proceso del motor, la solicitud acaba con un error y el motor se reinicia cuando llega la siguiente solicitud. [S15] Terminar el proceso es brusco, pero tiene una ventaja: la VRAM y la RAM vuelven seguro junto con él.</p>
+<p>La misma idea aparece también a un nivel más bajo. El <code>Verifier</code>, que comprueba los tokens de borrador, tiene un <code>release_gpu_waits</code>. Cuando un lote de trabajo de la GPU se atasca y no puede terminar con normalidad, libera a la fuerza todas las banderas de espera de la GPU para que el lote se vacíe. Pero desde ese momento este Verifier <strong>se niega</strong> a ejecutar ninguna ventana de cómputo nueva, porque ese lote terminó en condiciones poco fiables. <span class="ev ev-code">Hecho de código</span>[S08] Un vaciado forzado no es una terminación normal. No se puede fingir que no pasó nada y seguir atendiendo la solicitud siguiente.</p>
+
+<h2 id="sec-5">24.5 Quién puede usar tu GPU: autenticación y API keys</h2>
+<p>Hasta aquí vimos «cómo detener». Esta sección trata de «quién puede empezar». Si cualquiera puede enviar solicitudes a tu Strata, tu GPU se convierte en un recurso público.</p>
+<aside class="primer" id="c24-auth">
+<h3>Autenticación y API keys</h3>
+<p>La <dfn>autenticación</dfn> responde «quién eres», y la <dfn>autorización</dfn> responde «qué puedes hacer». La forma más simple de autenticación es una <dfn>API key</dfn>: el servidor y el cliente comparten de antemano una cadena larga y aleatoria, y el cliente la pone en una cabecera HTTP en cada solicitud, normalmente escrita como <code>Authorization: Bearer tu-clave</code>. Si coincide, el servidor deja pasar la solicitud, y si no, devuelve 401.</p>
+<p>Una API key es como una llave compartida de una puerta: quien la tiene puede abrir, así que debe mantenerse en secreto. Nunca la pongas en el código fuente de una página web ni la subas a un repositorio público. Envíala por HTTPS siempre que puedas, porque si no, cualquiera en el camino puede leerla.</p>
+<p>La comparación en sí requiere cuidado. Una comparación normal de cadenas termina en cuanto encuentra un carácter distinto, de modo que cuanto más largo es el prefijo adivinado, más tarda la comparación. Midiendo el tiempo, un atacante puede adivinar la clave un carácter a la vez. Los ataques que filtran información por «subproductos» como el tiempo o el consumo de energía se llaman <dfn>ataques de canal lateral</dfn>, y este es un <dfn>ataque de temporización</dfn>. La defensa es una <dfn>comparación en tiempo constante</dfn>: sin importar dónde difieran primero las cadenas, compara toda la cadena antes de devolver el resultado.</p>
+<p class="further">Para seguir leyendo: <a href="https://en.wikipedia.org/wiki/API_key" target="_blank" rel="noopener noreferrer">Wikipedia: API key (en inglés)</a> · <a href="https://es.wikipedia.org/wiki/Ataque_de_canal_lateral" target="_blank" rel="noopener noreferrer">Wikipedia: Ataque de canal lateral</a> · <a href="https://developer.mozilla.org/es/docs/Web/HTTP/Reference/Headers/Authorization" target="_blank" rel="noopener noreferrer">MDN: cabecera Authorization</a> · <a href="https://docs.python.org/es/3/library/hmac.html" target="_blank" rel="noopener noreferrer">Documentación de Python: hmac.compare_digest</a> · <a href="https://www.rfc-editor.org/rfc/rfc6750" target="_blank" rel="noopener noreferrer">RFC 6750: tokens Bearer (en inglés)</a></p>
+</aside>
+<p>La primera línea de defensa de Strata es <strong>escuchar por defecto solo a esta computadora</strong>: el servidor escucha por defecto en <code>127.0.0.1</code>, así que los demás dispositivos no pueden conectarse. <span class="ev ev-code">Hecho de código</span> En ese caso, el README dice que en tu aplicación sirve cualquier API key. [S01] Para llegar desde un teléfono u otra computadora, cambias a escuchar en <code>0.0.0.0</code>, y el README dice sin rodeos que «siempre pongas una clave». [S01] Si cambias la dirección de escucha pero no pones clave, el servidor imprime al arrancar una advertencia: no hay API key, así que cualquiera en la red puede usar este modelo. <span class="ev ev-code">Hecho de código</span></p>
+<p>Una vez puesta una clave, las solicitudes a <code>/v1/*</code> deben llevarla: como <code>Authorization: Bearer …</code> o en la cabecera <code>x-api-key</code> (que usan los clientes de estilo Anthropic). La comparación usa <code>hmac.compare_digest</code>, que un comentario del código llama «constant-time»; si no coincide, devuelve 401 con el tipo <code>authentication_error</code>. <span class="ev ev-code">Hecho de código</span> La figura 24-7 muestra toda la decisión.</p>
+<figure class="fig"><svg viewBox="0 0 400 316" role="img" aria-label="Figura 24-7: cómo comprueba Strata la API key. Sin clave configurada, la solicitud pasa; con clave, toma la clave que envió el cliente y compara en tiempo constante; si coincide se atiende, y si no coincide recibe 401">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="8" width="200" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">Llega solicitud a /v1/…</text>
+<rect class="f-soft" fill="#e5f1df" x="100" y="62" width="200" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="84" font-size="13" text-anchor="middle">¿Hay API key configurada?</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="316" y="62" width="76" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="354" y="84" font-size="13" text-anchor="middle">Permitir</text>
+<text class="f-muted" fill="#5c6d66" x="308" y="56" font-size="12" text-anchor="middle">No</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="122" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="144" font-size="13" text-anchor="middle">Toma Bearer o x-api-key</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="114" font-size="12">Sí</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="176" width="240" height="34" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="198" font-size="13" text-anchor="middle">hmac.compare_digest(…)</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="236" width="160" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="258" font-size="13" text-anchor="middle">Coincide: se atiende</text>
+<rect class="f-warn" fill="#9e5d24" x="220" y="236" width="160" height="34" rx="8"/>
+<text class="f-on" fill="#ffffff" x="300" y="258" font-size="13" text-anchor="middle">No coincide: 401</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V60M300 79H314M200 96V120M200 156V174M160 210V222H100V234M240 210V222H300V234"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="292" font-size="12" text-anchor="middle">Antes de todo esto: por defecto solo</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="310" font-size="12" text-anchor="middle">escucha en 127.0.0.1</text>
+</svg><figcaption>Figura 24-7　La comprobación de la API key de Strata. Por defecto escucha solo a esta computadora, así que correr sin clave es seguro. En cuanto se abre a la red, la clave es el único cerrojo de la puerta, y la comparación debe ser en tiempo constante.</figcaption></figure>
+<p>¿Por qué tiene que ser en tiempo constante? El simulador de abajo te deja hacer de atacante:</p>
+<div class="viz" data-viz="key-compare-timing"><figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="Figura 24-8: adivinar el primer carácter de la clave. Con la comparación de salida temprana, el candidato correcto compara un carácter más y su barra es claramente más alta; con la comparación en tiempo constante, los 16 candidatos tardan exactamente lo mismo">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="13" font-weight="600" text-anchor="middle">Con salida temprana</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="13" font-weight="600" text-anchor="middle">Tiempo constante</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="12" text-anchor="middle">Acierto: 1 carácter más</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="38" font-size="12" text-anchor="middle">Siempre los 4 caracteres</text>
+<rect class="f-accent" fill="#136d5a" x="16" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="27" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="38" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="49" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="60" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="71" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="82" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="93" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="104" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="115" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="126" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="137" y="126" width="8" height="24"/><rect class="f-warn" fill="#9e5d24" x="148" y="102" width="8" height="48"/><rect class="f-accent" fill="#136d5a" x="159" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="170" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="181" y="126" width="8" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="216" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="227" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="238" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="249" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="260" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="271" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="282" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="293" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="304" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="315" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="326" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="337" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="348" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="359" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="370" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="381" y="54" width="8" height="96"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 150H194M210 150H394"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="12" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="152" y="168" font-size="12" text-anchor="middle">c</text>
+<text class="f-muted" fill="#5c6d66" x="185" y="168" font-size="12" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="168" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="385" y="168" font-size="12" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="194" font-size="12" text-anchor="middle">16 candidatos para el carácter 1</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="212" font-size="12" text-anchor="middle">(la clave real empieza por c)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="232" font-size="12" text-anchor="middle">Interactivo: adivina un carácter cada vez</text>
+</svg><figcaption>Figura 24-8　La comparación con salida temprana escribe «cuántos caracteres eran correctos» en el tiempo, así que un atacante necesita solo 16 intentos por carácter. La comparación en tiempo constante hace que todos los candidatos parezcan exactamente iguales. <span class="ev ev-est">Estimación didáctica</span></figcaption></figure></div>
+<p>En el mundo real, cada comparación difiere solo en unos pocos nanosegundos, mientras que la fluctuación de la red es de varios milisegundos. Por eso un ataque real tiene que medir la misma suposición miles y miles de veces y sacar la diferencia con estadística. Eso es difícil, pero no imposible. Usar <code>hmac.compare_digest</code> es cuestión de una línea de código, así que no hay razón para correr el riesgo.</p>
+<p>Strata también se defiende de un ataque más sutil: el <dfn>DNS rebinding</dfn> (reasignación de DNS). Una página web maliciosa que abras puede apuntar por un momento su propio nombre de dominio a <code>127.0.0.1</code> y luego llegar al servicio de tu computadora haciéndose pasar por «su propio sitio». Por eso, cuando no hay clave, el servidor responde solo a las solicitudes cuya cabecera <code>Host</code> sea un nombre que conoce, como <code>localhost</code> o una dirección IP. También se rechazan las solicitudes <code>POST</code> que vienen de un origen web desconocido. Una vez puesta una clave, decide la clave, porque la página web de otra persona no puede obtener tu clave. <span class="ev ev-report">Informe upstream</span></p>
+<p class="bridge"><strong>Si estudiaste informática:</strong> esta sección toca varios conceptos básicos de Redes de computadoras y Seguridad de la información: la diferencia entre autenticación y autorización, la superficie de ataque mínima (escuchar por defecto solo en la dirección de loopback) y los ataques de canal lateral. Las medidas de seguridad se apilan en capas, y cada capa protege solo de aquello para lo que está pensada.</p>
+
+<h2 id="sec-6">24.6 Manos a la obra: cancela una solicitud tú mismo</h2>
+<p>Este capítulo no tiene una página de laboratorio aparte. Las dos figuras interactivas son el laboratorio. Haz tres cosas, en orden:</p>
+<ol>
+<li>En el simulador del ciclo de vida, pulsa «Cancelar» en cada uno de los tres estados <strong>En cola, Prefill y Decode</strong>, y anota la «espera en el peor caso». En el prefill son unos 15,6 segundos, y en el decode solo unos 0,51 segundos. Piensa: si fueras el diseñador, ¿cómo harías que el prefill también se detuviera más rápido? ¿Qué costaría?</li>
+<li>Tras pulsar Cancelar, pulsa «Motor perdido» mientras está en «Cancelando». Mira cómo cierra el servidor y por qué la espera del eco de STOP también debe tener un límite de tiempo.</li>
+<li>En el simulador del ataque de temporización, descifra la clave una vez con cada método de comparación y cuenta cuántos intentos necesita cada uno.</li>
+</ol>
+<p>Si sabes escribir Python, puedes usar el <code>MockEngine</code> incluido en Strata (<code>python -m serve.server --engine mock</code>) para iniciar un servidor en una máquina sin GPU, enviar una solicitud con streaming usando <code>curl</code>, pulsar Ctrl+C a mitad para desconectar y mirar después, en la ventana del servidor, cómo terminó la solicitud. [S15]</p>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>Una solicitud atraviesa el navegador, la conexión HTTP, el proceso servidor, el proceso motor y la GPU. Cada capa entiende algo distinto por «detenido». La señal de cancelación hay que pasarla capa por capa y confirmarla.</li>
+<li>La cancelación de Strata es cooperativa: un hilo vigilante revisa la conexión cada 0,5 segundos y activa la bandera de cancelación. El motor se detiene en un punto de control, y el servidor libera el FIFO solo después de leer el DONE de esa misma solicitud. En el prefill los puntos de control están lejos unos de otros, y la cancelación es lenta.</li>
+<li>Strata escucha por defecto solo a esta computadora. Cuando lo abres a la red, debes poner una API key, y la comparación usa <code>hmac.compare_digest</code>, en tiempo constante, para evitar los ataques de temporización.</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «Si cierro la página web, la GPU se detiene».</strong></p>
+<p>Cerrar la página web solo detiene la capa de arriba. El servidor primero tiene que notar que la conexión se cayó, luego avisar al motor, y el motor todavía tiene que llegar a su siguiente punto de control antes de parar. Antes de que Strata corrigiera #430 y #431, hubo casos en que el cliente se había ido hacía rato y el motor seguía calculando. Hay que confirmar «detenido» en cada capa por separado.</p></div>
+
+<details class="deep"><summary>Más a fondo: el punto de linealización de la cancelación, las respuestas viejas tardías y las fronteras de confianza</summary>
+<h3>¿Desde qué momento «surte efecto» la cancelación?</h3>
+<p>Puedes definir la cancelación así: desde cierta frontera confirmada, no se confirma ningún token nuevo al usuario, y los recursos relacionados dejan de usarse con el tiempo. Esa frontera es el <dfn>punto de linealización</dfn> de la cancelación. Si una bandera solo se activó y el bucle de chunks del prefill o el bucle del decode todavía no la ha visto, la cancelación no está completa.</p>
+<p>Según la lectura que hace este libro de <code>serve/server.py</code>, una solicitud que sigue en la cola comprueba la bandera de cancelación solo después de obtener el cerrojo FIFO y enviar el comando <code>GEN</code> al motor, dentro del bucle que espera la salida del motor: cuando llega el primer token o la primera línea de progreso del prefill, o tras 10 segundos sin salida. <span class="ev ev-code">Hecho de código</span> Esto significa que una solicitud en cola cuyo cliente colgó hace rato igualmente hace que el motor empiece a leer su prompt, y solo después recibe STOP. Un ejercicio de ampliación que vale la pena: comprobar la bandera una vez tras obtener el cerrojo y antes de enviar el comando.</p>
+<h3>Ejemplo resuelto: una respuesta vieja tras un tiempo agotado</h3>
+<p>La solicitud A agota su tiempo y el servicio empieza con la solicitud B. Si los resultados tardíos de A se siguen escribiendo en la cola de salida compartida, B puede recibir tokens de A, o tomar el <code>DONE</code> de A como su propio final. La solución es comprobar a quién pertenece cada salida y no reutilizar el mismo estado mutable hasta que se confirme que la ejecución vieja terminó.</p>
+<p>Strata hace lo segundo: tras enviar STOP, sigue leyendo hasta el <code>DONE</code> de esta misma solicitud, con el cerrojo FIFO en su poder todo el tiempo. Y cuando registra el uso, cuenta solo el <code>DONE</code> que llega durante esta solicitud, porque si no, una solicitud fallida o desconectada anotaría como propios los números de decode de la anterior. <span class="ev ev-code">Hecho de código</span> Este libro no ha auditado todos los caminos de pertenencia de salida de upstream. En clase puedes construir este riesgo con un motor mock que se retrase a propósito y verificar después la corrección.</p>
+<h3>Un watchdog debe entender las fases del trabajo</h3>
+<p>Tratar todo «un rato sin texto de salida» como un bloqueo mortal mata solicitudes sanas que están leyendo prompts largos. Esperar para siempre bloquea todo el FIFO. Un buen diagnóstico debe distinguir: estar en cola, un cálculo largo legítimo, E/S lenta, un proceso hijo perdido y un protocolo desincronizado, e informar del estado y del último progreso en lugar de un vago «tiempo agotado». Strata ajusta su límite por cada chunk del prefill y escribe el motivo de la pérdida en el mensaje de error, que es exactamente esta idea. [S15]</p>
+<p>De la misma forma, el «control explícito del modelo» (cargar, descargar) no debe interrumpir solicitudes que están en ejecución o en cola: el código define <code>ModelBusy</code> justo para esto. [S15] La documentación upstream dice que, en ese caso, la API de control devuelve 409. <span class="ev ev-report">Informe upstream</span></p>
+<h3>Herramientas, URLs de imágenes y archivos locales son fronteras de confianza</h3>
+<p>La salida del modelo es entrada no confiable. Los argumentos de las herramientas necesitan validación de esquema y comprobaciones de permisos. Obtener URLs remotas implica acceso hacia fuera y límites de recursos. Leer rutas locales implica permisos de archivos y alcance de rutas. La entrada de imágenes de Strata admite tres orígenes: datos base64, URLs http(s) y rutas de archivos locales. [S15] Si se previenen SSRF, recorrido de rutas (path traversal) y problemas similares, hay que auditarlo punto de entrada por punto de entrada. No puedes declarar seguro todo el sistema porque un lugar use una biblioteca segura.</p>
+<p><code>frontend.py</code> renderiza las plantillas en un entorno Jinja en sandbox. [S16] Es una elección concreta de la capa de plantillas, y no demuestra de forma automática que la ejecución de herramientas, la obtención de URLs y el acceso a archivos sean seguros. Cada tipo de recurso necesita su propio modelo de amenazas.</p>
+<h3>Una lista de comprobación para «cancelación completa»</h3>
+<p>Inyecta estos casos en el motor mock: cancelar durante el prefill, salida cortada, cancelación duplicada, un motor que no responde, resultados viejos tardíos y una solicitud nueva tras la recuperación. Condiciones de aceptación: no se confirma ningún token nuevo visible para el usuario; toda tarea que lea o escriba los búferes relacionados se detuvo o terminó; la cola y el estado no los usa por error la solicitud siguiente; la salida vieja tardía se reconoce y se descarta; los recursos se liberan exactamente una vez; y el cliente recibe un claro «cancelada» o «fallida», nunca «éxito».</p>
+<p>Un último recordatorio: este libro es un sitio web estático. No contiene ninguna API key de inferencia real y nunca llega directamente desde el navegador a tu servidor de modelos. Si algún día se conecta a una plataforma de laboratorios real, esa plataforma necesitará su propia autenticación, cuotas, aislamiento de trabajos y un proxy del lado del servidor. Nunca pongas una clave en una página del curso.</p>
+</details>

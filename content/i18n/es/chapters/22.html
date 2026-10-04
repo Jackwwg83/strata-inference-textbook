@@ -1,0 +1,262 @@
+<div class="hook"><span class="eyebrow">Quizá lo hayas visto</span>
+<p>Cuando descargas software de código abierto, la página de versiones suele mostrar una fila de archivos: <code>windows-x64</code>, <code>linux-x64</code>, <code>macos-arm64</code>… Es el mismo programa. ¿Por qué hacen falta tantas copias?</p>
+<p>El README de Strata empieza así: tarjetas gráficas NVIDIA o AMD, Windows o Linux. <span class="ev ev-report">Informe upstream</span>[S01] Su documento de principios lo dice con más claridad: en tarjetas NVIDIA (CUDA) y AMD (HIP) corre el mismo motor, compilado una vez para cada una. [S02] Este capítulo responde dos preguntas: ¿cómo se convierte un solo código fuente en programas que corren en máquinas distintas? Y, cuando algo «corre», ¿cuánto demuestra de verdad?</p></div>
+<p class="tldr"><strong>En una línea:</strong> cada chip solo entiende sus propias instrucciones. Strata escribe un solo código fuente y usa interruptores de compilación, compilación condicional y una «tabla de cambio de nombres» de CUDA a HIP para construir dos motores, uno para NVIDIA y otro para AMD. En la CPU, al arrancar pregunta qué instrucciones conoce el procesador y elige un kernel AVX-512 o AVX2. Compila, pasa las pruebas, corre en una tarjeta real y lo verificó el mantenedor: son cuatro niveles distintos de evidencia.</p>
+
+<h2 id="sec-1">22.1 Una receta, tres cocinas</h2>
+<p>Imagina que escribes una receta y la envías a tres restaurantes. Uno cocina con gas, otro con inducción y otro solo tiene horno. La instrucción «saltea tres minutos» tiene que traducirse a lo que permite el equipo de cada cocina.</p>
+<p>Con los programas pasa lo mismo. Quien programa escribe <dfn>código fuente</dfn>: texto que una persona puede leer. Lo que un chip ejecuta de verdad es <dfn>código máquina</dfn>: una cadena de instrucciones binarias. Qué instrucciones entiende un chip, y cómo se codifica cada una, lo fija su <dfn>conjunto de instrucciones</dfn>. Es como «la lista de electrodomésticos de esta cocina». Traducir el código fuente a código máquina de un conjunto de instrucciones es el trabajo del <dfn>compilador</dfn>.</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figura 22-1: el mismo código fuente pasa por el preprocesador y el compilador, y se convierte en tres tipos de código máquina: para una CPU x86, una GPU NVIDIA y una GPU AMD">
+<rect class="f-soft" fill="#e5f1df" x="60" y="8" width="280" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="33" font-size="14" font-weight="600" text-anchor="middle">Código fuente: una sola vez</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="70" width="360" height="46" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="90" font-size="14" font-weight="600" text-anchor="middle">Preprocesador</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="108" font-size="12" text-anchor="middle">Expande #include y macros; deja una rama de #if</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="138" width="360" height="46" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="158" font-size="14" font-weight="600" text-anchor="middle">Compilador</text>
+<text class="f-on" fill="#ffffff" x="200" y="176" font-size="12" text-anchor="middle">Código máquina de un conjunto de instrucciones</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 48V68M200 116V136M200 184V196H70V210M200 196V210M200 196H330V210"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="212" width="124" height="54" rx="8"/>
+<text class="f-text" fill="#182f2b" x="70" y="234" font-size="13" font-weight="600" text-anchor="middle">CPU x86</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="254" font-size="12" text-anchor="middle">AVX2 / AVX-512</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="138" y="212" width="124" height="54" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="234" font-size="13" font-weight="600" text-anchor="middle">GPU NVIDIA</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="254" font-size="12" text-anchor="middle">sm_75 … sm_120</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="268" y="212" width="124" height="54" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="234" font-size="13" font-weight="600" text-anchor="middle">GPU AMD</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="254" font-size="12" text-anchor="middle">gfx1030 … gfx1201</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="12" text-anchor="middle">Un código fuente, tres «dialectos» de código máquina</text>
+</svg><figcaption>Figura 22-1　El código fuente se escribe una sola vez. El preprocesador lo reescribe primero para el destino. Después el compilador lo traduce a las instrucciones del chip de destino. Si cambias de chip, hay que compilar otra vez.</figcaption></figure>
+<p>Los nombres <code>sm_120</code> y <code>gfx1100</code> de la figura son códigos de arquitectura de GPU. Son como el modelo de una cocina. El script de compilación de Strata exige que las tarjetas NVIDIA tengan capacidad de cómputo 7.5 o superior, es decir, serie RTX 20 y posteriores. En el lado AMD acepta solo una lista explícita, y cualquier arquitectura fuera de ella produce un error. <span class="ev ev-code">Hecho de código</span></p>
+<aside class="primer" id="c22-compiler">
+<h3>Compiladores, conjuntos de instrucciones y compilación condicional</h3>
+<p>Un <dfn>conjunto de instrucciones</dfn> es un contrato entre el hardware y el software. El chip promete «conozco estas instrucciones» y el software solo puede hablar con ellas. Los chips de una misma familia añaden instrucciones nuevas con el tiempo. La familia de CPU x86, por ejemplo, tuvo primero AVX2 y después añadió el más ancho AVX-512. Si un chip viejo se encuentra una instrucción que no conoce, informa de una «instrucción ilegal» y el programa se cae.</p>
+<p>Un <dfn>compilador</dfn> traduce el código fuente a código máquina. Compilar C y C++ ocurre en dos etapas. Primero el <dfn>preprocesador</dfn> edita el texto. Después el compilador propiamente dicho hace la traducción. El preprocesador hace tres cosas. Pega tal cual los archivos de <code>#include</code>. Sustituye por nombre las <dfn>macros</dfn> definidas con <code>#define</code>, como un «buscar y reemplazar». Y conserva solo una rama de cada condición <code>#if</code>, borrando por completo las demás. Este último truco se llama <dfn>compilación condicional</dfn>.</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="Figura 22-2: un archivo fuente con ramas #if; al compilar para gfx1100 solo queda la rama sudot4, y al compilar para gfx1030 solo queda la rama sdot4">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">Archivo fuente (uno solo)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="30" width="184" height="148" rx="8"/>
+<text class="f-text" fill="#182f2b" x="16" y="52" font-size="12">#if defined(__gfx1100__)</text>
+<text class="f-muted" fill="#5c6d66" x="28" y="70" font-size="12">usa sudot4</text>
+<text class="f-text" fill="#182f2b" x="16" y="88" font-size="12">#elif defined(__gfx1030__)</text>
+<text class="f-muted" fill="#5c6d66" x="28" y="106" font-size="12">usa sdot4</text>
+<text class="f-text" fill="#182f2b" x="16" y="124" font-size="12">#else</text>
+<text class="f-muted" fill="#5c6d66" x="28" y="142" font-size="12">bucle byte a byte</text>
+<text class="f-text" fill="#182f2b" x="16" y="160" font-size="12">#endif</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M192 66H212M192 140H212"/>
+<rect class="f-soft" fill="#e5f1df" x="214" y="34" width="178" height="62" rx="8"/>
+<text class="f-text" fill="#182f2b" x="224" y="56" font-size="12" font-weight="600">Compilar para gfx1100</text>
+<text class="f-text" fill="#182f2b" x="224" y="80" font-size="12">Solo ve: usa sudot4</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="110" width="178" height="62" rx="8"/>
+<text class="f-text" fill="#182f2b" x="224" y="132" font-size="12" font-weight="600">Compilar para gfx1030</text>
+<text class="f-text" fill="#182f2b" x="224" y="156" font-size="12">Solo ve: usa sdot4</text>
+<text class="f-text" fill="#182f2b" x="200" y="202" font-size="12" text-anchor="middle">El preprocesador borra antes las ramas no elegidas</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="222" font-size="12" text-anchor="middle">Así, un código da programas de un solo camino</text>
+</svg><figcaption>Figura 22-2　Compilación condicional: un solo archivo fuente contiene todas las ramas, y cada compilación conserva solo la que coincide con el destino. El compilador ni siquiera ve las otras ramas.</figcaption></figure>
+<p>Así escribe Strata el «producto punto de cuatro bytes» en las tarjetas AMD. Las tarjetas RDNA3 y RDNA4 usan una instrucción sudot4. RDNA2 no la tiene y usa la más antigua sdot4. En los demás casos hay un bucle que multiplica byte a byte y suma. Los tres caminos calculan exactamente el mismo entero, pero a distinta velocidad. <span class="ev ev-code">Hecho de código</span> En la sección 22.3 lo compilaremos con las manos en la masa.</p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/Compilador" target="_blank" rel="noopener noreferrer">Wikipedia: Compilador</a> · <a href="https://es.wikipedia.org/wiki/Conjunto_de_instrucciones" target="_blank" rel="noopener noreferrer">Wikipedia: Conjunto de instrucciones</a> · <a href="https://es.wikipedia.org/wiki/Preprocesador_de_C" target="_blank" rel="noopener noreferrer">Wikipedia: Preprocesador de C</a> · <a href="https://en.cppreference.com/w/cpp/preprocessor/conditional" target="_blank" rel="noopener noreferrer">cppreference: inclusión condicional (en inglés)</a></p>
+</aside>
+<p class="bridge"><strong>Si estudiaste informática:</strong> un curso de compiladores sigue la línea de análisis léxico, análisis sintáctico y generación de código. El preprocesado ocurre antes de todo eso. Es edición de texto pura y no conoce la gramática. Por eso los errores de sustitución de macros suelen señalar lugares extraños: lo que ve el compilador es el código ya sustituido.</p>
+
+<h2 id="sec-2">22.2 CPU: preguntar qué instrucciones conoce y luego elegir un kernel</h2>
+<p>El capítulo 10 explicó que los expertos que la GPU no tiene en caché los calcula la CPU, allí mismo en la RAM. La documentación upstream lo resume así: estos cálculos usan kernels AVX-512 o AVX2, y los modelos en formatos i-quant usan los kernels de ggml. <span class="ev ev-report">Informe upstream</span>[S02] El código fuente distingue más. Los formatos i-quant también cambian al kernel multi-token propio de Strata cuando un grupo tiene varios tokens. <span class="ev ev-code">Hecho de código</span> Aquí, un <dfn>kernel</dfn> es un fragmento de código de cálculo central, escrito a propósito para correr muy rápido.</p>
+<p>AVX2 y AVX-512 son instrucciones <dfn>SIMD</dfn>: una sola instrucción procesa a la vez toda una fila de números (el capítulo 13 lo explica a fondo). La diferencia es lo ancha que es esa fila. Los registros de AVX2 tienen 256 bits y los de AVX-512 tienen 512 bits. Mira la figura 22-3.</p>
+<figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="Figura 22-3: un registro AVX2 de 256 bits contiene 32 enteros de 8 bits; un registro AVX-512 de 512 bits contiene 64">
+<defs><pattern id="c22-lane" width="4.6875" height="18" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="3.6" height="18"/></pattern></defs>
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">Enteros de 8 bits por registro vectorial</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="12" font-weight="600">AVX2</text>
+<rect fill="url(#c22-lane)" x="90" y="38" width="150" height="18"/>
+<text class="f-text" fill="#182f2b" x="250" y="52" font-size="12">256 bits = 32</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12" font-weight="600">AVX-512</text>
+<rect fill="url(#c22-lane)" x="90" y="84" width="300" height="18"/>
+<text class="f-text" fill="#182f2b" x="90" y="124" font-size="12">512 bits = 64: el doble por instrucción</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="156" font-size="12">Kernels de CPU: AVX-512 si hay; si no, AVX2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="178" font-size="12">Si la CPU las conoce y el SO guarda los registros</text>
+</svg><figcaption>Figura 22-3　Un registro del doble de ancho procesa el doble de números por instrucción. Pero las CPU viejas no conocen AVX-512, así que el programa tiene que llevar dos juegos de kernels.</figcaption></figure>
+<p>El problema es este. Si todo el programa se compilara para AVX-512, el compilador podría insertar instrucciones AVX-512 en cualquier parte, y el programa se caería en una CPU vieja. El script de compilación de Strata añade los interruptores de AVX-512 o AVX2 solo a unos pocos archivos fuente de kernels (opciones como <code>-mavx512f</code> en GCC y <code>/arch:AVX512</code> en MSVC). El archivo que «sondea la CPU» no los lleva, así que corre sin riesgo en cualquier CPU x86-64. <span class="ev ev-code">Hecho de código</span></p>
+<p>El sondeo usa <dfn>CPUID</dfn>: una instrucción que hace que la CPU «se presente» y devuelva una cadena de bits, donde cada bit indica una función. Strata comprueba que estén presentes las cinco subfunciones de AVX-512 (F, BW, VL, VNNI y VBMI). También comprueba que el sistema operativo guarde ese juego de registros grandes al cambiar de hilo. Si falta algo, trata la CPU como si no tuviera AVX-512. <span class="ev ev-code">Hecho de código</span> Después elige el kernel en este orden:</p>
+<div class="viz" data-viz="cpu-dispatch"><figure class="fig"><svg viewBox="0 0 400 396" role="img" aria-label="Figura 22-4: orden de selección del kernel de CPU: sin AVX2 se niega a arrancar; un paquete Q2_0 estándar exige AVX-512; los formatos nativos prueban primero el kernel AVX-512, luego el AVX2 y por último vuelven a ggml-cpu">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="320" height="36" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" font-weight="600" text-anchor="middle">Arranque: pregunta a la CPU con CPUID</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="64" width="222" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="121" y="87" font-size="12" text-anchor="middle">¿AVX2 (con FMA y F16C)?</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="240" y="64" width="152" height="36" rx="8"/>
+<text class="f-warn" fill="#9e5d24" x="316" y="87" font-size="12" text-anchor="middle">No: no arranca</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="120" width="222" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="121" y="143" font-size="12" text-anchor="middle">¿Paquete Q2_0 estándar?</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="240" y="116" width="152" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="316" y="134" font-size="12" text-anchor="middle">Sí: solo AVX-512</text>
+<text class="f-warn" fill="#9e5d24" x="316" y="151" font-size="12" text-anchor="middle">si no, no arranca</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="176" width="222" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="121" y="199" font-size="12" text-anchor="middle">¿AVX-512 completo y activo?</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="240" y="172" width="152" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="316" y="190" font-size="12" text-anchor="middle">Sí: kernel iq512</text>
+<text class="f-muted" fill="#5c6d66" x="316" y="207" font-size="12" text-anchor="middle">grupo de ≥ 2 tokens</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="232" width="222" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="121" y="255" font-size="12" text-anchor="middle">¿Formato con AVX2 y activo?</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="240" y="228" width="152" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="316" y="246" font-size="12" text-anchor="middle">Sí: kernel iq256</text>
+<text class="f-muted" fill="#5c6d66" x="316" y="263" font-size="12" text-anchor="middle">grupo de ≥ 2 tokens</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="292" width="382" height="38" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="316" font-size="13" font-weight="600" text-anchor="middle">Ninguna: producto punto de ggml-cpu, 1 token</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V54H121V62M232 82H238M121 100V118M232 138H238M121 156V174M232 194H238M121 212V230M232 250H238M121 268V290"/>
+<text class="f-muted" fill="#5c6d66" x="128" y="113" font-size="12">sí</text>
+<text class="f-muted" fill="#5c6d66" x="128" y="169" font-size="12">no</text>
+<text class="f-muted" fill="#5c6d66" x="128" y="225" font-size="12">no</text>
+<text class="f-muted" fill="#5c6d66" x="128" y="283" font-size="12">no</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="352" font-size="12">Esquema: omite que IQ4_XS vuelve a ggml</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="370" font-size="12">en CPU con AVX-512.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="388" font-size="12">Lógica de generate.cpp y native_expert.cpp</text>
+</svg><figcaption>Figura 22-4　El mismo archivo de programa toma kernels distintos en CPU distintas. La decisión ocurre en tiempo de ejecución, así que un solo binario publicado sirve para CPU nuevas y viejas.</figcaption></figure></div>
+<p>Varios detalles merecen una pausa. <span class="ev ev-code">Hecho de código</span></p>
+<ul>
+<li><strong>Sin AVX2, no arranca.</strong> Todos los kernels de expertos en CPU necesitan como mínimo AVX2, FMA y F16C. El motor informa del modelo de CPU y dice que hace falta una CPU Intel Haswell (2013), AMD Zen (2017) o posterior.</li>
+<li><strong>El paquete Q2_0 estándar solo tiene un kernel AVX-512.</strong> La documentación de instalación upstream dice que setup escribe una copia extra de los expertos, de unos 40 GB, solo para Q2_0 y solo en CPU con AVX-512, para que la use este kernel rápido. <span class="ev ev-report">Informe upstream</span> El comentario del archivo de cabecera explica con franqueza por qué se niega a arrancar desde el principio: así quien tiene una CPU vieja sabe el motivo en el segundo 0, y no se topa con una instrucción ilegal en el token 4000.</li>
+<li><strong>Las variables de entorno también cambian la ruta.</strong> <code>STRATA_NO_IQ512</code> manda a una CPU con AVX-512 por el kernel AVX2, y <code>STRATA_NO_IQ256</code> apaga además el kernel AVX2, de modo que solo queda ggml. La misma máquina y el mismo programa toman un camino de cálculo distinto con solo cambiar una variable de entorno.</li>
+</ul>
+<p class="bridge"><strong>Si estudiaste informática:</strong> esto es «despacho en tiempo de ejecución», la misma idea que las funciones virtuales de la programación orientada a objetos. El punto de llamada no cambia, y qué código se ejecuta se decide solo al correr. La diferencia es que aquí el criterio no es el tipo del objeto, sino los bits de función que devuelve CPUID.</p>
+
+<h2 id="sec-3">22.3 GPU: un código al estilo CUDA, dos motores para NVIDIA y AMD</h2>
+<p>En la CPU, un archivo de programa lleva dos juegos de kernels y elige al correr. En la GPU se va más lejos. Las tarjetas NVIDIA y AMD tienen instrucciones totalmente distintas, e incluso plataformas de programación distintas. La única salida es construir un motor aparte para cada fabricante.</p>
+<aside class="primer" id="c22-cuda-hip">
+<h3>CUDA y HIP</h3>
+<p><dfn>CUDA</dfn> es la plataforma de programación de GPU de NVIDIA: un conjunto de extensiones de sintaxis de C++, una biblioteca de funciones de ejecución y el compilador nvcc. Con ella se escriben funciones que corren en paralelo en la GPU. Luego se llama a funciones como <code>cudaMalloc</code> y <code>cudaMemcpy</code> para reservar VRAM (memoria de video) y mover datos. CUDA solo produce código máquina para tarjetas NVIDIA.</p>
+<p><dfn>HIP</dfn> es el equivalente de AMD en la plataforma ROCm. Está modelado a propósito sobre CUDA. En la mayoría de las funciones basta cambiar el prefijo <code>cuda</code> por <code>hip</code>: <code>cudaMalloc</code> pasa a ser <code>hipMalloc</code>, con casi el mismo significado. Por eso un código CUDA muchas veces compila en tarjetas AMD con solo «cambiar los nombres». AMD ofrece incluso una herramienta oficial, HIPIFY, que cambia los nombres de forma automática.</p>
+<p>Además de los nombres, hay diferencias que no se arreglan renombrando. Una GPU agrupa varios hilos que se ejecutan al unísono. NVIDIA lo llama warp y AMD lo llama wavefront (wave, para abreviar). En NVIDIA un grupo tiene siempre 32 hilos. Las arquitecturas antiguas de AMD usan 64, y la serie RDNA puede usar 32. Un código que depende de «un grupo de 32» falla en una máquina de 64. Los kernels HIP de Strata solo admiten wave32 y lo vuelven a comprobar al arrancar. <span class="ev ev-code">Hecho de código</span> El capítulo 15 explica a fondo los hilos, los warps y las ideas relacionadas.</p>
+<p>Relación con este capítulo: Strata no usa una herramienta para reescribir su código fuente. En cambio, al compilar, mete automáticamente una «tabla de cambio de nombres» en cada archivo fuente. Ahora vemos cómo.</p>
+<p class="further">Para seguir leyendo: <a href="https://rocm.docs.amd.com/projects/HIP/en/latest/what_is_hip.html" target="_blank" rel="noopener noreferrer">Documentación de ROCm: What is HIP (en inglés)</a> · <a href="https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_porting_guide.html" target="_blank" rel="noopener noreferrer">Documentación de ROCm: portar de CUDA a HIP (en inglés)</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA: guía de programación de CUDA (en inglés)</a> · <a href="https://es.wikipedia.org/wiki/CUDA" target="_blank" rel="noopener noreferrer">Wikipedia: CUDA</a> · <a href="https://es.wikipedia.org/wiki/ROCm" target="_blank" rel="noopener noreferrer">Wikipedia: ROCm</a></p>
+</aside>
+<p>El código de GPU de Strata está escrito al estilo CUDA en archivos <code>.cu</code>, 53 en el directorio <code>src</code>. Al activar el interruptor de compilación HIP pasan tres cosas: <span class="ev ev-code">Hecho de código</span></p>
+<ol>
+<li>El script de compilación marca todos los archivos <code>.cu</code> como lenguaje HIP y se los entrega al compilador de AMD.</li>
+<li>Las opciones de compilación ganan <code>-include hip_compat/cuda_runtime.h</code>, que obliga a poner este archivo de cabecera de adaptación al principio de cada archivo fuente. Aquí un <dfn>shim</dfn> (adaptador) es una capa fina de código, colocada entre dos capas, cuyo único trabajo es alisar sus diferencias.</li>
+<li>El shim contiene 82 macros de la forma <code>#define cudaMalloc hipMalloc</code>, y otro shim, <code>cublas_v2.h</code>, se ocupa de 17 líneas de nombres de la biblioteca de matrices. Cuando el preprocesador las sustituye, los nombres de CUDA se convierten en nombres de HIP.</li>
+</ol>
+<p>El script de compilación también establece que los interruptores de CUDA y de HIP no pueden estar activos a la vez: cada compilación construye un solo backend. <span class="ev ev-code">Hecho de código</span></p>
+<p>Cambiar nombres no basta. Algunas funciones internas de GPU de CUDA no tienen un equivalente listo en HIP para las tarjetas RDNA, así que el shim las implementa por su cuenta. Por ejemplo, el producto punto de cuatro bytes <code>__dp4a</code>: parte cada uno de dos enteros de 32 bits en 4 bytes con signo, multiplica los pares correspondientes y suma los resultados en un acumulador. El shim lo divide en tres caminos según la arquitectura de la GPU (mira el recuadro de la sección 22.1). Otro ejemplo es <code>__shfl_xor_sync</code>, que intercambia datos dentro de un warp. El shim comprueba primero que «los 32 carriles participan». Si no es así, aborta de inmediato en lugar de descartar en silencio esa parte del significado. <span class="ev ev-code">Hecho de código</span></p>
+<p>El simulador de abajo entrega tres líneas de código fuente a distintas tarjetas de destino. Pulsa <strong>Compilar</strong> y mira cómo avanza la tira paso a paso:</p>
+<div class="viz" data-viz="portable-build"><figure class="fig"><svg viewBox="0 0 400 320" role="img" aria-label="Figura 22-5: el mismo código fuente al estilo CUDA; la compilación NVIDIA conserva los nombres y usa dp4a por hardware, y la compilación AMD cambia cudaMalloc por hipMalloc y dp4a por la instrucción sudot4">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">Mismo código fuente al estilo CUDA</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="28" width="320" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="56" y="51" font-size="12">cudaMalloc(&amp;buf, bytes);</text>
+<text class="f-text" fill="#182f2b" x="56" y="73" font-size="12">acc = STRATA_DP4A(a, b, acc);</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 86V98H102V108M200 98H298V108"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="110" width="188" height="120" rx="8"/>
+<text class="f-text" fill="#182f2b" x="20" y="134" font-size="13" font-weight="600">NVIDIA: nvcc</text>
+<text class="f-text" fill="#182f2b" x="20" y="160" font-size="12">cudaMalloc se conserva</text>
+<text class="f-text" fill="#182f2b" x="20" y="184" font-size="12">STRATA_DP4A → __dp4a</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="208" font-size="12">dp4a por hardware</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="204" y="110" width="188" height="120" rx="8"/>
+<text class="f-text" fill="#182f2b" x="216" y="134" font-size="13" font-weight="600">AMD: compila con HIP</text>
+<text class="f-text" fill="#182f2b" x="216" y="160" font-size="12">cudaMalloc → hipMalloc</text>
+<text class="f-text" fill="#182f2b" x="216" y="184" font-size="12">STRATA_DP4A → sudot4</text>
+<text class="f-muted" fill="#5c6d66" x="216" y="208" font-size="12">v_dot4 de RDNA3</text>
+<text class="f-text" fill="#182f2b" x="200" y="254" font-size="12" text-anchor="middle">Los nombres cambian con 82 #define en</text>
+<text class="f-text" fill="#182f2b" x="200" y="272" font-size="12" text-anchor="middle">hip_compat/cuda_runtime.h</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="296" font-size="12" text-anchor="middle">El ejemplo de dp4a da 95 en ambos lados:</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="314" font-size="12" text-anchor="middle">los enteros coinciden bit a bit</text>
+</svg><figcaption>Figura 22-5　No cambia ni un carácter del código fuente. La compilación NVIDIA usa directamente los nombres de CUDA. En la compilación AMD, el shim cambia los nombres por sus versiones de HIP y cambia el producto punto por la instrucción propia de AMD.</figcaption></figure></div>
+<p>El motor compilado también recuerda para qué arquitecturas se compiló. Al arrancar, compara la arquitectura real de la tarjeta con esa lista y exige wave32. Si no coinciden, sale con un error que nombra la tarjeta y la lista. Así evita esperar a media ejecución para soltar un enigmático «invalid device function». <span class="ev ev-code">Hecho de código</span></p>
+<p>En el lado NVIDIA también se usa compilación condicional para cuidar las tarjetas viejas. <code>__dp4a</code> solo existe desde la capacidad de cómputo 6.1. Al compilar para una tarjeta 6.0, el <code>#if</code> pone en su lugar un bucle de software equivalente. Pero este camino exige activar a mano un interruptor experimental y upstream no lo respalda. Otro ejemplo: al compilar para la serie RTX 50 con CUDA 12.8, el script de compilación muestra una advertencia, porque algunos usuarios han reportado que los motores compilados así se caen con prompts largos. <span class="ev ev-code">Hecho de código</span> Así que la versión del compilador también es una variable.</p>
+
+<h2 id="sec-4">22.4 ¿Cuánto falta para pasar de «compila» a «tiene soporte»?</h2>
+<p>Supón que la arquitectura de tu GPU está en la lista y que el motor compiló. ¿Eso es «soporte»? El propio script de compilación de Strata da una respuesta muy detallada. Divide las arquitecturas AMD en tres niveles, y CMake reacciona distinto a cada uno al configurar: <span class="ev ev-code">Hecho de código</span></p>
+<figure class="fig"><svg viewBox="0 0 400 314" role="img" aria-label="Figura 22-6: cuatro niveles de evidencia de soporte: compila, pasa las pruebas, corre en una tarjeta real y verificado por el mantenedor, con el nivel que alcanza cada arquitectura AMD de Strata">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle">Evidencia de «soporte» (arriba = más fuerte)</text>
+<rect class="f-accent" fill="#136d5a" x="160" y="40" width="230" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="170" y="59" font-size="13" font-weight="600">④ Lo verifica el mantenedor</text>
+<text class="f-on" fill="#ffffff" x="170" y="77" font-size="12">gfx1100, gfx1201</text>
+<rect class="f-soft" fill="#e5f1df" x="110" y="100" width="230" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="120" y="119" font-size="13" font-weight="600">③ Corre en tarjeta real</text>
+<text class="f-muted" fill="#5c6d66" x="120" y="137" font-size="12">gfx1101, gfx1200 (usuarios)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="160" width="230" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="70" y="179" font-size="13" font-weight="600">② Pasa sus pruebas</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="197" font-size="12">gfx1102: ctest pasa</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="220" width="230" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="20" y="239" font-size="13" font-weight="600">① Compila</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="257" font-size="12">gfx1102, gfx1030: con avisos</text>
+<text class="f-muted" fill="#5c6d66" x="250" y="247" font-size="12">← solo compila</text>
+<text class="f-muted" fill="#5c6d66" x="298" y="183" font-size="12">← no falla</text>
+<text class="f-muted" fill="#5c6d66" x="298" y="199" font-size="12">y acierta</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="127" font-size="12">carga real →</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="59" font-size="12">reproducible y</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="75" font-size="12">con dueño →</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="288" font-size="12" text-anchor="middle">Arquitecturas fuera de la lista:</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="306" font-size="12" text-anchor="middle">se rechazan ya en el nivel ①</text>
+</svg><figcaption>Figura 22-6　«Compila» es solo el nivel más bajo de evidencia. El script de compilación de Strata clasifica las arquitecturas AMD por la fuerza de la evidencia y rechaza sin más las que no están en la lista.</figcaption></figure>
+<ul>
+<li><strong>Verificada por el mantenedor</strong>: gfx1100 (RX 7900 XT / XTX) y gfx1201 (serie RX 9070, Radeon AI PRO R9700). El mantenedor las ha probado en tarjetas reales.</li>
+<li><strong>Verificada por usuarios</strong>: gfx1101 y gfx1200. Las personas dueñas de esas tarjetas las hicieron correr y lo reportaron. Al configurar solo se imprime una línea de aviso.</li>
+<li><strong>No verificada</strong>: gfx1102 y gfx1030 compilan, y al configurar se imprime una advertencia que pide a los usuarios reportar sus resultados. gfx1102 pasa las pruebas incluidas, pero todavía nadie ha reportado una ejecución completa de un modelo. gfx1030 ha corrido en una máquina de la comunidad, y el mantenedor aún no la ha verificado en persona.</li>
+</ul>
+<p>La segunda trampa son los números. El dp4a de la figura 22-5 es aritmética entera, así que los tres caminos coinciden bit a bit. Con el punto flotante es distinto: si cambia el orden de las sumas, los últimos dígitos pueden variar (el capítulo 4 trató el redondeo de los flotantes). La documentación AMD de Strata dice sin rodeos que no promete que los dos backends den respuestas idénticas bit a bit. <span class="ev ev-report">Informe upstream</span> Esto ocurre también en una sola máquina. Con los modelos de la serie IQ, la CPU usa el producto punto de ggml cuando calcula un token solo, y el kernel multi-token de Strata cuando calcula un grupo. Los dos redondean un poco distinto, y cuántos tokens tiene un grupo depende de los borradores. Por eso, incluso con temperatura 0, el mismo prompt puede recibir otra respuesta igual de razonable. Desde la versión 0.1.30 del motor puedes poner <code>STRATA_IQ_MT_MIN=1</code> para eliminar esta diferencia. El costo, medido upstream en un Ryzen 7600 (AVX-512), es que la decodificación de IQ3_S va entre 1 y 3 % más lenta. <span class="ev ev-report">Informe upstream</span>[S03]</p>
+<p>Así que la <strong>configuración de compilación es una condición experimental</strong>, y va en el informe igual que el hardware. Con el mismo commit, activar o no <code>STRATA_PORTABLE</code> hace que la parte de CPU de ggml se compile para «cualquier CPU con AVX2» o para «la CPU de esta máquina». Si cambias una variable de entorno, tienes un camino de cálculo distinto. <span class="ev ev-code">Hecho de código</span> Mira ahora la tabla de velocidades del README. El modelo Q2_0 escribe 94 tokens por segundo en la máquina con RTX 5070 y 60 por segundo en la máquina con RX 9070 XT. <span class="ev ev-report">Informe upstream</span>[S01] La condición es una conversación corta. El README no indica la versión del motor ni la longitud exacta del contexto. Las dos máquinas tienen además CPU distintas: una es un Ryzen 5 7600 con AVX-512 y la otra un Ryzen 9 3900X (Zen 2) con solo AVX2. Estos números muestran que «las dos máquinas pueden correrlo», pero no sirven para comparar si NVIDIA o AMD es más rápida.</p>
+<p>¿Cuántas combinaciones habría que verificar? Un cálculo aproximado está en la figura 22-7. <span class="ev ev-est">Estimación didáctica</span></p>
+<figure class="fig"><svg viewBox="0 0 400 184" role="img" aria-label="Figura 22-7: 10 arquitecturas de GPU por 3 rutas de CPU por 2 sistemas operativos por 5 paquetes de modelo dan 300 combinaciones">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="10" width="76" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="46" y="32" font-size="13" font-weight="600" text-anchor="middle">Arq. GPU</text>
+<text class="f-text" fill="#182f2b" x="46" y="56" font-size="14" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="93" y="44" font-size="14" text-anchor="middle">×</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="102" y="10" width="76" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="140" y="32" font-size="13" font-weight="600" text-anchor="middle">Ruta CPU</text>
+<text class="f-text" fill="#182f2b" x="140" y="56" font-size="14" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="187" y="44" font-size="14" text-anchor="middle">×</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="196" y="10" width="76" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="234" y="32" font-size="13" font-weight="600" text-anchor="middle">SO</text>
+<text class="f-text" fill="#182f2b" x="234" y="56" font-size="14" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="281" y="44" font-size="14" text-anchor="middle">×</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="10" width="76" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="328" y="32" font-size="13" font-weight="600" text-anchor="middle">Paquetes</text>
+<text class="f-text" fill="#182f2b" x="328" y="56" font-size="14" text-anchor="middle">5</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="90" width="240" height="40" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="115" font-size="14" font-weight="600" text-anchor="middle">300 combinaciones</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 68V88"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="156" font-size="12" text-anchor="middle">El contexto, el multi-GPU y los formatos KV</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="174" font-size="12" text-anchor="middle">lo multiplican todavía más</text>
+</svg><figcaption>Figura 22-7　Hasta un cálculo aproximado da 300 combinaciones, y una máquina solo puede encender una casilla. Las casillas sin probar deben quedar en blanco, no marcadas por defecto.</figcaption></figure>
+<p>La cuenta: 10 arquitecturas de GPU (para NVIDIA, las cuatro generaciones RTX 20/30/40/50 que enumera el script de compilación; para AMD, las 6 que se compilan en el motor de Windows), 3 rutas de CPU (AVX-512, AVX2, ggml), 2 sistemas operativos y los 5 paquetes de modelo que lista el README: 10 × 3 × 2 × 5 = 300. Nadie puede probarlas todas. Lo viable es trabajar por capas. Las muestras pequeñas de matemática pura cubren los algoritmos. Las pruebas de formato cubren la decodificación cuantizada. Cada backend corre pruebas de comparación en kernels representativos. Y las pruebas de extremo a extremo cubren solo las combinaciones más importantes.</p>
+
+<h2 id="sec-5">22.5 Manos a la obra: entrega una línea de código a dos backends</h2>
+<p>Este capítulo no tiene un laboratorio aparte. Los dos simuladores son el banco de trabajo. Te recomendamos probarlos en este orden:</p>
+<ol>
+<li>En «Un código fuente, dos backends», compila por turnos para RTX 50, RX 7900 y RX 6900. Compara las tres líneas tras el preprocesado: qué nombres cambiaron y en qué rama cayó dp4a. Comprueba si el resultado del ejemplo es siempre 95.</li>
+<li>Elige «una arquitectura fuera de la lista» y mira por qué CMake prefiere negarse en el primer paso.</li>
+<li>En «Selector de kernel de CPU», fija la CPU y el paquete de modelo, y cambia solo las variables de entorno y el número de tokens. Cuenta: ¿cuántos caminos de cálculo distintos puede tomar una misma máquina?</li>
+</ol>
+<p>Si tienes un compilador de C a mano, prueba un experimento más. Escribe una función escalar de producto punto y luego una versión que acumule en grupos de 8. Compara los resultados y los tiempos con el mismo conjunto de flotantes aleatorios. Verás que los últimos dígitos difieren. Primero confirma que la lógica es correcta y después habla de rendimiento. Los tiempos medidos con arreglos diminutos no representan un kernel SIMD real.</p>
+
+<h2 id="sec-6">22.6 Límites: licencias, modelos y este propio libro</h2>
+<p>«Portable» tiene todavía otro sentido: quién puede tomar el código, los modelos y la documentación, y cómo puede usarlos. El código del repositorio de Strata tiene licencia MIT. <span class="ev ev-code">Hecho de código</span>[S19] Unas pocas partes del repositorio tienen licencias propias. <code>third_party/ggml</code> viene de llama.cpp / ggml (MIT), y las fuentes tipográficas que usa la aplicación web tienen la licencia SIL Open Font. Los archivos de modelo no están en el repositorio, y cada modelo se rige por su propia licencia. <span class="ev ev-report">Informe upstream</span>[S02]</p>
+<p>Este libro es un sitio web estático: HTML, CSS y JavaScript, sin motor de inferencia y sin descargar pesos de modelos. Desplegarlo en cualquier servicio de alojamiento web solo publica un curso. No significa que Strata esté corriendo en ese servidor. Las figuras interactivas del libro son simulaciones didácticas. Reproducen la lógica de decisión del código fuente de Strata, pero no son los kernels de Strata y no predicen el rendimiento de ninguna máquina real.</p>
+<p>Cuando cita código upstream, este libro registra un commit fijo, no vuelve a empaquetar las fuentes tipográficas ni los modelos de upstream, y aclara que es un libro de texto escrito de forma independiente, sin aval oficial del proyecto original ni de ningún fabricante de modelos.</p>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>Un chip solo entiende su propio conjunto de instrucciones. El mismo código fuente se compila una vez para cada destino. La compilación condicional hace que, en cada compilación, un solo código conserve únicamente la rama que coincide con el destino.</li>
+<li>En la CPU, Strata despacha en tiempo de ejecución: primero pregunta con CPUID si hay AVX-512 y AVX2, y después elige el kernel. En la GPU despacha en tiempo de compilación: una tabla de cambio de nombres de CUDA a HIP más unas pocas funciones internas escritas a mano construyen dos motores, uno para NVIDIA y otro para AMD.</li>
+<li>Compila, pasa las pruebas, corre en una tarjeta real y lo verificó el mantenedor: son cuatro niveles distintos de evidencia. Tampoco se garantiza que los resultados en punto flotante sean idénticos bit a bit entre backends. Anota la configuración de compilación y las variables de entorno como condiciones experimentales.</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «Si el código compila en mi tarjeta gráfica, mi tarjeta tiene soporte».</strong></p>
+<p>Compilar solo demuestra que el compilador reconoce el código. El script de compilación de Strata tiene un contraejemplo a mano: gfx1102 compila y pasa las pruebas incluidas, pero nadie ha reportado todavía una ejecución completa de un modelo, así que al configurar sigue apareciendo la advertencia de «no verificada». El soporte real viene de correr un modelo real en una tarjeta real, obtener resultados que cuadren y que alguien pueda reproducirlo.</p></div>
+
+<details class="deep"><summary>Más a fondo: tiempo de compilación y de ejecución, los límites del shim y las declaraciones de soporte</summary>
+<h3>Por qué el interruptor de AVX-512 se añade solo a archivos sueltos</h3>
+<p>El comentario del script de compilación da la razón. En un archivo fuente compilado con <code>/arch:AVX512</code>, el compilador puede usar instrucciones AVX-512 en <strong>cualquier</strong> parte, incluso en el código escalar que creías que era el «plan B». Si el plan B escalar y el kernel AVX-512 estuvieran en el mismo archivo, el plan B dejaría de serlo y se caería igual en las CPU viejas. Por eso Strata añade el interruptor solo a los archivos de kernels. La función que sondea la CPU vive en un archivo sin el interruptor, lo que garantiza que el paso de «solo preguntar» es seguro en cualquier CPU x86-64. <span class="ev ev-code">Hecho de código</span></p>
+<p>El propio sondeo también usa compilación condicional. El mismo código de CPUID usa <code>__cpuidex</code> y <code>_xgetbv</code> con MSVC, y <code>__cpuid_count</code> más <code>xgetbv</code> en ensamblador en línea con GCC/Clang. Comprobar el registro XCR0 confirma que el sistema operativo guarda los registros grandes de AVX-512 al cambiar de hilo. Si la CPU lo admite pero el sistema no los guarda, tampoco se puede usar. <span class="ev ev-code">Hecho de código</span></p>
+<h3>Los límites del shim: abortar antes que cambiar el significado en silencio</h3>
+<p>Las funciones de intercambio de warp de CUDA llevan un argumento de máscara que dice «qué carriles participan». Las funciones equivalentes de HIP no tienen ese argumento. El shim hace esto: los kernels actuales solo usan la máscara completa, así que cualquier llamada sin máscara completa aborta de inmediato (<code>__builtin_trap</code>), en lugar de descartar la máscara y seguir. <code>__nanosleep</code> cuenta ciclos de reloj en CUDA, mientras que la instrucción de espera de AMD solo acepta de 0 a 15. Por eso el shim usa siempre el mínimo, 1, ya que aquí solo se toma como una pista de «espera un momento». <span class="ev ev-code">Hecho de código</span></p>
+<p>Los tres caminos de dp4a también tienen sus sutilezas. La instrucción sudot4 de RDNA3/RDNA4 permite indicar por separado si cada operando tiene signo, y el shim marca los dos con signo para que coincida con el significado de <code>__dp4a</code> de CUDA. La sdot4 de RDNA2 ya es «con signo × con signo, acumulado módulo 2³²», con el mismo significado. El bucle portable acumula en un entero de 32 bits sin signo y luego lo lee con signo, lo que también es módulo 2³². El archivo de pruebas del simulador de este capítulo comprueba una por una que las tres versiones coinciden bit a bit incluso en los límites del desbordamiento.</p>
+<h3>El nombre no decide el formato: despacho por tipo</h3>
+<p>El mismo nombre de tensor puede usar formatos de cuantización distintos en capas distintas. Un comentario de <code>layer.cpp</code> recoge una lección. El código inicial suponía que «el nombre decide el formato», por ejemplo que <code>attn_qkv</code> era siempre algún K-quant. En el paquete de modelo real, el <code>attn_qkv</code> de las 36 capas GDN viene en cuatro formatos: IQ4_XS, Q3_K, Q2_0 y Q4_K. Por eso la regla cambió a despachar por <strong>tipo</strong>: los códigos de 2 bits usan activaciones Q8_0 y los demás formatos de cuantización usan Q8_K. Si te equivocas, el producto matriz-vector tiene un error de entre 0,6 % y 1,4 %. Lo que sale es un vector «de aspecto razonable» y no uno claramente roto, que es el tipo de fallo más difícil de detectar. <span class="ev ev-code">Hecho de código</span>[S14]</p>
+<h3>Fija también las dependencias</h3>
+<p>Los expertos en CPU de Strata usan el producto punto de ggml-cpu, y la compilación descarga ggml del repositorio de llama.cpp. No descarga «la última versión», sino un commit escrito a fuego en <code>third_party/ggml/VERSION.txt</code>. <span class="ev ev-code">Hecho de código</span> La razón es la misma por la que este libro fija el commit de Strata: si cambia una dependencia, puede cambiar el camino numérico.</p>
+<h3>Una declaración de soporte mínima</h3>
+<p>Al escribir una declaración de soporte para un backend nuevo, indica como mínimo:</p>
+<ul>
+<li>El commit del código fuente; el compilador y su versión; la lista de arquitecturas de destino; todos los interruptores de compilación; las versiones de las bibliotecas de las que depende; las variables de entorno de ejecución.</li>
+<li>Los dispositivos, controladores, paquetes de modelo, formatos de cuantización y formatos KV probados, los dos caminos de prefill y decode, y el rango de longitudes de contexto.</li>
+<li>La evidencia por niveles: compila, pasan las pruebas incluidas, comparación a nivel de tensor (error frente a una implementación de referencia), calidad de extremo a extremo, estabilidad y rendimiento.</li>
+<li>Las combinaciones sin probar se listan expresamente como «sin probar»; nunca escribas «soporte completo».</li>
+</ul>
+<p>Dos binarios compilados desde el mismo commit pueden tomar caminos de código distintos si sus interruptores de compilación difieren. El registro de arranque debería decir qué backend, qué ruta de CPU y si se usó de verdad una alternativa. Cuando Strata arranca en una CPU sin AVX-512, imprime si pasó a AVX2 o a ggml. <span class="ev ev-code">Hecho de código</span> Los usuarios no deberían tener que adivinarlo por el nombre del archivo.</p>
+<h3>La cola de la vectorización</h3>
+<p>Cuando la longitud de un vector no es divisible entre el número de carriles, la «cola» sobrante hay que tratarla con una máscara o con un camino escalar aparte. Leer unos bytes de más para ahorrar esfuerzo puede leer datos del experto siguiente. No necesariamente se cae, pero el resultado es incorrecto. Cuando Strata carga expertos nativos, comprueba primero que el tamaño de cada experto sea un múltiplo entero del tamaño de bloque del formato, y lo rechaza si no. <span class="ev ev-code">Hecho de código</span></p>
+</details>
