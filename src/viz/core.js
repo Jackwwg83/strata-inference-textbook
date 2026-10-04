@@ -55,9 +55,10 @@
   const Viz = {
     esc,
     LANGS,
+    tables: [],   // every string table passed to Viz.t, for the parity test
     get lang() { return pageLang(); },
     // Picks the string table for the page language, falling back to Chinese key by key.
-    t(tables) { const base = tables.zh || {}, cur = tables[pageLang()] || {}; return new Proxy(cur, { get: (o, k) => (k in o ? o[k] : base[k]) }); },
+    t(tables) { Viz.tables.push(tables); const base = tables.zh || {}, cur = tables[pageLang()] || {}; return new Proxy(cur, { get: (o, k) => (k in o ? o[k] : base[k]) }); },
     register(name, def) {
       if (!def || typeof def.mount !== 'function') throw new Error('Viz.register needs a mount function: ' + name);
       registry[name] = def;

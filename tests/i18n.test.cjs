@@ -48,3 +48,26 @@ test('lab page string tables match the Chinese keys', () => {
     }
   }
 });
+
+test('widget string tables keep the Chinese keys and arities in every language', () => {
+  const fs2 = require('node:fs'), path2 = require('node:path');
+  const dir = path2.resolve(__dirname, '../src/viz');
+  require(path2.join(dir, 'core.js'));
+  const files = fs2.readdirSync(dir).filter(f => f.endsWith('.js') && f !== 'core.js').sort((a, b) => (a.endsWith('.math.js') ? 0 : 1) - (b.endsWith('.math.js') ? 0 : 1) || a.localeCompare(b));
+  for (const f of files) require(path2.join(dir, f));
+  assert.ok(globalThis.Viz.tables.length > 0);
+  for (const tables of globalThis.Viz.tables) {
+    const zh = tables.zh;
+    for (const [lang, t] of Object.entries(tables)) {
+      if (lang === 'zh' || lang === 'en' && Object.keys(zh).length === 0) continue;
+      assert.deepEqual(Object.keys(t).sort(), Object.keys(zh).sort(), `widget table ${lang} keys differ (first zh key: ${Object.keys(zh)[0]})`);
+      for (const k of Object.keys(zh)) {
+        assert.equal(typeof t[k], typeof zh[k], `widget ${lang}.${k} type`);
+        if (typeof zh[k] === 'function') assert.equal(t[k].length, zh[k].length, `widget ${lang}.${k} arity`);
+        if (Array.isArray(zh[k])) assert.equal(t[k].length, zh[k].length, `widget ${lang}.${k} length`);
+        const text = typeof t[k] === 'function' ? String(t[k]) : JSON.stringify(t[k]);
+        assert.ok(!/[一-鿿]/.test(text), `widget ${lang}.${k} contains Chinese`);
+      }
+    }
+  }
+});

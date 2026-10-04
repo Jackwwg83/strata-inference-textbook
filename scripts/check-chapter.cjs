@@ -5,16 +5,31 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
-const id = process.argv[2];
-const metaPath = process.argv[3];
-if (!/^\d{2}$/.test(id || '')) { console.error('usage: node scripts/check-chapter.cjs NN [meta.json]'); process.exit(2); }
+const args = process.argv.slice(2);
+const langAt = args.indexOf('--lang');
+const lang = langAt >= 0 ? args.splice(langAt, 2)[1] : 'zh';
+const id = args[0];
+const metaPath = args[1];
+if (!/^\d{2}$/.test(id || '')) { console.error('usage: node scripts/check-chapter.cjs NN [meta.json] [--lang en]'); process.exit(2); }
 
 const hosts = require('./link-hosts.cjs');
 const sources = JSON.parse(fs.readFileSync(path.join(root, 'content/sources.json'), 'utf8'));
 const sourceIDs = new Set(sources.map(s => s.id));
-const html = fs.readFileSync(path.join(root, 'content/chapters', id + '.html'), 'utf8');
+const html = fs.readFileSync(path.join(root, lang === 'zh' ? 'content/chapters' : `content/i18n/${lang}/chapters`, id + '.html'), 'utf8');
 const problems = [];
 const need = (ok, msg) => { if (!ok) problems.push(msg); };
+
+// A translation must keep the master's structure and contain no Chinese.
+if (lang !== 'zh') {
+  const zh = fs.readFileSync(path.join(root, 'content/chapters', id + '.html'), 'utf8');
+  const list = (h, re) => [...h.matchAll(re)].map(m => m[1]).join(',');
+  for (const [what, re] of [['widgets', /data-viz="([^"]+)"/g], ['primers', /<aside class="primer" id="([^"]+)"/g], ['h2 ids', /<h2 id="([^"]+)"/g], ['source refs', /\[((?:S|R)\d{2})\]/g], ['evidence tags', /class="ev ([a-z-]+)"/g], ['svg count', /(<svg\b)/g], ['ids', /\bid="(c\d{2}-[^"]+)"/g]]) {
+    const a = list(zh, re), b = list(html, re);
+    need(a === b, `${what} differ from the Chinese master: zh=[${a.slice(0, 120)}] ${lang}=[${b.slice(0, 120)}]`);
+  }
+  const cjk = html.replace(/<code>[\s\S]*?<\/code>/g, '').match(/[\u4e00-\u9fff]/g);
+  need(!cjk, `contains ${cjk ? cjk.length : 0} Chinese characters`);
+}
 
 // Template blocks
 for (const cls of ['class="hook"', 'class="tldr"', 'class="recap"', 'class="myth"', '<details class="deep">', 'class="bridge"']) need(html.includes(cls), 'missing ' + cls);
@@ -69,7 +84,7 @@ if (metaPath) {
   need(Array.isArray(m.quiz) && m.quiz.length === 3, 'meta.quiz needs 3 questions');
   for (const q of m.quiz || []) { need(q.choices?.length === 3, 'quiz needs 3 choices: ' + q.text); need(Number.isInteger(q.correct) && q.correct >= 0 && q.correct < 3, 'quiz.correct 0..2: ' + q.text); need(q.why?.length > 10, 'quiz.why: ' + q.text); }
   need(m.problem?.length > 10 && m.answer?.length > 20, 'meta.problem / meta.answer');
-  need(Array.isArray(m.sources) && m.sources.every(s => sourceIDs.has(s)), 'meta.sources must be known ids');
+  if (lang === 'zh') need(Array.isArray(m.sources) && m.sources.every(s => sourceIDs.has(s)), 'meta.sources must be known ids');
   if (m.title !== undefined) need(typeof m.title === 'string' && m.title.length > 2, 'meta.title');
 }
 
