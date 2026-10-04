@@ -31,15 +31,18 @@
   const LANGS = ['zh', 'en', 'ja', 'ko', 'es', 'ar'];
   const pageLang = () => { const l = (root.document && document.documentElement.lang || 'zh').slice(0, 2).toLowerCase(); return LANGS.includes(l) ? l : 'zh'; };
 
-  // On narrow screens a wide widget chart would shrink its text below reading size.
-  // Give such a chart a readable width and let it scroll sideways inside the widget.
+  // On narrow screens a widget chart scaled to fit would shrink its text below reading size.
+  // Give such a chart just enough width for 9px text and let it scroll sideways inside the widget.
+  const MIN_TEXT_PX = 9;
   function fitWide(el) {
     el.querySelectorAll('svg[viewBox]').forEach(svg => {
       if (svg.closest('.viz-scroll') || svg.closest('figure')) return;
-      const vb = svg.viewBox.baseVal;
-      if (!vb || vb.width <= 420) return;
-      const need = Math.round(vb.width * 0.9);
-      if (svg.parentElement.clientWidth >= need) return;
+      const vb = svg.viewBox.baseVal, texts = [...svg.querySelectorAll('text')];
+      if (!vb || !vb.width || !texts.length) return;
+      const minFont = Math.min(...texts.map(t => parseFloat(getComputedStyle(t).fontSize) || 12));
+      const avail = svg.parentElement.clientWidth;
+      if (!avail || minFont * avail / vb.width >= MIN_TEXT_PX) return;
+      const need = Math.ceil(MIN_TEXT_PX * vb.width / minFont);
       const wrap = document.createElement('div');
       wrap.className = 'viz-scroll';
       svg.parentNode.insertBefore(wrap, svg);
