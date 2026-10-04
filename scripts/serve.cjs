@@ -14,7 +14,8 @@ const server = http.createServer((req,res)=>{
  let pathname;
  try{pathname=decodeURIComponent(new URL(req.url,'http://localhost').pathname);}catch{res.writeHead(400);return res.end('Bad path');}
  if(pathname.includes('\0')){res.writeHead(400);return res.end('Bad path');}
- const file=path.resolve(root,'.'+(pathname==='/'?'/index.html':pathname));
+ // A directory path such as /en/ serves its index.html, as Vercel does.
+ const file=path.resolve(root,'.'+(pathname.endsWith('/')?pathname+'index.html':pathname));
  if(!file.startsWith(root+path.sep)){res.writeHead(403);return res.end('Forbidden');}
  fs.stat(file,(err,stat)=>{
   if(err||!stat.isFile()){res.writeHead(404);return res.end('Not found');}
