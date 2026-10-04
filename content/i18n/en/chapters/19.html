@@ -1,0 +1,298 @@
+<div class="hook"><span class="eyebrow">You may have noticed</span>
+<p>When you watch Strata write, it sometimes seems to burst out a whole string of words at once instead of squeezing them out one at a time. The README explains it like this: a small helper first guesses the next few words, and the big model checks all those guesses in one go, so the same answer arrives 1.6–1.8 times faster. <span class="ev ev-report">Upstream report</span>[S01]</p>
+<p>The upstream docs also say the model's built-in guessing layer guesses at most 3 tokens at a time. <span class="ev ev-report">Upstream report</span>[S02] Here is the puzzle: a correct guess is a free token, so why not guess 10 at once? This chapter answers two questions: how many guesses pay off best, and how the engine changes its mind on the fly when the acceptance rate keeps shifting.</p></div>
+<p class="tldr"><strong>In one line:</strong> each extra guessed token adds less and less to the expected gain, shrinking like a geometric series, while the time to verify a round keeps growing. Strata compares "expected tokens committed per millisecond" and updates its acceptance rates on the fly with an exponential moving average.</p>
+
+<h2 id="sec-1">19.1 Guess once, check once: how many tokens does a round give?</h2>
+<p>First a quick review of Chapter 18's <dfn>speculative decoding</dfn>: guess cheaply first, then let the big model grade the guesses. The guesser is the model's built-in <dfn>MTP layer</dfn> (multi-token prediction), and the candidates it guesses are called <dfn>drafts</dfn>. <span class="ev ev-report">Upstream report</span>[S02]</p>
+<p>The big model lines up "the last confirmed token + k drafts" in a row and runs through its 48 layers just once. That single pass tells it, for every position at once, "here is what I think belongs here". This row is the <dfn>verify window</dfn>, and it is k + 1 long. Figure 19-1 walks through an example with k = 3.</p>
+<figure class="fig"><svg viewBox="0 0 400 296" role="img" aria-label="Figure 19-1: one round of speculative decoding. Three drafts are guessed; the first two match the big model, the third does not, and the round commits 3 tokens">
+<text class="f-muted" fill="#5c6d66" x="150" y="22" font-size="12" text-anchor="middle">previous</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="22" font-size="12" text-anchor="middle">draft 1</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="22" font-size="12" text-anchor="middle">draft 2</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="22" font-size="12" text-anchor="middle">draft 3</text>
+<text class="f-text" fill="#182f2b" x="10" y="46" font-size="13" font-weight="600">① Draft</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="63" font-size="12">MTP guesses 3</text>
+<rect class="f-soft" fill="#e5f1df" x="125" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="150" y="55" font-size="15" text-anchor="middle">go</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="185" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="210" y="55" font-size="15" text-anchor="middle">to</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="245" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="270" y="55" font-size="15" text-anchor="middle">the</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="305" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="55" font-size="15" text-anchor="middle">zoo</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="13" font-weight="600">② Verify</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="123" font-size="12">48 layers, one pass</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="185" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="210" y="115" font-size="15" text-anchor="middle">to</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="245" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="270" y="115" font-size="15" text-anchor="middle">the</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="305" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="115" font-size="15" text-anchor="middle">park</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="144" font-size="12" text-anchor="middle">What the big model says goes here</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="13" font-weight="600">③ Compare</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="193" font-size="12">stop at first miss</text>
+<text class="f-text" fill="#182f2b" x="210" y="184" font-size="13" text-anchor="middle">match</text>
+<text class="f-text" fill="#182f2b" x="270" y="184" font-size="13" text-anchor="middle">match</text>
+<text class="f-warn" fill="#9e5d24" x="330" y="184" font-size="13" font-weight="600" text-anchor="middle">differs</text>
+<text class="f-text" fill="#182f2b" x="10" y="232" font-size="13" font-weight="600">④ Commit</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="249" font-size="12">2 accepted + 1 own</text>
+<rect class="f-accent" fill="#136d5a" x="185" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="210" y="241" font-size="15" text-anchor="middle">to</text>
+<rect class="f-accent" fill="#136d5a" x="245" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="270" y="241" font-size="15" text-anchor="middle">the</text>
+<rect class="f-accent" fill="#136d5a" x="305" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="330" y="241" font-size="15" text-anchor="middle">park</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 80H390M10 154H390M10 204H390"/>
+<text class="f-text" fill="#182f2b" x="200" y="284" font-size="12" text-anchor="middle">One pass commits 3 tokens; draft “zoo” is discarded</text>
+</svg><figcaption>Figure 19-1　One round of speculative decoding: 3 guesses, the first 2 match the big model, the 3rd does not. The big model's own answer at the 3rd position, "park", gets committed along the way, so this round yields 3 tokens.</figcaption></figure>
+<p>The rule is simple: compare from left to right and stop at the first mismatch. Every matching draft before it is <strong>accepted</strong>, plus the big model's own answer where it stopped. So if a drafts are accepted, the round commits a + 1 tokens. Strata's generation loop counts exactly this way: it compares each draft in the window with the big model's output, then calls <code>commit(a + 1)</code>. <span class="ev ev-code">Code fact</span></p>
+<p>Even if no guess is right, the round still gets the big model's own 1 token, the same as with no guessing at all. Wrong guesses cannot make the answer worse, because the big model has the final say on every word. <span class="ev ev-report">Upstream report</span>[S02] A wrong guess costs only one thing: this round's verification computed a few extra positions for nothing.</p>
+
+<h2 id="sec-2">19.2 How many per round on average? Enter the expected value</h2>
+<p>You cannot know in advance how many drafts a round will accept. What we can compute is how many it gets <strong>on average</strong>, which is the <dfn>expected value</dfn>.</p>
+<p>Let the <dfn>conditional acceptance rate</dfn> of the i-th draft be pᵢ: the probability that draft i is accepted, given that the i − 1 drafts before it were all accepted. The word "given" matters: once an earlier draft is rejected, the later ones never even get compared.</p>
+<p>Draft i is useful only if the first i are all accepted, which has probability p₁ × p₂ × … × pᵢ. Add up every position's "probability of being useful" and you get the expected number of tokens committed per round:</p>
+<div class="equation">E = 1 + p₁ + p₁p₂ + … + p₁p₂…pₖ</div>
+<p>The leading 1 is the big model's own token, which every round gets for sure. Strata's source code multiplies and adds the terms one by one in exactly this way. <span class="ev ev-code">Code fact</span>[S09] If every position has the same acceptance rate p, this sum is the first k + 1 terms of a geometric sequence. The primer below shows why adding more terms "runs out of steam".</p>
+<aside class="primer" id="c19-expected-value">
+<h3>Expected value and geometric series</h3>
+<p>Intuition: the expected value is "the average result after you do something many, many times". A fair die can land on anything from 1 to 6 on a single roll, but on average it gives 3.5. The <dfn>expected value</dfn> is defined as: multiply each outcome by its probability, then add them all up.</p>
+<p>To count "tokens per round" there is a handier route: add up each position's "probability of being used". Position 1 is always used, probability 1; position 2 is used with probability p; position 3 with p²… so E = 1 + p + p² + … + pᵏ. A sum where each term is the previous one times the same number is a <dfn>geometric series</dfn>, and it has a ready-made formula: E = (1 − pᵏ⁺¹) ÷ (1 − p).</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="Figure 19-2: with p equal to 0.86 and 3 drafts, the four positions contribute 1, 0.86, 0.74 and 0.64 on average, about 3.24 in total">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">Average gain per position, 3 drafts (p = 0.86)</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="12">Model's own</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="38" width="220" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="326" y="52" font-size="12">1 (always)</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">Draft 1</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="70" width="189.2" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="295" y="84" font-size="12">p = 0.86</text>
+<text class="f-text" fill="#182f2b" x="10" y="116" font-size="12">Draft 2</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="102" width="162.7" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="269" y="116" font-size="12">p² ≈ 0.74</text>
+<text class="f-text" fill="#182f2b" x="10" y="148" font-size="12">Draft 3</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="134" width="139.9" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="246" y="148" font-size="12">p³ ≈ 0.64</text>
+<text class="f-text" fill="#182f2b" x="10" y="182" font-size="12" font-weight="600">Total E = 1 + 0.86 + 0.74 + 0.64 ≈ 3.24 tokens</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">Infinite guesses still cap out: E → 1 ÷ (1 − p) ≈ 7.1</text>
+</svg><figcaption>Figure 19-2　Each extra guess multiplies its contribution by p once more, so each bar is shorter than the last. Three guesses get 3.24 tokens on average; even infinitely many cannot pass 7.1.</figcaption></figure>
+<p>So the gain from guessing more keeps shrinking: with p = 0.86, the 8th draft contributes only 0.86⁸ ≈ 0.30 tokens. A geometric series also has a ceiling: as the number of terms goes to infinity, the sum approaches 1 ÷ (1 − p). With p = 0.86, even infinitely many guesses cannot average 7.2 tokens per round.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Expected_value" target="_blank" rel="noopener noreferrer">Wikipedia: Expected value</a> · <a href="https://en.wikipedia.org/wiki/Geometric_series" target="_blank" rel="noopener noreferrer">Wikipedia: Geometric series</a> · <a href="https://en.wikipedia.org/wiki/Geometric_distribution" target="_blank" rel="noopener noreferrer">Wikipedia: Geometric distribution</a></p>
+</aside>
+<p class="bridge"><strong>If you studied CS:</strong> call "tokens committed in a round" the random variable N. The method above is the tail-sum formula from probability, E[N] = Σ P(N ≥ i). It holds for any distribution, so the derivation does not need the positions to be independent; it only chains conditional probabilities.</p>
+<p>Now plug in Strata's numbers. The source code starts every MTP position at an acceptance rate of 0.86, and a comment says this was measured on the same model. <span class="ev ev-code">Code fact</span>[S09] With 3 guesses, E = 1 + 0.86 + 0.74 + 0.64 ≈ 3.24. The upstream docs report that in practice one verify pass commits 2.4–3.2 tokens on average. <span class="ev ev-report">Upstream report</span>[S02] The two are in the same range, so 0.86 is a reasonable starting point. The real acceptance rate shifts with the text, which Section 19.4 covers in detail. <span class="ev ev-est">Teaching estimate</span></p>
+
+<h2 id="sec-3">19.3 The other half of the bill: wider windows cost more to verify</h2>
+<p>If verification were free, more guesses would always be better. But verification takes time. Strata's cost model <code>step_ms</code> splits one round's time into four parts: <span class="ev ev-code">Code fact</span>[S09]</p>
+<ul>
+<li><strong>Dense part</strong>: attention and everything else every token must compute. The wider the window, the slower this part; the source uses a table of multipliers indexed by window length.</li>
+<li><strong>CPU experts</strong>: experts not cached on the GPU are computed by the CPU (see Chapter 10). The more tokens in the window, the more <strong>distinct</strong> experts are used and the busier the CPU gets.</li>
+<li><strong>Sync</strong>: a fixed coordination overhead per round.</li>
+<li><strong>Drafting</strong>: the MTP layer also needs time to guess each draft.</li>
+</ul>
+<p>The defaults for these parts are in the header file: dense part 11 ms, all 480 experts on the CPU 15.8 ms, VRAM hit rate 55%, sync 2.4 ms, and 1.2 ms per MTP draft. A comment says defaults such as the multiplier table come from measurements on September 23, and that 11 ms is the target from the plan and should be replaced with a measured value inside the engine. <span class="ev ev-code">Code fact</span> Figure 19-3 plugs these defaults into the formula to show how the four parts grow as the window widens.</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="Figure 19-3: with Strata's default parameters, one round grows from 20.5 milliseconds with no guessing to 92.0 milliseconds with 8 guesses">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">One round is made of four parts (ms, bars to scale)</text>
+<text class="f-text" fill="#182f2b" x="10" y="54" font-size="12">k = 0</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="40" width="34.7" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="90.7" y="40" width="22.4" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="113.1" y="40" width="7.6" height="20"/>
+<text class="f-text" fill="#182f2b" x="127" y="55" font-size="12">20.5</text>
+<text class="f-text" fill="#182f2b" x="10" y="94" font-size="12">k = 1</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="80" width="36.4" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="92.4" y="80" width="39.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="132.2" y="80" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="139.8" y="80" width="3.8" height="20"/>
+<text class="f-text" fill="#182f2b" x="150" y="95" font-size="12">27.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="12">k = 3</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="120" width="50.3" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="106.3" y="120" width="70.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="177.1" y="120" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="184.7" y="120" width="11.3" height="20"/>
+<text class="f-text" fill="#182f2b" x="202" y="135" font-size="12">44.4</text>
+<text class="f-text" fill="#182f2b" x="10" y="174" font-size="12">k = 8</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="160" width="114.4" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="170.4" y="160" width="137.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="308.2" y="160" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="315.8" y="160" width="30.2" height="20"/>
+<text class="f-text" fill="#182f2b" x="352" y="175" font-size="12">92.0</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="24" y="205" font-size="12">Dense</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="104" y="205" font-size="12">CPU experts</text>
+<rect class="f-muted" fill="#5c6d66" x="180" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="194" y="205" font-size="12">Sync</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="240" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="254" y="205" font-size="12">Drafting</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="226" font-size="12">CPU work grows with k, but slower than the token count</text>
+</svg><figcaption>Figure 19-3　As the window grows from 1 token to 9, one round only gets about 4.5 times longer. The reason: tokens in the same window often pick the same experts, so one read of the weights serves several tokens. <span class="ev ev-est">Teaching estimate</span></figcaption></figure>
+<p>Look at the CPU part. If 9 tokens each used a completely different set of experts, the CPU would have 9 times the work of 1 token. Yet the multiplier table in the source tops out at 5.2 times, and a comment says the table comes from measured routing traces. <span class="ev ev-code">Code fact</span> Tokens in the same window often pick the same experts; this is Chapter 10's "hot experts" at work.</p>
+<p>With the numerator and the denominator in hand, the goal is clear: <strong>speed = expected tokens committed per round ÷ time per round</strong>. The controller computes this for every k and picks the fastest. <span class="ev ev-code">Code fact</span>[S09] The interactive figure below lays the calculation out for you.</p>
+<div class="viz" data-viz="draft-window"><figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="Figure 19-4: with Strata's default parameters and p equal to 0.86, speed for k from 0 to 8; k equal to 3 is fastest at about 72.8 tokens per second">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Tokens/s per window (p = 0.86, source default costs)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="102.4" width="26" height="97.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="85" y="66" width="26" height="134"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="124" y="58.6" width="26" height="141.4"/>
+<rect class="f-accent" fill="#136d5a" x="163" y="54.4" width="26" height="145.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="61.4" width="26" height="138.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="241" y="67.2" width="26" height="132.8"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="280" y="73.8" width="26" height="126.2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="319" y="80.2" width="26" height="119.8"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="358" y="84.8" width="26" height="115.2"/>
+<text class="f-text" fill="#182f2b" x="59" y="118" font-size="11" text-anchor="middle">49</text>
+<text class="f-text" fill="#182f2b" x="98" y="61" font-size="11" text-anchor="middle">67</text>
+<text class="f-text" fill="#182f2b" x="137" y="53" font-size="11" text-anchor="middle">71</text>
+<text class="f-text" fill="#182f2b" x="176" y="49" font-size="11" font-weight="600" text-anchor="middle">73</text>
+<text class="f-text" fill="#182f2b" x="215" y="56" font-size="11" text-anchor="middle">69</text>
+<text class="f-text" fill="#182f2b" x="254" y="62" font-size="11" text-anchor="middle">66</text>
+<text class="f-text" fill="#182f2b" x="293" y="68" font-size="11" text-anchor="middle">63</text>
+<text class="f-text" fill="#182f2b" x="332" y="75" font-size="11" text-anchor="middle">60</text>
+<text class="f-text" fill="#182f2b" x="371" y="79" font-size="11" text-anchor="middle">58</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="5 4" d="M40 97.6H390"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 200H390"/>
+<text class="f-muted" fill="#5c6d66" x="59" y="216" font-size="11" text-anchor="middle">k=0</text>
+<text class="f-muted" fill="#5c6d66" x="98" y="216" font-size="11" text-anchor="middle">k=1</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="216" font-size="11" text-anchor="middle">k=2</text>
+<text class="f-text" fill="#182f2b" x="176" y="216" font-size="11" font-weight="600" text-anchor="middle">k=3</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="216" font-size="11" text-anchor="middle">k=4</text>
+<text class="f-muted" fill="#5c6d66" x="254" y="216" font-size="11" text-anchor="middle">k=5</text>
+<text class="f-muted" fill="#5c6d66" x="293" y="216" font-size="11" text-anchor="middle">k=6</text>
+<text class="f-muted" fill="#5c6d66" x="332" y="216" font-size="11" text-anchor="middle">k=7</text>
+<text class="f-muted" fill="#5c6d66" x="371" y="216" font-size="11" text-anchor="middle">k=8</text>
+<text class="f-text" fill="#182f2b" x="10" y="238" font-size="11">Best: k = 3, 72.8 tokens/s, 1.49× the no-draft 48.8</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="256" font-size="11">Dashed line: no-draft × 1.05, the bar drafts must clear</text>
+</svg><figcaption>Figure 19-4　Speed first rises, then falls. Three guesses are fastest; beyond that, each extra draft adds less and less while verification keeps getting more expensive. <span class="ev ev-est">Teaching estimate</span></figcaption></figure></div>
+<p>The numbers in this figure come from plugging the source defaults into the formula, not from measurements: with no guessing, a round takes 20.5 ms, or 48.8 tokens per second; with 3 guesses, a round takes 44.4 ms, yields 3.24 tokens on average, and runs at 72.8 per second. <span class="ev ev-est">Teaching estimate</span> What it shows is the shape: the curve has a peak, and where the peak sits depends on the acceptance rate and the costs.</p>
+<p>There is one more threshold. The best window must beat no guessing by more than 5%, or the controller will not use it and simply does not guess. <span class="ev ev-code">Code fact</span>[S09] The header comment describes this 5% as a setting from the plan. <span class="ev ev-code">Code fact</span> The benefit: the acceptance estimate itself has error, so a "gain" of one or two percent may well be an illusion created by that error.</p>
+
+<h2 id="sec-4">19.4 Acceptance rates change: learning on the fly</h2>
+<p>0.86 is only a starting point. When you write code, what comes next can often be guessed from what came before; when you write a brand-new poem, it is much harder. The upstream docs also note that the same prompt with a different answer can change the output speed by several percent, because the number of accepted drafts changed. <span class="ev ev-report">Upstream report</span>[S03] So the acceptance rate has to be estimated on the fly. Strata's tool for that is the exponential moving average.</p>
+<aside class="primer" id="c19-ema">
+<h3>Exponential moving average (EMA)</h3>
+<p>Intuition: you want to know the recent average temperature, but you do not want to keep every day's record. The trick is to keep just one number, the "estimate", and every time a new temperature arrives, nudge the estimate a small step toward it:</p>
+<div class="equation">new estimate = old estimate + α × (new data − old estimate)</div>
+<p>This is the <dfn>exponential moving average</dfn>, and α (between 0 and 1) is the update weight. Expand it and the newest data point has weight α, the one before has α(1 − α), the one before that α(1 − α)²… Older data gets less weight, decaying exponentially, hence the name. It needs the memory of a single number, and each update costs one multiplication and two additions or subtractions.</p>
+<p>α sets the trade-off. A large α tracks quickly but is easily thrown off by one or two chance results; a small α is steady but takes a long time to react when things change. A handy measure is the <strong>half-life</strong>: how many updates it takes for old data's weight to drop by half, which is ln 0.5 ÷ ln(1 − α). With α = 0.05 that is about 13.5 updates; with α = 0.3 it is under 2.</p>
+<p>Strata's controller uses exactly this formula to update each position's acceptance rate: an acceptance counts as 1, a rejection as 0. <span class="ev ev-code">Code fact</span>[S09] The default α in the header file is 0.05. <span class="ev ev-code">Code fact</span></p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Moving_average" target="_blank" rel="noopener noreferrer">Wikipedia: Moving average</a> · <a href="https://en.wikipedia.org/wiki/Exponential_smoothing" target="_blank" rel="noopener noreferrer">Wikipedia: Exponential smoothing</a> · <a href="https://www.rfc-editor.org/rfc/rfc6298" target="_blank" rel="noopener noreferrer">RFC 6298: Computing TCP's retransmission timer</a></p>
+</aside>
+<p class="bridge"><strong>If you studied CS:</strong> in computer networks, TCP estimates the round-trip time (RTT) with an EMA: SRTT ← (1 − 1/8) × SRTT + 1/8 × the new RTT sample, as in RFC 6298. Estimating an acceptance rate and estimating network delay are the same kind of problem: the data is noisy, the environment changes, and memory is tight.</p>
+<p>There is a trap in the bookkeeping. Say this round guessed 3 and the 1st was rejected right away. How should drafts 2 and 3 be recorded? They were never compared at all. They are <strong>unobserved</strong>, not "failures". Statistics calls this situation, where the outcome was never seen, <dfn>censoring</dfn>.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figure 19-5: after draft 1 is rejected, correct bookkeeping records a failure only for position 1; wrong bookkeeping also records failures for the unchecked positions 2 and 3">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">3 drafts, 1st rejected: what to record for the rest?</text>
+<text class="f-text" fill="#182f2b" x="10" y="58" font-size="13" font-weight="600">This round</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="130" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="167.5" y="49" font-size="12" text-anchor="middle">Position 1</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="66" font-size="12" font-weight="600" text-anchor="middle">Rejected</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="49" font-size="12" text-anchor="middle">Position 2</text>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="66" font-size="12" text-anchor="middle">Unchecked</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="300" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="49" font-size="12" text-anchor="middle">Position 3</text>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="66" font-size="12" text-anchor="middle">Unchecked</text>
+<text class="f-text" fill="#182f2b" x="10" y="112" font-size="13" font-weight="600">Correct</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="129" font-size="12">Strata's way</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="120" font-size="12" text-anchor="middle">fail</text>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="120" font-size="12" text-anchor="middle">skip</text>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="120" font-size="12" text-anchor="middle">skip</text>
+<text class="f-text" fill="#182f2b" x="10" y="172" font-size="13" font-weight="600">Wrong</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="189" font-size="12">unseen = fail</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="180" font-size="12" text-anchor="middle">fail</text>
+<text class="f-warn" fill="#9e5d24" x="252.5" y="180" font-size="12" text-anchor="middle">fail</text>
+<text class="f-warn" fill="#9e5d24" x="337.5" y="180" font-size="12" text-anchor="middle">fail</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 88H390M10 146H390M10 204H390"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="226" font-size="12">Wrong way: p₃ estimate → 0.86³ ≈ 0.64; true value 0.86</text>
+</svg><figcaption>Figure 19-5　Record only positions that were actually compared. Count "unseen" as "failed" and the later positions get blamed more and more unfairly, so the controller wrongly concludes that long windows do not pay.</figcaption></figure>
+<p>Strata's <code>observe</code> updates only the accepted positions plus the first rejected one; it leaves every later position alone. <span class="ev ev-code">Code fact</span>[S09] There is also the opposite case: when every guess in a round is accepted, positions beyond the window were never tried either. If they were never updated, the window could never grow. The source handles this by nudging those positions' estimates a small step toward the estimate of the deepest observed position. <span class="ev ev-code">Code fact</span>[S09]</p>
+<p>The tracker below lets you feel both effects yourself: the α trade-off and the effect of the bookkeeping rule.</p>
+<div class="viz" data-viz="draft-ema"><figure class="fig"><svg viewBox="0 0 400 258" role="img" aria-label="Figure 19-6: the true acceptance rate drops from 0.86 to 0.55 at round 150; the estimate with α equal to 0.05 is smooth but slow, the one with α equal to 0.3 follows quickly but jumps around">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Acceptance falls 0.86 → 0.55: two α values chase it</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="44" font-size="11" text-anchor="end">1.0</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="119" font-size="11" text-anchor="end">0.5</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="194" font-size="11" text-anchor="end">0</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width=".6" d="M40 40H380M40 115H380M40 190H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="2 3" d="M210 30V190"/>
+<text class="f-muted" fill="#5c6d66" x="214" y="36" font-size="11">topic change</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40.0 61.0L43.4 47.2L46.8 42.5L50.2 40.8L53.6 40.3L57.0 62.1L60.4 47.6L63.8 87.6L67.2 101.3L70.6 92.5L74.0 111.6L77.4 86.6L80.8 56.0L84.2 45.5L87.6 73.4L91.0 51.4L94.4 75.4L97.8 52.2L101.2 44.2L104.6 117.9L108.0 66.7L111.4 49.2L114.8 88.1L118.2 56.5L121.6 45.7L125.0 41.9L128.4 85.7L131.8 55.7L135.2 45.4L138.6 41.8L142.0 72.1L145.4 51.0L148.8 120.3L152.2 112.5L155.6 64.9L159.0 48.5L162.4 42.9L165.8 41.0L169.2 62.4L172.6 92.7L176.0 89.6L179.4 57.0L182.8 45.8L186.2 64.1L189.6 48.2L193.0 42.8L196.4 41.0L199.8 40.3L203.2 40.1L206.6 40.0L210.0 62.1L213.4 124.1L216.8 167.4L220.2 160.2L223.6 179.8L227.0 186.5L230.4 143.8L233.8 75.6L237.2 128.7L240.6 101.9L244.0 83.3L247.4 86.3L250.8 87.4L254.2 56.3L257.6 90.6L261.0 155.9L264.4 79.8L267.8 53.6L271.2 111.7L274.6 131.7L278.0 170.0L281.4 106.6L284.8 94.4L288.2 80.7L291.6 130.5L295.0 124.6L298.4 136.1L301.8 104.4L305.2 93.6L308.6 156.9L312.0 133.7L315.4 139.2L318.8 105.5L322.2 107.5L325.6 116.7L329.0 66.3L332.4 80.5L335.8 98.9L339.2 82.3L342.6 131.0L346.0 124.8L349.4 145.6L352.8 121.2L356.2 99.4L359.6 127.4L363.0 101.5L366.4 114.6L369.8 132.7L373.2 148.3L376.6 130.7L380.0 71.1"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M40.0 61.0L43.4 58.0L46.8 55.4L50.2 53.2L53.6 51.3L57.0 56.5L60.4 54.1L63.8 59.6L67.2 64.3L70.6 68.0L74.0 77.9L77.4 79.3L80.8 73.7L84.2 68.9L87.6 71.9L91.0 67.3L94.4 70.5L97.8 66.2L101.2 62.5L104.6 73.9L108.0 69.0L111.4 64.9L114.8 68.9L118.2 64.7L121.6 61.2L125.0 58.2L128.4 63.1L131.8 59.8L135.2 57.0L138.6 54.6L142.0 59.6L145.4 56.8L148.8 69.0L152.2 72.4L155.6 67.8L159.0 63.8L162.4 60.4L165.8 57.5L169.2 61.8L172.6 66.2L176.0 69.6L179.4 65.3L182.8 61.7L186.2 65.4L189.6 61.8L193.0 58.7L196.4 56.0L199.8 53.7L203.2 51.8L206.6 50.1L210.0 55.4L213.4 67.8L216.8 85.3L220.2 93.4L223.6 107.2L227.0 119.0L230.4 121.6L233.8 110.0L237.2 114.6L240.6 111.1L244.0 107.7L247.4 105.2L250.8 103.0L254.2 94.0L257.6 93.8L261.0 107.5L264.4 97.9L267.8 89.7L271.2 96.8L274.6 103.0L278.0 115.4L281.4 111.4L284.8 108.4L288.2 105.4L291.6 110.7L295.0 114.5L298.4 118.1L301.8 114.1L305.2 110.7L308.6 122.0L312.0 124.2L315.4 126.4L318.8 121.2L322.2 117.2L325.6 120.0L329.0 108.6L332.4 106.0L335.8 104.1L339.2 101.7L342.6 107.5L346.0 111.8L349.4 116.2L352.8 112.8L356.2 109.5L359.6 113.9L363.0 110.5L366.4 114.3L369.8 118.0L373.2 121.5L376.6 123.8L380.0 111.8"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="6 4" d="M40 61H210V107.5H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M10 210H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="214" font-size="11">Thick: α = 0.05, smooth, ~a dozen rounds to catch up</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M10 230H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="234" font-size="11">Thin: α = 0.3, quick to follow but jumpy</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="6 4" d="M10 250H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="254" font-size="11">Dashed: true rate (the controller cannot see it)</text>
+</svg><figcaption>Figure 19-6　The horizontal axis is the round (300 in all); the vertical axis is the acceptance estimate for draft 1. A small α is steady but a beat behind; a large α reacts fast but gets pulled around by noise. Acceptances are simulated random numbers. <span class="ev ev-est">Teaching estimate</span></figcaption></figure></div>
+<p>The deeper the position, the fewer chances it gets to be compared: draft 3 gets a record only when the first two are both accepted. So deep positions update more slowly than shallow ones. That is why, in the tracker, the p₃ curve reacts noticeably more sluggishly than p₁ after the topic changes. <span class="ev ev-est">Teaching estimate</span></p>
+
+<h2 id="sec-5">19.5 Which one does Strata actually run?</h2>
+<p>The controller described so far lives in <code>src/spec/controller.cpp</code>. It is compiled into the <code>strata_spec</code> library and has its own unit test, <code>controller_test</code>. <span class="ev ev-code">Code fact</span> But open the main generation program, <code>generate.cpp</code> (the source of the <code>strata</code> executable), and it includes a different header, <code>draft_policy.hpp</code>; the generation loop calls <code>DraftPolicy</code>. In the engine source this book checked, we found no call to <code>Controller</code>. <span class="ev ev-code">Code fact</span> Figure 19-7 puts the two side by side.</p>
+<figure class="fig"><svg viewBox="0 0 400 268" role="img" aria-label="Figure 19-7: Controller estimates cost with a formula model and decides the MTP window, and is called only from unit tests; DraftPolicy uses measured times, only decides whether to switch to lookup drafts, and is called by the main generation loop">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="185" height="200" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="32" font-size="13" font-weight="600">Controller</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="50" font-size="12">src/spec/controller.cpp</text>
+<text class="f-text" fill="#182f2b" x="22" y="76" font-size="12">Picks MTP window k</text>
+<text class="f-text" fill="#182f2b" x="22" y="100" font-size="12">Compares lookup too</text>
+<text class="f-text" fill="#182f2b" x="22" y="124" font-size="12">Cost: formula model</text>
+<text class="f-text" fill="#182f2b" x="22" y="148" font-size="12">Rates: EMA, α = 0.05</text>
+<text class="f-text" fill="#182f2b" x="22" y="172" font-size="12">Bar: 5% faster to draft</text>
+<text class="f-warn" fill="#9e5d24" x="22" y="196" font-size="12">Caller: unit tests</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="10" width="185" height="200" rx="8"/>
+<text class="f-text" fill="#182f2b" x="217" y="32" font-size="13" font-weight="600">DraftPolicy</text>
+<text class="f-muted" fill="#5c6d66" x="217" y="50" font-size="12">src/spec/draft_policy.cpp</text>
+<text class="f-text" fill="#182f2b" x="217" y="76" font-size="12">--spec sets MTP window</text>
+<text class="f-text" fill="#182f2b" x="217" y="100" font-size="12">Only: switch to lookup?</text>
+<text class="f-text" fill="#182f2b" x="217" y="124" font-size="12">Cost: timed per round</text>
+<text class="f-text" fill="#182f2b" x="217" y="148" font-size="12">MTP yield: measured avg</text>
+<text class="f-text" fill="#182f2b" x="217" y="172" font-size="12">Bar: 3% faster to swap</text>
+<text class="f-text" fill="#182f2b" x="217" y="196" font-size="12" font-weight="600">Caller: generation loop</text>
+<text class="f-text" fill="#182f2b" x="200" y="236" font-size="12" text-anchor="middle">Same goal: expected tokens committed per ms</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="256" font-size="12" text-anchor="middle">The difference is the denominator: formula vs stopwatch</text>
+</svg><figcaption>Figure 19-7　One objective, two implementations. The one actually deciding inside the generation loop is on the right: it no longer guesses the cost with a formula but records how long each window really took.</figcaption></figure>
+<p>Start with the MTP side. In the generation loop, the MTP window length comes from the launch option <code>--spec</code> and stays fixed every round except the first. It only gets shorter when <code>--spec-min-p</code> is set: once the draft layer's confidence in a draft falls below that threshold, no more drafts are added to the window. <span class="ev ev-code">Code fact</span> The upstream docs say MTP guesses at most 3 at a time. <span class="ev ev-report">Upstream report</span>[S02]</p>
+<p><code>DraftPolicy</code> handles something else: <dfn>prompt lookup</dfn>. If the text being written repeats a passage from the context, say, copying a few existing lines while editing code, then whatever followed that passage last time will probably follow it again, and can be used directly as a draft. Lookup drafts are at most 5 long, and they are used only when the measured acceptance rate and cost both say it pays. Upstream reports 6–11% faster code editing and no change on ordinary text. <span class="ev ev-report">Upstream report</span>[S02] The generation loop has one more precondition: when MTP is on, the first token of the lookup draft must match MTP's own first draft before <code>DraftPolicy</code> is asked to decide. <span class="ev ev-code">Code fact</span></p>
+<p><code>DraftPolicy</code> still uses this chapter's formula: on the lookup side E(k) = 1 + q + q² + … + qᵏ, where q is an acceptance rate tracked in buckets by "how long the match was"; on the MTP side it uses the measured average yield per round directly. The denominator is no longer a formula but the measured time per round for each window length, smoothed by an EMA with α = 0.1; for lengths it has not measured, it converts from measured ones with a preset shape curve. A lookup window must beat the MTP window by more than 3% to be chosen. <span class="ev ev-code">Code fact</span></p>
+<p>That is a great engineering lesson: however detailed your cost model, it cannot beat measuring directly. Round times change with the machine and with the context length; measured values follow the machine automatically.</p>
+
+<h2 id="sec-6">19.6 Hands-on: find the best window yourself</h2>
+<p>Open this chapter's lab, "How long a draft is worth guessing". It uses a simpler cost formula: a baseline time plus a fixed verify and drafting cost per draft, with the same acceptance rate p for every position. It compares the expected tokens, time and net gain for k = 0 to 5.</p>
+<ol>
+<li>Set p to 0: every k has an expected value of 1, and drafts only add time. The best answer should be k = 0.</li>
+<li>Set p to 1: the expected value is exactly k + 1. See whether the longest window always wins now.</li>
+<li>Keep p fixed and raise the draft cost: find the point where the best k drops back to 0.</li>
+</ol>
+<p>Afterwards, compare with this chapter's two interactive figures. The lab's cost is a straight line; in Strata's cost model, shared experts make the CPU part grow slower than a straight line, while the dense multiplier jumps sharply once the window reaches 5 tokens. A different cost curve moves the peak.</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>Expected tokens per round E = 1 + p₁ + p₁p₂ + …: each extra guess multiplies its contribution by another acceptance rate, so returns diminish. With p = 0.86, even infinitely many guesses cannot pass 7.1.</li>
+<li>What to optimize is speed = E ÷ time per round. Wider windows cost more to verify, so the speed curve has a peak; drafting must also beat no drafting by a clear margin to be worth it.</li>
+<li>Estimate acceptance rates on the fly with an EMA: a large α reacts fast but jitters, a small α is steady but slow. Positions never compared are "unseen" and must not be counted as failures.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "A higher acceptance rate always means more speed."</strong></p>
+<p>The acceptance rate is only part of the numerator. Suppose a smarter but slower drafting method raises the expected yield per round from 2 to 2.5 tokens, but the round time goes from 10 ms to 15 ms: speed drops from 200 tokens per second to about 167. <span class="ev ev-est">Teaching estimate</span> To judge a drafting method, look at tokens committed per millisecond, not just how many guesses were right.</p></div>
+
+<details class="deep"><summary>Go deeper: conditional probability, censoring, exploration and acceptance criteria</summary>
+<h3>The expectation formula needs no independence assumption</h3>
+<p>pᵢ is defined as "the conditional probability that draft i is accepted, given the first i − 1 were all accepted". Draft i contributes if and only if the first i are all accepted, and the multiplication rule for conditional probability gives that probability directly as p₁p₂…pᵢ, with no claim that positions are independent. Example: p = [0.8, 0.6, 0.5] gives E = 1 + 0.8 + 0.48 + 0.24 = 2.52. If drafting plus verifying takes 18 ms per round, speed is about 140 tokens/s; with no guessing a round takes 8 ms, 125 tokens/s, so the net gain is about 12%. These are teaching exercises, not Strata benchmarks. <span class="ev ev-est">Teaching estimate</span></p>
+<p>The source's <code>expected</code> is used in two ways: MTP passes a per-position array; lookup drafts use the same q for every position, which is a geometric series. <span class="ev ev-code">Code fact</span>[S09]</p>
+<h3>The cost model, term by term</h3>
+<p>In <code>step_ms(k)</code>, n = k + 1, clamped to between 1 and K_MAX + 1. Dense part = <code>dense_ms × dense_ratio[n−1]</code>. CPU part = (1 − hit rate) × <code>cpu_all_miss_ms</code> × U × (1 + <code>extra_use_cost</code> × (n ÷ U − 1)), where U is how many times more distinct experts the window uses compared with a single token, and n ÷ U is how many tokens use each expert on average. Drafting part = k × time per draft. <span class="ev ev-code">Code fact</span>[S09] Defaults from the header file: K_MAX = 8; <code>extra_use_cost</code> = 0.25, meaning each extra token using the same expert costs only 25% of one read; lookup drafts cost 0.01 ms each, nearly free. <span class="ev ev-code">Code fact</span></p>
+<p>Applying the ideal "weights are read only once" to every draft unconditionally overestimates the gain; ignoring expert reuse completely underestimates it. The actual value of U depends on routing and must be measured.</p>
+<h3>Priors are not physical constants</h3>
+<p>MTP's initial acceptance rate of 0.86 and the lookup prior bucketed by match length, {0.35, 0.6, 0.8, 0.92}, are only starting points. The comments say the former was measured on the same model and the latter comes from offline replay, and both are then learned per session. <span class="ev ev-code">Code fact</span>[S09] Change the language, the quantization or the task, and both draft quality and expert reuse change. <code>DraftPolicy</code> has its own lookup prior: {0.75, 0.88, 0.93, 0.96}, each worth 4 observations, so a few rounds of real data override it; old observations decay by a factor of 0.97 per round. <span class="ev ev-code">Code fact</span></p>
+<h3>Censoring, positions beyond the window, and "exploration"</h3>
+<p>After the first draft is rejected, later positions are no longer under the condition "every earlier draft accepted", so they are unobserved. Recording them as 0 creates a self-reinforcing loop: the shorter the window, the worse deep positions look, and the less willing the controller is to try a long window again. When everything is accepted, the opposite happens: positions beyond the window were never tested, and the source pulls them toward the estimate of the deepest observed position, or the window could never grow. <span class="ev ev-code">Code fact</span>[S09]</p>
+<p>Looking at <code>Controller</code>'s two functions alone, there is another boundary worth noting: once "no drafting" is chosen, <code>observe</code> returns right away and the estimates stop updating. <span class="ev ev-code">Code fact</span>[S09] If noise ever pushes the estimate below the threshold, these two functions alone can never learn their way back, and the caller must explore separately. (One test in this chapter's module demonstrates exactly this.) <code>DraftPolicy</code> explores explicitly: a lookup window whose time has never been measured gets tried directly for its first 3 uses, as long as its acceptance estimate is at least 0.85. The comment says verification guarantees the output does not change; the only thing at stake is this round's speed. <span class="ev ev-code">Code fact</span></p>
+<h3>Can drafts change the output?</h3>
+<p>In principle, no: every committed token is the big model's own choice. But the upstream docs point out a floating-point exception: with IQ-quantized models, the CPU uses different kernels to compute an expert for one token and for several tokens, and their rounding differs slightly; how many tokens share an expert depends on the drafts in the verify window. So even at temperature 0, the same prompt can produce a different but equally reasonable answer. Setting <code>STRATA_IQ_MT_MIN=1</code> makes every group use the multi-token kernel, and the answer no longer depends on the drafts. <span class="ev ev-report">Upstream report</span>[S03]</p>
+<h3>Acceptance criteria</h3>
+<p>To test a window controller, boundaries are more convincing than a pretty curve:</p>
+<ul>
+<li>When drafts are very expensive, it falls back to k = 0.</li>
+<li>With p = 0, extra drafts produce no fake gain.</li>
+<li>With p = 1, E equals exactly k + 1.</li>
+<li>Unobserved positions are not counted as failures; when everything is accepted, positions beyond the window can be pulled up.</li>
+<li>If it beats no drafting by less than the threshold, it stays with no drafting.</li>
+</ul>
+<p>The computation module behind this chapter's interactive figures has tests for these boundaries, and its cost function was checked term by term against the source defaults. Upstream's own <code>controller_test</code> tests the same kind of properties: with the priors it picks 2 to 5 drafts, it turns speculation off after sustained rejections, and the window widens after sustained full acceptance. <span class="ev ev-code">Code fact</span></p>
+</details>

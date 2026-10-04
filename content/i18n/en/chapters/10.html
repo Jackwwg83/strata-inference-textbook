@@ -1,0 +1,197 @@
+<div class="hook"><span class="eyebrow">You may have noticed</span>
+<p>Some models with well over a hundred billion parameters somehow run on a single ordinary graphics card, while a plain model with only a few tens of billions of parameters will not even fit on that same card. Most of these "it actually runs" giants are <dfn>MoE</dfn> (Mixture of Experts) models.</p>
+<p>The secret: for every token it generates, an MoE model wakes up only a small slice of its parameters, and the rest can wait somewhere else. This chapter explains three things: what an expert is, who picks the experts, and where the experts that were not picked live.</p></div>
+<p class="tldr"><strong>In one line:</strong> the model Strata runs has 512 experts in every layer, and each token picks only 10 of them per layer. There are lots of parameters, but each step uses only about 5%, so rarely used experts can stay in RAM instead of all crowding onto the GPU.</p>
+
+<h2 id="sec-1">10.1 What is an expert?</h2>
+<p>Picture a hospital. An ordinary model is like a single family doctor: every patient who walks in gets the doctor's entire knowledge. An MoE model is like a hospital full of specialists: each patient first goes to the triage desk, the desk calls in only the few doctors who fit the case, and everyone else keeps drinking their tea. Figure 10-1 puts the two kinds of model side by side.</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="Figure 10-1: a dense model uses all its parameters for every token, while an MoE model wakes only a few experts in each layer">
+<defs>
+<pattern id="c10-dense" width="17" height="17" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="14" height="14" rx="2"/></pattern>
+<pattern id="c10-sparse" width="17" height="17" patternUnits="userSpaceOnUse"><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x=".5" y=".5" width="13" height="13" rx="2"/></pattern>
+</defs>
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">Dense model</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="12" text-anchor="middle">All parameters, every token</text>
+<rect fill="url(#c10-dense)" x="17" y="52" width="167" height="167"/>
+<text class="f-text" fill="#182f2b" x="303" y="20" font-size="13" font-weight="600" text-anchor="middle">MoE model</text>
+<text class="f-muted" fill="#5c6d66" x="303" y="38" font-size="12" text-anchor="middle">Only a few experts per layer</text>
+<rect fill="url(#c10-sparse)" x="220" y="52" width="167" height="167"/>
+<rect class="f-accent" fill="#136d5a" x="271" y="86" width="14" height="14" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="339" y="154" width="14" height="14" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="100" y="242" font-size="12" text-anchor="middle">All of it is working</text>
+<text class="f-muted" fill="#5c6d66" x="303" y="242" font-size="12" text-anchor="middle">10 of 512 per layer (~2%)</text>
+</svg><figcaption>Figure 10-1　A dense model uses every parameter at every step. An MoE model wakes only a few experts per step; the rest take no part in that step at all.</figcaption></figure>
+<p>Inside a model, an <dfn>expert</dfn> is just a group of parameters that performs one kind of computational transformation. It is not a little model with a mind of its own, and it does not have to match a "specialty" a human would recognize, such as "the math expert" or "the poetry expert". What each expert is good at emerges on its own during training.</p>
+<p>The model Strata runs has 48 layers. Every layer has its own 512 experts, plus one <dfn>shared expert</dfn> that joins in every time. <span class="ev ev-code">Code fact</span>[S04][S13] Figure 10-2 shows what one expert looks like inside.</p>
+<figure class="fig"><svg viewBox="0 0 400 330" role="img" aria-label="Figure 10-2: one expert is made of three matrices, gate, up and down, with about 4.9 million parameters in total">
+<rect class="f-soft" fill="#e5f1df" x="110" y="8" width="180" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">Input: 2560 numbers</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V58H110V72M200 58H290V72"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="74" width="160" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="110" y="95" font-size="13" font-weight="600" text-anchor="middle">gate matrix</text>
+<text class="f-muted" fill="#5c6d66" x="110" y="113" font-size="12" text-anchor="middle">2560 → 640</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="74" width="160" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="290" y="95" font-size="13" font-weight="600" text-anchor="middle">up matrix</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="113" font-size="12" text-anchor="middle">2560 → 640</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M110 122V136H290V122M200 136V148"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="150" width="280" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="175" font-size="12" text-anchor="middle">Activated gate × up, element-wise</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 190V214"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="120" y="216" width="160" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="237" font-size="13" font-weight="600" text-anchor="middle">down matrix</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="255" font-size="12" text-anchor="middle">640 → 2560</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 264V276"/>
+<text class="f-text" fill="#182f2b" x="200" y="292" font-size="12" text-anchor="middle">Output: 2560 numbers</text>
+<text class="f-text" fill="#182f2b" x="200" y="320" font-size="12" font-weight="600" text-anchor="middle">Parameters: 3 × 2560 × 640 = 4,915,200</text>
+</svg><figcaption>Figure 10-2　An expert is just three matrices: first squeeze the 2560-wide input down to 640, then expand it back to 2560. Each expert has about 4.9 million parameters.</figcaption></figure>
+<p>The model's main width is 2560, and the width inside an expert is 640. <span class="ev ev-code">Code fact</span>[S04][S06] Add up the three matrices and each expert has about 4.9 million parameters. Keep that number in mind; the next section needs it.</p>
+
+<h2 id="sec-2">10.2 How the triage desk picks experts</h2>
+<p>Every layer has a <dfn>router</dfn>, our triage desk. It takes one look at the current token's data, gives each of the layer's 512 experts a score, and picks the 10 with the highest scores. This step is called <dfn>top-k selection</dfn>, with k = 10 here. <span class="ev ev-code">Code fact</span>[S13]</p>
+<p>Each of the 10 chosen experts computes its own result. The router then turns the scores into "how much say each one gets", that is, weights, adds up the 10 results by those weights, adds the shared expert's result, and hands everything to the next layer. The other 502 experts take no part in this step at all. Computing only what the input calls for is known as <dfn>conditional computation</dfn>.</p>
+<p>Words alone do not give you a feel for it. The simulator below slows the process down; press <strong>Step</strong> to walk through it one step at a time:</p>
+<div class="viz" data-viz="moe-router"><figure class="fig"><svg viewBox="0 0 400 420" role="img" aria-label="Figure 10-3: one MoE layer at work. The router scores 512 experts, picks 10, adds their results weighted by score, then adds the shared expert">
+<defs><pattern id="c10-grid" width="10" height="10" patternUnits="userSpaceOnUse"><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-width=".6" x=".5" y=".5" width="8" height="8" rx="1.5"/></pattern></defs>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="6" width="280" height="38" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" font-weight="600" text-anchor="middle">Input: the current token's data</text>
+<rect class="f-soft" fill="#e5f1df" x="60" y="64" width="280" height="38" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="88" font-size="13" font-weight="600" text-anchor="middle">Router: scores all 512 experts</text>
+<rect fill="url(#c10-grid)" x="40" y="122" width="320" height="160"/>
+<rect class="f-accent" fill="#136d5a" x="70.5" y="132.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="210.5" y="142.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="320.5" y="162.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="120.5" y="182.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="260.5" y="192.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="160.5" y="212.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="340.5" y="222.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="90.5" y="242.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="230.5" y="252.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="300.5" y="272.5" width="8" height="8" rx="1.5"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="300" font-size="12" text-anchor="middle">512 cells = 512 experts; highlighted 10 = top scores</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="318" width="280" height="38" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="342" font-size="13" font-weight="600" text-anchor="middle">10 experts compute; weighted sum</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="376" width="280" height="38" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="400" font-size="13" font-weight="600" text-anchor="middle">+ shared expert → next layer</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V62M200 102V120M200 304V316M200 356V374"/>
+</svg><figcaption>Figure 10-3　One MoE layer at work. All 48 layers do this, so one token makes 48 × 10 = 480 expert picks in total.</figcaption></figure></div>
+<p class="bridge"><strong>If you studied CS:</strong> to find the top 10 of 512 scores you do not have to sort all 512. The primer below covers three ways to do it and their complexity.</p>
+<aside class="primer" id="c10-top-k">
+<h3>Top-k selection: finding the k largest of n numbers</h3>
+<p>The most direct approach is to sort all n numbers and take the first k, which costs O(n log n). But we only want the top 10; we do not care at all how the other 502 are ordered, so a full sort does a lot of wasted work.</p>
+<p>A cheaper way uses a <dfn>min-heap</dfn> that holds only k numbers. Scan the list once; whenever a number beats the top of the heap (the current k-th place), it replaces it. The heap always holds k items, each adjustment costs only O(log k), and the total is O(n log k). With n = 512 and k = 10, that is roughly a third of the work of a full sort.</p>
+<p>There is also <dfn>quickselect</dfn>, which borrows the "partition" idea from quicksort and needs only O(n) on average. On GPUs, people also use parallel reduction, so many threads compare at once. Which one to use depends on the hardware and on how big k is; this book has not checked which one Strata's kernels use.</p>
+<p>Whatever the algorithm, it must define <strong>who wins a tie</strong>. Otherwise the same input could pick different experts on two runs.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Heap_%28data_structure%29" target="_blank" rel="noopener noreferrer">Wikipedia: Heap (data structure)</a> · <a href="https://en.wikipedia.org/wiki/Quickselect" target="_blank" rel="noopener noreferrer">Wikipedia: Quickselect (finding the k-th element in linear time)</a> · <a href="https://en.wikipedia.org/wiki/Selection_algorithm" target="_blank" rel="noopener noreferrer">Wikipedia: Selection algorithm</a></p>
+</aside>
+
+<h2 id="sec-3">10.3 Doing the math: 125 billion parameters, how many per token?</h2>
+<p>With "4.9 million parameters per expert" and "480 picks per token" in hand, we can work out how many parameters one token really uses:</p>
+<div class="table-wrap"><table><thead><tr><th>Item</th><th>Formula</th><th>Result</th></tr></thead><tbody>
+<tr><td>Parameters in all routed experts</td><td>4,915,200 × 24,576</td><td>about 120.8 billion</td></tr>
+<tr><td>Total model parameters (README)</td><td>—</td><td>about 125 billion <span class="ev ev-report">Upstream report</span></td></tr>
+<tr><td>Parameters outside the experts</td><td>125 B − 120.8 B</td><td>about 4.2 billion <span class="ev ev-est">Teaching estimate</span></td></tr>
+<tr><td>Expert parameters one token uses</td><td>4,915,200 × 480</td><td>about 2.4 billion</td></tr>
+<tr><td>Parameters one token actually uses</td><td>2.4 B + about 4.2 B</td><td>about 6.6 billion, roughly 5% of the total <span class="ev ev-est">Teaching estimate</span></td></tr>
+</tbody></table></div>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="Figure 10-4: 97% of the model's parameters sit in the routed experts, yet each token uses only about 5% of the parameters">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="12">Where the parameters go (bar lengths to scale)</text>
+<text class="f-text" fill="#182f2b" x="20" y="44" font-size="12" font-weight="600">All model parameters: about 125 billion</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="52" width="347.9" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="367.9" y="52" width="12.1" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="88" font-size="12">Routed experts ≈120.8 B (97%) · other parts ≈4.2 B (3%)</text>
+<text class="f-text" fill="#182f2b" x="20" y="122" font-size="12" font-weight="600">Used by each token: about 6.6 billion (5%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="130" width="360" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="130" width="6.9" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="26.9" y="130" width="12.1" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="166" font-size="12">Chosen experts ≈2.4 B + parts used every step ≈4.2 B</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="188" font-size="12">Light area: unused this step, so it can wait in RAM</text>
+</svg><figcaption>Figure 10-4　97% of this model's parameters live in the routed experts, yet each token uses only about 5%. That is why it is safe to park the rarely used experts somewhere else.</figcaption></figure>
+<p>"Parameters outside the experts" comes from subtracting the README's round numbers, so treat it only as a feel for the order of magnitude. <span class="ev ev-est">Teaching estimate</span>[S01][S04]</p>
+<p>Now the bytes. The source code says one expert takes 1,382,400 bytes in the standard format. <span class="ev ev-code">Code fact</span>[S06] Spread over 4.9 million parameters, that is about 2.25 bits per parameter, more than 7 times smaller than the original 16 bits. This kind of compression is called <dfn>quantization</dfn>, and Chapter 4 covers it in detail. In this format the 24,576 experts add up to about 34 GB, and the 480 experts one token must read come to about 664 MB. <span class="ev ev-est">Teaching estimate</span></p>
+
+<h2 id="sec-4">10.4 Where do the unpicked experts live?</h2>
+<p>34 GB of experts will not fit on a 12 GB graphics card (GPU). Strata's answer is tiered storage <span class="ev ev-report">Upstream report</span>[S02]:</p>
+<ul>
+<li>The <strong>GPU</strong> first holds the parts every token needs, then uses all the remaining VRAM to cache the <strong>experts picked most often</strong>.</li>
+<li><strong>RAM</strong> holds all the experts. An expert that is picked but not on the GPU is a "miss"; misses are mostly computed by the CPU right there in RAM, at the same time as the GPU works.</li>
+</ul>
+<p>Why not just move a missed expert to the GPU for the moment and compute it there? The key is <dfn>bandwidth</dfn>: how many bytes per second you can move. Below, four places race to move those 664 MB. Who gets there first?</p>
+<div class="viz" data-viz="transfer-race"><figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="Figure 10-5: moving 664 MB takes about 1.0, 8.0, 10.5 and 94.9 milliseconds from VRAM, RAM, PCIe and SSD respectively">
+<text class="f-muted" fill="#5c6d66" x="10" y="14" font-size="11">Time to move 664 MB (theoretical peak, bars to scale)</text>
+<text class="f-text" fill="#182f2b" x="10" y="42" font-size="12">VRAM</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="30" width="2.3" height="16"/>
+<text class="f-text" fill="#182f2b" x="106" y="43" font-size="12">1.0 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="82" font-size="12">RAM</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="70" width="18.5" height="16"/>
+<text class="f-text" fill="#182f2b" x="122" y="83" font-size="12">8.0 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="122" font-size="12">PCIe 5.0</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="110" width="24.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="128" y="123" font-size="12">10.5 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="162" font-size="12">SSD</text>
+<rect class="f-warn" fill="#9e5d24" x="96" y="150" width="220" height="16"/>
+<text class="f-text" fill="#182f2b" x="322" y="163" font-size="12">94.9 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="11">Time = 664 MB ÷ bandwidth (672 / 83 / 63 / 7 GB/s)</text>
+</svg><figcaption>Figure 10-5　One trip over PCIe takes 10.5 milliseconds; the moving alone caps you below 94 tokens per second. Reading from the SSD takes almost 0.1 seconds.</figcaption></figure></div>
+<p>The conclusion is clear: you cannot send every token's experts over PCIe. So Strata lets the CPU compute most missed experts in place, in RAM, and that data never has to squeeze through this narrow road. The upstream docs add that it hands a small share of the missed experts to the GPU over PCIe, to balance the work between the two sides. <span class="ev ev-report">Upstream report</span>[S03]</p>
+<p class="bridge"><strong>If you studied CS:</strong> this is exactly the memory hierarchy idea from computer organization: keep the most used data on the fastest level. The "memory hierarchy" primer in Chapter 1 compares the bandwidth of each level.</p>
+<p>How many experts fit in the GPU cache has a direct effect on speed. Figure 10-6 shows one set of measurements from the upstream docs.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figure 10-6: how many of the 24,576 experts sit on the GPU. 1,589 by default and 3,872 after moving the chat history out of VRAM; speed rises from 50.9 to 62.6 tokens per second">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="13" font-weight="600">All 24,576 experts (bar lengths to scale)</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="54" font-size="12">Default settings</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="62" width="360" height="22" rx="4"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="62" width="23.3" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="20" y="104" font-size="12">On GPU: 1,589 (about 6%) · 50.9 tokens per second</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="138" font-size="12">After moving most of the chat history to RAM</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="146" width="360" height="22" rx="4"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="146" width="56.7" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="20" y="188" font-size="12">On GPU: 3,872 (about 16%) · 62.6 tokens per second</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="222" font-size="12">Upstream: RTX 5070 12 GB, Q2_0, 262K context, v0.1.5</text>
+</svg><figcaption>Figure 10-6　The more experts cached on the GPU, the less the CPU has to compute, and the faster it runs. Data from the upstream docs. [S03]</figcaption></figure>
+<p>With a long 262K context, the chat history alone takes a lot of VRAM. After moving most of it to RAM, the freed space holds 2,283 more experts, and generation speeds up from 50.9 to 62.6 tokens per second. <span class="ev ev-report">Upstream report</span>[S03] The docs also say that each extra 1 GB of VRAM holds about 700 more experts. [S02] That matches the byte count: 1 GB ÷ 1,382,400 bytes ≈ 723.</p>
+
+<h2 id="sec-5">10.5 Hot experts change: the cache follows the conversation</h2>
+<p>Which experts are hot depends on what you are talking about. The experts that get busy while you write code may be very different from the ones busy while you write prose. So Strata's expert cache is not fixed once and for all; it keeps adjusting as you chat, moving recently popular experts onto the GPU and moving cold ones out. <span class="ev ev-report">Upstream report</span>[S02] Figure 10-7 is a sketch.</p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="Figure 10-7: after the topic switches from code to prose, the VRAM cache swaps out two cold experts and swaps in two hot ones; the number of slots stays the same">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Expert cache in VRAM (sketch: only 8 slots drawn)</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">Coding</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="96" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="112.5" y="48" font-size="12" text-anchor="middle">#027</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="133" y="30" width="33" height="26" rx="3"/><text class="f-muted" fill="#5c6d66" x="149.5" y="48" font-size="12" text-anchor="middle">#331</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="170" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="186.5" y="48" font-size="12" text-anchor="middle">#045</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="207" y="30" width="33" height="26" rx="3"/><text class="f-muted" fill="#5c6d66" x="223.5" y="48" font-size="12" text-anchor="middle">#408</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="260.5" y="48" font-size="12" text-anchor="middle">#156</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="281" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="297.5" y="48" font-size="12" text-anchor="middle">#073</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="318" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="334.5" y="48" font-size="12" text-anchor="middle">#219</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="355" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="371.5" y="48" font-size="12" text-anchor="middle">#360</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M149.5 58V96M223.5 58V96"/>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="12">Now prose</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="96" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="112.5" y="118" font-size="12" text-anchor="middle">#027</text>
+<rect class="f-accent" fill="#136d5a" x="133" y="100" width="33" height="26" rx="3"/><text class="f-on" fill="#ffffff" x="149.5" y="118" font-size="12" text-anchor="middle">#112</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="170" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="186.5" y="118" font-size="12" text-anchor="middle">#045</text>
+<rect class="f-accent" fill="#136d5a" x="207" y="100" width="33" height="26" rx="3"/><text class="f-on" fill="#ffffff" x="223.5" y="118" font-size="12" text-anchor="middle">#290</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="260.5" y="118" font-size="12" text-anchor="middle">#156</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="281" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="297.5" y="118" font-size="12" text-anchor="middle">#073</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="318" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="334.5" y="118" font-size="12" text-anchor="middle">#219</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="355" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="371.5" y="118" font-size="12" text-anchor="middle">#360</text>
+<text class="f-text" fill="#182f2b" x="10" y="156" font-size="12">Out: #331, #408 (rarely picked lately; back to RAM)</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">In: #112, #290 (picked often lately; moved into VRAM)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="202" font-size="12">Same slots, new residents. Expert IDs are made up.</text>
+</svg><figcaption>Figure 10-7　When the topic changes, the hot experts change too. The cache swaps cold experts out and hot ones in, and the total VRAM used stays the same.</figcaption></figure>
+<p>It works like a kitchen counter. If you have been cooking Sichuan food every day, the peppercorns and chilies sit within reach; switch to baking and the counter changes with you. The counter stays the same size; what sits on it depends on what you used recently. Chapter 12 explains how this cache decides who comes in and who goes out.</p>
+<p>One thing to note: the cache changes only <strong>where</strong> an expert is computed, never <strong>what</strong> is computed. An expert swapped out is still in RAM, and when it is picked the CPU computes it; the model has not lost a single expert. (Chapter 26 shows that the CPU and the GPU may disagree slightly in the last few decimal places when they compute the same expert, but that is not a "lost expert".)</p>
+
+<h2 id="sec-6">10.6 Hands-on: feel how "hot" experts drive the hit rate</h2>
+<p>How much a cache helps depends on whether experts are picked evenly. If a few hot experts do a large share of the work, caching them lets the GPU do more and the CPU less. If every expert has exactly the same chance of being picked, caching 6% of them gets you only about a 6% hit rate.</p>
+<p>Open this chapter's lab, "Cache traces and conflicts", and try two access traces: one concentrated on a few keys, one spread out evenly. With the same number of slots, see how far apart the hit rates are. The more concentrated the accesses, the more a small cache is worth. The policies in the lab are the general textbook algorithms, not the adaptive policy Strata actually uses.</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>An MoE model has many experts in every layer, and the router picks a few for each token. The model Strata runs picks 10 of 512 per layer, so one token makes 480 picks in total.</li>
+<li>Many parameters does not mean many parameters per step: this model uses only about 5% of its parameters for each token.</li>
+<li>Hot experts are cached on the GPU, all experts live in RAM, and misses are mostly computed in place by the CPU. More VRAM means a bigger cache and more speed.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "Experts that are not picked are useless; delete them to save space."</strong></p>
+<p>An expert not picked in this step may be needed by the very next token. Deleting experts changes the model itself. The Coder version that Strata offers drops half of the experts: according to its author, it keeps 91% of the original model's score on the coding benchmark SWE-bench Verified, but it gets clearly weaker on Chinese and other text. Upstream therefore recommends the version with all experts if you write in Chinese. <span class="ev ev-report">Upstream report</span>[S01]</p></div>
+
+<details class="deep"><summary>Go deeper: the top-k boundary, interface contracts and how to evaluate a cache</summary>
+<h3>Top-k is a discontinuous boundary</h3>
+<p>The scores of 10th and 11th place can be extremely close. A tiny numerical error can swap a whole expert, and the resulting output difference is far larger than the score difference itself. So "every routing score is within 10⁻⁴" is not enough to prove that two computations picked the same experts. Tests must record the chosen expert IDs, their weights and the combined output separately, and must include deliberately built boundary cases, ties and outliers.</p>
+<h3>A fixed address is not fixed content</h3>
+<p><code>expert_source.hpp</code> writes its interface contract as a list of warnings. [S06] The first one: the input <code>x_f</code> that each layer sends to the expert pool uses <strong>the same</strong> block of pinned memory. The address never changes, but the content differs from layer to layer. If someone caches its quantized form by address, layer 0's data gets reused for the next 47 layers. The result is a finite, plausible-looking, completely wrong token.</p>
+<p>This is the "key design" problem from data structures: where an object is does not tell you which version it is. In engineering you need an explicit generation number, a layer number, a content identity or a bounded lifetime; pointer equality alone cannot tell you the data is equal.</p>
+<h3>Routing weights are applied exactly once</h3>
+<p>The second contract in the same file: the expert pool does <strong>not</strong> multiply by the routing weights; the combine step on the device does that in one place. <span class="ev ev-code">Code fact</span>[S06] If the expert pool also multiplied, you would hardly notice in one layer, but across 48 layers the error keeps growing. The third: the expert geometry (2560, 640, 1,382,400 bytes) is fixed by the model file, and a size mismatch is rejected outright instead of being read anyway. Reading with the wrong width silently pulls in bytes from the neighboring expert, and nothing reports an error.</p>
+<h3>Why the parameter formula and the real byte count disagree</h3>
+<p>At "2 bits per parameter", one expert would need only 4,915,200 × 2 ÷ 8 = 1,228,800 bytes. The real format uses 1,382,400 bytes; the extra 153,600 bytes (about 11%) are scale factors and other metadata that quantization needs. Different quantization packs also have different record lengths. [S06] Do not take the simplified parameter formula as the true size of any format.</p>
+<h3>How to evaluate a cache policy fairly</h3>
+<p>If you choose hot experts on one access trace and then report the hit rate on the same trace, the result is inflated: the policy has "seen the exam". The right way is to split off a held-out set by request or by task and measure on traces the policy has never seen. Do not cut one long conversation into similar pieces and put them on both sides, or information leaks. When you report a hit rate, also state the cache capacity, the per-layer allocation, the denominator of the hit count, cold start versus warmed up, and where the trace came from. A bare "70% hit rate" cannot guide any capacity budget.</p>
+</details>

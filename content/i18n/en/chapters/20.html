@@ -1,0 +1,217 @@
+<div class="hook"><span class="eyebrow">You may have noticed</span>
+<p>Hand a long document to a chat AI and the first question takes a good while before any answer appears. Ask a follow-up and the answer pops out almost at once. Strata's docs say the same thing: after the first message it keeps hold of the conversation and reads only the newly added part, so a follow-up can start within seconds. <span class="ev ev-report">Upstream report</span>[S02]</p>
+<p>What exactly does the engine "keep hold of"? If two requests differ by a single word or swap one image, does it still dare to reuse anything? If two conversations start the same and then branch, can they share one copy? This chapter covers prefix reuse, snapshots and copy-on-write.</p></div>
+<p class="tldr"><strong>In one line:</strong> Strata saves a prefix it has read as a checkpoint (a kind of snapshot). When a new request's tokens, images and steering mode match the checkpoint exactly, it resumes from the checkpoint and reads only the new tail. A snapshot must hold the entire running state; saving just the KV cache is not enough.</p>
+
+<h2 id="sec-1">20.1 Why follow-ups are fast: do not reread what was already read</h2>
+<p>Multi-turn chat has one quirk: every request sends the whole history again. The request for turn 5 starts with everything from turns 1 to 4 and only then has your new question. The new content is often a short stretch; the long part before it is the <dfn>prefix</dfn>, the part identical to the start of the previous request.</p>
+<p>If the engine read from the first token every time, long chats would get slower and slower. The smart way is like a bookmark: start reading where you stopped last time. This is called <dfn>prefix reuse</dfn>, and engines often call it the prompt cache.</p>
+<p>How much does it save? Strata reads long text at more than 1,000 tokens per second. <span class="ev ev-report">Upstream report</span>[S02] A comment in the source does the math too: a 30,000-token system prompt read at about 1,000 per second takes about 30 seconds. <span class="ev ev-report">Upstream report</span> Figure 20-1 compares the two approaches.</p>
+<figure class="fig"><svg viewBox="0 0 400 196" role="img" aria-label="Figure 20-1: a 30,000-token prefix and a 500-token new question. Reading from the start takes about 30.5 seconds; reusing a checkpoint and reading only the new part takes about 0.5 seconds">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="12">Time to read a request (to scale, teaching estimate)</text>
+<text class="f-text" fill="#182f2b" x="20" y="46" font-size="12" font-weight="600">No reuse: read from the first token</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="54" width="354" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="374" y="54" width="6" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="90" font-size="12">30,000 prefix tokens + 500 new tokens, about 30.5 s</text>
+<text class="f-text" fill="#182f2b" x="20" y="124" font-size="12" font-weight="600">Reuse a checkpoint: read only the new part</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="20" y="132" width="354" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="374" y="132" width="6" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="12">Checkpoint restores the prefix; read 500 new: about 0.5 s</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="188" font-size="12">At about 1,000 tokens per second: time = tokens ÷ 1,000</text>
+</svg><figcaption>Figure 20-1　The longer the prefix, the more reuse is worth. Without reuse, 30,000 ÷ 1,000 = 30 seconds go into rereading; with reuse, only the 500 new tokens are read, about 0.5 seconds. <span class="ev ev-est">Teaching estimate</span></figcaption></figure>
+<p>Resuming from a checkpoint has its own cost: the checkpoint lives in RAM and must be moved back to the GPU. A checkpoint is about 118 MB (the next sections explain why). At the PCIe 5.0 theoretical bandwidth of about 63 GB/s used in Chapter 10, that is 118 ÷ 63 ≈ 2 milliseconds. <span class="ev ev-est">Teaching estimate</span> Next to 30 seconds, it is negligible.</p>
+<p>The upstream docs also warn of a side effect: the prompt cache makes a repeated request read only its tail, which takes a different computation path from reading it all, so the answer may not be exactly the same as a full read. If you need byte-identical output, turn it off with options such as <code>--prompt-cache 0</code>. <span class="ev ev-report">Upstream report</span>[S03]</p>
+
+<h2 id="sec-2">20.2 What counts as "the same prefix"?</h2>
+<p>Reuse requires that the history a checkpoint stands for is <strong>exactly the same</strong> as the start of the new request. "Looks about the same" does not count. Change one token and the result at every later position changes with it.</p>
+<p>Strata makes this call with a function called <code>conversation_prefix</code>, plus one extra check when the conversation cache picks an entry. <span class="ev ev-code">Code fact</span>[S10] Together they make four rules:</p>
+<ol>
+<li><strong>Same steering mode.</strong> <dfn>Steering</dfn> is an optional "control vector" that, when turned on, changes the intermediate results of many layers. If the two sides use different modes, the state in the checkpoint was computed a different way, so it is skipped.</li>
+<li><strong>The checkpoint is shorter than the request.</strong> The request's last token must really be read, because it starts the next verify round. So a checkpoint exactly as long as the request cannot be used.</li>
+<li><strong>Every token ID in the prefix is the same.</strong></li>
+<li><strong>Every image in the prefix has the same identity.</strong> In the token sequence an image is just a run of placeholders, and identical placeholders can stand for completely different pictures. So the engine records a separate identity for each image: its start position plus a content hash. <span class="ev ev-code">Code fact</span>[S10]</li>
+</ol>
+<div class="viz" data-viz="prefix-match"><figure class="fig"><svg viewBox="0 0 400 362" role="img" aria-label="Figure 20-2: a checkpoint must pass four checks before reuse: steering mode, length, tokens and images; only if all pass is it reused">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="31" font-size="13" font-weight="600" text-anchor="middle">New request arrives</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="64" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="87" font-size="13" text-anchor="middle">① Same steering mode?</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="120" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="143" font-size="13" text-anchor="middle">② Checkpoint shorter?</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="176" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="199" font-size="13" text-anchor="middle">③ Prefix tokens all equal?</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="232" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="255" font-size="13" text-anchor="middle">④ Same image hashes?</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="292" width="220" height="38" rx="8"/>
+<text class="f-on" fill="#ffffff" x="150" y="316" font-size="13" font-weight="600" text-anchor="middle">All pass: read the new tail</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M150 44V62M150 100V118M150 156V174M150 212V230M150 268V290"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M260 82H284M260 138H284M260 194H284M260 250H284"/>
+<text class="f-warn" fill="#9e5d24" x="290" y="86" font-size="12">No: skip</text>
+<text class="f-warn" fill="#9e5d24" x="290" y="142" font-size="12">No: can't use</text>
+<text class="f-warn" fill="#9e5d24" x="290" y="198" font-size="12">No: discard</text>
+<text class="f-warn" fill="#9e5d24" x="290" y="254" font-size="12">No: discard</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="354" font-size="11">Rules taken from conversation_cache.hpp</text>
+</svg><figcaption>Figure 20-2　If any one of the four checks fails, the checkpoint cannot be used; the engine tries another checkpoint or reads from the start.</figcaption></figure></div>
+<p class="bridge"><strong>If you studied data structures:</strong> deciding "is this checkpoint a prefix of the request?" is a string prefix comparison, and finding the longest matching prefix among many checkpoints is exactly what tries and radix trees are good at. Strata's source comments compare it directly to a radix tree; see Section 20.4.</p>
+
+<h2 id="sec-3">20.3 What goes into a snapshot: a notebook can flip back, a whiteboard cannot</h2>
+<p>A checkpoint is a kind of <dfn>snapshot</dfn>: a picture of the whole state at one moment, so you can return to that moment later, like a game save. What to save depends on how the model "remembers" history. The model Strata runs has two kinds of layers among its 48, and they remember history in completely different ways. <span class="ev ev-code">Code fact</span>[S04]</p>
+<ul>
+<li><strong>The 12 attention layers (QSA) use a KV cache.</strong> For each token read, they write one more row by position, like a <strong>notebook</strong>. To go back to a prefix, ignore the later rows: the verifier's notes say plainly that rejected positions are simply overwritten when they are processed again, before any query reads them. <span class="ev ev-code">Code fact</span>[S08]</li>
+<li><strong>The 36 GDN layers use a recurrent state.</strong> For each token read, they rewrite a fixed-size block of state <strong>in place</strong>, like a <strong>whiteboard</strong>. <span class="ev ev-code">Code fact</span>[S17] Once token 5 is read, what the board looked like at token 4 is erased and can never be computed back.</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="Figure 20-3: the KV cache is like a notebook, appending one row per position, so rolling back to a prefix just ignores the later rows; the recurrent state is like a whiteboard rewritten whole for every token, so rolling back needs a photo taken in advance">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">KV cache: notebook</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="12" text-anchor="middle">One row per token, append only</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="50" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="64" font-size="12">token 1</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="74" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="88" font-size="12">token 2</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="98" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="112" font-size="12">token 3</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="122" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="136" font-size="12">token 4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="30" y="146" width="140" height="20" rx="3"/><text class="f-muted" fill="#5c6d66" x="40" y="160" font-size="12">token 5, old branch</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="30" y="170" width="140" height="20" rx="3"/><text class="f-muted" fill="#5c6d66" x="40" y="184" font-size="12">token 6, old branch</text>
+<text class="f-text" fill="#182f2b" x="100" y="214" font-size="12" text-anchor="middle">Back to 4: ignore rows 5–6,</text>
+<text class="f-text" fill="#182f2b" x="100" y="232" font-size="12" text-anchor="middle">later writes overwrite them</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 10V250"/>
+<text class="f-text" fill="#182f2b" x="300" y="20" font-size="13" font-weight="600" text-anchor="middle">GDN state: whiteboard</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="38" font-size="12" text-anchor="middle">Rewritten in place every token</text>
+<rect class="f-soft" fill="#e5f1df" x="225" y="50" width="150" height="100" rx="6"/>
+<text class="f-text" fill="#182f2b" x="300" y="94" font-size="12" text-anchor="middle">State after reading</text>
+<text class="f-text" fill="#182f2b" x="300" y="114" font-size="12" text-anchor="middle">token 6</text>
+<text class="f-warn" fill="#9e5d24" x="300" y="176" font-size="12" text-anchor="middle">Back to token 4?</text>
+<text class="f-warn" fill="#9e5d24" x="300" y="194" font-size="12" text-anchor="middle">Erased; cannot recompute</text>
+<text class="f-text" fill="#182f2b" x="300" y="222" font-size="12" text-anchor="middle">Only a photo taken earlier:</text>
+<text class="f-text" fill="#182f2b" x="300" y="240" font-size="12" text-anchor="middle">that photo is the checkpoint</text>
+</svg><figcaption>Figure 20-3　Two kinds of memory, two ways to roll back. The notebook just "pretends the later rows were never written"; the whiteboard can only be restored from a photo taken in advance.</figcaption></figure>
+<p>How big is the whiteboard? Each GDN layer's state is 128 × 48 × 128 32-bit floats, so the 36 layers total 36 × 128 × 48 × 128 × 4 bytes ≈ 113 MB. <span class="ev ev-est">Teaching estimate</span>[S04][S17] However long the conversation, this whiteboard stays the same size. The KV notebook keeps getting thicker: stored at 2 bytes per number, the 12 layers take 12 × 2 × 2 × 256 × 2 bytes ≈ 24.6 KB per token, or about 737 MB for 30,000 tokens. <span class="ev ev-est">Teaching estimate</span></p>
+<p>So Strata's checkpoints mostly store the whiteboard: the GDN recurrent state, plus a few small pieces such as the PLE (per-layer embedding) history and the attention indexer's tails, along with the token IDs and image identities of that prefix. <span class="ev ev-code">Code fact</span>[S10] The upstream docs say one checkpoint is about 118 MB, <span class="ev ev-report">Upstream report</span> which matches the 113 MB whiteboard: it is the bulk of it.</p>
+
+<h2 id="sec-4">20.4 A chain of checkpoints: pin the root, rotate the rest</h2>
+<p>When does the engine take a photo? The upstream docs say: one at the start of each new assistant turn, plus one more every 16K tokens while reading a long prompt, with at most 6 kept in RAM. <span class="ev ev-report">Upstream report</span></p>
+<p>These checkpoints have a special shape. The KV cache on the GPU has only one region, so it can hold only one history branch at a time. Every checkpoint kept must therefore be a prefix of the current history; sorted by length, each is a prefix of the next, forming a <dfn>chain</dfn>. A source comment compares it to a radix tree: a tree flattened down to the single branch the session can hold. <span class="ev ev-code">Code fact</span></p>
+<figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="Figure 20-4: a chain of checkpoints. Each checkpoint is a prefix of the next; the root sits at the end of the system prompt and is pinned; a new request resumes from the longest matching checkpoint">
+<text class="f-muted" fill="#5c6d66" x="20" y="16" font-size="12">One chat's checkpoints (bar = prefix length, sketch)</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="28" width="110" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="30" y="45" font-size="12">Root · pinned</text>
+<text class="f-muted" fill="#5c6d66" x="138" y="45" font-size="12">End of system prompt</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="60" width="170" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="77" font-size="12">Round 2 start</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="92" width="250" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="109" font-size="12">Round 3 start</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="124" width="320" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="141" font-size="12">Round 4 start (longest checkpoint)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M340 118V188"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="160" width="320" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="340" y="160" width="40" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="177" font-size="12">New request: prefix = round-4 checkpoint</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="208" font-size="12">Resume from the longest match; read only the tail</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="228" font-size="12">Up to 6 (~118 MB each); evict the LRU one, never the root</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="248" font-size="12">New chat: resume at the root, skipping the system prompt</text>
+</svg><figcaption>Figure 20-4　The checkpoints form a chain, each a prefix of the next. The root is pinned, so even a brand-new chat can skip the system prompt.</figcaption></figure>
+<p>When the chain is full, who gets evicted? The early approach was first in, first out: the oldest checkpoint went first. But the oldest one is usually the end of the system prompt, the very spot every new chat from the same client passes through. Throw it away and every new chat must reread the system prompt from scratch. <span class="ev ev-code">Code fact</span></p>
+<p>The current rule is: <strong>pin the root, rotate the rest by least recently used (LRU)</strong>. The eviction function in the source is only a few lines: if the capacity is below 2, turn off pinning and evict the oldest; otherwise skip entry 0 and pick the least recently used among the rest. <span class="ev ev-code">Code fact</span> The upstream docs add one more rule: for a prompt read from the start, if the system prompt has 2,048 tokens or more, a photo is also taken at the end of the system prompt so that a root exists (from engine 0.1.20). <span class="ev ev-report">Upstream report</span> Chapter 12 covers cache replacement policies like LRU in detail.</p>
+
+<h2 id="sec-5">20.5 Two conversations, one shared opening: copy-on-write</h2>
+<p>Now a harder case: conversations A and B start exactly the same (say, the same system prompt plus the same document), then each asks its own question. Can they share the prefix and pay only for the parts that differ? Operating systems and databases found a classic answer to this long ago.</p>
+<aside class="primer" id="c20-copy-on-write">
+<h3>Snapshots and copy-on-write</h3>
+<p>The clumsiest way to take a <dfn>snapshot</dfn> of some data is to copy all of it. 1 GB of data means copying 1 GB: slow, and it takes double the space. Yet most of the time, the snapshot and the original later differ in only a few places.</p>
+<p><dfn>Copy-on-write</dfn> (COW) takes another route: copy nothing at first. Both sides share the same data, and each block carries a <dfn>reference count</dfn>, meaning "how many users it has". Whoever wants to write into a shared block copies <strong>that block</strong> first and changes their own copy. A block nobody changes only ever exists once. Figure 20-5 shows a three-page example.</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="Figure 20-5: copy-on-write. Right after the fork A and B share three pages; when B wants to change page 2, only that page is copied and the other two stay shared">
+<text class="f-text" fill="#182f2b" x="100" y="16" font-size="12" font-weight="600" text-anchor="middle">① Just forked: all shared</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="19" y="28" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102" y="44" font-size="12" text-anchor="middle">A's page table</text>
+<rect class="f-soft" fill="#e5f1df" x="19" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="44" y="90" font-size="12" text-anchor="middle">pg1 ×2</text>
+<rect class="f-soft" fill="#e5f1df" x="77" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="102" y="90" font-size="12" text-anchor="middle">pg2 ×2</text>
+<rect class="f-soft" fill="#e5f1df" x="135" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="160" y="90" font-size="12" text-anchor="middle">pg3 ×2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="19" y="166" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102" y="182" font-size="12" text-anchor="middle">B's page table</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 50V70M102 50V70M160 50V70M44 100V166M102 100V166M160 100V166"/>
+<text class="f-muted" fill="#5c6d66" x="102" y="214" font-size="12" text-anchor="middle">0 pages copied</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 8V222"/>
+<text class="f-text" fill="#182f2b" x="302" y="16" font-size="12" font-weight="600" text-anchor="middle">② B writes page 2: copy it</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="214" y="28" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297" y="44" font-size="12" text-anchor="middle">A's page table</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="239" y="90" font-size="12" text-anchor="middle">pg1 ×2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="272" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="297" y="90" font-size="12" text-anchor="middle">pg2 ×1</text>
+<rect class="f-soft" fill="#e5f1df" x="330" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="355" y="90" font-size="12" text-anchor="middle">pg3 ×2</text>
+<rect class="f-accent" fill="#136d5a" x="272" y="118" width="50" height="30" rx="3"/><text class="f-on" fill="#ffffff" x="297" y="138" font-size="12" text-anchor="middle">pg2′</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="214" y="166" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297" y="182" font-size="12" text-anchor="middle">B's page table</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M239 50V70M297 50V70M355 50V70M239 100V166M297 148V166M355 100V166"/>
+<text class="f-muted" fill="#5c6d66" x="297" y="214" font-size="12" text-anchor="middle">Only the written page copied</text>
+</svg><figcaption>Figure 20-5　Copy-on-write: share first; whoever writes makes a copy, and only of the page being written. "×2" is the reference count.</figcaption></figure>
+<p>The most famous example is Linux's <code>fork()</code>: creating a child process copies only the page table. Parent and child share all physical memory pages, marked read-only. Whoever writes a page first triggers a page fault, and only then does the kernel copy that page. That is why forking a process that uses several GB of memory finishes almost instantly. File system snapshots and the multiversion concurrency control (MVCC) in databases use the same idea.</p>
+<p>Back to this chapter: the shared prefix of two conversations is exactly the "pages nobody changes". As long as the prefix's KV pages are only read and never written, they can safely be shared. The simulator below lets you try it yourself.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Copy-on-write" target="_blank" rel="noopener noreferrer">Wikipedia: Copy-on-write</a> · <a href="https://man7.org/linux/man-pages/man2/fork.2.html" target="_blank" rel="noopener noreferrer">Linux manual: fork(2)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/" target="_blank" rel="noopener noreferrer">OSTEP (free operating systems textbook, the virtual memory chapters)</a> · <a href="https://en.wikipedia.org/wiki/Multiversion_concurrency_control" target="_blank" rel="noopener noreferrer">Wikipedia: Multiversion concurrency control</a></p>
+</aside>
+<div class="viz" data-viz="prefix-cow"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figure 20-6: a 17-token prefix, 4 tokens per page, A and B each write 3. The first 4 pages are shared; page 5 is copied by A and written in place by B, 6 pages in all, while a full copy needs 10">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="11">17-token prefix, 4 tokens/page; A and B then write 3 each</text>
+<text class="f-text" fill="#182f2b" x="20" y="68" font-size="13" font-weight="600">A</text>
+<text class="f-text" fill="#182f2b" x="20" y="148" font-size="13" font-weight="600">B</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="60" y="34" width="46" height="130" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="114" y="34" width="46" height="130" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="168" y="34" width="46" height="130" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="222" y="34" width="46" height="130" rx="3"/>
+<g>
+<rect class="f-accent" fill="#136d5a" x="64" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="74" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="84" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="94" y="95" width="7" height="7"/>
+<rect class="f-accent" fill="#136d5a" x="118" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="128" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="138" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="148" y="95" width="7" height="7"/>
+<rect class="f-accent" fill="#136d5a" x="172" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="182" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="192" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="202" y="95" width="7" height="7"/>
+<rect class="f-accent" fill="#136d5a" x="226" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="236" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="246" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="256" y="95" width="7" height="7"/>
+</g>
+<text class="f-muted" fill="#5c6d66" x="83" y="156" font-size="11" text-anchor="middle">×2</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="156" font-size="11" text-anchor="middle">×2</text>
+<text class="f-muted" fill="#5c6d66" x="191" y="156" font-size="11" text-anchor="middle">×2</text>
+<text class="f-muted" fill="#5c6d66" x="245" y="156" font-size="11" text-anchor="middle">×2</text>
+<rect class="f-box" fill="#ffffff" stroke="#9e5d24" stroke-width="2" stroke-dasharray="4 3" x="276" y="34" width="56" height="50" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="281" y="46" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="292" y="46" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="303" y="46" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="314" y="46" width="7" height="7"/>
+<text class="f-warn" fill="#9e5d24" x="304" y="76" font-size="11" text-anchor="middle">copy</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="276" y="114" width="56" height="50" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="281" y="126" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="292" y="126" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="303" y="126" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="314" y="126" width="7" height="7"/>
+<text class="f-muted" fill="#5c6d66" x="304" y="156" font-size="11" text-anchor="middle">in place</text>
+<text class="f-text" fill="#182f2b" x="10" y="190" font-size="12">COW: 6 pages, only 1 copied; a full copy needs 10</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="11">Page 5 has 1 prefix token; A writes first, so A copies it</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="11">GDN state can't be shared: B copies it whole (~113 MB)</text>
+</svg><figcaption>Figure 20-6　The 4 pages full of prefix are shared by both sides; the half-full page 5 is written by both, so A, who writes first, copies it and B writes in place. Small accent squares are prefix tokens; the other kind are tokens written after the fork.</figcaption></figure></div>
+<p>The simulator reveals two things. First, KV pages can be shared, but the last page of the prefix, if not full, gets written by both sides and must be copied. Second, the recurrent state (the whiteboard) can never be shared: every token rewrites it whole, so at a fork it can only be copied in full.</p>
+<p>So what does Strata itself do? It does <strong>not</strong> share pages between two conversations. The source says so right on the buffer that holds snapshot data: a snapshot and the buffers it keeps have exactly one owner, so no sharing and no copy-on-write are needed. <span class="ev ev-code">Code fact</span> As noted earlier, the KV region on the GPU holds only one history branch at a time, so a single chain is enough. Copy-on-write here is our teaching extension, not Strata's implementation.</p>
+<p>Strata does have a similar money-saving trick, though. It can "park" several conversations in RAM (this feature is off by default and must be turned on by hand), with a full snapshot for each parked conversation: running state, checkpoints, the KV pages in use and the draft layer's KV. <span class="ev ev-report">Upstream report</span> After a conversation is restored, its unchanged KV pages can be kept and reused directly the next time it is parked, with no fresh copy; when the conversation grows, new pages are only appended and existing pages are not moved; only pages rewritten by a rollback are copied again. <span class="ev ev-report">Upstream report</span> That is the same spirit as copy-on-write: do not copy what has not changed.</p>
+
+<h2 id="sec-6">20.6 Hands-on: save, switch, restore, then compare</h2>
+<p>Restoring a snapshot has one iron rule: <strong>either restore it completely, or refuse it clearly</strong>. Half-restored state is the most dangerous kind: the model will happily generate text that reads smoothly and is completely wrong. Strata first validates every layer and every checkpoint, and starts writing only when all of them pass; a snapshot that fails validation is rejected before any GPU operation. If something goes wrong in the middle of moving data, the interface requires that the caller must <strong>not</strong> keep using that session for inference. <span class="ev ev-code">Code fact</span></p>
+<p class="bridge"><strong>If you studied databases:</strong> this is the atomicity of a transaction: either it all takes effect, or it is as if nothing happened. Chapter 18 described "commit only the accepted prefix" in speculative decoding; here the same idea is applied to restoring a session.</p>
+<p>Open this chapter's lab, "Commit only the accepted prefix". It uses a toy recurrence s ← 0.5s + t to show why the candidate state differs from the committed state, and why rolling back only the counter leaves a wrong state behind. Set the second draft to be rejected and find the position where "the counter rolled back but the state did not". That is exactly why a whiteboard cannot be rolled back by "pretending nothing was written".</p>
+<p>To go further, design your own test that needs no GPU: run conversation A with the same toy recurrence and save a snapshot; switch to conversation B; then restore A and continue. Finally compare bit for bit with the result of "A never left". The two must be exactly the same.</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>Prefix reuse accepts only an exact match: the token IDs, image identities and steering mode must all be the same, and the checkpoint must also be shorter than the request before reading can resume.</li>
+<li>The KV cache is like a notebook: to roll back, ignore the later rows. The recurrent state is like a whiteboard, rewritten whole for every token, so it can only roll back to a checkpoint photographed in advance. The bulk of a Strata checkpoint is the GDN state of about 113 MB.</li>
+<li>Copy-on-write lets several branches share pages nobody changes and copies only the page being written. Strata uses a checkpoint chain with "root pinned, the rest rotated by LRU"; parked conversations each own their buffers outright, with no copy-on-write.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "Saving the KV cache is the same as saving the whole conversation."</strong></p>
+<p>For the model Strata runs, that is far from enough. 36 of its 48 layers remember history in a recurrent state, which is not in the KV cache. On top of that come the PLE history, the attention indexer's tails, the draft layer's KV, and the token IDs and image identities of the prefix. <span class="ev ev-code">Code fact</span>[S10] Leave out any one of them and the restored conversation will quietly compute the wrong thing.</p></div>
+
+<details class="deep"><summary>Go deeper: matching rules, the snapshot inventory, capacity accounting and the restore contract</summary>
+<h3>Source details of the matching rules</h3>
+<p><code>conversation_prefix</code> first requires that the checkpoint is not empty, that its length is strictly less than the request's, and that the first n token IDs are equal one by one; otherwise it returns 0. Then it walks the request's images: images whose start position is outside the prefix are skipped; those inside must equal the checkpoint's recorded images in order (both start position and hash); finally, the checkpoint's recorded images must be used up exactly. One image too many, one too few, or one swapped, and it returns 0. <span class="ev ev-code">Code fact</span>[S10]</p>
+<p>When the conversation cache picks a checkpoint, it searches back from the most recently parked entry and skips entries with a different steering mode outright; for each entry it considers both the current state and each of its checkpoints, and takes the longest match. On equal length it prefers the most recently parked branch, and the caller prefers the state it already holds at the same length. <span class="ev ev-code">Code fact</span>[S10]</p>
+<h3>Identity checklist: what upstream checks, and what this book suggests</h3>
+<p>Upstream checks tokens, image identities and the steering mode. The snapshot also has an 18-integer <code>geometry</code> array, and a source comment states clearly that it is used only for a runtime compatibility check; it is <strong>not</strong> the identity of the model weights, nor a disk format. <span class="ev ev-code">Code fact</span>[S10] Two models with the same shapes and completely different weights have the same geometry.</p>
+<p>If you extend this mechanism to production (snapshots on disk, shared across processes, many users), this book suggests the identity key should at least add: the model weight version, the tokenizer and chat template, the RoPE settings, the quantization format, the device numeric mode, and the authorization scope (whose conversation may be used by whom). This is a teaching extension list, not checks upstream already does.</p>
+<h3>The full inventory of a snapshot</h3>
+<p>A checkpoint (<code>ConversationCheckpoint</code>) contains: token IDs, image identities, the GDN state, the PLE history, the indexer tails, dead, block_pos and other byte blocks, plus the per-device sub-checkpoints <code>stage_parts</code> of the layer-split runtime. The KV part (<code>ConversationKv</code>) has a format ID, the cell count, the head count, the head dimension, the page size, the indexer row count, and K, V, their quantization scale factors and the pooled index rows. A whole-conversation snapshot (<code>SavedConversation</code>) adds the geometry, the layer range <code>layer_lo / layer_hi</code>, the current state, the list of checkpoints, the KV of the main layers plus the draft layer, and the steering flag. <span class="ev ev-code">Code fact</span>[S10]</p>
+<p>Note the multi-GPU boundary: a source comment says ordinary layer-split checkpoints keep each device's running state, but parking a whole session currently supports only a single GPU and rejects those sub-checkpoints. <span class="ev ev-code">Code fact</span>[S10] The upstream docs also say that turning on parking together with <code>--layer-split</code> is rejected before the model loads. <span class="ev ev-report">Upstream report</span> You cannot go from "supports multiple GPUs" to "every cache and restore combination supports multiple GPUs".</p>
+<h3>Capacity accounting: count capacity, guard against underflow</h3>
+<p>A snapshot's byte count adds up each vector's <code>capacity()</code>, not its <code>size()</code>: space already allocated but not yet filled counts too. <span class="ev ev-code">Code fact</span>[S10] The check for whether a new snapshot fits is written as <code>held &lt;= budget_ &amp;&amp; incoming &lt;= budget_ - held &amp;&amp; …</code>, confirming before each subtraction that it cannot go negative. An unsigned integer that goes below zero wraps around to a huge positive number, and the budget check becomes meaningless. KV kept for reuse counts toward the same budget. <span class="ev ev-code">Code fact</span>[S10]</p>
+<p>To make room, it first drops the KV kept for reuse, then evicts the oldest entries in parking order. <span class="ev ev-code">Code fact</span> The upstream docs also require a margin of free physical memory of at least <code>--conversation-cache-min-free-mib</code> (default 2560), checked once before allocating and again after the photo is taken; if memory data cannot be read, nothing is parked. <span class="ev ev-report">Upstream report</span> The corresponding check function clearly separates "could not read" from "read 0": with no data, it refuses outright. <span class="ev ev-code">Code fact</span> The default budget is 0, meaning the feature is off; the docs' example uses 8 GiB and 4 slots and says this is a ceiling, not a recommendation. <span class="ev ev-report">Upstream report</span></p>
+<h3>The restore contract and persistence</h3>
+<p>The snapshot interface sorts restore results into three kinds: success, invalid snapshot, and transfer failure. An invalid snapshot is rejected before any CUDA call or write; a transfer failure may leave half a state behind, and the caller must <strong>not</strong> keep using that session for inference. <span class="ev ev-code">Code fact</span> The upstream docs say a transfer or sync failure is treated as fatal, and snapshots do not survive a restart. <span class="ev ev-report">Upstream report</span></p>
+<p>To store snapshots on disk, a common safe approach is: write a temporary file first; once it is written, flushed to disk and has passed its checksum, "publish" it with one atomic rename, and record a format version in the file. The exact durability guarantees also depend on the file system. [R02] This is a teaching extension; Strata does not currently persist snapshots.</p>
+<h3>The limits of KV page reuse</h3>
+<p>The snapshot interface has an easily missed comment: identical token IDs do <strong>not</strong> prove the KV bytes are unchanged. "Number of unchanged tokens" is valid only for storage that was really restored into this session from the snapshot and has had every later rewrite subtracted. <span class="ev ev-code">Code fact</span> The matching function in the conversation cache shrinks the "unchanged length" down to the first dirtied position each time it meets a rewrite, and drops the whole block once it reaches 0. <span class="ev ev-code">Code fact</span>[S10]</p>
+<p>The buffer holding snapshot data is made of 16 MiB segments; appending never moves existing data, and only the small segment directory may move. <span class="ev ev-code">Code fact</span> This is what underpins "growth only appends, existing pages are not copied".</p>
+<h3>Worked example: why a fork from a shared prefix needs write isolation</h3>
+<p>Sessions A and B share their first 1000 tokens. Then A writes token a and B writes b. The read-only shared prefix need not be copied, but position 1001 and the mutable recurrent state must be separate for each. If both sessions pointed straight at the same writable state, one request would quietly corrupt the other. A teaching design can use "immutable prefix pages + reference counts + copy-on-write"; the GDN recurrent state must be copied in full at the fork point.</p>
+<h3>Test matrix and acceptance</h3>
+<p>Write down "should hit / should reject" for each of these cases: same tokens but different images; same prefix but different steering; different model versions; a request exactly as long as the checkpoint. In the table, keep "checked upstream" and "extension requirement" in separate columns.</p>
+<p>For the restore test, use "A → save → B → restore A → continue", and compare the result bit for bit with A never having left. Then deliberately inject a truncated snapshot, a wrong format, an insufficient budget and an unfinished commit. There is only one safe failure: refuse clearly and keep the original state, rather than going on to generate plausible-looking text.</p>
+</details>

@@ -1,0 +1,283 @@
+<div class="hook"><span class="eyebrow">Two cards, but not twice as fast</span>
+<p>Strata's README has one line on this: two or three graphics cards can run the model together. <span class="ev ev-report">Upstream report</span>[S01] The upstream docs give one set of measurements: an RTX 5080 plus an RTX 3090 reads long prompts about 20% faster, yet generates answers at about the same speed as the 5080 alone.</p>
+<p>You added a whole 24 GB graphics card and the answers did not get faster. Where did the money go? This chapter explains three things: how two cards split the work, why a single token cannot get faster, and how much data really has to travel between the two cards.</p></div>
+<p class="tldr"><strong>In one line:</strong> Strata cuts the 48 layers into a front half and a back half, one per card. A token still has to pass the first card and then the second, so a single token does not get faster. The real gains are that two cards can cache twice as many experts, and that while reading a prompt the two cards work at the same time like a pipeline.</p>
+
+<h2 id="sec-1">21.1 How can two cards split the work?</h2>
+<p>Picture two people moving house. One can carry the bedroom while the other carries the living room; both can lift the same big sofa together; or each can move a different house. All three count as "two people working together", yet the amount of coordinating is completely different. Multiple GPUs are the same: there are three common ways to split, shown in Figure 21-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="Figure 21-1: three ways to split work across GPUs. Layer split gives each card some layers, tensor parallelism splits the same layer, request parallelism gives each card a whole copy of the model">
+<text class="f-text" fill="#182f2b" x="69" y="18" font-size="13" font-weight="600" text-anchor="middle">Layer split</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="35" font-size="12" text-anchor="middle">pipeline parallel</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">Tensor parallel</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="35" font-size="12" text-anchor="middle">split one layer</text>
+<text class="f-text" fill="#182f2b" x="331" y="18" font-size="13" font-weight="600" text-anchor="middle">Request parallel</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="35" font-size="12" text-anchor="middle">data parallel</text>
+<rect class="f-accent" fill="#136d5a" x="14" y="50" width="110" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="69" y="66" font-size="12" text-anchor="middle">GPU A</text>
+<text class="f-on" fill="#ffffff" x="69" y="82" font-size="12" text-anchor="middle">Layers 0–18</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M69 90V104"/>
+<rect class="f-soft" fill="#e5f1df" x="14" y="106" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="69" y="122" font-size="12" text-anchor="middle">GPU B</text>
+<text class="f-text" fill="#182f2b" x="69" y="138" font-size="12" text-anchor="middle">Layers 19–47</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="50" width="110" height="96" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="66" font-size="12" text-anchor="middle">One layer</text>
+<rect class="f-accent" fill="#136d5a" x="151" y="74" width="47" height="64" rx="4"/>
+<text class="f-on" fill="#ffffff" x="174.5" y="102" font-size="12" text-anchor="middle">A</text>
+<text class="f-on" fill="#ffffff" x="174.5" y="120" font-size="12" text-anchor="middle">left</text>
+<rect class="f-soft" fill="#e5f1df" x="202" y="74" width="47" height="64" rx="4"/>
+<text class="f-text" fill="#182f2b" x="225.5" y="102" font-size="12" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="225.5" y="120" font-size="12" text-anchor="middle">right</text>
+<rect class="f-accent" fill="#136d5a" x="276" y="50" width="110" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="331" y="66" font-size="12" text-anchor="middle">GPU A: request 1</text>
+<text class="f-on" fill="#ffffff" x="331" y="82" font-size="12" text-anchor="middle">full model</text>
+<rect class="f-soft" fill="#e5f1df" x="276" y="106" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="331" y="122" font-size="12" text-anchor="middle">GPU B: request 2</text>
+<text class="f-text" fill="#182f2b" x="331" y="138" font-size="12" text-anchor="middle">full model</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M134.5 8V208M265.5 8V208"/>
+<text class="f-text" fill="#182f2b" x="69" y="168" font-size="12" text-anchor="middle">Crossings: 1/window</text>
+<text class="f-text" fill="#182f2b" x="200" y="168" font-size="12" text-anchor="middle">Crossings: 2/layer</text>
+<text class="f-text" fill="#182f2b" x="331" y="168" font-size="12" text-anchor="middle">Crossings: ~none</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="186" font-size="12" text-anchor="middle">Saves VRAM</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="186" font-size="12" text-anchor="middle">Needs a fast link</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="186" font-size="12" text-anchor="middle">Many users at once</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="204" font-size="12" text-anchor="middle">Strata uses this</text>
+</svg><figcaption>Figure 21-1　The three splits differ in "how often the cards must coordinate". A layer split crosses cards only once per verify window; tensor parallelism must sync at every layer; request parallelism barely needs to talk, but every card must hold the entire model.</figcaption></figure>
+<p>Strata uses the first one: a <dfn>layer split</dfn>, which cuts the model's layers in order into a few segments, each card handling one consecutive segment. The upstream docs put it plainly: this is pipeline (by-layer) parallelism, not tensor parallelism; a token crosses from one card to the next once per verify window, not twice per layer. <span class="ev ev-report">Upstream report</span></p>
+<p>In the code, this lands in a function called <code>set_stage</code>. Each <dfn>stage</dfn> (the segment of layers on one card) runs only the layers <code>[layer_begin, layer_end)</code>: a stage that does not start at layer 0 takes over the data from the segment before it; a stage that ends before the last layer hands its data on and carries no output head. <span class="ev ev-code">Code fact</span>[S08]</p>
+<aside class="primer" id="c21-parallelism">
+<h3>Pipeline parallelism and tensor parallelism</h3>
+<p>When a big model does not fit on one card, there are two basic ways to cut it. Cut it horizontally, into segments of layers, and you get <dfn>pipeline parallelism</dfn>: like a factory line, the first station finishes and passes the work to the second. Cut it vertically, splitting one layer's big matrix into pieces, and you get <dfn>tensor parallelism</dfn>: like two people lifting a sofa together, they must shout "one, two, three" at every step to stay in sync.</p>
+<p>The two cuts pay their costs in different places. A pipeline passes data only once at each boundary between segments, but one piece of data must finish the earlier segment before it can enter the next, so the wait for a single piece of data cannot be saved. Tensor parallelism really lets two cards compute the same layer at once, but after every layer the two halves must be combined. In the classic Megatron-LM approach, each Transformer layer's forward pass does this combining twice. With 48 layers, that is 96 times.</p>
+<p>There is a third way, <dfn>data parallelism</dfn> (here called request parallelism): each card holds a whole copy of the model and handles different requests. It needs almost no cross-card talk, provided one card can hold the entire model.</p>
+<p>Strata's problem is that "the model does not fit on one card", and the graphics cards in a home PC are usually connected only through PCIe, with no dedicated high-speed link. So it chose the layer split, which needs the least communication.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Pipeline_%28computing%29" target="_blank" rel="noopener noreferrer">Wikipedia: Pipeline (computing)</a> · <a href="https://en.wikipedia.org/wiki/Parallel_computing" target="_blank" rel="noopener noreferrer">Wikipedia: Parallel computing</a> · <a href="https://pytorch.org/docs/stable/distributed.pipelining.html" target="_blank" rel="noopener noreferrer">PyTorch docs: Pipeline Parallelism</a> · <a href="https://huggingface.co/docs/transformers/perf_train_gpu_many" target="_blank" rel="noopener noreferrer">Hugging Face: comparing multi-GPU parallelism</a> · <a href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener noreferrer">The Megatron-LM paper</a></p>
+</aside>
+
+<h2 id="sec-2">21.2 One token still has to queue layer by layer</h2>
+<p>While generating an answer, every token must travel from layer 0 to layer 47. Layer 19 needs layer 18's result, and layer 18 needs layer 17's. This dependency chain cannot be broken. So while the first card computes the front half, the second can only wait; while the second computes the back half, the first sits idle. See Figure 21-2.</p>
+<figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="Figure 21-2: when generating one token, GPU A computes the front layers and hands off to GPU B for the back layers; the two cards take turns working and take turns waiting">
+<text class="f-muted" fill="#5c6d66" x="8" y="18" font-size="12">Timeline for one token (sketch; time runs left to right)</text>
+<text class="f-text" fill="#182f2b" x="8" y="56" font-size="12">GPU A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="40" width="330" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="40" width="130" height="24"/>
+<text class="f-on" fill="#ffffff" x="125" y="56" font-size="12" text-anchor="middle">Layers 0–18</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="56" font-size="12" text-anchor="middle">idle</text>
+<text class="f-text" fill="#182f2b" x="8" y="100" font-size="12">GPU B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="84" width="330" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="214" y="84" width="176" height="24"/>
+<text class="f-on" fill="#ffffff" x="302" y="100" font-size="12" text-anchor="middle">Layers 19–47 + output head</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="100" font-size="12" text-anchor="middle">idle</text>
+<rect class="f-warn" fill="#9e5d24" x="190" y="68" width="24" height="12"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M190 64L202 68M214 80L214 84"/>
+<text class="f-text" fill="#182f2b" x="60" y="130" font-size="12">Handoff: 51,216 bytes/token, via RAM</text>
+<text class="f-text" fill="#182f2b" x="8" y="156" font-size="12" font-weight="600">Same token: through A, then B, never at once</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="178" font-size="12">Split at K = 19 (upstream log); bar lengths are a sketch</text>
+</svg><figcaption>Figure 21-2　While generating, a token must finish the layers on the first card before it can enter the second. The two cards take turns working and take turns waiting, so the time for a single token is not halved.</figcaption></figure>
+<p>The upstream measurements confirm this: with an RTX 5080 plus an RTX 3090, generation speed is about the same as the 5080 alone, and slightly faster when writing code. <span class="ev ev-report">Upstream report</span> (Coder model, 32K context, Ryzen 9 9950X3D CPU; one card writes stories at 83–87 tokens per second and the best two-card split at 84; for code the figures are 88–105 and 110. The docs do not state the engine version; the results folder is dated 2026-09-29.)</p>
+<p>So what is the second card for? <strong>Capacity.</strong> Chapter 10 explained that experts not in VRAM go to the CPU, which computes them in RAM, slowly. After a layer split, each card caches experts only for its own layers, so together the two cards can cache about twice as many experts as one. The upstream docs say that for the Coder model, a 16 GB card plus a 24 GB card can hold almost every expert, and "that is where the speed comes from": during generation the CPU is barely needed. <span class="ev ev-report">Upstream report</span> Figure 21-3 shows what sits on each card.</p>
+<figure class="fig"><svg viewBox="0 0 400 272" role="img" aria-label="Figure 21-3: after a layer split, each card holds its own copy of the dense weights, its own session state, a prompt buffer and the expert cache for its own layers; the last card also holds the output head and draft layer; the experts in RAM are stored only once">
+<text class="f-text" fill="#182f2b" x="102" y="22" font-size="13" font-weight="600" text-anchor="middle">GPU A (primary)</text>
+<text class="f-text" fill="#182f2b" x="297" y="22" font-size="13" font-weight="600" text-anchor="middle">GPU B (last one)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="30" width="185" height="156" rx="8"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="30" width="185" height="156" rx="8"/>
+<rect class="f-soft" fill="#e5f1df" x="20" y="40" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="56" font-size="12" text-anchor="middle">Dense weights, ~3.4 GB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="68" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="84" font-size="12" text-anchor="middle">Own session state + KV</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="96" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="112" font-size="12" text-anchor="middle">Prompt buffer, ~1.5 GB</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="124" width="165" height="52" rx="4"/>
+<text class="f-on" fill="#ffffff" x="102.5" y="146" font-size="12" text-anchor="middle">Layer 0–18 expert cache</text>
+<text class="f-on" fill="#ffffff" x="102.5" y="164" font-size="12" text-anchor="middle">gets all remaining VRAM</text>
+<rect class="f-soft" fill="#e5f1df" x="215" y="40" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="56" font-size="12" text-anchor="middle">Dense weights, ~3.4 GB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="68" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="84" font-size="12" text-anchor="middle">Own session state + KV</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="96" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="112" font-size="12" text-anchor="middle">Prompt buffer, ~1.5 GB</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="215" y="124" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="140" font-size="12" text-anchor="middle">Head + draft, ~0.8 GB</text>
+<rect class="f-accent" fill="#136d5a" x="215" y="152" width="165" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="297.5" y="168" font-size="12" text-anchor="middle">Layer 19–47 expert cache</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M102 186V206M297 186V206"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="206" width="380" height="40" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="223" font-size="12" text-anchor="middle">RAM: one copy of every expert, shared by both GPUs;</text>
+<text class="f-text" fill="#182f2b" x="200" y="239" font-size="12" text-anchor="middle">the CPU computes experts no GPU has cached</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="264" font-size="12" text-anchor="middle">Upstream sizes (Coder); prompt buffer at 2048-token chunks</text>
+</svg><figcaption>Figure 21-3　Every card holds its own copy of the dense weights, but each caches experts only for its own layers. What the layer split mainly buys is "twice as many cacheable experts".</figcaption></figure>
+<p>Mind the cost: every card needs its own copy of the dense weights, plus its own session state and prompt buffer. That is why upstream advises against bringing in cards with less than 8 GB of VRAM. <span class="ev ev-report">Upstream report</span></p>
+
+<h2 id="sec-3">21.3 Reading the prompt is when the pipeline starts turning</h2>
+<p>Reading a prompt is a different story. A long prompt is fully known before reading starts, and Strata cuts it into many <dfn>chunks</dfn> and reads them one by one (Chapter 16 covered chunking). Now the two cards can stagger: while the second card reads chunk c, the first is already reading chunk c+1. The comment on the prefill interface says exactly this: a stage that is not the last copies its data into <strong>two</strong> pinned memory buffers and launches the next stage on another thread, "so the next stage reads chunk c while this stage reads chunk c+1". <span class="ev ev-code">Code fact</span>[S12]</p>
+<p>Laundry is a good analogy. The washer takes 4 minutes per load and the dryer 5 minutes per load. With a single load, you need 9 minutes no matter what. With 8 loads, the second load goes into the washer as soon as the first goes into the dryer. The dryer sets the beat: one load comes out every 5 minutes. The total is the first 4 minutes plus 8 dryer runs of 40 minutes, 44 minutes in all. Doing everything one after another would take 8 × 9 = 72 minutes.</p>
+<p>The stretch at the start where "the dryer waits for the first load" and the stretch at the end where "the washer has nothing left to wash" are called <dfn>bubbles</dfn>: times when a station on the pipeline sits idle. The simulator below draws the two cards as a timeline. Change each segment's time, the number of chunks and the transfer time, and see where the bubbles are:</p>
+<div class="viz" data-viz="layer-pipeline"><figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="Figure 21-4: a two-card pipeline timeline. With a at 4 milliseconds, b at 5 milliseconds and 4 chunks, it takes 24 milliseconds, with idle stretches at the start and the end">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="11">4 prompt chunks: A 4 ms each, B 5 ms each, no transfer</text>
+<text class="f-text" fill="#182f2b" x="8" y="55" font-size="12">GPU A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="36" width="324" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="114" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="181.5" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="249" y="37" width="52.5" height="26"/>
+<text class="f-on" fill="#ffffff" x="86" y="55" font-size="12" text-anchor="middle">1</text>
+<text class="f-on" fill="#ffffff" x="140" y="55" font-size="12" text-anchor="middle">2</text>
+<text class="f-on" fill="#ffffff" x="207.5" y="55" font-size="12" text-anchor="middle">3</text>
+<text class="f-on" fill="#ffffff" x="275" y="55" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="343" y="55" font-size="11" text-anchor="middle">idle</text>
+<text class="f-text" fill="#182f2b" x="8" y="103" font-size="12">GPU B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="84" width="324" height="28"/>
+<text class="f-muted" fill="#5c6d66" x="87" y="103" font-size="11" text-anchor="middle">idle</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="114" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="181.5" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="249" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="316.5" y="85" width="66" height="26"/>
+<text class="f-text" fill="#182f2b" x="147" y="103" font-size="12" text-anchor="middle">1</text>
+<text class="f-text" fill="#182f2b" x="214.5" y="103" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="282" y="103" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="349.5" y="103" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="60" y="130" font-size="11" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="114" y="130" font-size="11" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="181.5" y="130" font-size="11" text-anchor="middle">9</text>
+<text class="f-muted" fill="#5c6d66" x="249" y="130" font-size="11" text-anchor="middle">14</text>
+<text class="f-muted" fill="#5c6d66" x="316.5" y="130" font-size="11" text-anchor="middle">19</text>
+<text class="f-muted" fill="#5c6d66" x="384" y="130" font-size="11" text-anchor="end">24 ms</text>
+<text class="f-text" fill="#182f2b" x="60" y="152" font-size="11">Fill: B waits for chunk 1</text>
+<text class="f-text" fill="#182f2b" x="384" y="152" font-size="11" text-anchor="end">Drain: A done, B ends</text>
+<text class="f-text" fill="#182f2b" x="10" y="178" font-size="12">4 chunks: 24 ms = 5 × 4 + 4; serial: 4 × 9 = 36 ms</text>
+</svg><figcaption>Figure 21-4　The slower card sets the beat: one chunk every 5 milliseconds. Total time = a + b + (N − 1) × max(a, b). The more chunks, the smaller the share of the bubbles at the start and the end.</figcaption></figure></div>
+<p>Check the simulator's conclusion against the upstream measurements: with the same 5080 plus 3090, reading a 16K prompt goes from 1,726–2,017 tokens per second on one card to 2,039, and a 28K prompt from 1,970 to 2,357. The docs explain it as "each card reads its own layers while the other card reads the next chunk", a speedup of about 18%–20%. <span class="ev ev-report">Upstream report</span> (Same conditions as the previous section.)</p>
+<p class="bridge"><strong>If you studied CS:</strong> this is the same thing as the instruction pipeline in computer organization. A 5-stage pipeline does not make a single instruction faster; it makes an instruction finish every cycle. Throughput is set by the slowest stage, and the fill at the start and the stalls on dependencies are the bubbles. In a layer split, a "stage" is a segment of layers and an "instruction" is a prompt chunk.</p>
+
+<h2 id="sec-4">21.4 How big is the parcel, and how wide is the road?</h2>
+<p>What exactly passes between the two cards at a handoff? Intuitively, what flows from layer to layer for one token is a 2560-dimensional vector, that is, 2560 numbers. Strata's handoff is bigger. <code>verify.hpp</code> specifies that the handoff buffer holds three things per token: the residual R (hc × n_embd numbers), one vector the previous layer has not written back yet (n_embd numbers), and hc injection coefficients. <span class="ev ev-code">Code fact</span>[S08] Plug in the model geometry hc = 4 and n_embd = 2560 [S04]:</p>
+<div class="equation">4 × 2560 + 2560 + 4 = 12,804 floats = 51,216 bytes / token</div>
+<p>Why not just pass 2560 numbers? Because this model's residual is itself 4 vectors of 2560 dimensions, and one write-back from the last layer is postponed to the start of the next layer. For the next stage to carry on "as if nothing had been split", it needs all of it. A code comment says this split is <strong>bit-exact</strong>: split or not, the numbers computed are exactly the same. <span class="ev ev-code">Code fact</span>[S08]</p>
+<p>When reading a prompt, the handoff carries the residual part: 4 × 2560 floats per token, 40,960 bytes. A chunk holds 2048 tokens by default, so that is 2048 × 40,960 = 83,886,080 bytes, about 84 MB. <span class="ev ev-code">Code fact</span> (<code>src/prefill/prefill.cpp</code>) <span class="ev ev-est">Teaching estimate</span> When generating, the docs say there is one handoff per verify window, "a few hundred KB, relayed through pinned memory". <span class="ev ev-report">Upstream report</span> At 51,216 bytes per token, a 5-token window is about 256 KB, which matches.</p>
+<p>Now that we know the size of the parcel, we need the width of the road. The primer below covers the roads between two cards.</p>
+<aside class="primer" id="c21-interconnect">
+<h3>Interconnect bandwidth: PCIe and NVLink</h3>
+<p>A graphics card plugs into a <dfn>PCIe</dfn> slot on the motherboard. PCIe is a serial bus made of several <dfn>lanes</dfn> side by side, like a highway with several lanes: "×16" means 16 lanes and "×4" means 4. Each PCIe generation doubles the speed of a single lane.</p>
+<p>At theoretical peak, per direction: PCIe 3.0 ×16 is about 15.8 GB/s, PCIe 4.0 ×16 about 31.5 GB/s, and PCIe 5.0 ×16 about 63 GB/s. In a ×4 slot you get only a quarter of that.</p>
+<p><dfn>NVLink</dfn> is NVIDIA's dedicated high-speed link between graphics cards. A data-center H100 has 18 NVLink 4.0 links, 900 GB/s in both directions combined, about 450 GB/s per direction: more than ten times PCIe 4.0 ×16. Home dual-GPU setups usually do not have it and must go over PCIe. Figure 21-5 compares these roads.</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="Figure 21-5: theoretical bandwidth per direction for common interconnects. PCIe 4.0 ×4 about 7.9, PCIe 3.0 ×16 about 15.8, PCIe 4.0 ×16 about 31.5, PCIe 5.0 ×16 about 63, NVLink 4.0 about 450 GB/s">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Theoretical peak per direction, GB/s (bars to scale)</text>
+<text class="f-text" fill="#182f2b" x="10" y="46" font-size="12">PCIe 4.0 ×4</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="34" width="3.9" height="16"/>
+<text class="f-text" fill="#182f2b" x="130" y="47" font-size="12">7.9</text>
+<text class="f-text" fill="#182f2b" x="10" y="76" font-size="12">PCIe 3.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="64" width="7.7" height="16"/>
+<text class="f-text" fill="#182f2b" x="134" y="77" font-size="12">15.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="12">PCIe 4.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="94" width="15.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="142" y="107" font-size="12">31.5</text>
+<text class="f-text" fill="#182f2b" x="10" y="136" font-size="12">PCIe 5.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="124" width="30.8" height="16"/>
+<text class="f-text" fill="#182f2b" x="157" y="137" font-size="12">63</text>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="12">NVLink 4.0</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="154" width="220" height="16"/>
+<text class="f-text" fill="#182f2b" x="346" y="167" font-size="12">450</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="198" font-size="12">NVLink 4.0: 18 links on an H100; home rigs use PCIe</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">Each PCIe gen doubles speed; ×16 = 16 lanes side by side</text>
+</svg><figcaption>Figure 21-5　The roads on a home motherboard are much narrower. Tensor parallelism must sync at every layer and suffers badly without a fast link like NVLink; a layer split hands off only once between segments, and PCIe is plenty.</figcaption></figure>
+<p>Besides bandwidth there is <dfn>latency</dfn>: even a single byte pays a fixed startup and sync overhead. Send one big parcel and you pay the latency once; send 96 small parcels and you pay it 96 times. Chapter 5 covers bandwidth and latency in detail, and the <a href="#chapter/01/c01-memory-hierarchy">"memory hierarchy"</a> primer in Chapter 1 compares the bandwidth of each level.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/PCI_Express" target="_blank" rel="noopener noreferrer">Wikipedia: PCI Express</a> · <a href="https://en.wikipedia.org/wiki/NVLink" target="_blank" rel="noopener noreferrer">Wikipedia: NVLink</a> · <a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/overview.html" target="_blank" rel="noopener noreferrer">NVIDIA NCCL docs: multi-GPU communication overview</a></p>
+</aside>
+<p>Now put the parcel and the road together. The calculator below compares the communication cost of the two splits on different links. The tensor-parallel row is a hypothetical comparison; Strata does not do this:</p>
+<div class="viz" data-viz="link-budget"><figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="Figure 21-6: on PCIe 4.0 ×16, the layer split hands off in about 36 microseconds per window and a hypothetical tensor-parallel split takes about 1116 microseconds; handing off one prompt chunk takes about 5.3 milliseconds">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="11">PCIe 4.0 ×16, fixed 10 µs per crossing, 5-token window</text>
+<text class="f-text" fill="#182f2b" x="10" y="50" font-size="12">Layer split</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="38" width="7.5" height="16"/>
+<text class="f-text" fill="#182f2b" x="134" y="51" font-size="12">about 36 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="70" font-size="11">2 × (10 µs + 256 KB ÷ 31.5 GB/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="100" font-size="11">Tensor parallel</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="88" width="230" height="16"/>
+<text class="f-on" fill="#ffffff" x="344" y="101" font-size="12" text-anchor="end">about 1116 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="120" font-size="11">What-if: 96 × (10 µs + 51 KB ÷ 31.5 GB/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="150" font-size="12">Prompt chunk handoff (2048 tokens): about 5.3 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="170" font-size="11">Reading that chunk takes ~1 s (upstream ~2,000 tokens/s)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="11">Latency is assumed; tensor parallel is only a comparison</text>
+</svg><figcaption>Figure 21-6　The layer split's communication cost is small enough to ignore; tensor parallelism's cost comes mainly from the number of syncs, with the fixed latency multiplied 96 times.</figcaption></figure></div>
+<p>All the formulas are in the figure. <span class="ev ev-est">Teaching estimate</span> Two conclusions. First, during generation, the layer split's handoff per window takes only tens of microseconds; at the upstream-measured ~84 tokens per second, a token takes about 12 milliseconds, so the handoff is under 1% of it. Second, while reading a prompt, handing off an 84 MB chunk takes about 5.3 milliseconds round trip on PCIe 4.0 ×16, while reading that chunk itself takes nearly 1 second. That is what lets the upstream docs say "no NVLink needed, no direct GPU-to-GPU access needed, and it works even in ×4 or ×1 slots". <span class="ev ev-report">Upstream report</span></p>
+
+<h2 id="sec-5">21.5 Each card minds only its own layers</h2>
+<p>After the layers are split, each card still needs its own "memory": every layer's KV cache or recurrent state. The early approach had every stage allocate state for all 48 layers, even though it ran only one segment. A comment in <code>session.hpp</code> calls this "the old whole-model-sized buffer problem". Now each session owns only the state of the layers <code>[layer_lo, layer_hi)</code>. <span class="ev ev-code">Code fact</span>[S13]</p>
+<p>There is an easy-to-miss detail here. Layers in the code are still numbered by their <strong>global</strong> index, but the arrays hold only this segment's rows. So to fetch the state of the g-th GDN layer, you first subtract the index of the segment's first GDN layer, <code>gdn_ord0</code>. Get the subtraction wrong and you read another layer's state, with no error reported. If a segment has no QSA layer at all, the code still allocates one "primary" QSA state for it, because whole-model shared things such as the rotary position embedding table are read from there. <span class="ev ev-code">Code fact</span>[S13]</p>
+<p>Where to cut also matters. The function that computes how many bytes a segment of layers takes, <code>session_bytes</code>, is pure arithmetic, so it can "quote a price" for a candidate split before any memory is allocated. <span class="ev ev-code">Code fact</span>[S13] The upstream docs say the default auto mode tries every split for two or three cards and picks the one that lets the card caches hold the most "hot experts". The startup log prints the choice, for example "K = 19, the cache can hold 11,767 of 12,288 profile entries". <span class="ev ev-report">Upstream report</span></p>
+<p>Last, saving. Chapter 20 covered session snapshots. While reading a prompt, the first card is often a chunk or more ahead of the second. If you simply stitch the two cards' states together at some moment, you get a monster that is "front half at chunk 3, back half at chunk 2". See Figure 21-7.</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="Figure 21-7: while reading a prompt, GPU A is one chunk ahead of GPU B. Stitching the two cards' current states gives an inconsistent save; the right way is for each card to save its part when it finishes the same chunk">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="12">Progress of the two cards at one moment</text>
+<text class="f-text" fill="#182f2b" x="8" y="48" font-size="12">GPU A</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="30" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="140" y="30" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="216" y="30" width="70" height="26" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="292" y="30" width="70" height="26" rx="3"/>
+<text class="f-on" fill="#ffffff" x="99" y="48" font-size="12" text-anchor="middle">Chunk 1</text>
+<text class="f-on" fill="#ffffff" x="175" y="48" font-size="12" text-anchor="middle">Chunk 2</text>
+<text class="f-on" fill="#ffffff" x="251" y="48" font-size="12" text-anchor="middle">Chunk 3</text>
+<text class="f-text" fill="#182f2b" x="327" y="48" font-size="12" text-anchor="middle">Chunk 4</text>
+<text class="f-text" fill="#182f2b" x="8" y="92" font-size="12">GPU B</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="74" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="140" y="74" width="70" height="26" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="216" y="74" width="70" height="26" rx="3"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="292" y="74" width="70" height="26" rx="3"/>
+<text class="f-on" fill="#ffffff" x="99" y="92" font-size="12" text-anchor="middle">Chunk 1</text>
+<text class="f-on" fill="#ffffff" x="175" y="92" font-size="12" text-anchor="middle">Chunk 2</text>
+<text class="f-text" fill="#182f2b" x="251" y="92" font-size="12" text-anchor="middle">Chunk 3</text>
+<text class="f-muted" fill="#5c6d66" x="327" y="92" font-size="12" text-anchor="middle">Chunk 4</text>
+<text class="f-warn" fill="#9e5d24" x="8" y="128" font-size="12">Wrong: stitching now mixes A at chunk 3, B at chunk 2</text>
+<text class="f-text" fill="#182f2b" x="8" y="152" font-size="12">Right: each GPU saves its part after the same chunk</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="172" font-size="12">Strata grabs state here through on_stage_chunk</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="192" font-size="12">Highlight = done; light = reading; empty box = not yet</text>
+</svg><figcaption>Figure 21-7　The two cards' progress is out of step. A save must line up on the end of the same chunk, with each card saving its own part when it finishes that chunk; you cannot stitch together both sides' "current state" at some moment.</figcaption></figure>
+<p>Strata gives each stage a callback, <code>on_stage_chunk</code>, which is called whenever a card finishes a chunk and its own state sits exactly at the end of that chunk. The comment notes that by the time the last stage reports, the earlier stages "are already a chunk or more ahead", so a save in the middle of a prompt must take each stage's part here. <span class="ev ev-code">Code fact</span>[S12]</p>
+
+<h2 id="sec-6">21.6 Hands-on: find the bubbles, and think about whether to add a card</h2>
+<p>This chapter has no separate lab page; the two interactive figures are the workbench. Try this:</p>
+<ol>
+<li>In "two-card pipeline", fix a = 4 and b = 5, drag the chunk count from 1 to 8, write down each total, and check 5N + 4. Then set the transfer time to 1 ms and look at "just one token": see why two cards end up slower than one.</li>
+<li>Make a and b very unbalanced (say 2 and 8) and see how long the fast card sits idle. That is why upstream advises "put the fastest card first and let the auto split assign layers by cache capacity". <span class="ev ev-report">Upstream report</span></li>
+<li>In "how long one handoff takes", switch between links and change the latency, and see whether the gap between tensor parallelism and the layer split comes mainly from bytes or from the number of crossings.</li>
+</ol>
+<p>The upstream docs also give a few practical lessons you can understand through the simulator's conclusions. <span class="ev ev-report">Upstream report</span></p>
+<ul>
+<li><strong>Do not add a much slower card just to make up numbers.</strong> Adding an RTX 2080 Ti to the 5080 plus 3090 actually dropped generation to 68 (stories) and 90 (code) tokens per second. Every extra card adds another round of handoff and waiting to each window.</li>
+<li><strong>If one card can hold it, do not split.</strong> Version 0.1.31 added an optional switch: when the first card can hold all the profiled experts and the context, use only that card. Running the Coder model on an R9700 32 GB plus an RX 9070 XT, turning it on raised a 4K prompt from 1,244 to 1,776 tokens per second and generation from about 51 to about 60; a 16K prompt got about 5% slower.</li>
+<li><strong>Old cards are not supported.</strong> Every card needs compute capability 7.5 or higher (RTX 20 series and newer).</li>
+</ul>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>There are three ways to split across cards: layer split (pipeline parallelism), tensor parallelism and request parallelism. Strata uses the layer split because it needs the least cross-card talk, and home PCIe is enough.</li>
+<li>One token's layers must be computed one after another, so a layer split does not make it faster. Two cards bring twice the cacheable experts, and staggered work while reading prompts: total time = a + b + (N − 1) × max(a, b).</li>
+<li>The handoff carries the complete mathematical state: 51,216 bytes per token while generating, about 84 MB per chunk while reading a prompt. Few bytes, few crossings, so the communication cost is small; saves must line up on the moment each card finishes the same chunk.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "Plug in two graphics cards and generation doubles in speed."</strong></p>
+<p>One token's layers depend on each other in order, so the two cards can only take turns. In upstream measurements, a 5080 plus a 3090 generates at about the same speed as the 5080 alone, and adding a 2080 Ti makes it slower. Where two cards do speed things up, it is because the extra VRAM lets the CPU compute fewer experts and because long prompts are read as a pipeline, not because "two cards' compute adds up". <span class="ev ev-report">Upstream report</span></p></div>
+
+<details class="deep"><summary>Go deeper: the handoff contract, the double-buffer protocol and how to evaluate a two-card gain</summary>
+<h3>Why the handoff must be 12,804 numbers</h3>
+<p>The comment on <code>Verifier::set_stage</code> spells it out: each token in the handoff carries the residual R (hc × n_embd), the last layer's vector bo that has not been written back yet (n_embd), and inject (hc); the next stage "folds in" this write-back when it reads its first layer, exactly as an unsplit window would, so the split is bit-exact. Both pointers must be device-visible memory (mapped pinned memory, which must also be portable when the two stages are on two cards). <span class="ev ev-code">Code fact</span>[S08] The number of handoff floats comes from <code>handoff_floats</code>, and the formula is exactly <code>hc*n_embd + n_embd + hc</code>. [S08]</p>
+<p>Passing only the 2560-dimensional "hidden state" would drop the other three residual copies and the postponed write-back. Nothing would crash; it would just compute the wrong thing silently. The lesson: a cross-device communication format must reflect the complete mathematical contract, and you cannot trim it casually because "the hidden size is 2560". Upstream also offers a checking mode: <code>--layer-split K --split-device 0</code> runs both stages on the same card, solely to verify that the handoff is bit-exact; it is not a speed mode. <span class="ev ev-report">Upstream report</span></p>
+<h3>The double-buffer handoff protocol</h3>
+<p>In <code>prefill.cpp</code>, the earlier stage allocates two blocks of pinned memory at init with <code>cudaHostAlloc(..., cudaHostAllocPortable)</code>, each big enough for one whole prompt chunk's residual rows (chunk × D × 4 bytes, D = 4 × 2560). <span class="ev ev-code">Code fact</span> After each chunk, it does four things in order:</p>
+<ol>
+<li>Copy the residual rows from VRAM into the current handoff buffer and wait for the copy to finish;</li>
+<li>Call <code>on_stage_chunk</code>, while this stage's state sits exactly at the end of the chunk;</li>
+<li>Wait for the next stage to finish the previous chunk (so it will no longer read the buffer about to be overwritten);</li>
+<li>Launch the next stage on another thread to read this chunk, then switch to the other buffer and go on to the next chunk.</li>
+</ol>
+<p>Let the earlier stage take a′ per chunk (including the copy out) and the later stage b′ per chunk (including the copy in). Step 3 means the moment the earlier stage starts chunk c+1 equals the moment the later stage starts chunk c. From this it follows that the later stage starts consecutive chunks max(a′, b′) apart, starts the first chunk at a′, and finishes the last chunk b′ after starting it, so total time = a′ + b′ + (N − 1) × max(a′, b′). With a′ = 4, b′ = 5 and N = 8 that is 44 ms, versus 72 ms one chunk after another. <span class="ev ev-est">Teaching estimate</span> This chapter's simulator uses exactly this model, and <code>tests/viz-21.test.cjs</code> checks the dependencies and buffer rules chunk by chunk.</p>
+<p>If each chunk's transfer also occupies a critical resource, it belongs in a′ or b′; you cannot pretend it does not exist. Whether PCIe lets the two cards access each other directly, whether data must detour through RAM, the motherboard topology and crossing NUMA nodes all change this number. Strata chose the most conservative road: relay everything through RAM and never rely on GPU-to-GPU access.</p>
+<h3>Global indices and "a segment with no QSA layer"</h3>
+<p>The session state comments explain: <code>qsa_states</code> and <code>gdn_state</code> keep global indices and the arrays simply have fewer rows, so each per-layer user must subtract <code>gdn_ord0</code>; the whole-model uses that used to read <code>qsa_states[0]</code> (the shared RoPE table, the prefill staging identity, the rope MTP borrows) now read <code>qsa_states[primary]</code>; a segment with no QSA layer still allocates one primary state. The default full-range allocation is byte-identical to the old whole-model allocation. <span class="ev ev-code">Code fact</span>[S13] Tests must specifically cover edge cases such as "a segment with no QSA layer" and "a split point near layer 1".</p>
+<h3>A save must belong to a single boundary</h3>
+<p>The contract of <code>on_stage_chunk</code>: it is called when a stage finishes a chunk, its own stream has synced, and its state sits at the end of that chunk; the last stage calls it before <code>on_chunk</code>; it runs on that stage's own thread, with that stage's card as the current device. <span class="ev ev-code">Code fact</span>[S12] The upstream docs add that a session save stores and restores every card's state, and a save in the middle of a prompt has each card store its own part when it finishes that chunk. <span class="ev ev-report">Upstream report</span> Put the other way round: if you wait for the last card to report completion and then grab the earlier card's "current state", you get some later chunk, and the save is inconsistent.</p>
+<h3>How to tell where a two-card speedup comes from</h3>
+<p>"Two cards are faster than one" does not by itself show "the pipeline is very efficient". The extra VRAM raises the expert hit rate and cuts CPU work, and that may well be the main gain. Measure separately: each card's expert hit rate, the CPU pool's workload, the handoff time, and each stage's time. Upstream's auto split itself shows where the focus is: it picks the split that "lets the cache hold the most hot experts", and on a tie it leaves the most room on the fullest card. <span class="ev ev-report">Upstream report</span></p>
+<h3>Cases not covered yet, or covered with conditions</h3>
+<ul>
+<li>Under the WDDM driver on Windows and WSL2, only an 8 GiB expert region is pinned, and the rest streams through a pinned staging ring; the Linux driver has no such cap. <span class="ev ev-report">Upstream report</span></li>
+<li>Every card must hold a copy of the dense weights and its own prompt buffer (about 1.5 GB each with the default 2048-token chunks), so cards under 8 GB are not recommended; mixing NVIDIA and AMD cards is not supported. <span class="ev ev-report">Upstream report</span></li>
+<li>Strata has another two-card mode, <code>--peer-device</code>: the second card acts only as an expert cache, with activations and results going back and forth over NVLink or another GPU-to-GPU path; it is mutually exclusive with <code>--layer-split</code>, so you can pick only one. <span class="ev ev-report">Upstream report</span></li>
+<li>Acceptance cannot rest on one successful run on an ideal two-card topology. Also test cancelled requests, a very short last chunk, an error on the second card and unavailable GPU-to-GPU access, then compare the results byte for byte with a single card.</li>
+</ul>
+</details>
