@@ -1,0 +1,168 @@
+<div class="hook"><span class="eyebrow">Quizá lo hayas notado</span>
+<p>La página de una tarjeta gráfica presume de decenas de billones de operaciones por segundo. Pero esa misma tarjeta, con un modelo grande, escupe solo unas decenas de tokens por segundo. Según el número de operaciones, generar un token no debería tardar tanto. ¿Adónde se va el tiempo?</p>
+<p>En los comentarios del código de Strata hay una conclusión muy directa: este motor está «limitado por el costo de lanzamiento, no por el ancho de banda». Y otra: GEMV es solo cerca del 16 % de un token, así que optimizarlo unos puntos porcentuales «no mueve el total». <span class="ev ev-code">Hecho de código</span>[S13][S14] Este capítulo te enseña a encontrar adónde se va el tiempo con tres reglas: ancho de banda y latencia, Roofline y la ley de Amdahl.</p></div>
+<p class="tldr"><strong>En una línea:</strong> el tiempo de un cálculo es, como mínimo, el mayor entre el «tiempo de calcular» y el «tiempo de mover datos»; al escribir la respuesta hay muchos datos y pocas operaciones, así que todo se atasca en el movimiento. Antes de optimizar, mide cuánto pesa cada parte: una parte que es solo el 16 % no puede hacer que el conjunto sea más del 19 % más rápido, ni aunque se vuelva infinitamente rápida.</p>
+
+<h2 id="sec-1">5.1 Si la tarjeta es tan rápida, ¿por qué los tokens llegan lentos?</h2>
+<p>Imagina un cocinero que corta verduras a una velocidad asombrosa, pero los ingredientes hay que subirlos del almacén del sótano viaje tras viaje. Si el transporte no da abasto, por rápido que sea el cuchillo el cocinero tiene que esperar. Las unidades de cálculo de la GPU son ese cocinero, la VRAM y la RAM son el almacén, y cuántos bytes por segundo puede mover el pasillo de en medio decide si el cocinero puede estar ocupado.</p>
+<p>Al escribir la respuesta, cada token generado obliga a leer una vez los pesos que usa ese paso. El capítulo 10 calculó que solo los datos de los expertos son unos 664 MB. En el código de Strata hay una medición: en la máquina de pruebas, leer expertos desde la RAM va a 44,14 GB/s. <span class="ev ev-code">Hecho de código</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/core/expert_source.hpp#L378-L385" target="_blank" rel="noopener noreferrer">expert_source.hpp</a> Si los 663,6 MB de expertos de cada token se leyeran desde la RAM, solo leer tardaría 663,6 MB ÷ 44,14 GB/s ≈ 15 ms, como máximo 66 tokens por segundo, sin haber empezado a calcular. <span class="ev ev-est">Estimación didáctica</span></p>
+<p>Por eso Strata pone los expertos más populares en la VRAM (que se lee mucho más rápido) y hace que la CPU calcule allí mismo, en la RAM, los expertos que fallan (así los datos no tienen que cruzar PCIe). La velocidad de salida medida upstream es de 93 tokens por segundo (RTX 5070 12 GB, Q2_0, prompt de 4K, motor 0.1.26, con decodificación especulativa), más alta que ese tope de «todo desde la RAM». Hay dos razones: muchísimos expertos no tienen que leerse de la RAM, y la decodificación especulativa permite producir más de un token por vuelta (capítulo 18). <span class="ev ev-report">Informe upstream</span>[S03]</p>
+<aside class="primer" id="c05-bandwidth-latency">
+<h3>Ancho de banda y latencia</h3>
+<p>El recuadro de jerarquía de memoria del capítulo 1 mencionó estas dos palabras; aquí las convertimos en una fórmula. La <dfn>latencia</dfn> es cuánto hay que esperar desde que se envía la petición hasta que llega el primer byte, como el paquete desde el pedido hasta que sale; el <dfn>ancho de banda</dfn> es cuánto se mueve por segundo una vez que empieza el transporte, como la capacidad de carga de un camión. El tiempo de mover un lote de datos es aproximadamente:</p>
+<div class="equation">tiempo de transferencia ≈ latencia + datos ÷ ancho de banda</div>
+<p>Cuál de los dos términos manda depende de la cantidad de datos, como ves en la figura 5-1. Un paquete pequeño es casi todo latencia: mover 1 KB y mover 2 KB tardan casi lo mismo. Un paquete grande es casi todo ancho de banda: el tiempo de 664 MB lo decide por completo el ancho de banda. Por eso, para optimizar operaciones pequeñas y frecuentes hay que reducir su número; para optimizar movimientos grandes, hay que subir el ancho de banda o mover menos.</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="Figura 5-1: mover 1 KB es casi todo latencia, unos 10 microsegundos; mover 664 MB es casi todo ancho de banda, unos 10,5 milisegundos">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">Tiempo = latencia + datos ÷ ancho de banda</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="40" font-size="12">Supuesto didáctico: latencia 10 μs, ancho de banda 63 GB/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="77" font-size="13">Mover 1 KB</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="60" width="289.5" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="379.5" y="60" width="1" height="24"/>
+<text class="f-text" fill="#182f2b" x="90" y="106" font-size="12">Latencia: 99,8 %, en total unos 10 μs</text>
+<text class="f-text" fill="#182f2b" x="10" y="147" font-size="13">Mover 664 MB</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="130" width="1" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="91" y="130" width="289.5" height="24"/>
+<text class="f-text" fill="#182f2b" x="90" y="176" font-size="12">Ancho de banda: 99,9 %, en total unos 10,5 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="204" font-size="12">Cada barra a su escala (los tiempos difieren unas 1000 veces).</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="222" font-size="12">Color de aviso: latencia; color principal: transferencia.</text>
+</svg><figcaption>Figura 5-1　Con paquetes pequeños manda la latencia; con paquetes grandes, el ancho de banda. En el mismo canal, el cuello de botella depende de cuánto se mueve de una vez.</figcaption></figure>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/Ancho_de_banda_%28inform%C3%A1tica%29" target="_blank" rel="noopener noreferrer">Wikipedia: Ancho de banda (informática)</a> · <a href="https://es.wikipedia.org/wiki/Latencia" target="_blank" rel="noopener noreferrer">Wikipedia: Latencia</a> · <a href="https://en.wikipedia.org/wiki/Memory_bandwidth" target="_blank" rel="noopener noreferrer">Wikipedia (en inglés): Memory bandwidth</a></p>
+</aside>
+
+<h2 id="sec-2">5.2 Dos techos: el modelo Roofline</h2>
+<p>Pongamos «calcular» y «mover» juntos. Sea un cálculo que hace F operaciones y tiene que mover D bytes a través de cierto nivel de almacenamiento; el hardware hace como máximo P operaciones por segundo y ese nivel mueve como máximo B bytes por segundo. Sin contar otros costos, el tiempo es al menos:</p>
+<div class="equation">T ≥ max(F ÷ P, D ÷ B)</div>
+<p>Manda el mayor de los dos términos. Definamos además la <dfn>intensidad aritmética</dfn> I = F ÷ D: cuántas operaciones se hacen por cada byte movido. La velocidad alcanzable queda entonces bajo dos «techos»: operaciones por segundo ≤ min(P, B × I). Dibujado parece un tejado y se llama <dfn>modelo Roofline</dfn>, como ves en la figura 5-2.</p>
+<div class="viz" data-viz="roofline-lab"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="Figura 5-2: gráfico Roofline. La diagonal es el techo de ancho de banda y la horizontal el techo de cómputo. Con un solo token por vuelta la intensidad aritmética es de aproximadamente 1 y el punto cae en la diagonal; con 128 tokens a la vez se pasa el punto de quiebre y se llega a la horizontal">
+<text class="f-muted" fill="#5c6d66" x="60" y="20" font-size="12">Cómputo alcanzable (TFLOPS, escala logarítmica)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M60 40V200H380"/>
+<text class="f-muted" fill="#5c6d66" x="56" y="204" font-size="12" text-anchor="end">0,01</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="164" font-size="12" text-anchor="end">0,1</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="124" font-size="12" text-anchor="end">1</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="84" font-size="12" text-anchor="end">10</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="56" font-size="12" text-anchor="end">100</text>
+<text class="f-muted" fill="#5c6d66" x="60" y="218" font-size="12" text-anchor="middle">0,1</text>
+<text class="f-muted" fill="#5c6d66" x="140" y="218" font-size="12" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="218" font-size="12" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="218" font-size="12" text-anchor="middle">100</text>
+<text class="f-muted" fill="#5c6d66" x="378" y="218" font-size="12" text-anchor="end">1.000</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M60 166.9L289.7 52H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M289.7 52V200"/>
+<text class="f-muted" fill="#5c6d66" x="380" y="44" font-size="12" text-anchor="end">Techo de cómputo P = 50 TFLOPS (supuesto)</text>
+<text class="f-muted" fill="#5c6d66" x="295" y="190" font-size="12">Quiebre ≈ 74</text>
+<circle class="f-warn" fill="#9e5d24" cx="140" cy="126.9" r="6"/>
+<text class="f-text" fill="#182f2b" x="150" y="146" font-size="12">Decode: b = 1, I ≈ 1</text>
+<circle class="f-accent" fill="#136d5a" cx="308.6" cy="52" r="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="76" font-size="12" text-anchor="middle">Prefill: b = 128</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="244" font-size="12" text-anchor="middle">Intensidad aritmética I (FLOP/byte, escala logarítmica)</text>
+</svg><figcaption>Figura 5-2　Roofline: la diagonal es el techo de ancho de banda y la horizontal el de cómputo. Al decodificar, cada vuelta calcula 1 token, el punto cae en la diagonal y casi todo el cómputo queda ocioso. El ancho de banda es el de la especificación de VRAM de la RTX 5070, 672 GB/s, con pesos FP16.</figcaption></figure></div>
+<aside class="primer" id="c05-roofline">
+<h3>Cómputo y Roofline</h3>
+<p>El <dfn>cómputo</dfn> es cuántas operaciones de coma flotante se hacen por segundo, en unidades de FLOPS; 1 TFLOPS son 10¹² operaciones por segundo. El modelo Roofline dice: lo rápido que puede ir un cálculo depende de bajo qué techo cae. El lugar donde se cruzan los dos techos se llama <dfn>punto de quiebre</dfn> y está en I = P ÷ B. Si I es menor que el quiebre, está <strong>limitado por el ancho de banda</strong>: por potente que sea el cómputo, espera datos; si I es mayor que el quiebre, está <strong>limitado por el cómputo</strong>: sobran datos y el cuello de botella son las operaciones.</p>
+<p>Calculemos I para una multiplicación matriz-vector. Cada peso hace una multiplicación y una suma con cada entrada, 2 operaciones; si el peso se guarda en FP16, ocupa 2 bytes. Calculando 1 solo token a la vez, I = 2 ÷ 2 = 1. Supón un cómputo P = 50 TFLOPS (supuesto didáctico) y un ancho de banda B = 672 GB/s: el quiebre queda cerca de 74; con I = 1 solo se pueden usar como máximo 0,672 TFLOPS, menos del 2 % del tope. <span class="ev ev-est">Estimación didáctica</span></p>
+<p>Dos avisos. Primero, D debe dejar claro los bytes <strong>a través de qué nivel</strong> pasan: VRAM, RAM, PCIe o disco. Usar el ancho de banda de la VRAM para calcular el tiempo de leer expertos de la RAM es aplicar el límite de velocidad de una autopista a un camino rural. Segundo, es una <strong>cota inferior</strong>, no una predicción: el tiempo real se alarga por costos de lanzamiento, sincronización, accesos de memoria irregulares y dependencias de datos.</p>
+<p class="further">Para seguir leyendo: <a href="https://en.wikipedia.org/wiki/Roofline_model" target="_blank" rel="noopener noreferrer">Wikipedia (en inglés): Roofline model</a> · <a href="https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html" target="_blank" rel="noopener noreferrer">Documentación de NVIDIA Nsight Compute: análisis Roofline (en inglés)</a> · <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html" target="_blank" rel="noopener noreferrer">Guía de buenas prácticas de CUDA C++ (en inglés)</a></p>
+</aside>
+
+<h2 id="sec-3">5.3 Comer solo y comer en una mesa grande</h2>
+<p>Se trae el mismo plato a la mesa: comerlo una persona o toda una mesa cuesta el mismo esfuerzo de llevarlo, pero la cantidad de personas que comen es diez veces mayor. Con los pesos pasa lo mismo: leerlos una vez para 1 token o para 32 tokens mueve casi los mismos datos.</p>
+<p>Un ejemplo concreto. <span class="ev ev-est">Estimación didáctica</span> Una capa lineal tiene unos 8 millones de pesos, de 2 bytes cada uno, unos 16 MB en total. Para 1 sola entrada: unos 16 millones de operaciones, I ≈ 1. Para 32 entradas a la vez, los pesos se siguen leyendo una sola vez: unos 512 millones de operaciones, con un tráfico de pesos de unos 16 MB, I ≈ 32. Las entradas y salidas también generan tráfico, así que es una aproximación, pero el orden de magnitud no falla.</p>
+<p>Esta es la raíz de lo que dijo el capítulo 1: «leer el prompt es rápido y escribir la respuesta es lento». Al leer el prompt, toda la pregunta se calcula junta y una copia de los pesos la comparten miles de tokens; al escribir la respuesta, cada vuelta tiene un solo token. Upstream midió en la misma máquina, con un prompt de 4K, 1.299 tokens por segundo al leer y 93,0 al escribir (RTX 5070 12 GB, Q2_0, motor 0.1.26). <span class="ev ev-report">Informe upstream</span>[S03] No se puede esperar de los dos la misma «velocidad por token».</p>
+<p>La cuantización también sube I: los mismos pesos ocupan menos bytes, y el mismo ancho de banda alimenta más operaciones. El Q2_0 del capítulo 4 ocupa solo 0,28125 bytes por peso, y la I de calcular 1 token pasa de 1 a unos 7. El precio es que cada peso hay que decodificarlo antes de usarlo, y esas operaciones extra no están dibujadas en ninguno de los dos techos del Roofline.</p>
+<p class="bridge"><strong>Si estudiaste informática:</strong> es la distinción de arquitectura de computadoras entre «limitado por memoria» y «limitado por cómputo», y obedece a la misma idea que usar bloques (tiling) en la CPU para reutilizar la caché: lograr que cada byte leído participe en más operaciones.</p>
+
+<h2 id="sec-4">5.4 Cadenas de dependencias: hay trabajo que no se puede paralelizar</h2>
+<p>En casa tienes lavadora y secadora a la vez, pero una carga de ropa tiene que lavarse del todo antes de secarse. Aunque haya más máquinas, esa carga no va más rápido. Si dibujas quién tiene que esperar a quién, la cadena más larga de principio a fin se llama <dfn>ruta crítica</dfn>: el tiempo total es, como mínimo, su longitud.</p>
+<p>El cálculo de cada capa de Strata tiene una cadena así. La salida de una capa tiene que unirse primero para que la capa siguiente reciba la entrada correcta; entre capas todo es estrictamente serie. Los comentarios del código lo dicen claro: el tiempo que la CPU dedica en cada capa a calcular expertos <strong>no se puede esconder dentro de una cadena residual estrictamente serie</strong>. Lo único que la GPU puede hacer en paralelo en ese rato es el poco trabajo del experto compartido, porque todo lo que viene después de la unión depende del resultado de los expertos. <span class="ev ev-code">Hecho de código</span>[S13] Mira la figura 5-3.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figura 5-3: la línea de tiempo de una capa. La GPU calcula primero atención y router; luego la GPU calcula los expertos que acertaron y la CPU los que fallaron; la GPU termina antes y solo espera, la unión espera a la CPU y la capa siguiente espera a la unión">
+<text class="f-text" fill="#182f2b" x="10" y="45" font-size="13" font-weight="600">GPU</text>
+<text class="f-text" fill="#182f2b" x="10" y="95" font-size="13" font-weight="600">CPU</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="26" width="115" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="117" y="46" font-size="12" text-anchor="middle">Atención + router</text>
+<rect class="f-soft" fill="#e5f1df" x="177" y="26" width="60" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="207" y="46" font-size="12" text-anchor="middle">Aciertos</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="239" y="26" width="42" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="260" y="46" font-size="12" text-anchor="middle">Espera</text>
+<rect class="f-accent" fill="#136d5a" x="283" y="26" width="40" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="303" y="46" font-size="12" text-anchor="middle">Unión</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="325" y="26" width="65" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="357" y="46" font-size="12" text-anchor="middle">Siguiente…</text>
+<rect class="f-accent" fill="#136d5a" x="177" y="76" width="104" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="229" y="96" font-size="12" text-anchor="middle">Fallos de caché</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M281 80L295 58"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M60 120H390"/>
+<text class="f-muted" fill="#5c6d66" x="390" y="136" font-size="12" text-anchor="end">Tiempo → (esquema, sin escala)</text>
+<text class="f-text" fill="#182f2b" x="10" y="158" font-size="12">Color principal: la ruta crítica:</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">atención + router → expertos en CPU → unión → siguiente capa</text>
+<text class="f-text" fill="#182f2b" x="10" y="200" font-size="12">La capa siguiente necesita el resultado unido: no empieza antes</text>
+<text class="f-text" fill="#182f2b" x="10" y="222" font-size="12">Cuanto más tarda la CPU, más larga la cadena; la GPU espera</text>
+</svg><figcaption>Figura 5-3　La ruta crítica de una capa. Con dos ramas en paralelo, el tiempo de este tramo lo decide la más lenta; que la GPU termine antes no sirve de nada, porque la unión espera a la CPU.</figcaption></figure>
+<p>Con dos ramas A y B en paralelo, el tiempo de este tramo es aproximadamente max(T<sub>A</sub>, T<sub>B</sub>) más el tiempo de la unión; con dos pasos en serie es T<sub>A</sub> + T<sub>B</sub>. Por eso, para el tramo de la CPU, la respuesta de Strata no es «solapar mejor», sino poner más expertos en la caché de VRAM para que la CPU calcule menos (capítulos 10 y 12). Las palabras del comentario del código: ese término de la CPU se resuelve con la caché de VRAM de la fase 3, no con esta canalización. [S13]</p>
+<p>Y hay que cuidarse de una ilusión: «dos cosas se lanzaron a la vez» no significa que «de verdad se solaparon». Strata añadió un contador de diagnóstico que cuenta si la CPU empezó a trabajar mientras la GPU aún calculaba, o si la GPU ya había terminado. En los dos casos los tokens son correctos y el tiempo por capa es el mismo; solo este contador dice si el solapamiento ocurrió de verdad. <span class="ev ev-code">Hecho de código</span>[S13]</p>
+
+<h2 id="sec-5">5.5 Si optimizas una parte, ¿cuánto mejora el conjunto?</h2>
+<p>Supón que optimizas hasta ser 2 veces más rápido el paso que ocupa el 20 % del tiempo total. ¿Cuánto mejora el conjunto? No 2 veces, ni 1,2: tiempo nuevo = 80 % + 20 % ÷ 2 = 90 %, y el conjunto solo es 1,11 veces más rápido. El gráfico interactivo de abajo te deja cambiar esos dos números a voluntad:</p>
+<div class="viz" data-viz="amdahl-bar"><figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="Figura 5-4: con GEMV al 16 %, acelerarlo 2 veces deja el tiempo total en 92 % y el conjunto 1,087 veces más rápido; acelerarlo hasta el infinito deja el tiempo en 84 % y el conjunto 1,19 veces más rápido">
+<text class="f-text" fill="#182f2b" x="10" y="30" font-size="12">Antes</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="14" width="235.2" height="22"/><text class="f-text" fill="#182f2b" x="217.6" y="30" font-size="12" text-anchor="middle">Resto 84 %</text>
+<rect class="f-accent" fill="#136d5a" x="335.2" y="14" width="44.8" height="22"/><text class="f-on" fill="#ffffff" x="357.6" y="30" font-size="12" text-anchor="middle">16 %</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="54" font-size="12">100 %</text>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">GEMV ×2</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="72" width="235.2" height="22"/><text class="f-text" fill="#182f2b" x="217.6" y="88" font-size="12" text-anchor="middle">Resto 84 %</text>
+<rect class="f-warn" fill="#9e5d24" x="335.2" y="72" width="22.4" height="22"/>
+<text class="f-muted" fill="#5c6d66" x="100" y="112" font-size="12">92 %: el conjunto es 1,087 veces más rápido</text>
+<text class="f-text" fill="#182f2b" x="10" y="146" font-size="12">GEMV → ∞</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="130" width="235.2" height="22"/><text class="f-text" fill="#182f2b" x="217.6" y="146" font-size="12" text-anchor="middle">Resto 84 %</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="170" font-size="12">84 %: 1,19 veces más rápido; es el límite</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="194" font-size="12">16 %: peso de GEMV en un token (comentarios del código)</text>
+</svg><figcaption>Figura 5-4　Ley de Amdahl: lo que no se optimiza no disminuye en nada, y eso fija el límite de la aceleración del conjunto.</figcaption></figure></div>
+<aside class="primer" id="c05-amdahl">
+<h3>Ley de Amdahl y ruta crítica</h3>
+<p>Si aceleras s veces la parte que ocupa la proporción f del tiempo total y el resto no cambia, la aceleración del conjunto es:</p>
+<div class="equation">S = 1 ÷ [(1 − f) + f ÷ s]</div>
+<p>Esta es la <dfn>ley de Amdahl</dfn>. Si s tiende a infinito, S tiende a 1 ÷ (1 − f): con f = 16 % el límite es 1,19 veces; con f = 50 %, 2 veces; con f = 90 %, 10 veces. La conclusión es sencilla: lo que se gana al optimizar lo decide «cuánto pesa esa parte», no «cuántas veces se hizo más rápida».</p>
+<p>Va en pareja con la ruta crítica. Amdahl dice «optimizar una parte de poco peso no sirve»; la ruta crítica dice «optimizar lo que no está en la cadena más larga <strong>no sirve de nada</strong>», porque el tiempo total lo decide la cadena más larga, y las demás, por rápidas que sean, solo empiezan a esperar antes. Por eso el primer paso del análisis de rendimiento es siempre medir la línea de tiempo: qué pasos están en la ruta crítica y cuánto pesa cada uno.</p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/Ley_de_Amdahl" target="_blank" rel="noopener noreferrer">Wikipedia: Ley de Amdahl</a> · <a href="https://es.wikipedia.org/wiki/M%C3%A9todo_de_la_ruta_cr%C3%ADtica" target="_blank" rel="noopener noreferrer">Wikipedia: Método de la ruta crítica</a> · <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html" target="_blank" rel="noopener noreferrer">Guía de buenas prácticas de CUDA C++ (con una sección sobre la ley de Amdahl, en inglés)</a></p>
+</aside>
+<p>En el código de Strata hay un ejemplo de manual. Los desarrolladores vieron que otra herramienta lograba más ancho de banda al cambiar de 32 a 64 los hilos por fila, lo que parecía una «aceleración gratis». La medición fue otra: con expertos, 64 hilos dan 11,75 tokens por segundo y 32 hilos 11,99; sin expertos, 20,19 contra 20,26, iguales dentro del ruido y algo peor. El comentario da una explicación que es justo Amdahl: GEMV es solo cerca del 16 % de un token, y mejorarlo unos puntos porcentuales no mueve el total. <span class="ev ev-code">Hecho de código</span>[S14] Ojo: estos token/s son mediciones de las primeras etapas del desarrollo y no se pueden comparar directamente con la velocidad de hoy.</p>
+<p>El mismo código midió también la parte grande de verdad: el costo de lanzamiento. Un kernel pequeño que procesa solo 48 números tarda aun así unos 0,028 ms, porque ese es el costo de lanzar un kernel en esta máquina; una capa GDN lanza unos 19 kernels y un bloque unos 45. Grabar los 43 nodos de un bloque como un CUDA Graph y reproducirlos de una vez bajó el tiempo de 2,393 ms a 1,585 ms, 1,51 veces más rápido, y todo lo ahorrado es costo de lanzamiento. <span class="ev ev-code">Hecho de código</span>[S13] Mira la figura 5-5. Es la versión de lo del apartado 5.1, «los paquetes pequeños mandan por latencia»: cada lanzamiento es un paquete pequeño.</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="Figura 5-5: el mismo cálculo, lanzando los kernels uno por uno, tarda 2,393 milisegundos; grabado como CUDA Graph y reproducido, solo 1,585 milisegundos">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">El mismo trabajo, dos formas de lanzarlo</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">Lanzar los kernels uno por uno</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="56" width="280" height="22"/>
+<text class="f-text" fill="#182f2b" x="296" y="72" font-size="12">2,393 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="12">Grabado como CUDA Graph y reproducido de una vez</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="114" width="185.4" height="22"/>
+<text class="f-text" fill="#182f2b" x="201" y="130" font-size="12">1,585 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">La diferencia de ≈ 0,8 ms es todo costo de lanzamiento:</text>
+<text class="f-text" fill="#182f2b" x="10" y="180" font-size="12">1,51 veces más rápido</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="202" font-size="12">43 nodos de un bloque; barras a escala.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="218" font-size="12">Medición de los comentarios del código upstream.</text>
+</svg><figcaption>Figura 5-5　Con muchos kernels pequeños, el tiempo lo domina el costo de lanzamiento y no el ancho de banda. CUDA Graph convierte una serie de lanzamientos en uno solo; el capítulo 15 lo explica a fondo.</figcaption></figure>
+
+<h2 id="sec-6">5.6 Las métricas deben corresponder a la experiencia; y luego, manos a la obra</h2>
+<p>Por último, aclaremos varias métricas que se mezclan a menudo. El <dfn>tiempo hasta el primer token</dfn> (TTFT) es el tiempo desde que se envía la petición hasta que se ve el primer token; incluye la cola, la plantilla, la tokenización, la lectura del prompt y la primera generación. La <dfn>velocidad de salida</dfn> es el número de tokens generados dividido por el tiempo que se tardó en generarlos, no «número final de palabras ÷ tiempo total». Cuando varias personas usan el sistema a la vez, también existe el <dfn>throughput total</dfn>: cuántos tokens por segundo salen sumando a todos. Un sistema puede tener un throughput total altísimo y que todos esperen mucho; o que las peticiones cortas vayan rápido y las largas se queden siempre al final. Por eso los capítulos 25 y 27 tratarán las colas y los percentiles: un solo número de token/s no es todo.</p>
+<p><strong>Manos a la obra:</strong> abre el laboratorio interactivo de este capítulo, «¿Cómputo o ancho de banda?».</p>
+<ol>
+<li>Introduce la cantidad de operaciones, la de datos movidos, el cómputo y el ancho de banda, y mira cómo el cuello de botella pasa del movimiento al cálculo.</li>
+<li>Añade un tramo de «tiempo de lanzamiento que no se puede ocultar» y mira cómo sube la cota inferior.</li>
+<li>Acelera 2 veces una etapa y mira por qué el conjunto de extremo a extremo no se vuelve 2 veces más rápido.</li>
+</ol>
+<p>Al informar resultados, escribe todos los supuestos y unidades antes del número y titula «cota inferior teórica / estimación didáctica». El número que sale de meter el cómputo máximo de la página publicitaria no se puede llamar medición de esa tarjeta.</p>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>El tiempo es, como mínimo, max(operaciones ÷ cómputo, bytes ÷ ancho de banda); hay que decir a través de qué nivel pasan los bytes. Al escribir la respuesta, I es muy pequeña y todo se atasca en el movimiento.</li>
+<li>Calcular varios tokens a la vez hace que una copia de los pesos se use muchas veces, I crece y por fin se aprovecha el cómputo. Por eso leer el prompt es más de diez veces más rápido que escribir la respuesta.</li>
+<li>Antes de optimizar, mide la línea de tiempo: optimizar lo que no está en la ruta crítica no sirve, y optimizar una parte de poco peso sirve poco (Amdahl).</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «Si el cómputo de la tarjeta se duplica, la velocidad de generación se duplica».</strong></p>
+<p>Al escribir la respuesta, la velocidad se atasca sobre todo en el movimiento de datos y en las cadenas de dependencias, y el cómputo está casi siempre ocioso: duplicarlo solo lo deja más ocioso. Para Strata, el tamaño de la VRAM importa más: la documentación upstream dice que más VRAM vale más que una tarjeta más rápida; cada 1 GB de VRAM permite alojar unos 700 expertos más, y cada experto que cabe en la tarjeta es uno menos que calcula la CPU. <span class="ev ev-report">Informe upstream</span>[S02]</p></div>
+
+<details class="deep"><summary>Más a fondo: cotas inferiores, solapamiento y cómo informar el rendimiento</summary>
+<h3>Una cota inferior no es una predicción</h3>
+<p>La fórmula T ≥ max(F ÷ P, D ÷ B) de Roofline es solo una cota inferior. El T real sufre además el lanzamiento de kernels, la sincronización, los accesos irregulares a memoria, el paralelismo insuficiente, los fallos de página y las dependencias en serie. Aunque un costo no exista, eso no significa que se puedan alcanzar <strong>a la vez</strong> todos los picos. D debe indicar a través de qué nivel pasa: VRAM, RAM, PCIe o disco; el mismo cálculo tiene una I distinta para cada nivel.</p>
+<h3>Ejemplo: la misma matriz de pesos, una entrada o un lote</h3>
+<p>Supuesto didáctico: una capa lineal de unos 8 millones de pesos, 2 bytes cada uno, unos 16 MB. Un vector de entrada son unos 16 millones de operaciones; sin contar otras lecturas y escrituras, I ≈ 1. Con 32 entradas a la vez y los pesos leídos una sola vez: unos 512 millones de operaciones, con tráfico de pesos de unos 16 MB, I ideal ≈ 32. Las activaciones y las salidas añaden tráfico, así que es una aproximación para entender. Explica por qué el GEMM de leer el prompt y el GEMV de escribir la respuesta no deben esperarse con la misma velocidad.</p>
+<h3>El solapamiento se demuestra con la línea de tiempo</h3>
+<p>Para dos ramas A y B que se pueden paralelizar, el tiempo de este tramo es aproximadamente max(T<sub>A</sub>, T<sub>B</sub>) + T<sub>unión</sub>; para dos pasos en serie es T<sub>A</sub> + T<sub>B</sub>. Sustituir el tiempo de solapamiento medido por «se lanzaron a la vez» es un error común del análisis de rendimiento. El código de sesión de Strata da una forma de detectar el contraejemplo: si el host lee que «esta capa ya terminó» y a la vez la consulta de eventos de la GPU también marca terminado, es que la capa había acabado antes, la CPU empezó a trabajar cuando la GPU ya estaba libre y toda la canalización equivale a una serie. Esa diferencia no se ve en el valor devuelto ni en el tiempo por capa, así que hay que contarla aparte. [S13]</p>
+<h3>Dos números de Amdahl</h3>
+<p>Si GEMV pesa el 20 % y el kernel se acelera 2 veces, el tiempo total pasa a 0,8 + 0,2 ÷ 2 = 0,9, y el conjunto solo es <strong>1,111 veces</strong> más rápido; aunque fuera infinitamente rápido, el límite sería 1,25 veces. La oportunidad real de optimización depende de cuánto pesa en <strong>la ruta crítica de la carga objetivo</strong>, no de lo bonito que sea el resultado de un microbenchmark.</p>
+<h3>Hay que definir las métricas por completo</h3>
+<p>El tiempo hasta el primer token puede incluir cola, plantilla, tokenización, lectura del prompt, primera generación y transmisión por la red; al informarlo hay que decir qué incluye. La velocidad de salida debe aclarar numerador y denominador: tokens generados entre el tiempo de la fase de generación, u otra cosa. La tabla de velocidades upstream sí escribe todas las condiciones: tarjeta, CPU, RAM, sistema operativo, versión del motor, longitud de contexto, cuántos tokens se generan y si la decodificación especulativa está activada. [S03] Hay que notar además que la velocidad con decodificación especulativa depende del contenido del texto: distintas respuestas al mismo prompt pueden diferir en varios puntos porcentuales. [S03]</p>
+<h3>Plantilla de informe</h3>
+<p>Escribe los supuestos antes del resultado: modelo y especificaciones del hardware, modelo y formato de cuantización, longitud de contexto, versión del motor, cuántas veces se midió y si se usa la media o la mediana. En el título deja claro si es «cota inferior teórica», «estimación didáctica» o «medición». El capítulo 27 desarrolla este método por completo.</p>
+</details>
