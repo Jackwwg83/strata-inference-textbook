@@ -52,6 +52,422 @@
     "level": "Core"
   },
   {
+    "id": "11",
+    "title": "PLE and n-grams: the model looks things up in a big table too",
+    "deck": "Hashing to row numbers, reading the SSD by page, an 8-way set-associative row cache: how a 28.8 GB table gives up only 16 rows per token.",
+    "part": "II · Model and state",
+    "courses": [
+      "Data Structures",
+      "Operating Systems",
+      "Computer Organization"
+    ],
+    "prereq": "Chapter 1 (memory hierarchy) and Chapter 10 (intuition for experts and caching). A little binary helps.",
+    "goals": [
+      "Explain what an n-gram is, and how three tokens become 16 row numbers through hashing (multiply, XOR, take the remainder)",
+      "Work out the cost of reading by page: why a 90-byte row needs a 4 KiB read, and why a row that crosses a page boundary needs two pages",
+      "Use set-associative caches and a rotating pointer to explain conflict misses: why a cache with enough total capacity can still keep missing"
+    ],
+    "quiz": [
+      {
+        "text": "When a set in Strata's PLE row cache is full, which row gets replaced?",
+        "choices": [
+          "The row that has gone unused the longest",
+          "The row under this set's replacement pointer; then the pointer moves on by one",
+          "A row picked at random"
+        ],
+        "correct": 1,
+        "why": "The source gives each set a rotating pointer: the new row is written into the way the pointer points at, the pointer adds one, and after a full round it wraps to the start. It does not track which row was used most recently, so it is not LRU."
+      },
+      {
+        "text": "A row is 200 bytes and starts at byte 4000 of a page (4096 bytes). Reading whole pages, how many pages must be read?",
+        "choices": [
+          "1 page",
+          "2 pages",
+          "200 pages"
+        ],
+        "correct": 1,
+        "why": "4000 + 200 = 4200, past the page's end at 4096. The row reaches into the next page, so both pages must be read."
+      },
+      {
+        "text": "Two different trigrams hash to the same row. What happens?",
+        "choices": [
+          "The program reports an error and refuses to run",
+          "Both read the same row data; this is a collision accepted by design",
+          "The program automatically stores one of them in an empty row instead"
+        ],
+        "correct": 1,
+        "why": "The table stores only values, not keys, so it neither notices nor handles collisions. There are far more combinations than rows, so collisions are certain. Different heads use different moduli, so two n-grams rarely collide on every head."
+      }
+    ],
+    "problem": "A program hands its SSD reads to a dedicated I/O thread. The time the main thread spends submitting requests drops to almost zero, yet the total time per token does not get shorter. Give two reasonable explanations, and say what to measure to tell them apart.",
+    "answer": "Explanation 1: right after submitting, the main thread needs the data, with no other work to do in between. The waiting has only moved from \"submit\" to \"collect\"; it has not been hidden. Explanation 2: the reads themselves got slower or are held up by something else, such as the cost of waking threads and taking locks, the latency of random reads, or the same file still being memory-mapped, which serializes the reads. To tell them apart, record three timestamps for every request: submitted, completed and consumed. If completion comes well before consumption, the reads are already hidden and the bottleneck is elsewhere. If the consumer is always waiting for completion, look at the percentiles of the wait time and of the single-read latency.",
+    "level": "Core"
+  },
+  {
+    "id": "12",
+    "title": "The expert cache: whom to keep, how to split, when to swap",
+    "deck": "The denominator of a hit rate, a starting list ranked by frequency, a range of slots per layer, replacement by decayed count, and the \"copy first, register after\" order of a swap.",
+    "part": "III · Heterogeneous execution",
+    "courses": [
+      "Data Structures",
+      "Operating Systems",
+      "Performance Modeling"
+    ],
+    "prereq": "Chapter 10 (the intuition behind MoE and the expert cache) and Chapter 11 (set-associative caches).",
+    "goals": [
+      "Name the denominator of a hit rate, and explain why the per-expert hit rate and the whole-layer hit rate differ by more than ten times",
+      "Compare LRU, LFU and decayed counts, and state the adjustment rules of Strata's expert cache (every 4 rounds, a count of 2, a lead of 1.5, × 0.7)",
+      "Write down the correct order for one swap: remove the table entry, wait for the copy to finish, then register"
+    ],
+    "quiz": [
+      {
+        "text": "In some layer, each expert's hit rate is 70%. If the experts were independent, about how likely is it that all 10 experts in this layer hit?",
+        "choices": [
+          "70%",
+          "About 2.8%",
+          "100%"
+        ],
+        "correct": 1,
+        "why": "All 10 must hit: 0.7 to the 10th power ≈ 0.028. The two metrics have different denominators and cannot stand in for each other. Real routing is not independent, so the real figure has to be measured separately."
+      },
+      {
+        "text": "During an expert swap, the residency table already says \"#112 is in slot 5\", but the bytes are still being copied. If the GPU follows the table and computes #112 now, what happens?",
+        "choices": [
+          "Nothing wrong, just a bit slower",
+          "It may read half-new, half-old bytes and compute a wrong result without any error",
+          "The program is sure to crash"
+        ],
+        "correct": 1,
+        "why": "The table entry and the bytes must be valid together. When an async copy function returns, the bytes have not necessarily arrived; registering early creates a fake hit with \"right label, wrong bytes\". The output looks normal, but it is already wrong."
+      },
+      {
+        "text": "The early expert cache had all layers share one counter and handed out slots in order of arrival. Its hit rate was only about 3%. What was the main reason?",
+        "choices": [
+          "VRAM was too small",
+          "The early layers arrived first and took every slot, so the later layers never got any",
+          "The GPU cannot compute the later layers"
+        ],
+        "correct": 1,
+        "why": "A token walks from layer 0 onward, and 256 slots are all handed out by about layer 26. Capacity was enough; the problem was that allocation got tangled up with the access order. Giving each layer its own range of slots fixed it."
+      }
+    ],
+    "problem": "In the low-RAM resident mode, RAM holds only the experts the graphics card does not have. List three conditions that one expert swap in this mode must keep.",
+    "answer": "First, before the incoming expert becomes visible to the GPU (registered in the residency table), its bytes have been fully copied into the VRAM slot. Second, before its slot is overwritten, the outgoing expert has been removed from the table (the CPU computes it from then on), and its full bytes have been copied back to RAM, into the place the incoming expert used to hold, so the RAM copy keeps exactly filling in what the GPU is missing. Third, table changes are synchronized with concurrent readers: any token that picks either expert during the copy must take the CPU path and must never see a half-new, half-old state. You should also check that expert blocks never cross slot boundaries, that errors can roll back, and that the RAM budget is not exceeded.",
+    "level": "Core"
+  },
+  {
+    "id": "13",
+    "title": "CPU + GPU: parallel within a layer, in line across layers",
+    "deck": "Computing an expert is mostly reading bytes. Hits go to the GPU and misses to the CPU, both at once; data dependence sets the critical path.",
+    "part": "III · Heterogeneous execution",
+    "courses": [
+      "Parallel Computing",
+      "Computer Organization",
+      "Performance Modeling"
+    ],
+    "prereq": "Chapter 5 (intuition for bandwidth and the critical path), Chapter 10 (MoE) and Chapter 12 (the expert cache).",
+    "goals": [
+      "Describe how CPUs and GPUs are designed differently, and use the SIMD example to explain why only independent data can be computed at once",
+      "Explain why Strata lets the CPU compute missed experts in place, and draw the timeline of how the GPU and CPU share one layer",
+      "Use data dependence and the critical path to explain why layers cannot run in parallel, and why cutting work that is not on the critical path does nothing"
+    ],
+    "quiz": [
+      {
+        "text": "The two branches are independent. The CPU branch has an effective rate Bc = 40 and the PCIe branch Bp = 20. To make both finish at the same time, what fraction f should go to the PCIe branch?",
+        "choices": [
+          "1/2",
+          "1/3",
+          "2/3"
+        ],
+        "correct": 1,
+        "why": "Set the two times equal: (1 − f)/40 = f/20, which gives f = 20 ÷ (40 + 20) = 1/3. The slower branch should get the smaller share."
+      },
+      {
+        "text": "While the CPU is still computing layer l's experts, can the GPU start computing layer l + 1?",
+        "choices": [
+          "Always",
+          "No, layer l + 1's input must wait for layer l to finish merging",
+          "Yes, as long as there are enough threads"
+        ],
+        "correct": 1,
+        "why": "Layer l + 1's input is exactly layer l's result after its 10 experts are merged. That is a data dependence. No scheduler, however clever, can get around it; the 48 layers form one serial chain."
+      },
+      {
+        "text": "Upstream cut the CPU's expert work per token from 18.2 milliseconds to 10.2 milliseconds, yet the total time per token did not change. What is the most likely reason?",
+        "choices": [
+          "The CPU measurement was wrong",
+          "The GPU's share of the work was queued behind the CPU, so the critical path stayed just as long",
+          "Not enough VRAM"
+        ],
+        "correct": 1,
+        "why": "In the first version, the GPU step that computes the hit experts ran after the CPU expert pool, so the GPU's share filled the time the CPU saved. Only after both sides computed at once did it really get faster."
+      }
+    ],
+    "problem": "Build an example where giving a larger share to the GPU makes the whole thing slower. Explain it with the times of the two branches.",
+    "answer": "Say that in some layer the CPU branch takes 8 milliseconds and the GPU branch over PCIe takes 7 milliseconds, so the join is set by the CPU's 8 milliseconds. Move more missed experts to the GPU: the CPU drops to 4 milliseconds, but the GPU branch grows to 12 milliseconds (PCIe transfer is slow), so the join now comes at 12 milliseconds, slower than before. If you also account for the CPU reading experts and PCIe reading pinned memory sharing the same memory bandwidth, a longer GPU branch also slows the CPU down, and things get even worse. The best point is where the two branches finish at the same time, not \"the more GPU, the better\".",
+    "level": "Core"
+  },
+  {
+    "id": "14",
+    "title": "Pinned memory, DMA and async: copy while you compute",
+    "deck": "Virtual addresses can move, but DMA trusts only physical addresses; \"submitted\" does not mean \"done\"; double buffering is correct only thanks to two signals.",
+    "part": "III · Heterogeneous execution",
+    "courses": [
+      "Operating Systems",
+      "Concurrent Programming",
+      "Computer Organization"
+    ],
+    "prereq": "Chapter 6 (files and memory mapping), Chapter 12 (swapping experts in the cache), Chapter 13 (how the CPU and GPU split the work).",
+    "goals": [
+      "Use virtual memory and paging to explain why DMA needs pinned memory and why Strata pins tens of GB at startup",
+      "Tell synchronous from asynchronous calls, and name two \"returned does not mean done\" examples in Strata (cache fills, verify window commits)",
+      "Compute the total time of double buffering and state what makes it correct: read only after the copy is done, write only after it has been used"
+    ],
+    "quiz": [
+      {
+        "text": "An asynchronous copy function has returned. What does that tell you?",
+        "choices": [
+          "The data has definitely reached its destination",
+          "The copy has been submitted, not necessarily finished",
+          "The source buffer can be freed right away"
+        ],
+        "correct": 1,
+        "why": "An asynchronous call only hands the work off. Whether the data has arrived, and whether the source buffer can be changed, depends on the completion event, not on whether the function has returned."
+      },
+      {
+        "text": "Two buffers, 4 chunks, each chunk takes 3 milliseconds to copy and 5 to compute, and copy and compute use independent hardware. What is the ideal total time?",
+        "choices": [
+          "20 milliseconds",
+          "23 milliseconds",
+          "32 milliseconds"
+        ],
+        "correct": 1,
+        "why": "The first copy takes 3 milliseconds, the 3 steps in between each cost the slower compute, 5 milliseconds, and the last compute takes 5: 3 + 3 × 5 + 5 = 23. Only a fully serial run takes 4 × 8 = 32."
+      },
+      {
+        "text": "The GPU can read a block of pinned memory directly through a mapping. Does that mean the data is already in VRAM?",
+        "choices": [
+          "Yes",
+          "No, every read still goes over PCIe",
+          "Only on Windows"
+        ],
+        "correct": 1,
+        "why": "\"An address the GPU can access\" and \"where the data actually lives\" are two different things. Mapped pinned memory still sits in the host's RAM; the GPU reads it over PCIe and is limited by the bus bandwidth."
+      }
+    ],
+    "problem": "A program sometimes reads the previous round's old state when it saves a checkpoint. Someone added \"wait 0.1 seconds\" before the save, and the problem went away. Why is this not a reliable fix? What should be done instead?",
+    "answer": "A fixed wait does not create an explicit \"read only after the write is done\" relationship. On a slower machine, under resource contention, or when this round has more data, 0.1 seconds may not be enough and the problem comes back; on a fast machine it just wastes time. The right fix is to wait for the completion signal tied to that state write, such as an event recorded after the write, or the wait_commit() that Strata's verifier provides, and to handle a failed or timed-out wait.",
+    "level": "Core"
+  },
+  {
+    "id": "15",
+    "title": "GPU kernels, fusion and CUDA Graph",
+    "deck": "Every kernel launch pays a check-in fee: how do you check in less without freezing the position?",
+    "part": "III · Heterogeneous execution",
+    "courses": [
+      "Parallel Computing",
+      "Compilers",
+      "Computer Organization"
+    ],
+    "prereq": "Chapters 1, 5 and 13 (the memory hierarchy, bandwidth, and how the CPU and GPU differ).",
+    "goals": [
+      "Explain how threads, thread blocks and warps divide the work, and why neighboring threads should read neighboring addresses",
+      "Use n × L + w and L + n × w to judge whether a chain of kernels is limited by launch overhead",
+      "Tell kernel fusion apart from CUDA Graph, and explain why values that change every step must live in a fixed-address buffer when you capture a graph"
+    ],
+    "quiz": [
+      {
+        "text": "A kernel computes for only 5 microseconds, but each submission takes 20 microseconds. If you submit 45 such kernels one by one, what is the GPU doing most of the time?",
+        "choices": [
+          "Computing at full load the whole time",
+          "Waiting for the CPU to submit the next kernel",
+          "Waiting for data in VRAM to move to the SSD"
+        ],
+        "correct": 1,
+        "why": "When w < L, the total is about n × L + w = 45 × 20 + 5 = 905 microseconds, of which the GPU computes only 45 × 5 = 225 microseconds; the rest is spent waiting for submissions. This is what \"launch-bound\" means."
+      },
+      {
+        "text": "Are CUDA Graph and kernel fusion the same thing?",
+        "choices": [
+          "Yes, a graph merges all kernels into one",
+          "No: a graph saves CPU-side submission and its nodes are still the original kernels; fusion is what merges the computation into one kernel",
+          "They are the same compiler optimization under different names"
+        ],
+        "correct": 1,
+        "why": "A graph records a chain of operations and their dependencies, then submits and replays the whole chain at once, and each node still runs on its own. Fusion rewrites the kernel so intermediate results stay on chip. Strata uses both."
+      },
+      {
+        "text": "If you capture \"the current position pos\" into a graph as a kernel argument and then simply replay it, what happens?",
+        "choices": [
+          "The driver adds one to pos automatically",
+          "Every token writes to position 0, the value at capture time; the program reports no error, but the model acts as if it has lost its memory",
+          "The graph refuses to replay and reports an error"
+        ],
+        "correct": 1,
+        "why": "A graph copies argument values at capture time, and replay never rereads them. Strata's qsa.hpp puts pos, n_kv, n_bid and width into a fixed-address step buffer; the kernels read it from VRAM every time, and the host rewrites its content each step."
+      }
+    ],
+    "problem": "Design a small test that does not need the full large model and that catches the bug \"sampling parameters are not updated when the graph is replayed\".",
+    "answer": "Fix a set of logits and send two requests in a row: the first greedy, the second at high temperature or with a different fixed random number. Run each on both the graph path and a reference path that does not use a graph, and compare the parameters each path actually used and the tokens it picked. The second request must take a branch that differs from the first and can be predicted. If you only change the random seed while the distribution is so lopsided that it always picks the same token, this test cannot reveal the bug.",
+    "level": "Core"
+  },
+  {
+    "id": "16",
+    "title": "Prefill: turning many tokens into a batch problem",
+    "deck": "On the same computer, reading the prompt is more than twenty times faster than writing the answer: the secret is batching and pipelining.",
+    "part": "III · Heterogeneous execution",
+    "courses": [
+      "Parallel Computing",
+      "Algorithm Design",
+      "Operating Systems"
+    ],
+    "prereq": "Chapters 3, 5, 10 and 14 (matrix multiplication, bandwidth and arithmetic intensity, MoE experts, DMA and asynchrony).",
+    "goals": [
+      "Use matrix × vector vs matrix × matrix to explain why prefill is faster than decode",
+      "Explain grouping by expert and the trade-offs of chunk size C: reuse, temporary VRAM, cancel latency",
+      "Draw the pipeline that overlaps moving and computing, and name the states that must be handed off after a chunk"
+    ],
+    "quiz": [
+      {
+        "text": "During prefill every token of the prompt is already known. So can the 5th token \"see\" the 6th?",
+        "choices": [
+          "Yes, they are all known anyway",
+          "No. The causal rule does not change; batching only changes how the computation is organized",
+          "Only for English prompts"
+        ],
+        "correct": 1,
+        "why": "A known input does not mean the model may look at the future. Prefill still uses the causal mask, and the recurrent layers still walk through the chunk in order."
+      },
+      {
+        "text": "Why does the dense part for 8 tokens together take only about 3 times as long as for one token, and not 8 times?",
+        "choices": [
+          "Because the GPU skips half of the tokens",
+          "Because one read of the weights is shared by all 8 tokens, so the moving cost is spread thin",
+          "Because computing together uses lower precision"
+        ],
+        "correct": 1,
+        "why": "In matrix × vector, one read of the weights serves one token; in matrix × matrix, the same weights serve the whole batch. The compute is all still done, but the move is paid once. The default table in spec/controller.hpp lists 3.0× for 8 tokens."
+      },
+      {
+        "text": "During prefill, Strata puts the chunk buffer in slots borrowed from the expert cache. While prefill runs, can the experts that used to be in those slots still count as \"hits\"?",
+        "choices": [
+          "Yes, the address has not changed",
+          "No. Their bytes have been overwritten, so they must be moved instead and filled back in after prefill",
+          "Yes, as long as the budgets add up to less than VRAM"
+        ],
+        "correct": 1,
+        "why": "The address is still there, but the content is now the chunk buffer. The safety condition is that at every moment the label matches the bytes in the slot: while lent out they do not count as hits, and only after the refill finishes may they be announced again."
+      }
+    ],
+    "problem": "The same prompt is read once with C = 1 and once with C = 8192, and the final answers are not word-for-word identical. Why can you neither conclude right away that one side has a bug, nor wave it off with \"it's just floating point\"?",
+    "answer": "Batched and one-by-one computation can take different rounding paths (upstream has documented that IQ models round differently in the single-token and multi-token expert kernels), and a tiny logits difference can make some token branch off. But the difference can also come from a real error in the state handoff, the causal mask or the layout. Compare on the same fixed history: the intermediate tensors, the chosen experts and index numbers, and the layer where the error starts to grow. Then judge by tolerances and quality gates set in advance. Check the non-numeric contracts, such as state positions, the mask and index numbers, separately and exactly.",
+    "level": "Core"
+  },
+  {
+    "id": "17",
+    "title": "KV capacity, working sets and tiered storage",
+    "deck": "How many bytes does it take to remember a conversation, is that GB or GiB, and does it live in VRAM or RAM?",
+    "part": "IV · Reuse and speculation",
+    "courses": [
+      "Operating Systems",
+      "Computer Organization",
+      "Performance Modeling"
+    ],
+    "prereq": "Chapters 1, 4, 8 and 12 (memory hierarchy, quantization, attention, cache replacement).",
+    "goals": [
+      "Compute the KV bytes of one conversation as 12 layers × 2 heads × 256 dimensions × 2 × bytes per element",
+      "Tell GB (10⁹) from GiB (2³⁰), and spot errors where the number and the unit do not match",
+      "Explain the page table and KV streaming: VRAM holds only the pages in use, the full history is in RAM, and misses are swapped in with CLOCK"
+    ],
+    "quiz": [
+      {
+        "text": "When Strata stores KV in FP16, how big is the main KV for a 128K (131,072-token) context?",
+        "choices": [
+          "Exactly 3 GiB",
+          "12 GiB",
+          "108 MiB"
+        ],
+        "correct": 0,
+        "why": "12 layers × 2 heads × 256 dimensions × 2 (K, V) × 2 bytes = 24,576 bytes per token; times 131,072 that is 3,221,225,472 bytes, exactly 3 × 2³⁰, which is 3 GiB (about 3.22 GB)."
+      },
+      {
+        "text": "How should you write 805,306,368 bytes?",
+        "choices": [
+          "805 MiB",
+          "805 MB, which is 768 MiB",
+          "768 MB"
+        ],
+        "correct": 1,
+        "why": "Divide by 10⁶ to get 805.3 MB, or by 2²⁰ to get 768 MiB. A comment in Strata's source writes \"805 MiB\", pairing the decimal number with the binary unit."
+      },
+      {
+        "text": "A 256K conversation runs with KV streaming on, and VRAM keeps the KV of only 32,768 positions. Can the model still see the earlier content?",
+        "choices": [
+          "No, the earlier history has been deleted",
+          "Yes: the full history is in RAM, and selected pages are swapped into VRAM before they are read",
+          "It can see only 1 in every 4 tokens"
+        ],
+        "correct": 1,
+        "why": "Being resident and being kept are two different things. The upstream docs say that with streaming, attention reads exactly the same values; only where the KV lives changes. How much stays in VRAM affects only speed."
+      }
+    ],
+    "problem": "A report counts Strata's KV over 48 layers and says \"this is a conservative estimate, so it is fine\". Why does the report still fail?",
+    "answer": "Only the 12 QSA layers have KV, so counting 48 layers makes the result 4 times too big. Erring on the safe side is not the same as having the right model: a false attribution makes people misjudge the bottleneck, buy the wrong hardware or switch off useful features. Count with the real 12 layers, then list the margin as its own item, instead of passing off a structural error as margin.",
+    "level": "Core"
+  },
+  {
+    "id": "18",
+    "title": "Speculative decoding: guess boldly, commit strictly",
+    "deck": "Guess a few tokens, then verify them in one go: how is a wrong guess taken back, and why does the answer stay the same?",
+    "part": "IV · Reuse and speculation",
+    "courses": [
+      "Probability",
+      "Algorithm Design",
+      "Database Systems"
+    ],
+    "prereq": "Chapters 2, 9, 14 and 16 (sampling and random numbers, the GDN recurrent state, synchronous versus asynchronous, batching).",
+    "goals": [
+      "State the rule \"accept up to the first mismatch\" and explain why every draft after it is thrown away",
+      "Map speculative decoding onto CPU branch prediction and speculative execution",
+      "Say, state by state, how GDN, the indexer, PLE and KV are taken back when the first a + 1 rows are committed"
+    ],
+    "quiz": [
+      {
+        "text": "In the window, the 2nd draft differs from the target's pick, and the 3rd draft happens to match the original text. Can the 3rd one be accepted?",
+        "choices": [
+          "Yes, it is right",
+          "No, it was guessed after a wrong word, so its premise no longer holds",
+          "It depends on how long the window is"
+        ],
+        "correct": 1,
+        "why": "Correctness holds as a chain along the prefix: a later draft has a correct premise only if everything before it matched. Strata's loop while (window[a+1] == outv[a]) ++a stops at the first mismatch."
+      },
+      {
+        "text": "With temperature sampling on, how does Strata decide whether a draft can be accepted?",
+        "choices": [
+          "The draft writes for the target directly, with no verification",
+          "Only if it exactly equals the target's reproducible sampled result for this row",
+          "Accept it with probability min(1, p/q)"
+        ],
+        "correct": 1,
+        "why": "Each row's random number is set by the seed and the absolute position, and the draft must equal the target's sampled result for that row. min(1, p/q) is the classic paper's method, not the Strata code this book read."
+      },
+      {
+        "text": "A window accepted only 1 draft. Is it enough to just roll back the position counter?",
+        "choices": [
+          "Yes",
+          "No: GDN must replay, the indexer must restore a snapshot, and PLE must restore the matching snapshot",
+          "Only KV needs handling"
+        ],
+        "correct": 1,
+        "why": "Different states are taken back in different ways. The extra KV slots actually need nothing and wait to be overwritten next round; GDN, the indexer and PLE each return to the prefix state in their own way."
+      }
+    ],
+    "problem": "You want to add a \"per-sequence statistics buffer\" to Strata (for example, one that counts how often each token has appeared). Write a speculative-decoding safety checklist for it.",
+    "answer": "① Which range of the history it covers; ② whether the verify window writes it tentatively while running; ③ whether it needs a snapshot, replay of recorded inputs, or is naturally overwritable; ④ how commit(n_keep) makes it reflect only the first n_keep rows (note n_keep = accepted drafts + 1); ⑤ how the rejected part is invalidated; ⑥ who confirms that asynchronous reads and writes have finished, and with which event (for example wait_commit after an asynchronous commit); ⑦ how it is cleaned up on an end token, a cancellation or a session restore; ⑧ compare it item by item with the reference result without speculation under the same fixed history.",
+    "level": "Core"
+  },
+  {
     "id": "19",
     "title": "How many drafts to guess: expected value, cost and learning on the fly",
     "deck": "A correctly guessed token is free, but verification takes time. How many guesses pay off best, and what if the acceptance rate changes?",

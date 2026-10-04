@@ -1,0 +1,253 @@
+<div class="hook"><span class="eyebrow">A strange measurement</span>
+<p>A comment in Strata's source code records something odd. A tiny GPU program called <code>gdn_gate</code> handles only 48 numbers in total, yet every run takes 28 microseconds. The author's verdict: a kernel this small cannot really be executing for 28 microseconds. <span class="ev ev-code">Code fact</span>[S13]</p>
+<p>The GPU finishes 48 numbers in the blink of an eye. So where does the extra time go? The answer is "check-in": every time the CPU asks the GPU to run a small program, it first has to go through a submission routine. Submit them one at a time, and one token needs about two thousand submissions. This chapter covers how the GPU splits up work, where the check-in fee comes from, and how Strata cuts two thousand check-ins down to a few dozen, or even one.</p></div>
+<p class="tldr"><strong>In one line:</strong> a small program on the GPU is called a kernel, and every launch carries a fixed overhead of tens of microseconds. Strata saves it in two ways: it fuses several kernels into one, and it records a whole layer's kernels as a CUDA Graph that is submitted in one go. The price is that a graph freezes its arguments, so the "position", which changes every step, must live in a block of VRAM at a fixed address.</p>
+
+<h2 id="sec-1">15.1 How the GPU splits up work: threads, thread blocks and warps</h2>
+<p>Picture a huge exam-grading hall. There are tens of thousands of papers, and each teacher grades one. The teachers are split into many rooms, and inside each room they sit in rows of 32. A whole row follows the same call: "turn the page", "look at question one", "give a score". The call is the same; the paper in each pair of hands is different.</p>
+<p>That is how a GPU works. A small program the CPU hands to the GPU is called a <dfn>kernel</dfn>. Launch a kernel once, and the GPU starts thousands upon thousands of <dfn>threads</dfn>. Every thread runs the same code; only the index of the data it handles differs. The threads are first grouped into <dfn>thread blocks</dfn>. The threads in one block run on the same compute unit and can share a small piece of fast storage. Inside a block, the threads are lined up in groups of 32 called <dfn>warps</dfn>: the 32 threads of one warp execute the same instruction at the same time. [R01] Figure 15-1 draws these three levels together.</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="Figure 15-1: one kernel launch creates a grid, the grid is split into thread blocks, and every 32 threads in a block form a warp">
+<defs><pattern id="c15-lane" width="9" height="12" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="7" height="12" rx="1"/></pattern></defs>
+<rect class="f-soft" fill="#e5f1df" x="10" y="8" width="380" height="96" rx="10"/>
+<text class="f-text" fill="#182f2b" x="22" y="28" font-size="13" font-weight="600">One launch = one grid</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="17" y="40" width="88" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="61" y="62" font-size="12" text-anchor="middle">Block 0</text>
+<text class="f-muted" fill="#5c6d66" x="61" y="80" font-size="12" text-anchor="middle">many threads</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="40" width="88" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="154" y="62" font-size="12" text-anchor="middle">Block 1</text>
+<text class="f-muted" fill="#5c6d66" x="154" y="80" font-size="12" text-anchor="middle">many threads</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="203" y="40" width="88" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="247" y="62" font-size="12" text-anchor="middle">Block 2</text>
+<text class="f-muted" fill="#5c6d66" x="247" y="80" font-size="12" text-anchor="middle">many threads</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="296" y="40" width="88" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="340" y="62" font-size="12" text-anchor="middle">…</text>
+<text class="f-muted" fill="#5c6d66" x="340" y="80" font-size="12" text-anchor="middle">many blocks</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M61 92V112H200V122"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="124" width="380" height="118" rx="10"/>
+<text class="f-text" fill="#182f2b" x="22" y="144" font-size="13" font-weight="600">One thread block: up to 1024 threads</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="167" font-size="12">warp 0</text>
+<rect fill="url(#c15-lane)" x="80" y="157" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="22" y="187" font-size="12">warp 1</text>
+<rect fill="url(#c15-lane)" x="80" y="177" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="22" y="207" font-size="12">warp 2</text>
+<rect fill="url(#c15-lane)" x="80" y="197" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="224" y="232" font-size="12" text-anchor="middle">… each row of 32 cells = 32 threads</text>
+<text class="f-text" fill="#182f2b" x="200" y="262" font-size="12" text-anchor="middle">warp: 32 threads that run the same instruction</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="282" font-size="12" text-anchor="middle">Each thread uses its index to pick its own data</text>
+</svg><figcaption>Figure 15-1　The GPU's three levels of work. One launch creates a grid, the grid is split into thread blocks, and every 32 threads in a block form a warp that follows the same call.</figcaption></figure>
+<p>Strata is full of this pattern. Take the KV paging of Chapter 17: the source says it "uses one 1,024-thread block to scan the selected indices". <span class="ev ev-code">Code fact</span> Or take the recurrence in the GDN layers: a source comment notes that each line of the formula touches only one column of the state, and the columns do not depend on each other, so "one thread can own a whole column, and no thread ever waits for another during the step". [S17]</p>
+<aside class="primer" id="c15-gpu-model">
+<h3>The GPU programming model: threads, thread blocks and warps</h3>
+<p>Intuition: a CPU is like a few all-round professors, each able to handle complex branches and decisions. A GPU is like thousands of teaching assistants, each of whom only does simple things on command, but there are a lot of them. To make a GPU fast, you have to split the work into thousands upon thousands of small tasks that <strong>do not depend on each other</strong>.</p>
+<p>Definition: the programmer writes a kernel function and, at launch, says "how many thread blocks, and how many threads per block". In CUDA you write <code>vecAdd&lt;&lt;&lt;4, 256&gt;&gt;&gt;(A, B, C)</code>: 4 blocks of 256 threads, 1,024 threads in total, and each one uses <code>threadIdx.x + blockDim.x × blockIdx.x</code> to work out which element it is responsible for. On current NVIDIA GPUs, a thread block holds at most 1,024 threads, and the threads in a block form warps of 32. [R01]</p>
+<p>A concrete number: when a warp reads VRAM and its 32 threads read <strong>neighboring</strong> addresses, the hardware can merge them into very few memory transactions. This is called <dfn>coalesced access</dfn>. If the addresses are far apart from each other, the read splits into many transactions, and each one uses only a small part of the bytes it fetches. The Strata example in the next section shows how big the gap is.</p>
+<p>How this ties into the chapter: a kernel is the smallest unit of work the CPU hands to the GPU. The smaller and more numerous the kernels, the more the cost of the "handover" itself stands out.</p>
+<p class="further">Further reading: <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html" target="_blank" rel="noopener noreferrer">NVIDIA CUDA Programming Guide: Programming model</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/intro-to-cuda-cpp.html" target="_blank" rel="noopener noreferrer">NVIDIA: Intro to CUDA C++ (with the vecAdd example)</a> · <a href="https://en.wikipedia.org/wiki/CUDA" target="_blank" rel="noopener noreferrer">Wikipedia: CUDA</a> · <a href="https://en.wikipedia.org/wiki/Thread_block_(CUDA_programming)" target="_blank" rel="noopener noreferrer">Wikipedia: Thread block</a></p>
+</aside>
+<p class="bridge"><strong>If you studied CS:</strong> a warp is the execution unit of SIMT (single instruction, multiple threads). One instruction drives 32 threads, like a SIMD vector instruction; but each thread has its own registers and program counter and can take a different branch, at the cost of the two sides of the branch running in turn. Chapter 13 covers the difference between SIMD and SIMT in detail.</p>
+
+<h2 id="sec-2">15.2 Neighboring threads read neighboring addresses: data layout matters</h2>
+<p>Same math, different data layout, and the speed can differ several times over. Figure 15-2 compares two ways of reading.</p>
+<figure class="fig"><svg viewBox="0 0 400 324" role="img" aria-label="Figure 15-2: when neighboring threads read neighboring addresses, one transaction is all useful; when neighboring threads are far apart, each 32-byte fetch uses only 4 bytes">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">Coalesced: adjacent threads, adjacent addresses</text>
+<circle class="f-soft" fill="#e5f1df" cx="44" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="44" y="46" font-size="12" text-anchor="middle">0</text>
+<circle class="f-soft" fill="#e5f1df" cx="88" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="88" y="46" font-size="12" text-anchor="middle">1</text>
+<circle class="f-soft" fill="#e5f1df" cx="132" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="132" y="46" font-size="12" text-anchor="middle">2</text>
+<circle class="f-soft" fill="#e5f1df" cx="176" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="176" y="46" font-size="12" text-anchor="middle">3</text>
+<circle class="f-soft" fill="#e5f1df" cx="220" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="220" y="46" font-size="12" text-anchor="middle">4</text>
+<circle class="f-soft" fill="#e5f1df" cx="264" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="264" y="46" font-size="12" text-anchor="middle">5</text>
+<circle class="f-soft" fill="#e5f1df" cx="308" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="308" y="46" font-size="12" text-anchor="middle">6</text>
+<circle class="f-soft" fill="#e5f1df" cx="352" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="352" y="46" font-size="12" text-anchor="middle">7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 52L40 84M88 52L66 84M132 52L92 84M176 52L118 84M220 52L144 84M264 52L170 84M308 52L196 84M352 52L222 84"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="86" width="224" height="22" rx="3"/>
+<text class="f-on" fill="#ffffff" x="132" y="101" font-size="12" text-anchor="middle">32 contiguous bytes, all used</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="132" font-size="12">8 threads × 4 bytes: one memory transaction</text>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="13" font-weight="600">Strided: adjacent threads far apart</text>
+<circle class="f-soft" fill="#e5f1df" cx="44" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="44" y="194" font-size="12" text-anchor="middle">0</text>
+<circle class="f-soft" fill="#e5f1df" cx="88" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="88" y="194" font-size="12" text-anchor="middle">1</text>
+<circle class="f-soft" fill="#e5f1df" cx="132" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="132" y="194" font-size="12" text-anchor="middle">2</text>
+<circle class="f-soft" fill="#e5f1df" cx="176" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="176" y="194" font-size="12" text-anchor="middle">3</text>
+<circle class="f-soft" fill="#e5f1df" cx="220" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="220" y="194" font-size="12" text-anchor="middle">4</text>
+<circle class="f-soft" fill="#e5f1df" cx="264" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="264" y="194" font-size="12" text-anchor="middle">5</text>
+<circle class="f-soft" fill="#e5f1df" cx="308" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="308" y="194" font-size="12" text-anchor="middle">6</text>
+<circle class="f-soft" fill="#e5f1df" cx="352" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="352" y="194" font-size="12" text-anchor="middle">7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 200L28 232M88 200L72 232M132 200L116 232M176 200L160 232M220 200L204 232M264 200L248 232M308 200L292 232M352 200L336 232"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="26" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="26" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="70" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="114" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="114" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="158" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="158" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="202" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="246" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="246" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="290" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="334" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="334" y="234" width="5" height="22"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="280" font-size="12">8 transactions × 32 B; only the marked 4 B are used</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="306" font-size="12">Old Strata GDN recurrence: threads ~24.5 KB apart</text>
+</svg><figcaption>Figure 15-2　Reading the same 8 numbers with two layouts moves 8 times more data in one than the other. When the threads in a warp read neighboring addresses, the hardware merges them into one transaction.</figcaption></figure>
+<p>Strata's GDN layers learned this the hard way. A comment in the fused kernel explains: the original code had one warp own one column of the state, with 32 threads walking down the 128 rows. But the state is stored as "row, head, column", so two neighboring threads read data about 24.5 KB apart. As a result, each 32-byte sector fetched delivered only 4 useful bytes, and each layer took 47.6 microseconds just to move 6.3 MB of state. <span class="ev ev-code">Code fact</span></p>
+<p>After the rewrite, one thread block owns a whole head, and its 512 threads are laid out as "row group, column". The 128 columns of a row become exactly one contiguous 512-byte read. <span class="ev ev-code">Code fact</span> The idea is the same as in Figure 15-2: make neighboring threads read neighboring addresses. GDN's basic kernel follows the same rule: the state is stored as (i, h, j) with j changing fastest, so for a fixed i, a warp reading along j touches contiguous memory. [S17]</p>
+<p>Data layout is a "free" choice: the state is a runtime buffer, not model weights, so you can lay it out any way you like. But the source warns that the two layouts index the same three numbers. Once the reader and the writer disagree on the layout, the program still runs, and the results go silently wrong. [S17]</p>
+
+<h2 id="sec-3">15.3 Every kernel launch pays a "check-in fee"</h2>
+<p>Back to the strange measurement at the start. For the CPU to make the GPU run a kernel, it goes through the driver: check the arguments, pack the command, put it in the submission queue. This paperwork runs on the CPU and takes time. It is called <dfn>launch overhead</dfn>. If the kernel itself computes for only a few microseconds while the paperwork takes ten or twenty, the GPU finishes one kernel and then sits idle waiting for the next. Figure 15-3 draws this "waiting".</p>
+<div class="viz" data-viz="kernel-launch"><figure class="fig"><svg viewBox="0 0 400 264" role="img" aria-label="Figure 15-3: 8 small kernels submitted in three ways. One by one takes 165 microseconds, fused in pairs 90 microseconds, CUDA Graph 60 microseconds">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">One by one</text>
+<text class="f-text" fill="#182f2b" x="390" y="18" font-size="12" text-anchor="end">165 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="37" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="26" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="116.4" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="152.7" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="189.1" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="225.5" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="261.8" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="298.2" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="334.5" y="27" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="57" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="46" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="152.7" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="189.1" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="225.5" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="261.8" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="298.2" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="334.5" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="370.9" y="47" width="8.6" height="12"/>
+<text class="f-text" fill="#182f2b" x="10" y="92" font-size="13" font-weight="600">Fused in pairs</text>
+<text class="f-text" fill="#182f2b" x="390" y="92" font-size="12" text-anchor="end">90 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="111" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="100" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="116.4" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="152.7" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="189.1" y="101" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="131" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="120" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="152.7" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="189.1" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="225.5" y="121" width="17.7" height="12"/>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="13" font-weight="600">CUDA Graph</text>
+<text class="f-text" fill="#182f2b" x="390" y="166" font-size="12" text-anchor="end">60 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="185" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="174" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="175" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="205" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="194" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="195" width="72.7" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">Sketch: 8 kernels, each computing for 5 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="254" font-size="12">Each submission takes 20 µs (the marked bars)</text>
+</svg><figcaption>Figure 15-3　Small kernels spend their time waiting for submission. Launched one by one, the GPU row is almost all gaps; fusion cuts the number of submissions; CUDA Graph submits only once, and the nodes run one after another. The numbers are teaching assumptions.</figcaption></figure></div>
+<p>This is not hypothetical. A Strata comment states the conclusion outright: "this engine is launch-bound, not bandwidth-bound." Every kernel in the GDN layers measured about 0.028 ms, even <code>gdn_gate</code>, which handles only 48 numbers; that is exactly the cost of one ordinary launch on that machine. One GDN layer makes about 19 launches, and a full layer block about 45. <span class="ev ev-code">Code fact</span>[S13] The comment does not say which GPU or driver version was used, so treat the numbers below only as a sense of scale.</p>
+<p>Let us do the math. Another comment says that launching kernel by kernel, one token needs about 2,000 launches, and each driver call measured 10–22 microseconds. <span class="ev ev-code">Code fact</span> The "check-in" alone costs each token anywhere from 2,000 × 10 µs = 20 ms to 2,000 × 22 µs ≈ 44 ms. In terms of speed, even if the GPU computed nothing at all, you would get at most 23–50 tokens per second. <span class="ev ev-est">Teaching estimate</span></p>
+<aside class="primer" id="c15-launch-fusion">
+<h3>Kernel launch overhead and kernel fusion</h3>
+<p>Intuition: at a hospital, you queue to check in. If every small test needed a fresh check-in, the whole morning would vanish at the check-in window. There are two fixes: merge several tests into one (<dfn>kernel fusion</dfn>), or have the doctor write the whole set of test orders at once and let the nurse work through the list (<dfn>CUDA Graph</dfn>).</p>
+<p>Definition: launch overhead is the fixed cost for the CPU to prepare and submit a kernel, and it hardly depends on how much the kernel computes. Say a kernel computes for w microseconds and a submission takes L microseconds. Submit n kernels one by one: if w &lt; L, the total is about n × L + w, and the GPU spends most of its time waiting; if w ≥ L, the total is about L + n × w, and the submissions hide behind the computation. <span class="ev ev-est">Teaching estimate</span></p>
+<p>Fusion does more than save check-ins. Once several operators become one kernel, intermediate results can stay in registers or on-chip storage instead of being written back to VRAM and read out again. The price is a more complex kernel, which may use more registers and so let fewer threads run on the GPU at once. CUDA Graph, on the other hand, does not change the kernels at all: it records a chain of operations and their dependencies, then submits and replays the whole chain in one go. What it saves is the cost of submitting on the CPU side. [R01]</p>
+<p>How this ties into the chapter: Strata uses both. The next section looks at the actual numbers.</p>
+<p class="further">Further reading: <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html" target="_blank" rel="noopener noreferrer">NVIDIA CUDA Programming Guide: CUDA Graphs</a> · <a href="https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/" target="_blank" rel="noopener noreferrer">PyTorch blog: Accelerating PyTorch with CUDA Graphs</a> · <a href="https://en.wikipedia.org/wiki/Loop_fission_and_fusion" target="_blank" rel="noopener noreferrer">Wikipedia: Loop fusion (the same idea in compilers)</a></p>
+</aside>
+
+<h2 id="sec-4">15.4 Two ways to save: fusion and CUDA Graph</h2>
+<p>Figure 15-4 puts the two side by side: fusion changes what runs on the GPU, and a graph changes how the CPU submits.</p>
+<figure class="fig"><svg viewBox="0 0 400 334" role="img" aria-label="Figure 15-4: fusion writes three kernels as one and keeps intermediate results on chip; CUDA Graph turns five submissions into one while the nodes are still the original five kernels">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">Kernel fusion: several kernels become one</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="65" y="54" font-size="12" text-anchor="middle">Conv + SiLU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="54" font-size="12" text-anchor="middle">L2 norm (q)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="335" y="54" font-size="12" text-anchor="middle">L2 norm (k)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M120 49H143M255 49H278"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="86" font-size="12">3 launches; intermediates round-trip through VRAM</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 92V104"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="106" width="380" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="128" font-size="12" text-anchor="middle">1 kernel: conv + SiLU + two L2 norms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="160" font-size="12">1 launch, results stay on chip (fused_gdn_conv_l2)</text>
+<text class="f-text" fill="#182f2b" x="10" y="192" font-size="13" font-weight="600">CUDA Graph: record once, replay many times</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="202" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="102" y="222" font-size="12" text-anchor="middle">No graph: one at a time</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="232" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="243" font-size="12" text-anchor="middle">submit kernel 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="250" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="261" font-size="12" text-anchor="middle">submit kernel 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="268" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="279" font-size="12" text-anchor="middle">submit kernel 3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="286" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="297" font-size="12" text-anchor="middle">submit kernel 4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="304" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="315" font-size="12" text-anchor="middle">submit kernel 5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="202" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="297" y="222" font-size="12" text-anchor="middle">Graph: one submission</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M233 266H361"/>
+<circle class="f-accent" fill="#136d5a" cx="233" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="265" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="297" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="329" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="361" cy="266" r="10"/>
+<text class="f-muted" fill="#5c6d66" x="297" y="300" font-size="12" text-anchor="middle">Still the same 5 kernels</text>
+<text class="f-muted" fill="#5c6d66" x="297" y="316" font-size="12" text-anchor="middle">It cuts CPU submissions</text>
+</svg><figcaption>Figure 15-4　Fusion changes what runs on the GPU: several operators become one kernel, and intermediate results never touch VRAM. A graph changes how the CPU submits: the whole chain goes out at once, and each node is still its own kernel. The two can be combined.</figcaption></figure>
+<p><strong>Fusion.</strong> Strata has a set of kernels whose file names start with <code>fused_</code>. For example, the single kernel <code>fused_gdn_conv_l2</code> replaces three launches: the old "convolution plus SiLU" and two L2 norms. <code>fused_gdn_ab</code> replaces two matrix-vector products and two element-wise kernels. <span class="ev ev-code">Code fact</span> Reading the hybrid residual used to take six kernels each time, 96 times per token; after fusion it takes two kernels. <span class="ev ev-code">Code fact</span></p>
+<p><strong>CUDA Graph.</strong> Strata records each layer's kernels as a graph. A comment gives the measurement: the same layer block of 43 nodes takes 2.393 ms launched one by one, but only 1.585 ms as a recorded graph replay. That is 1.51× faster, and the savings are "all launch overhead". <span class="ev ev-code">Code fact</span>[S13] Another comment puts it even more plainly: replay does exactly the same arithmetic as launching one by one; the only difference is that "about 2,000 kernel launches become 48 graph launches". <span class="ev ev-code">Code fact</span></p>
+<p>Can it go further? Yes. Under the Windows display driver model, each graph launch itself also costs about 0.3–0.4 ms. The per-layer loop launches 96 graphs per token, and a token measured 48.6 ms, of which the real kernels on the GPU took only 12 ms. So Strata wrote another version, "one graph per token", that packs all 48 layers into a single graph. <span class="ev ev-code">Code fact</span> Figure 15-5 lines up the three stages.</p>
+<figure class="fig"><svg viewBox="0 0 400 202" role="img" aria-label="Figure 15-5: submissions per generated token, from about 2000 kernel launches, to 48 to 96 graph launches, to 1 whole-token graph">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">CPU-to-GPU submissions per token (log-scale bars)</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">Launch kernels one by one</text>
+<text class="f-text" fill="#182f2b" x="390" y="44" font-size="12" text-anchor="end">about 2,000</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="52" width="344" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="10" y="94" font-size="12">Each layer as a graph (1–2 per layer)</text>
+<text class="f-text" fill="#182f2b" x="390" y="94" font-size="12" text-anchor="end">48–96</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="102" width="239" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="10" y="144" font-size="12">Whole token as one graph</text>
+<text class="f-text" fill="#182f2b" x="390" y="144" font-size="12" text-anchor="end">1</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="152" width="80" height="16" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="12">From session.hpp comments; log-scale bars</text>
+</svg><figcaption>Figure 15-5　Strata cuts the number of submissions step by step: first a graph per layer, then the whole token as one graph. Each submission saved removes a fixed cost of tens to hundreds of microseconds.</figcaption></figure>
+<p>Why not record the whole token from the start? Because in the middle of every layer, the GPU has to hand over to the CPU expert pool: only when the GPU reaches the routing step does the CPU know which experts to compute. Strata first used "one layer" as the unit of a graph precisely so the host could step in between layers, and so the CPU expert pool could start working while the GPU ran the next stretch. [S13] The whole-token graph instead uses a single-thread kernel on the GPU that waits, on the device, for the host to set a flag, so the host no longer calls the driver. <span class="ev ev-code">Code fact</span></p>
+
+<h2 id="sec-5">15.5 A graph freezes its arguments: the frozen position</h2>
+<p>CUDA Graph has a quirk: during capture, a kernel's <strong>arguments</strong> are copied into the graph as they are, and every later replay uses that copy. Strata wrote a small experiment just to confirm this: on replay, the graph rereads the data in its input buffers, but it does not reread kernel arguments. <span class="ev ev-code">Code fact</span></p>
+<p>The trouble is that some arguments change with every token. The classic one is the <strong>position</strong>: which token this is. If the position is passed as an argument to the kernel that writes the KV cache, it is 0 when the graph is captured, and it stays 0 on every replay after that. The simulator below slows this down. First pick "captured by value", then press <strong>Step</strong> through a few tokens:</p>
+<div class="viz" data-viz="graph-freeze"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figure 15-6: when the position is captured into the graph by value, all 4 tokens write to position 0; when the kernel reads the position from the step buffer, each token writes its own slot">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">Wrong: position captured as an argument</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="28" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="53" font-size="13" text-anchor="middle">t3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="58" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="106" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="298" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="346" y="28" width="44" height="40" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="32" y="84" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="80" y="84" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="128" y="84" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="176" y="84" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="224" y="84" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="272" y="84" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="320" y="84" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="368" y="84" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="104" font-size="12">t0–t3 all overwrite slot 0; attention sees 1 slot</text>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="13" font-weight="600">Right: the kernel reads pos from the step buffer</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="169" font-size="13" text-anchor="middle">t0</text>
+<rect class="f-accent" fill="#136d5a" x="58" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="80" y="169" font-size="13" text-anchor="middle">t1</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="128" y="169" font-size="13" text-anchor="middle">t2</text>
+<rect class="f-accent" fill="#136d5a" x="154" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="176" y="169" font-size="13" text-anchor="middle">t3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="298" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="346" y="144" width="44" height="40" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="32" y="200" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="80" y="200" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="128" y="200" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="176" y="200" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="224" y="200" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="272" y="200" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="320" y="200" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="368" y="200" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="224" font-size="12">Step buffer: fixed address, new content each step</text>
+</svg><figcaption>Figure 15-6　One graph, two ways of writing it. When the position is frozen as an argument, every token crowds into slot 0. When the position lives in a fixed-address VRAM buffer, the graph remembers the address, and the host rewrites the content each step.</figcaption></figure></div>
+<p>Strata's <code>qsa.hpp</code> spells out the damage this bug does. Once the position is frozen, every token writes to slot 0, scoring and selection look at just 1 slot, and attention only ever sees one slot of history. The comment calls it "worse than a crash": the output is finite, plausible-looking numbers, and the symptom looks exactly like "the model cannot use its context". People would suspect the KV cache, the selection algorithm or the weights, and never think of the graph. <span class="ev ev-code">Code fact</span>[S18]</p>
+<p>Its fix is "one block of VRAM, not six changed function signatures": put the four numbers that change every step into a tiny <dfn>step buffer</dfn>:</p>
+<ul>
+<li><code>step[0] = pos</code>: the position of the new token;</li>
+<li><code>step[1] = n_kv = pos + 1</code>: how many slots the cache holds;</li>
+<li><code>step[2] = n_bid</code>: how many 4-slot blocks are already full;</li>
+<li><code>step[3] = width</code>: how many slots this step selects, equal to min(n_kv, 2051). [S18]</li>
+</ul>
+<p>Each kernel reads the numbers it needs from this block of VRAM, the argument lists stay exactly the same from token to token, and the whole QSA path can be captured as a graph. Each step, the host does just one small copy to rewrite the content of that VRAM block. <span class="ev ev-code">Code fact</span>[S18] The four numbers depend on each other. Keeping them in one place, computed by one piece of code, rules out "changed pos, forgot n_kv".</p>
+<p class="bridge"><strong>If you studied CS:</strong> this is exactly the difference between "pass by value" and "pass by pointer" in C. If the graph records a value, it is that value forever; if it records a pointer, every dereference reads the new content. The catch is that the memory the pointer points to must stay valid the whole time, and the graph cannot check that for itself.</p>
+<p>The same reasoning applies to sampling. Parameters such as temperature and top-p can differ for every request, so Strata keeps sampling <strong>outside</strong> the captured graph; otherwise those parameters would be "permanently baked into the graph". <span class="ev ev-code">Code fact</span>[S08]</p>
+
+<h2 id="sec-6">15.6 Hands-on: find the bottleneck and the freeze yourself</h2>
+<p>Both interactive figures in this chapter work as small experiments.</p>
+<ol>
+<li><strong>Launch overhead timeline</strong> (Figure 15-3): first play it with the default settings, and note the total time and the GPU busy share for all three ways. Then slowly drag each kernel's compute time w from 5 µs to 40 µs, and find the point where "the graph is no longer clearly faster". You will find it sits roughly where w gets close to L: once a kernel runs longer than a submission, the submission cost hides on its own.</li>
+<li><strong>The frozen position</strong> (Figure 15-6): run 4 tokens with each way of writing it. Compare the KV slots and "how many slots attention can see". Then think: if you only checked "did the program report an error, and is the output a finite number", could you catch the wrong version?</li>
+</ol>
+<p>To check this on a real GPU, write a tiny graph that only does <code>state[pos] = token</code>, replay it with pos = 0, 1 and 2, and check that all three positions were written. Looking only at a final return value of "success" is not enough.</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>A GPU works with thousands upon thousands of threads: threads are grouped into thread blocks, and every 32 threads in a block form a warp. Make neighboring threads read neighboring addresses, and no data movement is wasted.</li>
+<li>Every kernel launch has a fixed overhead. Strata originally needed about 2,000 launches per token. It cuts the number of kernels with fusion, and uses CUDA Graph to bring submissions down to one per layer, then one per token.</li>
+<li>A graph freezes kernel arguments. Values that change every step (the position, n_kv, the selection width) must live in a fixed-address VRAM buffer that the kernel reads each time.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "CUDA Graph merges many kernels into one big kernel."</strong></p>
+<p>It does not. A graph only records a chain of operations and their dependencies. On replay, each node is still a separate kernel, and intermediate results are still written back to VRAM. What it saves is the cost of submitting on the CPU side. Truly merging computation into one kernel is kernel fusion, and that means rewriting the kernel. The two solve different problems, and Strata uses both. [R01]</p></div>
+
+<details class="deep"><summary>Go deeper: the cost of fusion, three duties of graph capture, and how to verify</summary>
+<h3>Fusion is not free</h3>
+<p>Writing several operators into one kernel means fewer launches and fewer writes and reads of intermediate results. The price: more variables are alive at once inside the kernel, so each thread needs more registers. The total number of registers is fixed, so the more each thread takes, the fewer threads can reside at once, and the GPU has fewer "spare threads" to hide memory waits. This is called lower occupancy. The code is also more complex and harder to test. So fusion should be decided by measurement. For example, Strata's fused hybrid-residual read has several variants. On each card, the engine first runs them with random weights and adopts only the newest variant that matches the baseline bit for bit. <span class="ev ev-code">Code fact</span></p>
+<p>A teaching example: a layer with 20 launches at 5 µs of host overhead each spends about 100 µs on launches alone. For small operators that compute for only a few microseconds, that is a lot; if each kernel computes for several milliseconds, the same 100 µs is a rounding error. These are all assumed values, meant for judging "is this worth optimizing", not measurements. <span class="ev ev-est">Teaching estimate</span></p>
+<h3>Three duties of graph capture</h3>
+<p><code>graph.hpp</code> writes three things down as preconditions of the interface, and each one comes from a dedicated small experiment. <span class="ev ev-code">Code fact</span></p>
+<ol>
+<li><strong>Waiting must call the driver, not just read memory.</strong> Under the Windows display driver model, command submission is batched. A spin loop that only read memory, without calling the driver, spun 5,907,703 times in 500 ms while the kernel never even started; the data flipped only once some code called the driver. So the wait was changed to poll an event repeatedly. Each poll costs about 0.021 ms, and it is a "query", not a "synchronize".</li>
+<li><strong>A graph rereads input buffers, not kernel arguments.</strong> Over 8 replays, each with a fresh pinned input, the results kept up every time; but arguments are copied into the nodes during capture and never read again. Every value that changes per step (position, page-table base, token ID) must be <strong>data</strong> in VRAM, not an argument.</li>
+<li><strong>Fixed addresses are the caller's job.</strong> The graph holds the graph, not the memory. Every buffer the captured code uses must be allocated before capture and must never be reallocated afterward.</li>
+</ol>
+<p>Two more defenses are worth learning. A capture that yields 0 nodes is an error right away, because "a graph that does nothing" would replay quietly forever, producing neither errors nor output. And if a CUDA error is left inside the capture body, the capture is abandoned instead of instantiating a broken graph. <span class="ev ev-code">Code fact</span></p>
+<h3>Do not take one execution path for the whole engine</h3>
+<p>Strata has several kinds of graph at the same time: <code>SessionGraphs</code> with one or two per layer (one stretch before routing, one after the experts are combined) [S13], the multi-token graph for the speculative decoding verification window (Chapter 18) [S08], the whole-token <code>TokenGraph</code>, and prefix graphs used for timing stage by stage. If one header says "one graph per layer", you cannot conclude from it that the engine never captures a bigger graph. Source code often keeps a reference path, a debug path, a fast path and implementations chosen by device capability side by side; the calling context and the conditions that enable a path are part of any conclusion. This is the same thing as "one function with several specialized versions" from a compilers course.</p>
+<h3>Verification: addresses, values and state</h3>
+<p>A graph optimization must verify at least three things: the values that change per step are updated correctly on every round; the captured addresses stay valid across all replays; and the state after a replay matches the reference path that does not use a graph. A typical lifetime trap: a buffer is freed when a request ends, but the graph object is kept for the next request, so the next replay reads and writes freed memory.</p>
+<p>The tests must also be able to "see" the bug. Repeating the same prompt at the same temperature proves nothing about switching parameters correctly. A better way: fix the logits, run two requests in a row, one greedy and one at high temperature (or with different fixed random numbers), and compare the parameters actually used and the results against the reference implementation without a graph. The second request must take a branch that differs from the first and can be predicted.</p>
+<p>Only advanced GPU work needs a profiler: record launch time, kernel time, register use and replay time, then use an end-to-end A/B comparison to judge whether a local optimization really shortened the critical path. Strata's comments contain a counterexample: in one round, stage timings measured in non-graph mode came out 4× higher than the real cost of the same work once captured as a graph, and nearly sent the optimization in the wrong direction. <span class="ev ev-code">Code fact</span></p>
+</details>

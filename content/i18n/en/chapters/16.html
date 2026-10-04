@@ -1,0 +1,235 @@
+<div class="hook"><span class="eyebrow">Same computer, two speeds</span>
+<p>Strata's upstream speed table has two columns of numbers. On the same computer with an RTX 5070, reading a 32K-token prompt runs at 2,171 tokens per second; writing the answer runs at only 81.8 tokens per second. <span class="ev ev-report">Upstream report</span>[S03]</p>
+<p>Same model, same 48 layers, same graphics card. Why is "reading" more than twenty times faster than "writing"? The secret fits in one word: batching. This chapter explains why computing together beats computing one at a time, how big a chunk should be, and how to make moving data and computing happen at the same time.</p></div>
+<p class="tldr"><strong>In one line:</strong> during decode the model can compute only one token at a time, so each read of the weights is used once. During prefill the whole prompt is already known, so thousands of tokens can be computed as one chunk, and each read of the weights is shared by the whole chunk. Strata reads at most 8,192 tokens per chunk, and starts moving the next layer's experts while the current layer is still computing.</p>
+
+<h2 id="sec-1">16.1 Why reading the prompt is over twenty times faster than writing the answer</h2>
+<p>Start with the numbers. Figure 16-1 shows the two speeds that upstream measured on one computer.</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="Figure 16-1: upstream measurements of prefill and decode speed. Prefill runs at 536 to 2171 tokens per second, decode at 74 to 93">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Upstream, same PC: prefill vs decode (tokens/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">1K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="36" width="69.1" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="135" y="46" font-size="12">536</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="52" width="11.3" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="77" y="62" font-size="12">87.3</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12">4K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="86" width="167.5" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="233" y="96" font-size="12">1,299</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="102" width="12" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="78" y="112" font-size="12">93.0</text>
+<text class="f-text" fill="#182f2b" x="10" y="148" font-size="12">32K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="136" width="280" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="346" y="146" font-size="12">2,171</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="152" width="10.6" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="77" y="162" font-size="12">81.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="198" font-size="12">128K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="186" width="271.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="338" y="196" font-size="12">2,107</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="202" width="9.5" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="76" y="212" font-size="12">73.7</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="226" width="10" height="10"/><text class="f-muted" fill="#5c6d66" x="24" y="235" font-size="12">Prefill</text>
+<rect class="f-warn" fill="#9e5d24" x="84" y="226" width="10" height="10"/><text class="f-muted" fill="#5c6d66" x="98" y="235" font-size="12">Decode</text>
+<text class="f-muted" fill="#5c6d66" x="154" y="235" font-size="12">RTX 5070 12 GB, Q2_0, v0.1.26</text>
+</svg><figcaption>Figure 16-1　On the same computer, prefill is about 6 to almost 30 times faster than decode, and the gap grows with the prompt length. Bar lengths are to scale; the decode bars are so short you can barely see them. Data from the upstream docs. [S03]</figcaption></figure>
+<p>The upstream docs list the test setup: an RTX 5070 12 GB graphics card, a Ryzen 5 7600 CPU, 64 GB of DDR5-5200 RAM, Windows, engine 0.1.26, the Q2_0 model, and speculative decoding switched on while writing the answer. <span class="ev ev-report">Upstream report</span>[S03]</p>
+<p>The gap comes from a basic difference between the two phases. During <dfn>decode</dfn> ("writing the answer"), the next token is unknown until the previous one has been chosen, so tokens can only come one at a time. During <dfn>prefill</dfn> ("reading the prompt"), every token of the prompt is already there, so a big block of them can go into the model together. Note that "computing together" does not mean "peeking at each other": the 5th token still sees only the first 4. The model's causal rule does not change at all; only the way the computation is organized changes.</p>
+
+<h2 id="sec-2">16.2 Why computing together is faster: matrix × vector vs matrix × matrix</h2>
+<p>Picture a teacher grading multiple-choice tests. For each test, the teacher takes the answer key out of a cabinet, checks the test, and puts the key back. If tests arrive one at a time, most of the time goes into fetching and returning the key. If 50 arrive at once, the teacher fetches the key once, checks all 50, and puts it back; spread over 50 tests, the fetching costs almost nothing.</p>
+<p>In a model, the "answer key" is the weights. For every layer, that layer's weights must be read from VRAM into the compute units. Figure 16-2 draws the two cases side by side.</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="Figure 16-2: in matrix × vector, one read of the weights serves one token; in matrix × matrix, one read of the weights is shared by a whole chunk of tokens">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="12" font-weight="600" text-anchor="middle">Matrix × vector: 1 token</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="34" width="100" height="100" rx="4"/>
+<text class="f-text" fill="#182f2b" x="70" y="89" font-size="13" text-anchor="middle">Weights W</text>
+<text class="f-text" fill="#182f2b" x="137" y="89" font-size="14" text-anchor="middle">×</text>
+<rect class="f-accent" fill="#136d5a" x="152" y="34" width="12" height="100" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="158" y="152" font-size="12" text-anchor="middle">1 column</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="172" font-size="12" text-anchor="middle">Weights read once,</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="188" font-size="12" text-anchor="middle">used by 1 token</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="12" font-weight="600" text-anchor="middle">Matrix × matrix: C tokens</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="34" width="100" height="100" rx="4"/>
+<text class="f-text" fill="#182f2b" x="270" y="89" font-size="13" text-anchor="middle">Weights W</text>
+<text class="f-text" fill="#182f2b" x="335" y="89" font-size="14" text-anchor="middle">×</text>
+<rect class="f-accent" fill="#136d5a" x="346" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="358" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="370" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="382" y="34" width="9" height="100" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="391" y="152" font-size="12" text-anchor="end">C columns</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="172" font-size="12" text-anchor="middle">Weights read once,</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="188" font-size="12" text-anchor="middle">shared by C tokens</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 30V194"/>
+<text class="f-text" fill="#182f2b" x="200" y="218" font-size="12" text-anchor="middle">More tokens, more compute; weights move just once</text>
+</svg><figcaption>Figure 16-2　Decode is "matrix × vector": one read of the weights serves one token. Prefill is "matrix × matrix": the same weights serve a whole chunk of tokens.</figcaption></figure>
+<aside class="primer" id="c16-batching">
+<h3>Batching: matrix × vector vs matrix × matrix</h3>
+<p>Intuition: moving data and computing are two separate bills. If you compute token by token, you move the whole set of weights every time, and moving becomes the main cost. If you compute a batch of tokens together, you pay for the move once while the compute stays the same, so the "compute done per byte moved" goes up. Chapter 5 called this ratio arithmetic intensity; it decides whether a program is limited by bandwidth or by compute.</p>
+<p>Definition: a layer's weights form an m × n matrix W. One token's input is a vector x of length n. Computing W·x is a <dfn>matrix-vector multiplication</dfn> (GEMV): it reads m × n weights and does about 2mn multiply-adds. Line up C tokens' vectors into an n × C matrix X, and computing W·X is a <dfn>matrix-matrix multiplication</dfn> (GEMM): it still reads m × n weights, but the compute grows to about 2mnC. The arithmetic intensity rises to about C times the original.</p>
+<p>A concrete number: Strata's speculative decoding controller has a default table of "how many times longer does the dense part take for n tokens at once than for one token". For 2 tokens it is 1.05×, for 4 it is 1.45×, for 8 it is 3.0×. <span class="ev ev-code">Code fact</span> In other words, with 8 tokens together each one costs on average 3.0 ÷ 8 ≈ 38% of computing it alone. <span class="ev ev-est">Teaching estimate</span></p>
+<p>How it ties to this chapter: during prefill C can be in the thousands, which is why prefill is so much faster. Batching has a price too: it needs more temporary storage for the whole chunk's intermediate results, and each chunk takes longer to finish.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Matrix_%28mathematics%29" target="_blank" rel="noopener noreferrer">Wikipedia: Matrix (mathematics)</a> · <a href="https://en.wikipedia.org/wiki/Matrix_multiplication" target="_blank" rel="noopener noreferrer">Wikipedia: Matrix multiplication</a> · <a href="https://en.wikipedia.org/wiki/Basic_Linear_Algebra_Subprograms" target="_blank" rel="noopener noreferrer">Wikipedia: BLAS (where GEMV and GEMM come from)</a></p>
+</aside>
+<div class="viz" data-viz="batch-reuse"><figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="Figure 16-3: putting n tokens into one dense pass. 2 tokens cost only 5% more, 4 cost 1.45 times, 8 cost 3 times, far less than the n times of doing them one by one">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Dense pass for n tokens at once (× one token's time)</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">n = 1</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="34" width="35" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="101" y="44" font-size="12">1.0×</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="49" width="35" height="12" rx="2"/>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">n = 2</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="78" width="36.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="103" y="88" font-size="12">1.05×</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="93" width="70" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="136" y="103" font-size="12">2×</text>
+<text class="f-text" fill="#182f2b" x="10" y="132" font-size="12">n = 4</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="122" width="50.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="117" y="132" font-size="12">1.45×</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="137" width="140" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="206" y="147" font-size="12">4×</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">n = 8</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="166" width="105" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="171" y="176" font-size="12">3.0×</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="181" width="280" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="346" y="191" font-size="12">8×</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">Main color: upstream ratio · Light: one by one (n×)</text>
+</svg><figcaption>Figure 16-3　The dense part is far cheaper together than one by one: 8 tokens take only 3 times as long. The numbers are the defaults in spec/controller.hpp; the comment says they come from upstream matrix-vector measurements. The interactive version lets you drag n and look at each case.</figcaption></figure></div>
+<p>Strata uses the same trick elsewhere. The verification window of speculative decoding sends in several tokens at once, and the source code describes this window's cost as "the dense weights are read only once and shared by T tokens". [S08] The fused read of the hybrid residual also has a multi-token version where up to 8 tokens share the weights, and "the weights are read only once for all of them". <span class="ev ev-code">Code fact</span></p>
+<p class="bridge"><strong>If you studied CS:</strong> this is "locality of memory access" from Computer Architecture and the BLAS levels from numerical linear algebra. BLAS-2 (matrix × vector) is limited by bandwidth; only BLAS-3 (matrix × matrix) can keep the compute units fully busy. Prefill turns a string of BLAS-2 calls into BLAS-3.</p>
+
+<h2 id="sec-3">16.3 Batching the experts: group by expert</h2>
+<p>The dense part is easy: every token uses the same weights. The expert part is trickier: each token picks 10 experts per layer, and different tokens pick different ones. Strata first <strong>groups by expert</strong>: it gathers the tokens that picked the same expert, reads that expert's weights once, and computes the whole group. [S12] Figure 16-4 shows a scaled-down sketch.</p>
+<figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="Figure 16-4: six tokens each pick two experts. After regrouping by expert, each expert's weights are read only once, for all the tokens that picked it">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12" font-weight="600">Per token (sketch: each token picks 2 experts)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="39" y="42" font-size="12" text-anchor="middle">t1</text><text class="f-muted" fill="#5c6d66" x="39" y="58" font-size="12" text-anchor="middle">E3 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="74" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="103" y="42" font-size="12" text-anchor="middle">t2</text><text class="f-muted" fill="#5c6d66" x="103" y="58" font-size="12" text-anchor="middle">E3 E5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="138" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="167" y="42" font-size="12" text-anchor="middle">t3</text><text class="f-muted" fill="#5c6d66" x="167" y="58" font-size="12" text-anchor="middle">E1 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="231" y="42" font-size="12" text-anchor="middle">t4</text><text class="f-muted" fill="#5c6d66" x="231" y="58" font-size="12" text-anchor="middle">E1 E3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="266" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="295" y="42" font-size="12" text-anchor="middle">t5</text><text class="f-muted" fill="#5c6d66" x="295" y="58" font-size="12" text-anchor="middle">E5 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="330" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="359" y="42" font-size="12" text-anchor="middle">t6</text><text class="f-muted" fill="#5c6d66" x="359" y="58" font-size="12" text-anchor="middle">E3 E7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 70V88"/>
+<text class="f-muted" fill="#5c6d66" x="210" y="84" font-size="12">regroup by expert</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="96" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="113" font-size="12" text-anchor="middle">E1</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="96" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="113" font-size="12" text-anchor="middle">t3</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="96" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="113" font-size="12" text-anchor="middle">t4</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="113" font-size="12" text-anchor="end">1 read, 2 tokens</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="126" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="143" font-size="12" text-anchor="middle">E3</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="143" font-size="12" text-anchor="middle">t1</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="143" font-size="12" text-anchor="middle">t2</text>
+<rect class="f-soft" fill="#e5f1df" x="164" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="186" y="143" font-size="12" text-anchor="middle">t4</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="236" y="143" font-size="12" text-anchor="middle">t6</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="143" font-size="12" text-anchor="end">1 read, 4 tokens</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="156" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="173" font-size="12" text-anchor="middle">E5</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="156" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="173" font-size="12" text-anchor="middle">t2</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="156" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="173" font-size="12" text-anchor="middle">t5</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="173" font-size="12" text-anchor="end">1 read, 2 tokens</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="186" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="203" font-size="12" text-anchor="middle">E7</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="203" font-size="12" text-anchor="middle">t1</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="203" font-size="12" text-anchor="middle">t3</text>
+<rect class="f-soft" fill="#e5f1df" x="164" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="186" y="203" font-size="12" text-anchor="middle">t5</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="236" y="203" font-size="12" text-anchor="middle">t6</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="203" font-size="12" text-anchor="end">1 read, 4 tokens</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">Results return to their tokens; add by routing weight</text>
+</svg><figcaption>Figure 16-4　Grouping by expert: 12 "expert calls" read expert weights only 4 times. At real scale the numbers are much bigger, and so is the reuse.</figcaption></figure>
+<p>Scale it up to real size: a chunk of 8,192 tokens, each picking 10 experts per layer, makes 81,920 expert calls in one layer, yet each layer has only 512 experts. On average each expert is shared by 81,920 ÷ 512 = 160 tokens. <span class="ev ev-est">Teaching estimate</span> A source comment also says that once a chunk reaches 1,024 tokens or more, "almost all" of each layer's 512 experts get picked. <span class="ev ev-code">Code fact</span></p>
+<p>After grouping, where do the experts come from? Hot experts cached in VRAM are read directly. The rest travel from the expert area in RAM through a pinned-memory "ring buffer" and onto the GPU on a separate copy stream. [S12] After the computation, the results must go back in the original token order and then be added up by each token's routing weights. Put one result in the wrong place, and it gets added to some other token.</p>
+<p>Note how this differs from decode. During decode, missed experts are mostly computed in place by the CPU in RAM (Chapter 10). During prefill each expert is shared by hundreds or thousands of tokens, so moving it to the GPU and computing them together pays off.</p>
+
+<h2 id="sec-4">16.4 How big should a chunk be? Is bigger always better?</h2>
+<p>The prompt is cut into <dfn>chunks</dfn> and read one chunk at a time; each chunk goes through all 48 layers before the next one starts. [S12] The bigger the chunk, the more tokens share the weights and the experts. But bigger is not always better. The teaching model below draws the trade-off:</p>
+<div class="viz" data-viz="prefill-chunk"><figure class="fig"><svg viewBox="0 0 400 220" role="img" aria-label="Figure 16-5: in the teaching model, prefill speed rises fast as the chunk grows from 1 token to 2048, then levels off near the ceiling of 2500 tokens per second">
+<text class="f-muted" fill="#5c6d66" x="10" y="14" font-size="12">Teaching model, 32K prompt: tokens/s by chunk size C</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="14" y="179" width="36" height="1"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="62" y="178.5" width="36" height="1.5"/>
+<rect class="f-accent" fill="#136d5a" x="110" y="174" width="36" height="6"/>
+<rect class="f-accent" fill="#136d5a" x="158" y="156.2" width="36" height="23.8"/>
+<rect class="f-accent" fill="#136d5a" x="206" y="85.8" width="36" height="94.2"/>
+<rect class="f-accent" fill="#136d5a" x="254" y="42.1" width="36" height="137.9"/>
+<rect class="f-accent" fill="#136d5a" x="302" y="41.1" width="36" height="138.9"/>
+<rect class="f-accent" fill="#136d5a" x="350" y="40.6" width="36" height="139.4"/>
+<text class="f-text" fill="#182f2b" x="32" y="172" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="80" y="172" font-size="12" text-anchor="middle">27</text>
+<text class="f-text" fill="#182f2b" x="128" y="168" font-size="12" text-anchor="middle">107</text>
+<text class="f-text" fill="#182f2b" x="176" y="150" font-size="12" text-anchor="middle">425</text>
+<text class="f-text" fill="#182f2b" x="224" y="80" font-size="12" text-anchor="middle">1,683</text>
+<text class="f-text" fill="#182f2b" x="272" y="37" font-size="12" text-anchor="middle">2,462</text>
+<text class="f-text" fill="#182f2b" x="320" y="36" font-size="12" text-anchor="middle">2,481</text>
+<text class="f-text" fill="#182f2b" x="368" y="36" font-size="12" text-anchor="middle">2,490</text>
+<text class="f-muted" fill="#5c6d66" x="32" y="196" font-size="12" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="196" font-size="12" text-anchor="middle">16</text>
+<text class="f-muted" fill="#5c6d66" x="128" y="196" font-size="12" text-anchor="middle">64</text>
+<text class="f-muted" fill="#5c6d66" x="176" y="196" font-size="12" text-anchor="middle">256</text>
+<text class="f-muted" fill="#5c6d66" x="224" y="196" font-size="12" text-anchor="middle">1024</text>
+<text class="f-muted" fill="#5c6d66" x="272" y="196" font-size="12" text-anchor="middle">2048</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="196" font-size="12" text-anchor="middle">4096</text>
+<text class="f-muted" fill="#5c6d66" x="368" y="196" font-size="12" text-anchor="middle">8192</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="214" font-size="12">Assume W = 600 ms, u = 0.4 ms, pipeline on</text>
+</svg><figcaption>Figure 16-5　With small chunks, each chunk's compute is too short to cover one trip of the weights, so speed grows almost in proportion to chunk size. Past the break-even point, speed hugs the compute ceiling. The numbers come from a teaching model, not from Strata measurements.</figcaption></figure></div>
+<p>How does the real Strata pick a chunk size? Upstream's explanation: long text is read in big chunks of at most 8,192 tokens each, which is why long documents read at over 1,000 tokens per second. [S02] With <code>--prefill auto</code>, the engine picks from a table of candidates: the largest buffer that stays within the borrowing limit. The default maximum is 8,192, and the user can explicitly raise it to 16,384 or 32,768. <span class="ev ev-code">Code fact</span> To estimate "how long will prefill take", the server also assumes at most 32,768 tokens per chunk. [S15]</p>
+<p>The price of a big chunk is temporary VRAM. The intermediate results of an 8,192-token chunk take a lot of space. Strata's answer is to "borrow" from the expert cache: during prefill it lends some slots at the end of the cache to the chunk buffer, and after prefill it fills the original experts back in. Each request borrows only the size its own prompt needs. [S12] Figure 16-6 shows a set of measurements from a source comment.</p>
+<figure class="fig"><svg viewBox="0 0 400 198" role="img" aria-label="Figure 16-6: a 12 GB GPU reading a 32K prompt. Chunk sizes 4096, 6144 and 8192 reach 791, 878 and 973 tokens per second">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Upstream code comment: 12 GB GPU, Q2_0, 32K prompt</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">Chunk 4096</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="35" width="162.6" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="258" y="48" font-size="12">791 tokens/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">Chunk 6144</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="75" width="180.4" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="276" y="88" font-size="12">878 tokens/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="128" font-size="12">Chunk 8192</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="115" width="200" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="296" y="128" font-size="12">973 tokens/s</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="164" font-size="12">Chunk 8192 borrows 69% of the expert cache slots</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="186" font-size="12">Bigger chunk: faster, but borrows more VRAM</text>
+</svg><figcaption>Figure 16-6　In the real engine, raising the chunk from 4,096 to 8,192 made prefill about 23% faster; the price was lending most of the expert cache during prefill. The comment does not say which engine version it used.</figcaption></figure>
+<p>The speedup is 973 ÷ 791 ≈ 1.23×. <span class="ev ev-est">Teaching estimate</span> Even bigger chunks can be a bit faster still: the comment records an RTX 5090 reading a 32K prompt at 5,624 tokens per second with 8,192-token chunks, and 6,465 tokens per second with the whole prompt as one chunk (32,768). But that needs a lot of VRAM, so it is off by default. <span class="ev ev-code">Code fact</span></p>
+<p>Chunks cannot be too small either. A source comment notes that below about 1,000 tokens per chunk the engine switches to a different set of kernels, and the Q2_0 output changes, so the "move every expert" mode has a floor of 1,024. <span class="ev ev-code">Code fact</span> Also, the engine checks "should I stop?" only before each chunk starts, so the bigger the chunk, the longer a cancelled request has to wait. [S12]</p>
+
+<h2 id="sec-5">16.5 Pipelining: this layer computes while the next one is on its way</h2>
+<p>Once the prompt is cut, each chunk still has to go through 48 layers. Every layer does two things: move the experts it needs onto the GPU, then compute. If the two take turns, the copy channel sits idle while the GPU computes, and the GPU sits idle while data moves. Strata overlaps them: while the current layer computes attention, the next layer's experts are already crossing PCIe. [S02]</p>
+<aside class="primer" id="c16-pipeline">
+<h3>Pipelining: several stages working at once</h3>
+<p>Intuition: doing laundry has two steps, "wash" and "dry". With one washer and one dryer, the smart move is to put the second load in the washer while the first load is in the dryer. Each load takes as long as before, but the whole pile finishes much sooner.</p>
+<p>Definition: split a job into several stages in sequence, each done by a different unit. While job i is in stage 2, job i+1 has already started stage 1. This is a <dfn>pipeline</dfn>. Once it is running steadily, the total time is set by the slowest stage, not by the sum of all stages. Figure 16-7 shows an example with two stages and four layers.</p>
+<p>A pipeline needs two things: the stages must use different units (here, the copy engine and the compute units), and a buffer between them must hold what "has arrived but is not computed yet". If the buffer is too small, the moving stops and waits.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Pipeline_%28computing%29" target="_blank" rel="noopener noreferrer">Wikipedia: Pipeline (computing)</a> · <a href="https://en.wikipedia.org/wiki/Instruction_pipelining" target="_blank" rel="noopener noreferrer">Wikipedia: Instruction pipelining</a> · <a href="https://en.wikipedia.org/wiki/Multiple_buffering" target="_blank" rel="noopener noreferrer">Wikipedia: Multiple buffering (the buffer between stages)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="Figure 16-7: moving and computing in turn takes 8 time slots; overlapped, they take only 5">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12" font-weight="600">No overlap: copy, then compute, in turn</text>
+<text class="f-text" fill="#182f2b" x="390" y="16" font-size="12" text-anchor="end">8 slots</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="38" font-size="12">Copy</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="58" font-size="12">Compute</text>
+<rect class="f-soft" fill="#e5f1df" x="60" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="79.5" y="38" font-size="12" text-anchor="middle">L1</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="119.5" y="58" font-size="12" text-anchor="middle">L1</text>
+<rect class="f-soft" fill="#e5f1df" x="140" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="159.5" y="38" font-size="12" text-anchor="middle">L2</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="199.5" y="58" font-size="12" text-anchor="middle">L2</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="239.5" y="38" font-size="12" text-anchor="middle">L3</text>
+<rect class="f-accent" fill="#136d5a" x="260" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="279.5" y="58" font-size="12" text-anchor="middle">L3</text>
+<rect class="f-soft" fill="#e5f1df" x="300" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="319.5" y="38" font-size="12" text-anchor="middle">L4</text>
+<rect class="f-accent" fill="#136d5a" x="340" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="359.5" y="58" font-size="12" text-anchor="middle">L4</text>
+<text class="f-text" fill="#182f2b" x="10" y="96" font-size="12" font-weight="600">Overlap: compute layer l, copy layer l+1</text>
+<text class="f-text" fill="#182f2b" x="390" y="96" font-size="12" text-anchor="end">5 slots</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="118" font-size="12">Copy</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="138" font-size="12">Compute</text>
+<rect class="f-soft" fill="#e5f1df" x="60" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="79.5" y="118" font-size="12" text-anchor="middle">L1</text>
+<rect class="f-soft" fill="#e5f1df" x="100" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="119.5" y="118" font-size="12" text-anchor="middle">L2</text>
+<rect class="f-soft" fill="#e5f1df" x="140" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="159.5" y="118" font-size="12" text-anchor="middle">L3</text>
+<rect class="f-soft" fill="#e5f1df" x="180" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="199.5" y="118" font-size="12" text-anchor="middle">L4</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="119.5" y="138" font-size="12" text-anchor="middle">L1</text>
+<rect class="f-accent" fill="#136d5a" x="140" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="159.5" y="138" font-size="12" text-anchor="middle">L2</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="199.5" y="138" font-size="12" text-anchor="middle">L3</text>
+<rect class="f-accent" fill="#136d5a" x="220" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="239.5" y="138" font-size="12" text-anchor="middle">L4</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="176" font-size="12">Strata: next layer's experts arrive during attention</text>
+</svg><figcaption>Figure 16-7　When the two stages take equally long, overlapping squeezes 8 time slots into 5. The more layers, the closer you get to "paying for only one stage".</figcaption></figure>
+<p>In Strata, the buffer is that pinned-memory ring buffer. A source comment records how much its size matters: reading Q2_0 with 8,192-token chunks, a ring of 96 slots reads 1,153 tokens per second, and 384 slots reach 1,294, because "the next layer's experts can arrive during this layer's attention phase". <span class="ev ev-code">Code fact</span></p>
+<p>With several graphics cards, the pipeline gains another level: each card owns a span of layers, and as soon as the earlier span hands a chunk's intermediate results to the later span, it starts reading the next chunk. In the words of the interface comment, while the later span reads chunk c, the earlier span is already reading chunk c+1. [S12]</p>
+<p>Finally, do not forget the handoff. When a chunk is done, the engine must leave the session state exactly as it "would be after reading token by token up to here": the GDN recurrent state and convolution history, the QSA KV cache and indexer, the PLE history. Not one can be missing, so that decode can pick up seamlessly from the next token. [S12]</p>
+
+<h2 id="sec-6">16.6 Hands-on: find a chunk that is fast and still fits</h2>
+<ol>
+<li>First play with the interactive figure above (Figure 16-5). Drag C from 1 to 8192 and watch where the bars change from "rising" to "plateau". Then switch the pipeline off, play once with it on and once with it off at C = 1024, and compare the "time per chunk".</li>
+<li>Open this book's lab, "Chunking and the space trade-off". Under an explicitly given reuse curve, it computes both the speed of each chunk size and the space it needs. First find the absolute fastest chunk, then rule out the ones over the VRAM budget, and compare how far the "best feasible" is from the "absolute best". The reuse curve and per-token space in the lab are made-up parameters, not Strata's allocator.</li>
+<li>Think about it: if the same prompt is read with C = 1 and with C = 8192, should the final state be the same? Answer after reading "Go deeper".</li>
+</ol>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>Decode is matrix × vector: one read of the weights serves one token. Prefill is matrix × matrix: one read of the weights serves a whole chunk. On the same computer, prefill can be more than twenty times faster than decode.</li>
+<li>The expert part is batched by grouping by expert: tokens that picked the same expert go together, and its weights are read only once. Bigger chunks mean more reuse, but they borrow more VRAM and make cancelling slower. Strata's default is at most 8,192 tokens per chunk.</li>
+<li>Pipelining overlaps moving and computing: while the current layer computes, the next layer's experts are already on their way. The total time is set by the slowest stage.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "During prefill all the tokens are known, so they can see each other and the causal rule no longer matters."</strong></p>
+<p>Wrong. Batching only changes how the computation is organized; it does not change the model's rules. Token i can still see only the tokens before it. Prefill still uses the causal mask, and the recurrent layers still walk through the chunk in order. An input being "known" and being allowed to "see the future" are two different things.</p></div>
+
+<details class="deep"><summary>Go deeper: state handoff, rounding differences and when borrowing VRAM is safe</summary>
+<h3>The handoff is more than the last vector</h3>
+<p>When a chunk is done, the state to hand off includes the GDN recurrent state and convolution state, the QSA KV and indexer, the PLE history, and the state related to the draft layers. [S12][S13] If you keep only the last row of logits and drop these states, the next decode step is no longer working on the same history.</p>
+<p>A strong test: read the same token string with different chunkings, such as C = 1, C = 7 and C = 32, then compare the state at chunk boundaries and the output that follows under a fixed history. The samples most likely to break: a length that just crosses a chunk boundary, a last chunk that is not full, a very short prompt, a cancel halfway through prefill, and decode starting right after prefill.</p>
+<h3>Batching changes rounding, but "floating point" is not an excuse for everything</h3>
+<p>Batched and one-by-one computation can take different rounding paths. The upstream docs give an example: with IQ-family models, the CPU computes one token's experts with ggml's dot product, but several tokens with Strata's own multi-token kernel, and the two round slightly differently. So even at temperature 0, the same prompt can produce another, equally reasonable answer because the drafts differ. Upstream added a switch that makes every group use the multi-token kernel. [S03]</p>
+<p>So when C = 1 and a large C do not give word-for-word identical output, you cannot conclude right away that one side has a bug, and you cannot wave it off with "it's just floating point" either. Compare on the same fixed history: the intermediate tensors, the chosen experts and index numbers, and the layer where the error starts to grow. Then judge by tolerances and quality gates set in advance. The "non-numeric contracts", such as state positions, the causal mask and index numbers, must be checked separately and exactly.</p>
+<h3>When borrowing VRAM is safe</h3>
+<p>The chunk buffer borrows slots from the expert cache, which raises two problems. First, while slots are lent out, the experts that used to live there are gone, so the routing table must stop treating them as "hits". In the source code, those experts are moved from RAM during prefill and filled back in afterwards. [S12] Second, only after the refill has finished may the engine announce again which expert lives in each slot. Showing that "the budgets add up to less than VRAM" does not prove that borrowing is safe. What you must prove is that "at every moment, the label matches the bytes in the slot".</p>
+<h3>The several chunk sizes in the docs</h3>
+<p>Different chunk sizes appear in different places upstream: the readme says "at most 8,192 tokens" [S02]; an old paragraph in the details doc still says 2,048; the server uses 32,768 as the upper bound to estimate wait time [S15]; the engine's auto mode defaults to a maximum of 8,192 and can be explicitly raised to 32,768. <span class="ev ev-code">Code fact</span> These numbers do not contradict each other; they answer different questions (default, historical value, upper bound). In formulas, this book always writes the chunk size as the variable C.</p>
+<h3>The limits of the teaching cost formula</h3>
+<p>This chapter's interactive figures and the "Chunking and the space trade-off" lab use a simplified cost formula of the form T ≈ N ÷ r(C) + ⌈N ÷ C⌉ × fixed cost per chunk, where r(C) is an explicitly set reuse curve. It can show two things, "the fixed cost gets spread thin" and "space is limited", but it cannot predict Strata's real throughput. Real speed also depends on the expert hit rate, PCIe bandwidth, the CPU copy threads, the attention compute that grows with context length, and more.</p>
+<p>In advanced GPU experiments, change only C each time, keep everything else fixed (quantization, KV format, drafts, input, cache state), and then explain the changes in speed and quality.</p>
+</details>
