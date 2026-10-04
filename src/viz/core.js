@@ -6,6 +6,8 @@
   'use strict';
   const registry = Object.create(null);
   const NS = 'http://www.w3.org/2000/svg';
+  // Shared widget chrome strings.
+  const UI = { zh: { tryTitle: '试试看', verdict: '结论' }, en: { tryTitle: 'Try it', verdict: 'Takeaway' } };
   const reduced = () => !!(root.matchMedia && root.matchMedia('(prefers-reduced-motion: reduce)').matches);
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -25,8 +27,16 @@
     };
   }
 
+  // Page language: zh (default), en, ja, ko, es, ar. Taken from <html lang>.
+  const LANGS = ['zh', 'en', 'ja', 'ko', 'es', 'ar'];
+  const pageLang = () => { const l = (root.document && document.documentElement.lang || 'zh').slice(0, 2).toLowerCase(); return LANGS.includes(l) ? l : 'zh'; };
+
   const Viz = {
     esc,
+    LANGS,
+    get lang() { return pageLang(); },
+    // Picks the string table for the page language, falling back to Chinese key by key.
+    t(tables) { const base = tables.zh || {}, cur = tables[pageLang()] || {}; return new Proxy(cur, { get: (o, k) => (k in o ? o[k] : base[k]) }); },
     register(name, def) {
       if (!def || typeof def.mount !== 'function') throw new Error('Viz.register needs a mount function: ' + name);
       registry[name] = def;
@@ -48,7 +58,7 @@
           ctxs.push(ctx);
         } catch (err) {
           ctx.dispose();
-          el.innerHTML = '<p class="hint">交互图加载失败：' + esc(err.message) + '</p>';
+          el.innerHTML = '<p class="hint">viz error: ' + esc(err.message) + '</p>';
           if (root.console) console.error('viz ' + el.dataset.viz, err);
         }
       });
@@ -92,7 +102,7 @@
     stat({ id, k, v, f, hot }) {
       return `<div class="viz-stat${hot ? ' hot' : ''}"><div class="k">${k}</div><div class="v" data-s="${id}-v">${v}</div><div class="f" data-s="${id}-f">${f}</div></div>`;
     },
-    tryList(items) { return `<div class="viz-try"><h4>&gt; 试试看</h4><ol>${items.map(i => `<li>${i}</li>`).join('')}</ol></div>`; },
+    tryList(items, title) { return `<div class="viz-try"><h4>&gt; ${esc(title || Viz.t(UI).tryTitle)}</h4><ol>${items.map(i => `<li>${i}</li>`).join('')}</ol></div>`; },
     button(label, cls) { return `<button type="button" class="viz-btn${cls ? ' ' + cls : ''}">${esc(label)}</button>`; },
     svg(tag, attrs, parent) {
       const e = document.createElementNS(NS, tag);
@@ -102,7 +112,7 @@
     },
     // Current value of a CSS custom property, for canvas or SVG fills that must follow the theme.
     color(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); },
-    fmt(n, digits = 0) { return Number(n).toLocaleString('zh-CN', { maximumFractionDigits: digits, minimumFractionDigits: digits }); },
+    fmt(n, digits = 0) { return Number(n).toLocaleString(pageLang() === 'zh' ? 'zh-CN' : pageLang(), { maximumFractionDigits: digits, minimumFractionDigits: digits }); },
   };
 
   root.Viz = Viz;

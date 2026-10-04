@@ -108,7 +108,7 @@ test('rewritten chapters follow the enthusiast template and print their deep div
  const app=fs.readFileSync(path.join(root,'src/app.js'),'utf8');
  assert.ok(app.includes('<details class="deep" open>'),'exported book must open deep dives too');
 });
-const LINK_HOSTS=new Set(['zh.wikipedia.org','en.wikipedia.org','oi-wiki.org','developer.mozilla.org','docs.nvidia.com','rocm.docs.amd.com','arxiv.org','github.com','huggingface.co','pytorch.org','docs.python.org','www.rfc-editor.org','html.spec.whatwg.org','zh.cppreference.com','en.cppreference.com','pages.cs.wisc.edu','csapp.cs.cmu.edu','www.3blue1brown.com','jalammar.github.io','learn.microsoft.com','www.kernel.org','man7.org','neon.com']);
+const LINK_HOSTS=require('../scripts/link-hosts.cjs');
 test('primers explain CS foundations and cite only vetted public sources',()=>{
  const htmlOf=id=>fs.readFileSync(path.join(root,'content/chapters',id+'.html'),'utf8');
  const rewritten=chapters.filter(c=>htmlOf(c.id).includes('class="hook"'));
