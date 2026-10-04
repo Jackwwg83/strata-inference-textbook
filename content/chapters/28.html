@@ -1,56 +1,215 @@
-<h2 id="sec-1">28.1 项目 A：没有显卡也能完成的最小引擎</h2>
-<p>从随附 <code>tiny_inference.py</code> 开始。它用很小的随机固定权重和字符词表，把消息编码、向量、归一化、递归 / 注意力、专家路由、输出 head 与贪心选择接起来。随机权重不会产生有意义语言；项目的目标是理解运行机制，不是假装训练出了聊天模型。</p>
-<p>第一阶段打印每个张量的形状及状态归属；第二阶段实现保存 / 恢复和分段 prefill；第三阶段加入受控草稿与接受前缀；第四阶段比较全重放与增量处理。每一阶段都必须先加入一个会失败的测试，再完成实现。</p>
-<h2 id="sec-2">28.2 项目 B：从一个可测优化开始</h2>
-<p>选一个局部方向：量化块解码、页表 gather、缓存策略、chunk 大小、草稿窗口控制或 SSE 分片解析。提交原理推导、基线、修改、负例、结果和局限。不要同时改五个开关后只展示总耗时。</p>
-<p>没有 GPU 的学生可完成 CPU reference 与数学模拟；有 GPU 的学生可以在固定 Strata SHA 上运行真实复现。两种成绩按证据质量、分析和工程完整性评分，不按显卡价格评分。</p>
-<h2 id="sec-3">28.3 项目 C：多用户设计评审</h2>
-<p>高级组提交一份多序列扩展设计，而非强行在学期末做出生产服务。要求列出只读共享对象、每序列状态、scratch 归属、调度与预算事务、取消、恢复、观测与回滚。</p>
-<p>使用第 25 章的并发验收场景反证方案。加分项是小型可运行调度 / 状态隔离原型；没有经过验证的能力必须列为未实现，不允许用界面上显示五个用户代替五条真实活动推理流。</p>
-<h2 id="sec-4">28.4 一份合格报告的结构</h2>
-<p>报告先提出可证伪问题，例如“在相同输入与质量门下，增加显存热专家预算是否减少 CPU 暴露时间？”随后给出理论、源代码定位、方法、数据、解释与限制。结论必须指出自己是代码事实、实验结果还是推测。</p>
-<p>所有图都要有单位、样本量和测量条件。来源链接使用固定 SHA，不只指向 main。性能原始数据与失败日志保留；模型和依赖哈希记录在 manifest。不要只交漂亮截图。</p>
-<h2 id="sec-5">28.5 推荐评分量表</h2>
-<table>
-<thead>
-<tr>
-<th>维度</th>
-<th style="text-align:right">分值</th>
-<th>可检查证据</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>原理与推导</td>
-<td style="text-align:right">20</td>
-<td>公式、单位、依赖与前提正确</td>
-</tr>
-<tr>
-<td>源码与契约</td>
-<td style="text-align:right">20</td>
-<td>指向真实代码，分清当前与历史</td>
-</tr>
-<tr>
-<td>实现与测试</td>
-<td style="text-align:right">25</td>
-<td>可运行、独立 oracle、负例和边界</td>
-</tr>
-<tr>
-<td>实验与质量</td>
-<td style="text-align:right">20</td>
-<td>配对比较、原始数据、质量门与失败</td>
-</tr>
-<tr>
-<td>表达与可复现</td>
-<td style="text-align:right">15</td>
-<td>环境、步骤、限制、他人可复验</td>
-</tr>
-</tbody>
-</table>
-<p>一旦把教学模拟冒充硬件实测，该项实验结论不计分；若存在未经说明的状态串用，性能得分不能抵消正确性缺陷。</p>
-<h2 id="sec-6">28.6 教材也要有版本控制</h2>
-<p>本版锚定 <code>99f3dbd0b21d1401b3769e0c0d963913607f380b</code>，研究日期为 2026-10-04。升级时先比较模型几何、状态、量化、调度和 API 契约，再刷新相关章节与实验。不是每次 main 更新都自动重写课程；可建立学期稳定版和研究跟踪版。</p>
-<p>本版是可授课、可自学的完整 Web 教学初版，但不是经过出版社或多位教师外审的正式定稿。公开发行前建议安排系统方向与模型数值方向分别交叉审阅，并以试讲反馈检查入门难度。独立教材不代表原项目背书。</p>
-<h2 id="sec-7">28.7 最后的理解检验</h2>
-<p>离开本书时，你应该能解释：为什么 40 GB 文件未必需要 40 GB 显存；为什么多 token 验证不等于提前知道未来；为什么相同指针可能是不同激活；为什么固定状态不等于任意回滚；为什么更多线程不等于更多正确会话；为什么一个更快的数值必须带着完整条件。</p>
-<p>这几句话能迁移到其他推理引擎。Strata 是进入真实系统的入口，而不是需要死记参数的终点。</p>
+<div class="hook"><span class="eyebrow">一个零件全绿的故事</span>
+<p>Strata 的模型里有一个查表模块，叫 PLE（第 11 章讲过）。开发者把它拆成几个零件：算哈希、从大表里读一行、做一小段计算。每个零件都写好了，也都通过了对照测试，分别对上了参考脚本、numpy 和 ggml 的结果。</p>
+<p>然后，整个模型的一道验收没通过。原因写在源码注释里：这些零件<strong>从来没有被模型的主路径调用过</strong>。<span class="ev ev-code">代码事实</span>[S13] 每个零件都是对的，整台机器却少了一块。这一章是全书的最后一章，讲你的课程项目怎样避开这个坑。</p></div>
+<p class="tldr"><strong>一句话：</strong>做系统，先打通一条最细的“纵切”：让一个 token 从输入一路走到输出，并留下可以检查的证据；再一层层加功能。每做一个取舍，都写下换来了什么、付出了什么、怎样验证；交付时，给每个组件标明它的证据走到了哪一步。</p>
+
+<h2 id="sec-1">28.1 模块全绿，系统却是错的</h2>
+<p>图 28-1 画出了 PLE 的处境。三个零件各自通过了对照测试，可模型的主路径从第 0 层走到第 47 层，一次也没有经过它们。单看任何一个零件的测试报告，都看不出问题。</p>
+<figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="图 28-1：PLE 的三个零件各自通过对照测试，但模型主路径从未调用它们，整模型验收没有通过">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="15" font-weight="600" text-anchor="middle">零件都通过了测试，却没人调用它们</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="70" y="58" font-size="14" text-anchor="middle">算哈希</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="80" font-size="14" text-anchor="middle">✓ 对照通过</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="58" font-size="14" text-anchor="middle">读大表的一行</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="80" font-size="14" text-anchor="middle">✓ 对照通过</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="270" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="58" font-size="14" text-anchor="middle">计算块</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="80" font-size="14" text-anchor="middle">✓ 对照通过</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M70 94V128M200 94V128M330 94V128"/>
+<text class="f-warn" fill="#9e5d24" x="80" y="116" font-size="14">✗ 没接上</text>
+<text class="f-warn" fill="#9e5d24" x="210" y="116" font-size="14">✗</text>
+<text class="f-warn" fill="#9e5d24" x="340" y="116" font-size="14">✗</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="132" width="380" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="157" font-size="14" text-anchor="middle">模型主路径：第 0 层 → 第 1 层 → … → 第 47 层</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 172V188"/>
+<rect class="f-warn" fill="#9e5d24" x="70" y="190" width="260" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="215" font-size="14" text-anchor="middle">整模型验收（C1）没有通过</text>
+</svg><figcaption>图 28-1　零件级的测试全部通过，不等于系统接好了。只有一条真正走完主路径的测试，才能发现“根本没被调用”这种错误。[S13]</figcaption></figure>
+<p>这种错误有一个共同的根源：先把每一层“横着”做完，最后才把它们接起来。好比修一条从 A 城到 B 城的路，先把每一公里都铺到最终宽度，最后一天才发现中间有一段从来没连上。更稳的做法是先修一条窄路，从 A 一直通到 B，能走车了，再慢慢拓宽。</p>
+<p>软件里，这条“窄路”叫<dfn>纵切</dfn>（vertical slice）：一个功能从入口一直贯穿到出口，每一层只做它必需的那一小部分，但整条链路是真的、能运行、能产出可以检查的结果。对推理引擎来说，第一条纵切就是：一句话进来，经过编码、逐层计算、选词，吐出一个 token，并把中间的关键数据打印出来，让人能核对。</p>
+<p>纵切不等于随便写。它要求“细”，不要求“糙”：这一条链上的每一步都要有测试，第 26 章讲的参照答案和负例一样都不能少。它省掉的是广度，不是正确性。</p>
+
+<h2 id="sec-2">28.2 系统设计，就是把取舍写下来</h2>
+<p>打通纵切之后，每加一个功能，都会遇到选择：用更多显存换速度，还是省显存；先求快，还是先求能调试。这些选择没有标准答案，但有标准的写法。</p>
+<aside class="primer" id="c28-system-design">
+<h3>系统设计与工程取舍</h3>
+<p><dfn>系统设计</dfn>回答的是：在给定的约束下，把一堆部件组织成一个能满足需求的整体。它和写一个算法不同：算法题通常有最优解，系统设计几乎总是在几个目标之间做<dfn>取舍</dfn>。速度、内存、正确性、可调试性、开发时间，往往此消彼长。</p>
+<p>一次像样的取舍，至少写清五件事：</p>
+<p>① <strong>决定</strong>：选了什么，没选什么。② <strong>换来</strong>：得到了什么好处，最好有数字。③ <strong>代价</strong>：付出了什么，同样要有数字。④ <strong>验证</strong>：怎样确认好处真的拿到了、代价真的只有这么多。⑤ <strong>重议条件</strong>：出现什么情况时，应该推翻这个决定。</p>
+<p>第 ⑤ 条最容易被忘掉。没有它，一个当初合理的决定，会在条件变了以后继续存在，变成没人敢动的“历史遗留”。工程界把这类越积越多、迟早要还的代价叫作<dfn>技术债</dfn>。</p>
+<p>取舍还有一个常见的陷阱：只优化你能测到的那一项。比如只看平均速度，就可能牺牲了尾部延迟；只看单元测试，就可能漏掉组合错误。所以设计时就要想好，每个目标用什么指标衡量。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/软件工程" target="_blank" rel="noopener noreferrer">维基百科：软件工程</a> · <a href="https://zh.wikipedia.org/zh-cn/技术负债" target="_blank" rel="noopener noreferrer">维基百科：技术负债</a> · <a href="https://en.wikipedia.org/wiki/Systems_design" target="_blank" rel="noopener noreferrer">Wikipedia: Systems design</a> · <a href="https://en.wikipedia.org/wiki/Trade-off" target="_blank" rel="noopener noreferrer">Wikipedia: Trade-off</a></p>
+</aside>
+<p>Strata 的源码注释里，有很多这样写得清清楚楚的取舍。图 28-2 整理了其中一个：QSA 层的索引器负责挑出要读的历史位置，它的键用 FP32 存，而不是更省的 FP16。<span class="ev ev-code">代码事实</span>[S18]</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="图 28-2：一次取舍的完整记录：索引器的键用 FP32 存，换来选择结果与参照一致，代价是 32K 上下文约 50 MiB">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="15" font-weight="600" text-anchor="middle">一次取舍的完整记录</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="380" height="234" rx="10"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="62" font-size="14">决定</text><text class="f-text" fill="#182f2b" x="104" y="62" font-size="14">索引器的键存成 FP32，不用 FP16</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="92" font-size="14">换来</text><text class="f-text" fill="#182f2b" x="104" y="92" font-size="14">选中的位置和参照完全一致</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="122" font-size="14">代价</text><text class="f-text" fill="#182f2b" x="104" y="122" font-size="14">32K 上下文时，这些键约占 50 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="152" font-size="14">理由</text><text class="f-text" fill="#182f2b" x="104" y="152" font-size="14">FP16 会让每个分数相对偏差约 2⁻¹¹，</text>
+<text class="f-text" fill="#182f2b" x="104" y="174" font-size="14">正好落在“选谁”的边界上</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="204" font-size="14">验证</text><text class="f-text" fill="#182f2b" x="104" y="204" font-size="14">选中的位置必须逐个相同，不给容差</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="234" font-size="14">何时重议</text><text class="f-text" fill="#182f2b" x="104" y="234" font-size="14">改用 INT8 前，先测出翻转率</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="14" text-anchor="middle">来源：qsa.hpp 开头的布局说明</text>
+</svg><figcaption>图 28-2　一条写得完整的取舍：决定、换来、代价、理由、验证、何时重议，六样都有。注释原话是：这点显存，“和一条正确性契约比起来很便宜”。[S18]</figcaption></figure>
+<p>再看几个例子，它们来自 <code>session.hpp</code>，都把“换来什么、付出什么”写在了一起 <span class="ev ev-code">代码事实</span>[S13]：</p>
+<ul>
+<li><strong>每层一张 GPU 计算图。</strong>把一层的几十次内核启动录成一张图再回放，实测同样的工作从 2.393 毫秒降到 1.585 毫秒，快了 1.51 倍，因为引擎的瓶颈是“启动内核”的开销，而不是带宽。相关的代价也写在旁边：为了让每层的专家结果用本层的权重合并，每层还要再加一张图，CPU 能和 GPU 重叠工作的窗口因此只剩共享专家那一小段；注释直说“一个严格串行的残差链藏不住逐层的 CPU 计算”，这部分只能靠显存里的专家缓存去解决。</li>
+<li><strong>调试开关做成运行时参数。</strong>“每层同步一次”能抓到别处看不见的错误，但会拖慢速度。它被做成一个运行时参数，而不是编译时选项：需要时打开，平时关掉。</li>
+<li><strong>生成 token 时零内存分配。</strong>一个会话需要的所有状态，在开始时一次分配好。注释特别说明：如果在长序列的第一个 token 才去申请显存，现有的每个测试都会通过，唯独违反这条约束。</li>
+</ul>
+<p>服务层也一样。Strata 的服务端一次只服务一个序列，请求先来先服务；提示加上输出上限超过上下文长度时，直接拒绝并返回 400，而不是悄悄截断。[S15] 前者用简单换来了状态不会串，后者用一次报错换来了用户不会拿到被截断却不自知的结果。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>工业界有一种做法叫“架构决策记录”（ADR）：每个重要决定写一页短文档，包括背景、决定、后果。你的课程报告里，每个设计选择都可以按图 28-2 的格式写一张小卡片。</p>
+
+<h2 id="sec-3">28.3 三种项目，选一个</h2>
+<p>课程项目分三种，按你手头的条件选。三种的评分标准相同：看证据的质量、分析和工程的完整性，不看显卡的价格。</p>
+<p><strong>项目 A：没有显卡也能做的微型引擎。</strong>从本书随附的 <code>labs/tiny_inference.py</code> 出发。它用很小的固定随机权重和字符词表，把编码、归一化、递归层与注意力层、专家路由、输出和贪心选词接成一条完整的链。随机权重不会产生有意义的语言；这个项目的目标是理解运行机制，不是假装训练出了聊天模型。第 28.5 节给出分步路线。</p>
+<p><strong>项目 B：从一个可测的优化开始。</strong>选一个局部方向：量化块的解码、页表收集、缓存策略、分块大小、草稿窗口的控制，或者流式输出的分片解析。提交原理推导、基线、改动、负例、结果和局限。一次只改一个因素，不要同时改五个开关，最后只展示一个总耗时。没有显卡的同学做 CPU 参照实现和数学模拟；有显卡的同学可以在固定的 Strata 提交上做真实复现。</p>
+<p><strong>项目 C：多用户设计评审。</strong>提交一份“让多个序列同时运行”的设计，而不是在学期末强行做出一个生产服务。设计的第一步，是给每一块数据定好归属，见图 28-3。</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="图 28-3：多用户设计的数据归属：权重只读共享，每个序列一份状态，临时工作区按时间共用">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="15" font-weight="600" text-anchor="middle">多用户设计的第一步：给每块数据定归属</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="34" width="360" height="62" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="58" font-size="15" font-weight="600" text-anchor="middle">只读，所有序列共享</text>
+<text class="f-text" fill="#182f2b" x="200" y="82" font-size="14" text-anchor="middle">模型权重、专家数据</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="108" width="360" height="62" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="132" font-size="15" font-weight="600" text-anchor="middle">每个序列各有一份</text>
+<text class="f-on" fill="#ffffff" x="200" y="156" font-size="14" text-anchor="middle">KV 缓存、GDN 递归状态、PLE 历史</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="182" width="360" height="62" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="206" font-size="15" font-weight="600" text-anchor="middle">临时工作区（scratch）</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="230" font-size="14" text-anchor="middle">同一时刻只有一层在用，所以可以共用</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="274" font-size="14" text-anchor="middle">Strata 的 SessionState：序列需要的全部非权重数据</text>
+</svg><figcaption>图 28-3　数据归属三分法。Strata 把“一个序列需要的、不是权重的一切”放进 SessionState；GDN 层的工作区由 36 层共用，状态则每层一份。[S13]</figcaption></figure>
+<p>设计文档要列出：哪些是只读共享对象，哪些是每个序列的状态，临时工作区归谁，调度和显存预算怎样分配，取消、恢复、观测和回滚怎么做。然后用第 25 章的并发验收场景去反驳自己的方案。加分项是一个能运行的小型调度或状态隔离原型。没有验证过的能力，必须写成“未实现”：界面上显示五个用户，不等于有五条真实在跑的推理流。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这和《操作系统》里的进程模型一模一样：多个进程共享只读的代码段，各自拥有私有的栈和堆。KV 缓存就是每个序列的“私有内存”，共享它而不加保护，就是两个进程互相改写对方的数据。</p>
+
+<h2 id="sec-4">28.4 交付什么：给每个组件标明证据</h2>
+<p>项目报告最常见的问题，不是代码写错，而是把“写完了”说成“做完了”。为此，报告里的每个组件都要标明它的证据走到了哪一步：</p>
+<div class="table-wrap"><table><thead><tr><th>状态</th><th>含义</th><th>可以拿出的证据</th></tr></thead><tbody>
+<tr><td>代码写完</td><td>写了，测试过了，但还没接进主路径</td><td>单元测试的输出</td></tr>
+<tr><td>接进主路径</td><td>主路径确实调用了它</td><td>一次完整运行的日志，能看到它被调用</td></tr>
+<tr><td>真实数据</td><td>真实输入经过它，产出了完整的结果</td><td>一条完整记录：输入、中间值、输出，字段齐全</td></tr>
+<tr><td>模拟、空值或推算</td><td>界面上能看到，但背后是假数据、空字段或估算</td><td>必须明说，并标“教学推演”</td></tr>
+</tbody></table></div>
+<p>一个组件完全可能“代码写完、也接进了主路径”，却还没有产出真实数据。这种状态必须照实写出来，不能用“完成”两个字盖过去。Strata 的源码里有一个很好的例子：CPU 和 GPU 本该重叠工作，可如果 CPU 拿到任务时 GPU 已经算完了这一层，整条流水线其实退化成了串行。这时每个 token 依然算得对，每层的耗时也看不出区别。所以作者专门加了一个计数器，统计 CPU 在 GPU 还在运行时拿到任务的层数，用来判断这个重叠机制是“真在干活”还是“只是摆设”。<span class="ev ev-code">代码事实</span>[S13]</p>
+<p>报告本身按这个顺序写：先提出一个可以被实验推翻的问题，例如“在相同的输入和质量门下，增加显存里的热专家预算，能否减少 CPU 的计算时间？”然后依次给出理论、源码定位、方法、数据、解释和局限。所有图都要写单位、样本数和测量条件；源码链接指向固定的提交，而不是会变的 main 分支；原始数据和失败日志都要保留。评分按下表：</p>
+<div class="table-wrap"><table><thead><tr><th>维度</th><th>分值</th><th>可检查的证据</th></tr></thead><tbody>
+<tr><td>原理与推导</td><td>20</td><td>公式、单位、依赖和前提正确</td></tr>
+<tr><td>源码与契约</td><td>20</td><td>指向真实代码，分清当前代码和过时的注释</td></tr>
+<tr><td>实现与测试</td><td>25</td><td>能运行，有独立的参照答案、负例和边界测试</td></tr>
+<tr><td>实验与质量</td><td>20</td><td>配对或交替比较、原始数据、质量门、失败也计入</td></tr>
+<tr><td>表达与可复现</td><td>15</td><td>写清环境、步骤和局限，别人能复验</td></tr>
+</tbody></table></div>
+<p>有两条红线。把教学模拟写成硬件实测，“实验与质量”整项不计分；存在没有说明的状态串用，“实现与测试”整项不计分，性能做得再好也抵消不了正确性的缺陷。下面的自检表可以帮你在交之前先给自己打一遍分。</p>
+<div class="viz" data-viz="rubric-check"><figure class="fig"><svg viewBox="0 0 400 256" role="img" aria-label="图 28-4：评分表的五项分值：原理 20、源码 20、实现与测试 25、实验 20、表达 15，以及两条红线">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="15" font-weight="600" text-anchor="middle">100 分怎么分配</text>
+<text class="f-text" fill="#182f2b" x="10" y="50" font-size="14">原理与推导</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="36" width="200" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="312" y="51" font-size="14">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="14">源码与契约</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="70" width="200" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="312" y="85" font-size="14">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="14">实现与测试</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="104" width="250" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="362" y="119" font-size="14">25</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="14">实验与质量</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="138" width="200" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="312" y="153" font-size="14">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="186" font-size="14">表达与复现</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="172" width="150" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="262" y="187" font-size="14">15</text>
+<text class="f-warn" fill="#9e5d24" x="10" y="222" font-size="14">红线：把模拟写成实测 → “实验与质量”清零</text>
+<text class="f-warn" fill="#9e5d24" x="10" y="246" font-size="14">红线：没说明的状态串用 → “实现与测试”清零</text>
+</svg><figcaption>图 28-4　评分表的分值分布。“实现与测试”占得最多；两条红线各自能让一整项归零。交互版可以逐项勾选，给自己打分。</figcaption></figure></div>
+
+<h2 id="sec-5">28.5 动手：先走通第一条纵切</h2>
+<p>以项目 A 为例。第一步不是写新功能，而是让现成的链路跑通一次，并看清它产出的每一个字段。在本书的仓库里运行：</p>
+<p><code>python3 labs/tiny_inference.py --prompt "hello" --tokens 8</code></p>
+<p>本书编写时实际运行的输出里，有这几样东西：模型几何（4 层、8 维、4 个专家选 2 个）、根据全部权重算出的模型指纹 <code>model_id</code>、提示的编号 <code>[8, 5, 12, 12, 15]</code>、生成的 8 个编号和对应的文字 <code>"mzjsldhx"</code>，以及 <code>"draft_matches_greedy": true</code>，说明草稿演示的结果和逐个生成完全一致。文字没有意义，因为权重是随机的；可每一个字段都是真算出来的。这就是你的第一份“真实数据”证据。</p>
+<p>接下来按纵切的思路一段段往上加。每一段都先写一个会失败的测试，再写实现：</p>
+<ol>
+<li><strong>看清形状和归属。</strong>在每一层打印张量的形状，画出哪些是只读的权重、哪些是会变的状态。</li>
+<li><strong>保存与恢复、分段预填充。</strong>保存一个会话，恢复后继续生成，结果要和没中断时一样；把提示切成几段处理，结果要和一次处理一样。</li>
+<li><strong>草稿与验证。</strong>修改草稿演示的候选，在任意一个位置第一次被拒绝后丢掉后面的草稿，输出要和贪心生成一致。</li>
+<li><strong>测量。</strong>最后才测速度，并且按第 27 章的方法写成记录。注意：这个脚本的耗时不能当成 Strata 的性能。</li>
+</ol>
+<p><code>labs/README.md</code> 里的五个任务大致沿着这条路线。先别急着动手，用下面的规划器体会一下：同样的周数，横着铺和竖着切，截止那天手里各有什么。</p>
+<div class="viz" data-viz="slice-planner"><figure class="fig"><svg viewBox="0 0 400 330" role="img" aria-label="图 28-5：第 10 周时的进度。横向铺开时没有一个功能完整可演示；纵切优先时已有两个功能完整跑通">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="15" font-weight="600">横向铺开：第 10 周时</text>
+<text class="f-muted" fill="#5c6d66" x="89" y="46" font-size="14" text-anchor="middle">代码</text>
+<text class="f-muted" fill="#5c6d66" x="131" y="46" font-size="14" text-anchor="middle">测试</text>
+<text class="f-muted" fill="#5c6d66" x="173" y="46" font-size="14" text-anchor="middle">接线</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="46" font-size="14" text-anchor="middle">证据</text>
+<text class="f-text" fill="#182f2b" x="10" y="72" font-size="14">主干</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="14">保存</text>
+<text class="f-text" fill="#182f2b" x="10" y="124" font-size="14">分段</text>
+<text class="f-text" fill="#182f2b" x="10" y="150" font-size="14">草稿</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="56" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="56" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="56" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="56" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="82" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="82" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="82" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="82" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="108" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="108" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="108" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="108" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="134" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="134" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="134" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="134" width="38" height="22" rx="3"/>
+<text class="f-warn" fill="#9e5d24" x="250" y="76" font-size="14" font-weight="600">能演示：0 个</text>
+<text class="f-text" fill="#182f2b" x="250" y="102" font-size="14">代码写了 4 个</text>
+<text class="f-text" fill="#182f2b" x="250" y="128" font-size="14">证据一份没有</text>
+<text class="f-text" fill="#182f2b" x="10" y="190" font-size="15" font-weight="600">纵切优先：第 10 周时</text>
+<text class="f-muted" fill="#5c6d66" x="89" y="216" font-size="14" text-anchor="middle">代码</text>
+<text class="f-muted" fill="#5c6d66" x="131" y="216" font-size="14" text-anchor="middle">测试</text>
+<text class="f-muted" fill="#5c6d66" x="173" y="216" font-size="14" text-anchor="middle">接线</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="216" font-size="14" text-anchor="middle">证据</text>
+<text class="f-text" fill="#182f2b" x="10" y="242" font-size="14">主干</text>
+<text class="f-text" fill="#182f2b" x="10" y="268" font-size="14">保存</text>
+<text class="f-text" fill="#182f2b" x="10" y="294" font-size="14">分段</text>
+<text class="f-text" fill="#182f2b" x="10" y="320" font-size="14">草稿</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="226" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="226" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="226" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="196" y="226" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="252" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="252" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="252" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="196" y="252" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="278" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="278" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="278" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="278" width="38" height="22" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="304" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="112" y="304" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="304" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="304" width="38" height="22" rx="3"/>
+<text class="f-text" fill="#182f2b" x="250" y="246" font-size="14" font-weight="600">能演示：2 个</text>
+<text class="f-text" fill="#182f2b" x="250" y="272" font-size="14">第 4 周就有证据</text>
+<text class="f-text" fill="#182f2b" x="250" y="298" font-size="14">草稿还没开始</text>
+</svg><figcaption>图 28-5　同样 10 周、同样 16 格工作（每格一周）。横着铺，格子填得满满的，却没有一个功能能演示；竖着切，有两个功能已经拿出了真实证据。</figcaption></figure></div>
+<p>规划器里的“一格一周”和“接口里藏着一个错误假设”都是教学假设，不是对任何真实项目的统计。它想让你看到的是结构上的差别：纵切让问题在第一个功能接线时就暴露出来，那时返工的范围最小。</p>
+
+<h2 id="sec-6">28.6 教材也有版本</h2>
+<p>本书的每一个代码事实，都对照 Strata 的一个固定提交核实过：<code>99f3dbd0b21d1401b3769e0c0d963913607f380b</code>，研究日期 2026-10-04。Strata 还在快速迭代，新版本里的数字、默认值和接口都可能变。教材要升级时，按图 28-6 的顺序做。</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="图 28-6：教材升级的四步：固定提交、观察上游变化、先比较契约、再刷新受影响的章节">
+<rect class="f-accent" fill="#136d5a" x="40" y="10" width="320" height="56" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="33" font-size="15" font-weight="600" text-anchor="middle">本书固定在一个提交上</text>
+<text class="f-on" fill="#ffffff" x="200" y="55" font-size="14" text-anchor="middle">99f3dbd…，研究日期 2026-10-04</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 66V84"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="86" width="320" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="109" font-size="15" font-weight="600" text-anchor="middle">上游 main 继续前进</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="131" font-size="14" text-anchor="middle">数字、默认值、接口都可能变</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 142V160"/>
+<rect class="f-soft" fill="#e5f1df" x="40" y="162" width="320" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="185" font-size="15" font-weight="600" text-anchor="middle">先比较契约</text>
+<text class="f-text" fill="#182f2b" x="200" y="207" font-size="14" text-anchor="middle">模型几何、状态、量化、调度、API</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 218V236"/>
+<rect class="f-soft" fill="#e5f1df" x="40" y="238" width="320" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="261" font-size="15" font-weight="600" text-anchor="middle">再刷新受影响的章节和实验</text>
+<text class="f-text" fill="#182f2b" x="200" y="283" font-size="14" text-anchor="middle">每处改动都附上新的来源行号</text>
+</svg><figcaption>图 28-6　教材升级的顺序：先看契约变了没有，再改受影响的章节。不是 main 每更新一次，课程就重写一次。</figcaption></figure>
+<p>为什么先比较“契约”？因为契约一变，依赖它的推导和实验就全部失效。Strata 自己就是这么看的：<code>layout.hpp</code> 里写着，模型几何的每一个字段都是某个内核依赖的数，改动它就是改动内核的契约，而不是调一个参数。<span class="ev ev-code">代码事实</span>[S04] 学期中可以维护两个版本：一个学期内不变的稳定版，一个跟踪上游的研究版。</p>
+<p>还有两件事要说清楚。第一，Strata 的代码以 MIT 许可证发布 [S19]，这个许可证管的是仓库里的代码，不能代替模型权重和其他第三方组件各自的许可。第二，本书是独立编写的教学材料，不代表原项目的背书；它是可以授课和自学的完整初版，还没有经过出版社或多位教师的外部审阅。公开发行前，建议请系统方向和模型数值方向的老师分别交叉审阅，再用试讲的反馈检查入门难度。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>先打通一条纵切：一个 token 从输入走到输出，留下可以检查的真实数据，再一层层加功能。零件全绿，不等于系统接好了。</li>
+<li>每个取舍写清五件事：决定、换来、代价、怎样验证、何时重议。数字要有单位和条件。</li>
+<li>交付时给每个组件标明证据的阶段：代码写完、接进主路径、真实数据，还是模拟。别用“完成”两个字盖过任何一层。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“先把每个模块都写完、测完，最后再拼起来，效率最高。”</strong></p>
+<p>分模块开发本身没错，错在“最后再拼”。模块之间的接口假设，只有在真正接起来时才会受到检验。Strata 的 PLE 模块就是这样：每个零件都通过了对照测试，可主路径从没调用过它们，直到整模型验收才暴露。[S13] 越晚接线，按错误假设写好的代码就越多，返工也越大。先接一条细线，再往上加，总的工作量往往更少。</p></div>
+
+<details class="deep"><summary>深入一层：报告结构、可观测性与最后的理解检验</summary>
+<h3>一份合格报告的结构</h3>
+<p>先提出一个你愿意被实验推翻的问题，然后依次写理论、源码定位、方法、数据、解释和局限。结论要标明自己属于哪一类：代码事实、实验结果，还是推测。所有图都要有单位、样本数和测量条件；来源链接使用固定的提交号，不只指向 main；性能的原始数据和失败日志都要保留；模型文件和依赖的哈希记在清单里。不要只交漂亮的截图。</p>
+<h3>评分表的红线怎样执行</h3>
+<p>把教学模拟冒充硬件实测，该项实验的结论一律不计分，即使其余部分做得很认真：读者已经无法分辨哪些数字可信。存在没有说明的状态串用，性能分不能抵消正确性的缺陷。两条红线的共同点是：它们破坏的是“证据可信”这件事本身。</p>
+<h3>可观测性：让“没在工作”的机制现形</h3>
+<p>Strata 的会话代码里有两个值得模仿的设计。一是“每层同步”调试模式：它能抓到“某个内核读了后面一层才会写的缓冲区”这类错误，平时看不见，代价是同步开销，所以做成运行时参数，按需打开。二是那个重叠计数器：CPU 和 GPU 的重叠如果退化成串行，返回值和每层耗时都看不出来，只有专门统计“CPU 在 GPU 仍在运行时拿到任务的层数”才能发现。[S13] 你的项目里，凡是声称“加速”“重叠”“缓存命中”的机制，都应该配一个能证明它真在工作的计数器。</p>
+<h3>约束要能被测试抓住</h3>
+<p>Strata 要求生成 token 时不做任何显存分配，所以会话的全部状态在开始时按最大长度一次算好、一次分配。注释点明了一个陷阱：如果某次分配发生在“更长序列的第一个 token”，现有的每个测试都会通过。[S13] 换句话说，一条约束如果没有专门的测试去检查它，它就只是一句愿望。写设计文档时，每条约束旁边都写上“哪个测试会在它被违反时失败”。</p>
+<h3>离开本书时的理解检验</h3>
+<p>你应该能用自己的话解释：为什么 40 GB 的模型文件不一定需要 40 GB 显存；为什么一次验证多个 token 不等于提前知道未来；为什么同一个指针可能指向不同层的数据；为什么固定的状态不等于可以任意回滚；为什么更多线程不等于能服务更多会话；为什么一个更快的数字必须带着完整的条件。这几句话可以迁移到任何一个推理引擎。Strata 是走进真实系统的入口，不是需要死记参数的终点。</p>
+</details>
