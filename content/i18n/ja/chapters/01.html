@@ -1,0 +1,279 @@
+<div class="hook"><span class="eyebrow">まずは、ちょっと不思議な話から</span>
+<p>Strata の README の冒頭には、こう書かれています。自分のゲーミング PC で、1250 億パラメータの AI モデルを動かせる。GPU（グラフィックスカード）に求められるのは、VRAM 12 GB から。<span class="ev ev-report">上流レポート</span>[S01]</p>
+<p>常識で計算してみましょう。1250 億個のパラメータは、1 つが 1 バイトだとしても 125 GB になります。12 GB のグラフィックスカードに、どうやって入るのでしょうか。この本が答えたいのは、こういう疑問です。AI モデルは、あなたのコンピュータの中で、実際にどう動いているのか。この疑問をたどりながら、コンピュータの構成、OS、アルゴリズム、ネットワークといった基礎知識をひとつにつなげていきます。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>チャット AI が一度に生成するのは、1 つのトークンだけです。その 1 つを作るために、GPU、メモリ、CPU、SSD が総動員されます。Strata の腕前は、この 4 つを「ちょうど足りる」ように配置することにあります。</p>
+
+<h2 id="sec-1">1.1 Enter を押したあと、何が起きるのか</h2>
+<p>チャット欄に 1 文を入力して、Enter を押します。数秒後、回答が 1 文字ずつ現れます。この間に、あなたの言葉は 6 回の変換を通ります。図 1-1 を見てください。</p>
+<div class="viz" data-viz="token-journey"><figure class="fig"><svg viewBox="0 0 400 486" role="img" aria-label="図 1-1：1 つの文が入力から出力までに通る 6 回の変換。第 4 から第 6 段階は、トークンを 1 つ生成するたびに繰り返される">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="30" font-size="14" font-weight="600" text-anchor="middle">① あなたのメッセージ</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="48" font-size="12" text-anchor="middle">「MoE とは何か説明して」</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="80" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="102" font-size="14" font-weight="600" text-anchor="middle">② チャットテンプレート</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="120" font-size="12" text-anchor="middle">役割の印・システム指示・ツール説明を足す</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="152" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="174" font-size="14" font-weight="600" text-anchor="middle">③ トークナイザ</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="192" font-size="12" text-anchor="middle">文字 → トークン番号（整数）の列</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="224" width="300" height="50" rx="10"/>
+<text class="f-on" fill="#ffffff" x="190" y="246" font-size="14" font-weight="600" text-anchor="middle">④ 推論エンジン：層ごとに計算</text>
+<text class="f-on" fill="#ffffff" x="190" y="264" font-size="12" text-anchor="middle">48 層を計算 → 次のトークンの確率</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="296" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="318" font-size="14" font-weight="600" text-anchor="middle">⑤ サンプリング</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="336" font-size="12" text-anchor="middle">確率に従ってトークンを 1 つ選ぶ</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="368" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="390" font-size="14" font-weight="600" text-anchor="middle">⑥ デコードと送信</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="408" font-size="12" text-anchor="middle">番号 → 文字に戻し、画面へ送る</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M190 58V78M190 130V150M190 202V222M190 274V294M190 346V366"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M340 393H372V249H346"/>
+<path class="f-muted" fill="#5c6d66" d="M346 249l8-5v10z"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="446" font-size="12" text-anchor="middle">破線：回答が終わっていなければ、新しいトークンを</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="464" font-size="12" text-anchor="middle">末尾に付けて第 ④ 段階へ戻る。1 周で出るのは 1 トークン。</text>
+</svg><figcaption>図 1-1　1 つの文が通る 6 回の変換。第 ④–⑥ 段階は、トークンを 1 つ生成するたびに繰り返されます。</figcaption></figure></div>
+<p>図には新しい言葉がいくつか出てきます。やさしい言葉で説明しましょう。</p>
+<p><dfn>トークン</dfn>（token）は、モデルが文字を読み書きするときの最小の単位です。漢字 1 文字のこともあれば、1 つの単語、英単語の半分、句読点 1 つのこともあります。モデルは文字そのものを理解せず、トークンの番号だけを理解します。文字をトークンに切り分けて番号に直すプログラムが<dfn>トークナイザ</dfn>です。図 1-2 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 196" role="img" aria-label="図 1-2：トークナイザは 1 つの文をトークンに切り分け、整数の番号に直す。モデルに見えるのは番号だけ">
+<text class="f-muted" fill="#5c6d66" x="200" y="20" font-size="12" text-anchor="middle">元の文：エンジンは文字を数字に変える</text>
+<rect class="f-soft" fill="#e5f1df" x="47" y="34" width="72" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="83" y="56" font-size="14" text-anchor="middle">エンジン</text>
+<rect class="f-soft" fill="#e5f1df" x="125" y="34" width="36" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="143" y="56" font-size="14" text-anchor="middle">は</text>
+<rect class="f-soft" fill="#e5f1df" x="167" y="34" width="48" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="191" y="56" font-size="14" text-anchor="middle">文字</text>
+<rect class="f-soft" fill="#e5f1df" x="221" y="34" width="36" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="239" y="56" font-size="14" text-anchor="middle">を</text>
+<rect class="f-soft" fill="#e5f1df" x="263" y="34" width="48" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="287" y="56" font-size="14" text-anchor="middle">数字</text>
+<rect class="f-soft" fill="#e5f1df" x="317" y="34" width="36" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="335" y="56" font-size="14" text-anchor="middle">に</text>
+<text class="f-muted" fill="#5c6d66" x="83" y="88" font-size="12" text-anchor="middle">18723</text><text class="f-muted" fill="#5c6d66" x="143" y="88" font-size="12" text-anchor="middle">1204</text><text class="f-muted" fill="#5c6d66" x="191" y="88" font-size="12" text-anchor="middle">29871</text><text class="f-muted" fill="#5c6d66" x="239" y="88" font-size="12" text-anchor="middle">31650</text><text class="f-muted" fill="#5c6d66" x="287" y="88" font-size="12" text-anchor="middle">26425</text><text class="f-muted" fill="#5c6d66" x="335" y="88" font-size="12" text-anchor="middle">40121</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 100V118"/>
+<path class="f-muted" fill="#5c6d66" d="M200 124l-5-8h10z"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="130" width="380" height="32" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="151" font-size="12" text-anchor="middle">モデルの入力：[18723, 1204, 29871, 31650, 26425, 40121]</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="186" font-size="12" text-anchor="middle">例示：実際の切り分けと番号は、モデル付属のトークナイザが決めます</text>
+</svg><figcaption>図 1-2　トークン化：文字はまずトークンに切り分けられ、表を引いて番号に直されます。モデルは最初から最後まで、この整数だけを相手にします。</figcaption></figure>
+<p><dfn>サンプリング</dfn>は第 ⑤ 段階です。モデルは次の単語をそのまま「言う」わけではありません。候補の各トークンに確率を付けて出します。サンプリングは、その確率に従って 1 つ選ぶ操作です。詳しくは第 2 章で扱います。</p>
+<p>図 1-1 の破線に注目してください。モデルは 1 周で 1 つのトークンしか生成しません。300 トークンの回答なら、第 ④ から第 ⑥ 段階を 300 回繰り返します。そのため「生成速度」は、1 秒に何トークン作れるかで測るのが普通です。単位は token/s と書きます。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>生成の全体は 1 つのループです。<code>while 終わっていない: 確率 = モデル(これまでのトークン); t = サンプリング(確率); これまでのトークン.append(t)</code>。どの周の入力にも前の周の出力が含まれます。このように「自分の出力を自分の入力にする」モデルを<dfn>自己回帰</dfn>モデルと呼びます。</p>
+
+<h2 id="sec-2">1.2 最初の 1 文字は、なぜいつも少し遅いのか</h2>
+<p>質問を送ってから、最初の 1 文字が出るまで少し待たされます。そのあとの文字は、ずっと速く出てきます。気づいた人もいるでしょう。理由は、1 回の回答が 2 つの段階に分かれているからです。図 1-3 を見てください。</p>
+<div class="viz" data-viz="first-token-wait"><figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="図 1-3：1 回の回答のタイムライン。まず質問全体を一度に読み、そのあと 1 周に 1 トークンずつ答えを書く">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">1 回の回答のタイムライン（例示、縮尺は不正確）</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="32" width="150" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="85" y="52" font-size="13" font-weight="600" text-anchor="middle">プリフィル（prefill）</text>
+<text class="f-on" fill="#ffffff" x="85" y="70" font-size="12" text-anchor="middle">質問全体をまとめて計算</text>
+<rect class="f-soft" fill="#e5f1df" x="168" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="186" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="204" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="222" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="240" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="258" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="276" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="294" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="312" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="330" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="348" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="366" y="32" width="14" height="48" rx="3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 88V94H160V88M168 88V94H380V88"/>
+<text class="f-muted" fill="#5c6d66" x="85" y="110" font-size="12" text-anchor="middle">最初の 1 文字まで</text>
+<text class="f-muted" fill="#5c6d66" x="274" y="110" font-size="12" text-anchor="middle">デコード：1 周に 1 トークン</text>
+<text class="f-text" fill="#182f2b" x="10" y="142" font-size="12">上流の実測（RTX 5070 12 GB、Q2_0、質問 4K）：</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">· プリフィル：毎秒約 1,299 トークン</text>
+<text class="f-text" fill="#182f2b" x="10" y="184" font-size="12">· デコード：毎秒約 93 トークン</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">プリフィルは十数倍速い。質問のトークンを</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="224" font-size="12">まとめて計算できるからです（第 16 章）。</text>
+</svg><figcaption>図 1-3　先に問題を読み、あとで答えを書きます。プリフィルでは質問全体をまとめて計算するので、単位時間に処理できるトークンがずっと多くなります。デコードは 1 つずつしか進められません。</figcaption></figure></div>
+<p>第 1 段階は<dfn>プリフィル</dfn>（prefill、問題を読む段階）です。モデルは質問全体を一度に読み込みます。質問のトークンはすべて分かっているので、まとめて計算できます。第 2 段階は<dfn>デコード</dfn>（decode、答えを書く段階）です。新しいトークンは、どれも 1 つ前のトークンに依存します。だから 1 つずつ進めるしかありません。</p>
+<p>Strata の上流の測定によると、同じマシンで、プリフィルは毎秒約 1,299 トークン、デコードは毎秒約 93 トークンを処理します。<span class="ev ev-report">上流レポート</span>[S03] つまり、質問が長いほど、最初の 1 文字までの待ち時間も長くなります。README も注意を促しています。会話の最初のメッセージは丸ごと 1 回読む必要があり、約 30,000 トークンごとに 1 分かかります。そのあとの追加の質問は、増えた部分だけを読むので、数秒で答えが始まります。[S01]</p>
+
+<h2 id="sec-3">1.3 モデル、エンジン、アプリ：よく混同される 3 つの役割</h2>
+<p>レストランにたとえてみましょう。図 1-4 です。Strata 自身のドキュメントも、厨房のたとえを使っています。[S02]</p>
+<figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="図 1-4：アプリ、推論エンジン、モデルの 3 つの役割は、レストランの受付、厨房、レシピに対応する">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="110" height="70" rx="10"/>
+<text class="f-text" fill="#182f2b" x="65" y="40" font-size="15" font-weight="600" text-anchor="middle">アプリ</text>
+<text class="f-muted" fill="#5c6d66" x="65" y="62" font-size="12" text-anchor="middle">レストランの受付</text>
+<text class="f-text" fill="#182f2b" x="134" y="30" font-size="12">お客を迎え、話を整えて、料理を出す</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="50" font-size="12">テンプレート・トークン化・文字への復元</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="70" font-size="12">Strata：serve/ 下の Python サーバ</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M65 80V108"/>
+<text class="f-muted" fill="#5c6d66" x="74" y="99" font-size="12">トークン番号</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="110" width="110" height="70" rx="10"/>
+<text class="f-on" fill="#ffffff" x="65" y="140" font-size="15" font-weight="600" text-anchor="middle">推論エンジン</text>
+<text class="f-on" fill="#ffffff" x="65" y="162" font-size="12" text-anchor="middle">厨房とシェフ</text>
+<text class="f-text" fill="#182f2b" x="134" y="130" font-size="12">お使いのハードで計算を実行する</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="150" font-size="12">VRAM・RAM・CPU・GPU を使い分ける</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="170" font-size="12">Strata 本体：C++ / CUDA / HIP</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M65 180V208"/>
+<text class="f-muted" fill="#5c6d66" x="74" y="199" font-size="12">パラメータを読む</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="210" width="110" height="70" rx="10"/>
+<text class="f-text" fill="#182f2b" x="65" y="240" font-size="15" font-weight="600" text-anchor="middle">モデル</text>
+<text class="f-muted" fill="#5c6d66" x="65" y="262" font-size="12" text-anchor="middle">レシピ</text>
+<text class="f-text" fill="#182f2b" x="134" y="230" font-size="12">学習済みのパラメータ ＋ 固定の計算規則</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="250" font-size="12">約 1250 億個のパラメータ</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="270" font-size="12">Qwen3.8-Flash-Next</text>
+</svg><figcaption>図 1-4　3 つの役割は、それぞれ受け持ちが違います。アプリがエンジンに渡すのはトークン番号の列で、エンジンはモデルのレシピに従って計算します。</figcaption></figure>
+<ul>
+<li><strong>モデルはレシピです。</strong>学習で得られた膨大な数字（「パラメータ」または「重み」）と、固定の計算規則でできています。Qwen3.8-Flash-Next は 1 つのモデルです。</li>
+<li><strong>推論エンジンは厨房とシェフです。</strong>あなたのハードウェアの上で、レシピどおりに計算を実行します。Strata は推論エンジンの 1 つで、llama.cpp や vLLM もそうです。</li>
+<li><strong>アプリは受付です。</strong>あなたを迎え、話を整えて厨房に渡し、できた料理をあなたに運びます。Strata 付属のウェブチャット画面や、API でつなぐプログラミングツールは、この層にあります。[S01]</li>
+</ul>
+<p>この 3 層を区別しておくと、問題を調べるときに探す場所を間違えません。エンジンをどれだけ速くしても、モデルは賢くなりません。レシピが同じなら、厨房を替えても料理の味は同じはずです。逆に、回答の質が落ちたときは、原因がレシピ（モデルを替えた、圧縮しすぎた）にあるかもしれません。厨房（エンジンのバグで計算が間違っている）かもしれません。受付（テンプレートやプロトコルがあなたの言葉を誤って伝えた）かもしれません。</p>
+
+<h2 id="sec-4">1.4 1 台のコンピュータにある 3 層の「倉庫」</h2>
+<p>厨房が速いかどうかは、材料をどこに置くかで大きく変わります。コンピュータも同じです。推論に関わる記憶装置は 3 層あります。図 1-5 です。</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="図 1-5：VRAM、RAM、SSD の 3 層の記憶装置。上ほど速くて小さい。Strata が各層に置くもの">
+<rect class="f-accent" fill="#136d5a" x="50" y="10" width="300" height="92" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="34" font-size="14" font-weight="600" text-anchor="middle">VRAM（GPU のメモリ）12–24 GB</text>
+<text class="f-on" fill="#ffffff" x="200" y="54" font-size="12" text-anchor="middle">調理台：手を伸ばせばすぐ取れる</text>
+<text class="f-on" fill="#ffffff" x="200" y="74" font-size="12" text-anchor="middle">毎トークンで必ず使う部分</text>
+<text class="f-on" fill="#ffffff" x="200" y="91" font-size="12" text-anchor="middle">＋ よく使う数千のエキスパート ＋ 会話履歴</text>
+<rect class="f-soft" fill="#e5f1df" x="30" y="118" width="340" height="92" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="142" font-size="14" font-weight="600" text-anchor="middle">RAM（メインメモリ）32–64 GB</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="162" font-size="12" text-anchor="middle">食料庫：数歩歩かないと届かない</text>
+<text class="f-text" fill="#182f2b" x="200" y="182" font-size="12" text-anchor="middle">全部で 24,576 個のエキスパート</text>
+<text class="f-text" fill="#182f2b" x="200" y="199" font-size="12" text-anchor="middle">GPU にないものは CPU がその場で計算</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="226" width="380" height="80" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="250" font-size="14" font-weight="600" text-anchor="middle">SSD</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="270" font-size="12" text-anchor="middle">地下倉庫：いちばん大きく、いちばん遅い</text>
+<text class="f-text" fill="#182f2b" x="200" y="290" font-size="12" text-anchor="middle">28.8 GB の参照テーブル。1 トークンが読むのは数行だけ</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="334" font-size="12" text-anchor="middle">上へ行くほど：速く、小さく、高価</text>
+</svg><figcaption>図 1-5　Strata が 3 層の記憶装置をどう使うか。容量は README が示すハードウェア要件で、役割分担は上流のドキュメントによります。[S01][S02]</figcaption></figure>
+<p>GPU は計算がいちばん速いのですが、VRAM がいちばん小さく、市販のゲーミングカードでは 12–24 GB ほどです。RAM（メインメモリ）はずっと大きいものの、GPU から遠く、データは PCIe というバスを通して送る必要があります。SSD はいちばん大きく、いちばん遅い装置です。</p>
+<p>Strata の役割分担は次のとおりです <span class="ev ev-report">上流レポート</span>[S02]：</p>
+<ol>
+<li>毎トークンで必ず使う部分と、特によく使われる数千個の「エキスパート」を、VRAM に置く。</li>
+<li>全エキスパートを RAM に置く。GPU にないものは、CPU が RAM の中でその場で計算し、GPU と同時に働く。</li>
+<li>SSD には 28.8 GB の参照テーブルを置く。1 トークンが読むのは、そのうちの数行だけ。</li>
+</ol>
+<p>「エキスパート」とは何か、は第 10 章で詳しく扱います。今は、小さな GPU で大きなモデルを動かす Strata の鍵だと思っておいてください。</p>
+<aside class="primer" id="c01-memory-hierarchy">
+<h3>メモリ階層</h3>
+<p>コンピュータの記憶装置は、いつも「速い」「大きい」「安い」のうち 2 つしか選べません。速いものは小さく高価で、大きいものは遅いのです。そこでコンピュータは、記憶装置をピラミッドのように重ねます。よく使うデータはいちばん速い層に置き、あまり使わないデータは下の層に置いて、必要になったら上へ運びます。これが<dfn>メモリ階層</dfn>（記憶階層）です。</p>
+<p>「速い」には 2 つの指標があります。<dfn>帯域幅</dfn>は 1 秒に何バイト運べるかで、水道管の太さにあたります。<dfn>レイテンシ</dfn>は、要求を出してから最初の 1 バイトが届くまでの待ち時間で、蛇口をひねってからコップに水が届くまでの時間にあたります。推論エンジンは、トークンを 1 つ生成するたびに大量のパラメータを読みます。だから、いちばん気にするのは帯域幅です。図 1-6 は、上流の測定マシンにおける各層の理論帯域幅です。</p>
+<figure class="fig"><svg viewBox="0 0 400 234" role="img" aria-label="図 1-6：上流の測定マシンにおける各層の理論帯域幅。VRAM は約 672 GB/s、RAM は約 83 GB/s、PCIe 5.0 は約 63 GB/s、SSD は約 7 GB/s">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">理論ピーク帯域幅、単位 GB/s（棒の長さは比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">VRAM</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="36" width="250" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="348" y="49" font-size="12">672</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">RAM</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="72" width="31" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="129" y="85" font-size="12">83（DDR5-5200 デュアルチャネル）</text>
+<text class="f-text" fill="#182f2b" x="10" y="120" font-size="12">PCIe バス</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="108" width="23" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="121" y="121" font-size="12">約 63（PCIe 5.0 x16、片方向）</text>
+<text class="f-text" fill="#182f2b" x="10" y="156" font-size="12">SSD</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="144" width="3" height="16" rx="1"/>
+<text class="f-text" fill="#182f2b" x="101" y="157" font-size="12">約 7（一般的な NVMe のシーケンシャル読み出し）</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="190" font-size="12">VRAM は RTX 5070 の仕様、RAM は上流の測定機の値です。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="207" font-size="12">実測は通常これより低くなります。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="224" font-size="12">VRAM から読むほうが、SSD から読むより約 100 倍速い。</text>
+</svg><figcaption>図 1-6　同じコンピュータの中でも、各層の帯域幅は 100 倍近く違います。よく使うデータを速い層に置くことが、あらゆるキャッシュ設計の出発点です。</figcaption></figure>
+<p>Strata の設計は、すべてこのピラミッドの上にデータを配置する作業と見なせます。人気のエキスパートは VRAM、全エキスパートは RAM、大きな参照テーブルは SSD に置きます。後の章でも、この図に何度も戻ってきます。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E5%8F%82%E7%85%A7%E3%81%AE%E5%B1%80%E6%89%80%E6%80%A7" target="_blank" rel="noopener noreferrer">Wikipedia：参照の局所性</a> · <a href="https://en.wikipedia.org/wiki/Memory_hierarchy" target="_blank" rel="noopener noreferrer">Wikipedia: Memory hierarchy（英語）</a> · <a href="https://csapp.cs.cmu.edu/" target="_blank" rel="noopener noreferrer">『詳解 コンピュータシステム』（CS:APP、英語原著）第 6 章</a></p>
+</aside>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは「コンピュータ構成」で習うメモリ階層そのままです。違いは、VRAM という層が増えている点だけです。CPU から見ると、VRAM は別のデバイス上のメモリです。自分のメモリのように直接読み書きはできず、データは PCIe を通して運びます（DMA は第 14 章で扱います）。</p>
+
+<h2 id="sec-5">1.5 計算してみよう：24,576 と 480</h2>
+<p>README によると、このモデルは 24,576 個の「エキスパート」でできていて、1 語を書くのにそのうち 10 個だけを使います。[S01] わかりやすくするために、この説明は簡略化されています。ソースコードで確かめてみましょう。</p>
+<p>ソースコードが定義するモデルの構造は、48 層で、1 層に 512 個のエキスパートです <span class="ev ev-code">コード上の事実</span>[S04]。各トークンは<strong>各層で</strong> 10 個のエキスパートを選びます <span class="ev ev-code">コード上の事実</span>[S13]。図 1-7 に、この構造を描きました。</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="図 1-7：48 層、1 層あたり 512 個のエキスパート、各層で 10 個を選ぶ。1 トークンで合計 480 回のエキスパート選択を行う">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">1 行 ＝ 1 層の 512 エキスパート（濃い 10 個が選ばれたもの）</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="43" font-size="12">第 1 層</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="34" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="87.2" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="101.7" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="121.9" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="165.3" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="212.0" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="285.1" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="301.5" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="318.5" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="341.8" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="355.6" y="34" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="61" font-size="12">第 2 層</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="52" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="118.1" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="160.9" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="180.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="195.6" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="209.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="268.1" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="287.6" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="301.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="311.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="323.5" y="52" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="79" font-size="12">第 3 層</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="70" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="72.7" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="84.7" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="124.4" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="134.5" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="147.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="215.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="256.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="314.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="344.3" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="355.6" y="70" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="115" font-size="12">第 46 層</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="106" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="64.5" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="87.8" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="119.3" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="147.1" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="177.3" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="194.3" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="203.8" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="217.0" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="259.2" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="328.5" y="106" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="133" font-size="12">第 47 層</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="124" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="92.2" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="106.7" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="147.7" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="181.7" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="207.6" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="219.5" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="260.5" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="271.8" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="297.0" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="383.4" y="124" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="151" font-size="12">第 48 層</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="142" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="76.5" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="92.2" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="155.9" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="176.7" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="227.7" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="244.7" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="268.1" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="296.4" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="328.5" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="345.6" y="142" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="225" y="97" font-size="13" text-anchor="middle">⋮（間にあと 42 層）</text>
+<text class="f-text" fill="#182f2b" x="200" y="180" font-size="13" font-weight="600" text-anchor="middle">48 層 × 1 層あたり 10 個 ＝ 480 回の選択</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="202" font-size="12" text-anchor="middle">48 層 × 1 層あたり 512 個 ＝ 24,576 個のエキスパート（総数）</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="224" font-size="12" text-anchor="middle">「1 語に 10 個」は、1 層あたりの話です</text>
+</svg><figcaption>図 1-7　1 つのトークンは 48 層をすべて通り、各層で 10 個のエキスパートを選び直します。だから合計は 10 回ではなく、480 回の選択です。</figcaption></figure>
+<ul>
+<li>48 × 512 = <strong>24,576</strong>。これがエキスパートの総数です。</li>
+<li>1 つのトークンは 48 層をすべて通り、各層で 10 個を選びます。合計で 48 × 10 = <strong>480</strong> 回のエキスパート選択です。</li>
+</ul>
+<p>「10 個」は各層の話で、モデル全体の話ではありません。モデル全体で 10 個しか使わないと思い込むと、計算量とデータ移動量の見積もりが 48 分の 1 になってしまいます。この本が繰り返し強調する習慣はこれです。<strong>数字には、単位と範囲を付けて持ち歩く</strong>。</p>
+
+<h2 id="sec-6">1.6 この本の読み方：数字にはすべて出どころがある</h2>
+<p>この本の結論には、どの種類の証拠にあたるかを必ず示します。</p>
+<ul>
+<li><span class="ev ev-code">コード上の事実</span>固定バージョンのソースコードから直接読み取ったもの。例：「48 層」。</li>
+<li><span class="ev ev-report">上流レポート</span>Strata の作者がドキュメントに書いた説明や、測ったデータ。この本では再測定していません。例：「RTX 5070 で毎秒 94 トークンを生成」。[S01]</li>
+<li><span class="ev ev-est">教育用の試算</span>この本が簡略化したモデルで計算した結果。直感をつかむためのもので、実測ではありません。ブラウザ上のインタラクティブな実験は、すべてこの種類です。</li>
+<li>基礎原理：数学やコンピュータの一般的な法則。Strata に依存しないので、ラベルは付けません。</li>
+</ul>
+<p>なぜここまで気にするのでしょうか。AI の世界では、数字が別の場所へ持ち出されやすいからです。他人のグラフィックスカードでの速度、ある設定でのメモリ使用量、宣伝図の簡略化された説明。条件から切り離されると、人を誤解させかねません。「この数字は、どんな条件で得られたのか」と問う習慣は、どの数字を覚えるよりも役に立ちます。</p>
+<p>この本のソースコード読解は、2026-10-03 時点の 1 つのコミットに固定しています。コミット番号はページ下部にあります。Strata はまだ速いペースで変わっているので、新しいバージョンでは数字が変わっているかもしれません。</p>
+<p><strong>手を動かす：</strong>この章のインタラクティブ実験「1 つのトークンの旅」を開きましょう。図 1-1 の経路を、1 段階ずつ確かめられる部品に分けてあります。各段階の入力と出力が見えます。どれか 1 本の矢印について、「ここが壊れたらどうなるか」を考えてみてください。たとえば、テンプレートが違っていたら。トークナイザとモデルが合っていなかったら。実験の数字はどれも教育用の試算で、あなたのコンピュータでの実測ではありません。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>モデルはレシピ、推論エンジンは厨房、アプリは受付です。3 つは受け持ちが違います。</li>
+<li>先に問題を読み、あとで答えを書きます。プリフィルは質問全体をまとめて計算し、デコードは 1 周に 1 トークンしか進められません。</li>
+<li>数字を見たら必ず問います。これはコード上の事実か、上流レポートか、試算か。単位と範囲は何か。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「モデルのファイルが何 GB なら、VRAM も何 GB 必要」</strong></p>
+<p>そうとは限りません。ファイルサイズが示すのは、重みが SSD の上で何バイトを占めるか、ということだけです。実行時は、重みの一部を RAM に置いたまま CPU で計算したり、必要なときだけ GPU に送ったりできます。VRAM には、会話履歴や一時データも置かなければなりません。Strata は約 70 GB のモデルをダウンロードしますが、12 GB のグラフィックスカードで動きます。[S01]</p></div>
+
+<details class="deep"><summary>もう一歩深く：ソースコードを読みたい人へ</summary>
+<h3>サーバ層とエンジンの本当の境界</h3>
+<p>Strata のサーバコードでは、アプリ層がエンジンに渡すのは HTTP リクエストでも生の JSON でもなく、トークン番号の列です。インターフェースは <code>Engine.generate(ids, max_new, sampling, cancel)</code> で、トークン番号を 1 つずつ返すイテレータを返します。<span class="ev ev-code">コード上の事実</span>[S15] テンプレートの適用、トークン化、プロトコルの解析は、すべてこの境界の外にあります。だから問題を調べるときは、まず、エラーが境界のどちら側で起きたのかを見分けます。</p>
+<p>同じファイルから、もう 1 つ分かります。サーバが一度に処理するシーケンスは 1 つだけで、リクエストは先着順（FIFO）で並びます。[S15]「OpenAI 互換 API に対応」は「複数人の同時利用に対応」と同じではありません。複数ユーザー向けに拡張するには何が要るかは、第 25 章で議論します。</p>
+<h3>層ごとの「キャッシュ」を混同しない</h3>
+<p>CPU のハードウェアキャッシュは、最近アクセスしたメモリの行を保存します。Strata のエキスパートキャッシュは、一部の重みを VRAM に置きます。KV キャッシュは、会話履歴の途中結果を保存します。セッションキャッシュは、復元できるシーケンス全体の状態を保存します。参照テーブルの行キャッシュは、SSD から読んだテーブルの行を保存します。これらは、保存する対象も、寿命も、無効になる条件もまったく違います。「キャッシュを足そう」という提案が意味を持つのは、<strong>何をキャッシュするのか、同じ対象だとどう確認するのか、いつ無効になるのか</strong>を説明できるときだけです。</p>
+<h3>コメントは事実ではない</h3>
+<p>ソースコードのコメントは、古い開発段階のまま残っていることがあります。たとえば <code>expert_source.hpp</code> の冒頭には「Phase 2 ではキャッシュなし（ヒット率 h = 0）」とあり、Phase 3 でこのオブジェクトを VRAM キャッシュに置き換えると書かれています。[S06] 一方、現在のバージョンのエンジンには、実際にエキスパートキャッシュがあります。[S02][S05] こうした食い違いに出会ったら、コメント 1 行だけで結論を出してはいけません。現在の呼び出しの流れ、デフォルト設定、テストをたどって確かめます。この本のソースコード案内が審査したのは、挙げた主要ファイルの該当範囲です。<strong>リポジトリ全体を 1 行ずつ監査したわけではありません</strong>。</p>
+<h3>授業での活動：1 つのトークンの責任境界を描く</h3>
+<p>紙に 5 つの箱を描きます。サーバ層、シーケンスの状態、重みの保管、計算カーネル、ハードウェアです。各箱に、入力を 1 つ、出力を 1 つ、そして常に成り立っていなければならない条件を 1 つ書きます。たとえば「シーケンスの状態は、その会話だけのものである」。次に、3 種類の不具合を、それぞれ原因になりそうな箱に入れます。「答えは正しいが遅い」「答えが毎回ランダムに変わる」「後半の文字が文字化けする」。目的は、すぐに当てることではありません。これらの仮説を区別できる実験を設計できるようになることです。</p>
+</details>

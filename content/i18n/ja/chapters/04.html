@@ -1,0 +1,218 @@
+<div class="hook"><span class="eyebrow">まず計算してみよう</span>
+<p>1250 億個のパラメータを、よくある 16 ビットで保存すると 250 GB になります。ところが Strata のインストーラーがダウンロードするモデルファイルは、約 70 GB だけです。<span class="ev ev-report">上流レポート</span>[S01] この章で計算します。エキスパート部分では、パラメータ 1 個あたりの平均がたった 2.25 ビットです。</p>
+<p>1 つの数を 16 ビットから 2 ビット少々まで縮めたら、失われた情報はどこへ行くのでしょうか。それでもモデルが使えるのはなぜでしょうか。この章は「1 つの数が計算機の中でどう保存されるか」から始めます。次に「ブロック全体で 1 本の物差しを共有する」方法へ進み、最後に Strata の実際のフォーマットを見ます。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>量子化とは、少数の整数の段階で、たくさんの小数をまとめて近似することです。ブロックごとに 1 つのスケール s を共有し、各数は「s の何倍か」だけを保存します。ビット数が少ないほど段階は粗くなり、誤差は大きくなります。誤差は自分から受け入れるものなので、必ず測ります。</p>
+
+<h2 id="sec-1">4.1 1 つの数に何ビット必要か</h2>
+<p>計算機の中では、すべてが 0 と 1 です。1 ビット（bit）は 2 つの状態しか表せません。8 ビットは 1 バイトで、256 通りを表せます。1 個のパラメータに使うビット数が多いほど、細かい値を表せますが、場所も大きく取ります。図 4-1 は、1250 億個のパラメータの合計サイズを、ビット数ごとに並べたものです。</p>
+<figure class="fig"><svg viewBox="0 0 400 218" role="img" aria-label="図 4-1：1250 億個のパラメータを 16、8、4、2.25 ビットで保存すると、それぞれ約 250、125、62.5、35 GB になり、どれも 12 GB の VRAM をはるかに超える">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">1250 億パラメータ：1 個あたりのビット数（棒は比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="51" font-size="12">16 ビット</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="36" width="260" height="20"/>
+<text class="f-text" fill="#182f2b" x="346" y="51" font-size="12">250 GB</text>
+<text class="f-text" fill="#182f2b" x="10" y="87" font-size="12">8 ビット</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="72" width="130" height="20"/>
+<text class="f-text" fill="#182f2b" x="216" y="87" font-size="12">125 GB</text>
+<text class="f-text" fill="#182f2b" x="10" y="123" font-size="12">4 ビット</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="108" width="65" height="20"/>
+<text class="f-text" fill="#182f2b" x="151" y="123" font-size="12">62.5 GB</text>
+<text class="f-text" fill="#182f2b" x="10" y="159" font-size="12">2.25 ビット</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="144" width="36.6" height="20"/>
+<text class="f-text" fill="#182f2b" x="122" y="159" font-size="12">約 35 GB</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M92.5 30V172"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="190" font-size="12">破線：12 GB の VRAM の位置</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">教育用の試算：1250 億 × ビット数 ÷ 8 = バイト数</text>
+</svg><figcaption>図 4-1　ビット数がサイズを決めます。1 個あたり 2.25 ビットまで圧縮しても 12 GB よりずっと大きいので、第 10 章では「階層に分けて置く」仕組みも必要になります。</figcaption></figure>
+<p>計算式は簡単です。バイト数 = パラメータ数 × ビット数 ÷ 8。1250 億 × 2.25 ÷ 8 ≈ 352 億バイト、約 35 GB です。<span class="ev ev-est">教育用の試算</span> これはエキスパート部分の、1 パラメータあたりの平均です。モデルの中のより敏感な部分には、もっと多くのビットを使います。</p>
+<p>「どう圧縮するか」の前に、ふだん使う小数点付きの数が、計算機の中でどう保存されているかを見ておきましょう。</p>
+<aside class="primer" id="c04-float">
+<h3>2 進数と浮動小数点数：FP32、FP16、BF16</h3>
+<p>科学的記数法では、123000 を 1.23 × 10⁵ と書きます。「有効数字」に 10 の何乗かを掛けた形です。計算機も同じ方法を使いますが、底は 2 です。0 でない数は、どれも 1.xxx × 2ᵉ と書けます。保存するときは 3 つに分けます。<dfn>符号ビット</dfn>（正か負か）、<dfn>指数部</dfn>（e がいくつか。<strong>範囲</strong>を決める）、<dfn>仮数部</dfn>（1 の後ろの xxx。<strong>精度</strong>を決める）です。この保存方式を<dfn>浮動小数点数</dfn>と呼び、規格は IEEE 754 です。</p>
+<p>よく使う 3 つのフォーマットは、分け方が違います（図 4-2）。FP32 は 1 + 8 + 23 ビットです。FP16 は 1 + 5 + 10 ビットで、指数部が 5 ビットしかないので、最大でも 65504 までです。BF16 は 1 + 8 + 7 ビットで、指数部が FP32 と同じ幅なので、範囲はほぼ同じです。その代わり仮数部は 7 ビットだけになり、精度は 8 倍粗くなります。</p>
+<div class="viz" data-viz="float-bits"><figure class="fig"><svg viewBox="0 0 400 222" role="img" aria-label="図 4-2：FP32、FP16、BF16 の 3 つのフォーマットのビット配分。FP32 は 1、8、23 ビット、FP16 は 1、5、10 ビット、BF16 は 1、8、7 ビット">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">ビット数に比例して描画：符号 1 ビット | 指数 | 仮数</text>
+<text class="f-text" fill="#182f2b" x="10" y="47" font-size="13" font-weight="600">FP32</text>
+<rect class="f-warn" fill="#9e5d24" x="70" y="28" width="10" height="28"/>
+<rect class="f-soft" fill="#e5f1df" x="80" y="28" width="80" height="28"/><text class="f-text" fill="#182f2b" x="120" y="47" font-size="12" text-anchor="middle">指数 8</text>
+<rect class="f-accent" fill="#136d5a" x="160" y="28" width="230" height="28"/><text class="f-on" fill="#ffffff" x="275" y="47" font-size="12" text-anchor="middle">仮数 23</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="74" font-size="12">最大約 3.4 × 10³⁸</text>
+<text class="f-text" fill="#182f2b" x="10" y="101" font-size="13" font-weight="600">FP16</text>
+<rect class="f-warn" fill="#9e5d24" x="70" y="82" width="10" height="28"/>
+<rect class="f-soft" fill="#e5f1df" x="80" y="82" width="50" height="28"/><text class="f-text" fill="#182f2b" x="105" y="101" font-size="12" text-anchor="middle">指数 5</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="82" width="100" height="28"/><text class="f-on" fill="#ffffff" x="180" y="101" font-size="12" text-anchor="middle">仮数 10</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="128" font-size="12">最大 65504：範囲が狭く、精度は中程度</text>
+<text class="f-text" fill="#182f2b" x="10" y="155" font-size="13" font-weight="600">BF16</text>
+<rect class="f-warn" fill="#9e5d24" x="70" y="136" width="10" height="28"/>
+<rect class="f-soft" fill="#e5f1df" x="80" y="136" width="80" height="28"/><text class="f-text" fill="#182f2b" x="120" y="155" font-size="12" text-anchor="middle">指数 8</text>
+<rect class="f-accent" fill="#136d5a" x="160" y="136" width="70" height="28"/><text class="f-on" fill="#ffffff" x="195" y="155" font-size="12" text-anchor="middle">仮数 7</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="182" font-size="12">範囲は FP32 と同じ、精度は最も粗い</text>
+<text class="f-text" fill="#182f2b" x="200" y="210" font-size="12" text-anchor="middle">BF16 = FP32 の上位 16 ビット：範囲は同じ、精度は粗い</text>
+</svg><figcaption>図 4-2　3 つの浮動小数点フォーマット。指数部のビットが「どれだけ大きく、小さく」を、仮数部のビットが「どれだけ細かく」を決めます。</figcaption></figure></div>
+<p>BF16 には巧妙な点があります。FP32 の下位 16 ビットを切り捨てただけなのです。だから BF16 から FP32 に戻すときは、0 を 16 個足すだけで、損失はありません。FP32 から BF16 にするときは、切り捨てる部分を丸める必要があります。Strata の変換関数は ggml のやり方をそのまま踏襲しています。「最近接丸め、同点は偶数へ」で、同点かどうかは 16 ビット目を見て判断します。コメントは、15 ビット目を使うと間違えるのは「ちょうど同点」のときだけだと、わざわざ注意しています。実データではほぼ起きないので、どのエンドツーエンドテストでも見つかりません。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/bf16_bits.hpp#L1-L16" target="_blank" rel="noopener noreferrer">bf16_bits.hpp</a> 同じコメントは、FP16 と BF16 は同じものの 2 通りの書き方ではない、とも強調しています。片方用に書いた変換関数をもう片方に使うと、「もっともらしい」のに間違った数が出てきます。</p>
+<p class="further">さらに読む：<a href="https://docs.python.org/ja/3/tutorial/floatingpoint.html" target="_blank" rel="noopener noreferrer">Python ドキュメント：浮動小数点演算、その問題と制限</a> · <a href="https://ja.wikipedia.org/wiki/IEEE_754" target="_blank" rel="noopener noreferrer">Wikipedia：IEEE 754</a> · <a href="https://ja.wikipedia.org/wiki/半精度浮動小数点数" target="_blank" rel="noopener noreferrer">Wikipedia：半精度浮動小数点数</a> · <a href="https://en.wikipedia.org/wiki/Bfloat16_floating-point_format" target="_blank" rel="noopener noreferrer">Wikipedia: bfloat16</a></p>
+</aside>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは『コンピュータの構成と設計』や CS:APP 第 2 章の内容です。バイアス付き指数、暗黙の最上位 1、非正規化数、丸めモード。モデル推論でいちばんよく踏む落とし穴は、まさにこれらの細部です。FP16 のオーバーフロー、非正規化数での精度低下、そして「最近接丸め」と「四捨五入」の、同点のときの違いです。</p>
+
+<h2 id="sec-2">4.2 量子化：1 本の物差しでブロック全体を測る</h2>
+<p>浮動小数点数は、1 つずつの数が自分の指数を持つので柔軟ですが、場所も取ります。量子化は発想を変えます。<strong>ブロック全体で 1 本の物差しを共有する</strong>のです。物差しの目盛り間隔を<dfn>スケール</dfn>（scale）s と呼びます。各数は「s の約何倍か」だけを記録します。この整数を<dfn>コード</dfn>と呼びます。</p>
+<aside class="primer" id="c04-quant">
+<h3>整数量子化と誤差</h3>
+<p>イメージはこうです。1 cm 刻みの目盛りしかない物差しで身長を測ると、全員が「いちばん近い 1 cm」として記録され、誤差は最大でも半分の 0.5 cm です。量子化も同じです。まず目盛り間隔 s を決め、各数をいちばん近い目盛りに丸めます。目盛りが細かいほど誤差は小さくなりますが、記録する段階が増え、1 個あたりに必要なビット数も増えます。</p>
+<p>いちばん単純なのは<dfn>対称一様量子化</dfn>です。b ビットのコードを使い、Q = 2<sup>b−1</sup> − 1 とします（4 ビットなら Q = 7）。ブロックの中で絶対値が最大の a を探し、s = a ÷ Q とします。各数 x は q = round(x ÷ s) とコード化し、復元は x̂ = s × q です。こうすると、最大の数がちょうど ±Q の段階に乗り、残りの数はその間に入ります。</p>
+<figure class="fig"><svg viewBox="0 0 400 188" role="img" aria-label="図 4-3：4 ビット対称量子化は −1 から 1 を 15 段階に分け、4 つの数はそれぞれ −7、−2、1、7 の段階に入る">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="12" text-anchor="middle">4 ビット対称量子化：s = 1 ÷ 7、15 段階</text>
+<circle class="f-warn" fill="#9e5d24" cx="20" cy="62" r="5"/><text class="f-warn" fill="#9e5d24" x="24" y="48" font-size="12" text-anchor="middle">−1</text>
+<circle class="f-warn" fill="#9e5d24" cx="146" cy="62" r="5"/><text class="f-warn" fill="#9e5d24" x="146" y="48" font-size="12" text-anchor="middle">−0.3</text>
+<circle class="f-warn" fill="#9e5d24" cx="236" cy="62" r="5"/><text class="f-warn" fill="#9e5d24" x="236" y="48" font-size="12" text-anchor="middle">0.2</text>
+<circle class="f-warn" fill="#9e5d24" cx="380" cy="62" r="5"/><text class="f-warn" fill="#9e5d24" x="376" y="48" font-size="12" text-anchor="middle">1</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 67V86M146 67L148.6 86M236 67L225.7 86M380 67V86"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M20 90H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 86V94M45.7 86V94M71.4 86V94M97.1 86V94M122.9 86V94M148.6 86V94M174.3 86V94M200 86V94M225.7 86V94M251.4 86V94M277.1 86V94M302.9 86V94M328.6 86V94M354.3 86V94M380 86V94"/>
+<circle class="f-accent" fill="#136d5a" cx="20" cy="90" r="4"/><circle class="f-accent" fill="#136d5a" cx="148.6" cy="90" r="4"/><circle class="f-accent" fill="#136d5a" cx="225.7" cy="90" r="4"/><circle class="f-accent" fill="#136d5a" cx="380" cy="90" r="4"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="112" font-size="12" text-anchor="middle">−7</text>
+<text class="f-muted" fill="#5c6d66" x="148.6" y="112" font-size="12" text-anchor="middle">−2</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="112" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="225.7" y="112" font-size="12" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="112" font-size="12" text-anchor="middle">7</text>
+<text class="f-text" fill="#182f2b" x="200" y="146" font-size="12" text-anchor="middle">元の値 [−1, −0.3, 0.2, 1] → コード [−7, −2, 1, 7]</text>
+<text class="f-text" fill="#182f2b" x="200" y="170" font-size="12" text-anchor="middle">復元 [−1, −0.286, 0.143, 1]、誤差はすべて s ÷ 2 以下</text>
+</svg><figcaption>図 4-3　量子化とは「いちばん近い目盛りに吸い寄せる」ことです。−0.3 は −2 の段階（−0.286）に、0.2 は 1 の段階（0.143）に吸い寄せられます。</figcaption></figure>
+<p>復元値と元の数の差が<dfn>量子化誤差</dfn>です。ブロックの誤差をまとめるには、<dfn>平均二乗誤差</dfn>（MSE）がよく使われます。各誤差を二乗して平均を取ります。上の例では MSE ≈ 0.00087 です。クリッピングしなければ、どの数の誤差も s ÷ 2 を超えません。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/量子化誤差" target="_blank" rel="noopener noreferrer">Wikipedia：量子化誤差</a> · <a href="https://en.wikipedia.org/wiki/Quantization_(signal_processing)" target="_blank" rel="noopener noreferrer">Wikipedia: Quantization (signal processing)</a> · <a href="https://huggingface.co/docs/transformers/main/ja/main_classes/quantization" target="_blank" rel="noopener noreferrer">Hugging Face ドキュメント：量子化</a></p>
+</aside>
+<p>ここでは各数が小さな整数を 1 つだけ保存しますが、ブロックごとに別途 s も 1 つ保存しなければなりません。この s も場所を取ります。ブロックが大きいほど、1 個あたりに割った s の負担は小さくなります。ブロックが小さいほど、s は「高く」つきます。次の節で見るように、このトレードオフは避けられません。</p>
+
+<h2 id="sec-3">4.3 外れ値：1 つの大きな数がブロック全体を巻き込む</h2>
+<p>1 本の物差しを共有する方式には、弱点があります。目盛り間隔は、ブロックの中で<strong>最大</strong>の数で決まります。ブロックの大半が ±0.5 以内なのに、1 つだけ −2.8 があると、s は何倍にも膨らみ、目盛りは粗くなり、小さい数は次々に 0 の段階へ吸い込まれます。この「群を抜いた」数を<dfn>外れ値</dfn>（outlier）と呼びます（図 4-4）。</p>
+<div class="viz" data-viz="quant-block"><figure class="fig"><svg viewBox="0 0 400 244" role="img" aria-label="図 4-4：16 個の数を 1 組にして 4 ビット量子化する。外れ値を 1 つ加えると、スケールは 0.067 から 0.4 になり、7 個の小さな数が 0 になる">
+<text class="f-text" fill="#182f2b" x="16" y="18" font-size="12" font-weight="600">16 個を 1 組に、外れ値なし：s ≈ 0.067</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="16" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="27" y="46" font-size="12" text-anchor="middle">2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="39" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="50" y="46" font-size="12" text-anchor="middle">−5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="62" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="73" y="46" font-size="12" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="85" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="96" y="46" font-size="12" text-anchor="middle">6</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="108" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="119" y="46" font-size="12" text-anchor="middle">−3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="131" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="142" y="46" font-size="12" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="165" y="46" font-size="12" text-anchor="middle">−7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="177" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="188" y="46" font-size="12" text-anchor="middle">4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="211" y="46" font-size="12" text-anchor="middle">−1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="223" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="234" y="46" font-size="12" text-anchor="middle">4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="246" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="257" y="46" font-size="12" text-anchor="middle">−5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="269" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="280" y="46" font-size="12" text-anchor="middle">3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="292" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="303" y="46" font-size="12" text-anchor="middle">7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="315" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="326" y="46" font-size="12" text-anchor="middle">−2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="338" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="349" y="46" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="361" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="372" y="46" font-size="12" text-anchor="middle">−6</text>
+<text class="f-muted" fill="#5c6d66" x="16" y="74" font-size="12">コードは −7 から 7 までフルに使用、MSE ≈ 0.0004</text>
+<text class="f-text" fill="#182f2b" x="16" y="104" font-size="12" font-weight="600">7 番目の値を −2.8 に変更：s = 0.4</text>
+<rect class="f-warn" fill="#9e5d24" x="16" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="27" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="39" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="50" y="132" font-size="12" text-anchor="middle">−1</text>
+<rect class="f-warn" fill="#9e5d24" x="62" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="73" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="85" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="96" y="132" font-size="12" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="108" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="119" y="132" font-size="12" text-anchor="middle">−1</text>
+<rect class="f-warn" fill="#9e5d24" x="131" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="142" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-accent" fill="#136d5a" x="154" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="165" y="132" font-size="12" text-anchor="middle">−7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="177" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="188" y="132" font-size="12" text-anchor="middle">1</text>
+<rect class="f-warn" fill="#9e5d24" x="200" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="211" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="223" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="234" y="132" font-size="12" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="246" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="257" y="132" font-size="12" text-anchor="middle">−1</text>
+<rect class="f-warn" fill="#9e5d24" x="269" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="280" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="292" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="303" y="132" font-size="12" text-anchor="middle">1</text>
+<rect class="f-warn" fill="#9e5d24" x="315" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="326" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-warn" fill="#9e5d24" x="338" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="349" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="361" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="372" y="132" font-size="12" text-anchor="middle">−1</text>
+<text class="f-muted" fill="#5c6d66" x="16" y="160" font-size="12">0 でなかった 7 個が 0 に。MSE ≈ 0.0097（約 24 倍）</text>
+<text class="f-text" fill="#182f2b" x="16" y="192" font-size="12">4 個 1 組に変更：外れ値の組だけが粗くなる</text>
+<text class="f-muted" fill="#5c6d66" x="16" y="212" font-size="12">MSE ≈ 0.0029</text>
+<text class="f-muted" fill="#5c6d66" x="16" y="232" font-size="12">代償：4 個ごとに 16 ビットのスケールを追加（重み 1 個あたり +4 ビット）</text>
+</svg><figcaption>図 4-4　マスの中は 4 ビットのコードです。外れ値が 1 つあるだけで、ブロック全体の目盛りが粗くなります。警告色のマスは、0 に「吸い込まれた」小さな数です。</figcaption></figure></div>
+<p>対策の 1 つは<strong>ブロックを小さくする</strong>ことです。外れ値が巻き込むのは、自分の小さな組だけになります。代償は、s が増えることです。1 組が g 個、1 個が b ビットで、組ごとに 16 ビットの s を 1 つ保存するなら、1 個あたりの実際のビット数は b + 16 ÷ g です。4 ビットのコードを 32 個ずつの組にすると 4.5 ビットです。4 個ずつの組なら 8 ビットになり、せっかくの圧縮が半分、無駄になります。</p>
+<p>だから「4 ビット量子化」は、名目上のビット数にすぎません。本当のコストは、スケール（フォーマットによってはオフセットも）を含めて計算します。回転、非一様なコードブック、敏感な層にビットを多めに残す方法も外れ値への対策ですが、どれもそれぞれ復号のコストがかかるので、あわせて評価する必要があります。</p>
+
+<h2 id="sec-4">4.4 Strata の Q2_0：重み 1 個あたり 2.25 ビット</h2>
+<p>Strata が使うモデルでは、ルーティングされるエキスパートはすべて Q2_0 というフォーマットです。38 GiB のモデルパッケージのうち 31.64 GiB を占めます。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/quantize_act.hpp#L8-L10" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a> 1 ブロックは次の形です（図 4-5）。64 個の重みが、FP16 のスケール d（2 バイト）を共有します。各重みは 2 ビットのコードで、64 個が 16 バイトに収まり、合計 18 バイトです。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/artifact/dequant.hpp#L8-L13" target="_blank" rel="noopener noreferrer">dequant.hpp</a></p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="図 4-5：Q2_0 の 1 ブロックは 18 バイトで、先頭の 2 バイトが FP16 のスケール、続く 16 バイトに 64 個の 2 ビットコードが入る。コード 0、1、2、3 は、それぞれ −d、0、d、2d に復元される">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">Q2_0 の 1 ブロック：64 個の重み、18 バイト</text>
+<rect class="f-warn" fill="#9e5d24" x="20" y="32" width="40" height="32"/><text class="f-on" fill="#ffffff" x="40" y="53" font-size="13" text-anchor="middle">d</text>
+<rect fill="url(#c04-bytes)" x="60" y="32" width="320" height="32"/>
+<defs><pattern id="c04-bytes" width="20" height="32" patternUnits="userSpaceOnUse"><rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x=".5" y=".5" width="19" height="31"/></pattern></defs>
+<text class="f-muted" fill="#5c6d66" x="20" y="86" font-size="12">先頭 2 バイト：スケール d（FP16 が 1 個）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="106" font-size="12">続く 16 バイト：2 ビットのコード 64 個（4 個 / バイト）</text>
+<text class="f-text" fill="#182f2b" x="20" y="140" font-size="12">1 バイト（8 ビット）を拡大：コード 0 は最下位 2 ビット</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="150" width="80" height="28"/><text class="f-text" fill="#182f2b" x="100" y="169" font-size="12" text-anchor="middle">コード 3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="150" width="80" height="28"/><text class="f-text" fill="#182f2b" x="180" y="169" font-size="12" text-anchor="middle">コード 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="220" y="150" width="80" height="28"/><text class="f-text" fill="#182f2b" x="260" y="169" font-size="12" text-anchor="middle">コード 1</text>
+<rect class="f-accent" fill="#136d5a" x="300" y="150" width="80" height="28"/><text class="f-on" fill="#ffffff" x="340" y="169" font-size="12" text-anchor="middle">コード 0</text>
+<text class="f-text" fill="#182f2b" x="20" y="214" font-size="12">コード</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="110" y="198" width="66" height="24"/><text class="f-text" fill="#182f2b" x="143" y="215" font-size="12" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="178" y="198" width="66" height="24"/><text class="f-text" fill="#182f2b" x="211" y="215" font-size="12" text-anchor="middle">1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="246" y="198" width="66" height="24"/><text class="f-text" fill="#182f2b" x="279" y="215" font-size="12" text-anchor="middle">2</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="314" y="198" width="66" height="24"/><text class="f-text" fill="#182f2b" x="347" y="215" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="20" y="240" font-size="12">復元値</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="224" width="66" height="24"/><text class="f-text" fill="#182f2b" x="143" y="241" font-size="12" text-anchor="middle">−d</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="178" y="224" width="66" height="24"/><text class="f-text" fill="#182f2b" x="211" y="241" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="246" y="224" width="66" height="24"/><text class="f-text" fill="#182f2b" x="279" y="241" font-size="12" text-anchor="middle">+d</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="314" y="224" width="66" height="24"/><text class="f-text" fill="#182f2b" x="347" y="241" font-size="12" text-anchor="middle">+2d</text>
+</svg><figcaption>図 4-5　Q2_0 のブロック：復元式は (コード − 1) × d です。段階は 4 つだけで、しかも非対称です。負が 1 段階、正が 2 段階あります。</figcaption></figure>
+<p>復元式は (コード − 1) × d です。コード 0、1、2、3 は、それぞれ −d、0、+d、+2d になります。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/artifact/dequant.hpp#L68-L78" target="_blank" rel="noopener noreferrer">dequant.hpp</a> 前の節の対称量子化と比べると、非対称で、段階も 4 つしかありません。コメントには、ブロックサイズ 64 はモデルファイル自身のオフセットから<strong>確認した</strong>値で、仮定ではないとも書かれています。この形式を最初に導入した llama.cpp のバージョンは、128 を使っていました。</p>
+<p>ここで、第 10 章のあの数を確かめられます。1 ブロックは 18 バイトで 64 個の重みなので、平均は 18 × 8 ÷ 64 = <strong>2.25 ビット</strong>です。1 つのエキスパートには 4,915,200 個のパラメータがあり、76,800 ブロックに分かれます。18 バイトを掛けると、ちょうど 1,382,400 バイトです。ソースコードで決められたエキスパートのサイズと、1 バイトも違いません。<span class="ev ev-est">教育用の試算</span>[S06] そのうち 76,800 × 2 = 153,600 バイトがスケールです。名目 2 ビットが実際は 2.25 ビットになる、その増えた分です。</p>
+<p>Strata のヘッダーには、ほかのブロック形式も出てきます。同じように、実際のビット数を計算できます。</p>
+<div class="table-wrap"><table><thead><tr><th>フォーマット</th><th>1 ブロック</th><th>重み 1 個あたりの実際のビット数</th><th>Strata での使い道</th></tr></thead><tbody>
+<tr><td>Q2_0</td><td>64 個、18 バイト</td><td>2.25 ビット</td><td>すべてのルーティングされるエキスパート</td></tr>
+<tr><td>Q4_0</td><td>32 個、18 バイト</td><td>4.5 ビット</td><td>一部の密なテンソル</td></tr>
+<tr><td>Q8_0</td><td>32 個、34 バイト</td><td>8.5 ビット</td><td>Q2_0 の重みと掛け合わせる活性化</td></tr>
+<tr><td>Q8_K</td><td>256 個、292 バイト</td><td>9.125 ビット</td><td>ほかの量子化重みと掛け合わせる活性化</td></tr>
+</tbody></table></div>
+<p>表のブロックサイズは <code>dequant.hpp</code> と <code>quantize_act.hpp</code> のコメントによります。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/quantize_act.hpp#L20-L36" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a> 下の 2 行は<strong>活性化</strong>のフォーマットです。掛け算の前に、入力の数列も一時的に 8 ビットへ量子化され、重みのフォーマットと組になります。同じモデルパッケージの中で、同じ名前のテンソルでも、層によって違うフォーマットを使うことがあります。Strata の規則は、どの活性化フォーマットを組み合わせるかをテンソルの<strong>型</strong>で決め、名前では決めない、というものです。<span class="ev ev-code">コード上の事実</span>[S14]</p>
+<p>もう 1 つ細かい点があります。同じフォーマットでも、ディスク上とメモリ上でバイト数が違うことがあります。Strata のローダーは、一部のテンソルの FP16 スケールを FP32 に広げてからメモリに置き、広げた後のサイズを記録します。その後のコードは、記録を読むだけで、自分では計算し直しません。<span class="ev ev-code">コード上の事実</span>[S14] だから VRAM を見積もるときは、ファイルサイズを割るだけではいけません。</p>
+
+<h2 id="sec-5">4.5 同じ式、違う小数</h2>
+<p>量子化が入れる誤差は「わざと」のものです。もう 1 種類、「うっかり」の誤差があります。浮動小数点数の足し算は、結合法則を満たしません（図 4-6）。</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="図 4-6：FP32 では、10 の 8 乗に 1 を足して 10 の 8 乗を引くと 0 になり、先に引いてから 1 を足すと 1 になる">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="20" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="46" font-size="13" font-weight="600" text-anchor="middle">(10⁸ + 1) − 10⁸</text>
+<text class="f-text" fill="#182f2b" x="102.5" y="72" font-size="12" text-anchor="middle">10⁸ + 1 は表せない</text>
+<text class="f-text" fill="#182f2b" x="102.5" y="94" font-size="12" text-anchor="middle">10⁸ に丸められる</text>
+<text class="f-warn" fill="#9e5d24" x="102.5" y="128" font-size="13" font-weight="600" text-anchor="middle">結果：0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="20" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="46" font-size="13" font-weight="600" text-anchor="middle">(10⁸ − 10⁸) + 1</text>
+<text class="f-text" fill="#182f2b" x="297.5" y="72" font-size="12" text-anchor="middle">10⁸ − 10⁸ = 0</text>
+<text class="f-text" fill="#182f2b" x="297.5" y="94" font-size="12" text-anchor="middle">0 + 1 = 1、損失なし</text>
+<text class="f-text" fill="#182f2b" x="297.5" y="128" font-size="13" font-weight="600" text-anchor="middle">結果：1</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="170" font-size="12" text-anchor="middle">FP32 では 10⁸ 付近の隣り合う数の間隔が 8</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="190" font-size="12" text-anchor="middle">同じ式でも、計算の順序を変えると結果が変わる</text>
+</svg><figcaption>図 4-6　浮動小数点の足し算は結合法則を満たしません。並列計算は足す順序を変えるので、CPU と GPU で同じ式を計算しても、最後の数桁が違うことがあります。</figcaption></figure>
+<p>これは推論エンジンの中で毎日起きています。Strata では、同じエキスパートが、GPU キャッシュにヒットすれば GPU で、ミスすれば CPU で計算されます。ソースコードには、実際の突き合わせが記録されています。CPU 側では活性化のスケールを FP32 で保存し、GPU 側ではフォーマットどおり FP16 で保存すると、80 個のデータブロックで<strong>すべて</strong>約 4.761 × 10⁻⁴（相対誤差）の差が出ました。そのため、GPU に CPU 側のスケールを使わせる版を専用に追加しています。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/quantize_act.hpp#L24-L30" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a> 同じファイルには、FP16 の活性化をそのまま量子化重みに掛けると、参照解との差が 0.6%–0.9% になり、許容誤差の 6 〜 9 倍になる、とも記されています。</p>
+<p>丸めの規則も同じです。Strata は 8 ビット活性化の丸めを「最近接丸め、同点は偶数へ」と書いていて、C 言語の <code>roundf</code> の「同点は 0 から遠い方へ」とは違います。違いが出るのはちょうど同点のときだけで、実データではほぼ起きません。だから、間違えて使ってもエンドツーエンドテストはすべて通ってしまいます。そこで、対照テストでは<strong>わざと同点になる</strong>入力を作っています。<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/quantize_act.hpp#L49-L53" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a></p>
+<p>会話履歴も量子化できます。Strata はデフォルトで KV キャッシュを 8 ビットで保存します。エンジン 0.1.8 から選べる 4 ビット KV キャッシュは、この部分のメモリを半分にし、128K コンテキストで約 4% 速くなります。ただし、長い文書では目に見えて精度が落ちます。パープレキシティ（モデルが「どれだけ驚いたか」を表す指標で、低いほど良い）は 8%–12% 上がり、「干し草の山の中の針」テストには合格したままです。<span class="ev ev-report">上流レポート</span>[S03] メモリを半分にする代わりに、測れる品質低下が出る。これが量子化の典型的なトレードオフです。</p>
+
+<h2 id="sec-6">4.6 手を動かす：誤差の帳簿をつける</h2>
+<p>この章のインタラクティブ実験「ビットと量子化誤差」を開きましょう。使うのはこの章で説明した対称一様量子化で、Q2_0 や IQ 系のフォーマットではありません。</p>
+<ol>
+<li>2、4、8 ビットのときの MSE、最大誤差、0 に丸められた数の個数を記録します。</li>
+<li>外れ値を 1 つ加えて、もう一度やります。スケールを共有するコストがどれくらい大きいか見ましょう。</li>
+<li>「1 ビット増やす」と「組を半分に小さくする」を比べます。比べるときは<strong>同じ総ストレージ</strong>で、スケールのビット数も含めてください。名目上のビット数だけで比べてはいけません。</li>
+</ol>
+<p>実験の配列は固定です。どの結果も、紙と鉛筆で確かめられます。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>浮動小数点数 = 符号 + 指数部 + 仮数部。指数部が範囲を、仮数部が精度を決めます。FP16 は範囲が狭く、BF16 は精度が粗いです。</li>
+<li>量子化は、ブロック全体で 1 つのスケール s を共有し、各数は s の何倍かだけを保存します。実際のビット数 = コードのビット数 + スケールを 1 個あたりに割ったビット数です。</li>
+<li>誤差には 2 種類あります。量子化がわざと入れるものと、浮動小数点の計算順序から来るものです。どちらも測る必要があります。「クラッシュしなかった」だけを見てはいけません。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「量子化はファイルの圧縮と同じで、展開すれば元と完全に同じになる。」</strong></p>
+<p>zip は可逆圧縮で、展開すれば 1 バイトも違いません。量子化は<strong>非可逆</strong>です。コードは「いちばん近い目盛り」しか覚えておらず、元の小数は戻ってきません。良い量子化なら、損失をほとんど見えないほど小さくできます。ただし「ほとんど」は、測って確かめるものです。Strata の 4 ビット KV キャッシュがその例です。メモリは半分になり、長い文書でのパープレキシティは 8%–12% 上がります。<span class="ev ev-report">上流レポート</span>[S03]</p></div>
+
+<details class="deep"><summary>もう一歩深く：名目ビット数、誤差の上限、そして 2 つの実際の教訓</summary>
+<h3>名目ビット数は実際のビット数ではない</h3>
+<p>1 ブロックが g = 32 個の重みで、コードが 4 ビット、さらに 16 ビットのスケールを 1 つ保存するとします。コードは 16 バイト、スケールは 2 バイトで、合計 18 バイト、実際は <strong>1 重みあたり 4.5 ビット</strong>です。オフセット、アライメントのパディング、インデックスが加わると、コストはさらに変わります。だから「パラメータ数 × 4 ÷ 8」で機械的に VRAM の必要量を決めてはいけません。ディスク上の表現、ロード後のスケールの幅、GPU での展開時の一時バッファは、どれも違う可能性があります。ソースコードに記録された各ブロックのバイト数は、ファイル名の拡張子よりも信頼できます。[S14]</p>
+<h3>誤差の上限は 1 ブロックだけで、モデル全体ではない</h3>
+<p>クリッピングなしで最近接丸めを使えば、1 要素の誤差は s ÷ 2 を超えません。これは 1 ブロックの量子化誤差の上限にすぎず、モデル全体のタスク品質の保証ではありません。非線形性、top-k のような選択の境界（第 10 章）、数十層の積み重ねは、誤差の伝わり方を変えます。だから検収は 3 層に分けます。フォーマットの復号が契約どおりか。固定入力でテンソルの誤差が予算内か。実タスクの品質が許容できるか。「クラッシュしなかった」では、1 層目すら証明できません。</p>
+<h3>教訓その 1：見落とされたのはスケールの「幅」</h3>
+<p><code>layer.cpp</code> に、大文字のコメントがあります。以前、ある関数が量子化テンソルの 3 つのブロックの大きさを自分で計算し、スケール 1 つあたり 4 バイトと仮定していました。ところが 303 個の量子化テンソルのうち 90 個は、FP16 のスケールで保存されていました（58 個の Q2_0 エキスパートテンソルすべてと、Q4_0、Q5_0、Q8_0、IQ4_NL）。計算したスケールのブロックは 2 倍の大きさになり、3 つのブロックを足してもテンソル全体と合いません。最初は「グループサイズを書き間違えたのでは」と疑いました。303 個のテンソルを全部調べても、グループサイズの間違いは 1 つもありませんでした。<strong>チェックされていない入力は、スケールの幅であって、グループの個数ではありませんでした。</strong>現在のやり方は、ロード時に FP16 のスケールを FP32 に広げ、本当のサイズを記録し、ほかのコードは照合するだけで計算し直さない、というものです。<span class="ev ev-code">コード上の事実</span>[S14]</p>
+<h3>教訓その 2：2 つのツールの意見が一致しても、正しいとは限らない</h3>
+<p>同じファイルには、別の話も記録されています。2 つのパッキングツールが、どちらも <code>mins</code> という名前のデータブロックを探していましたが、本当の名前は <code>offsets</code> でした。その結果、54 個の Q4_K/Q5_K テンソルのオフセットブロックが漏れました。メモリ領域は漏れた後のサイズで確保され、バイトもコピーされず、136 MiB の差が出ました。コメントの結論は覚えておく価値があります。<strong>2 つのツールが一致しても、同じ誤った前提を共有していなければ、証拠になりません。</strong>最終的にこの誤りを見つけたのは、「合わなければ拒否し、決して推測しない」というチェックでした。[S14]</p>
+<h3>フォーマットは型に従い、名前には従わない</h3>
+<p>開発中、「名前がフォーマットを決める」と仮定したことがありました。たとえば <code>attn_qkv</code> は必ず K 系の量子化だ、というものです。実際には、同じ名前でも層によってフォーマットの分布はばらばらです。36 個の GDN 層の <code>attn_qkv</code> では、IQ4_XS が 13 個、Q3_K が 18 個、Q2_0 が 1 個、Q4_K が 4 個でした。そこで規則を型ベースに改めました。2 ビットコードには Q8_0 の活性化、その他の量子化フォーマットには Q8_K を組み合わせます。組み合わせを間違えると、GEMV の結果が 0.6%–1.4% ずれます。はっきり壊れたベクトルではなく、「もっともらしい」ベクトルになります。[S14]</p>
+<h3>8 ビット活性化量子化の「間違いに見えて間違いでない」細部</h3>
+<p>Q8_K の活性化量子化は ggml の参照実装をそのまま踏襲しており、誤記に見える点が 2 つあります。1 つ目は、スケールに −128 ÷ max ではなく −127 ÷ max を使うこと。2 つ目は、max に「絶対値が最大の要素の符号付きの値」を取るので、正の最大値は −127 に対応づけられることです。コメントによると、−127 を −128 と書き換えると 0.79% のスケール誤差が出ます。これは量子化のステップ幅と同じ桁で、「使えそうに見える」活性化ができてしまいます。<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/quantize_act.hpp#L35-L48" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a></p>
+</details>

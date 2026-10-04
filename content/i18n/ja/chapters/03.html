@@ -1,0 +1,210 @@
+<div class="hook"><span class="eyebrow">まずは不思議な話から</span>
+<p>Strata のソースコードには、「リファレンス実装とわざと違えている」箇所を説明するコメントがあります。同じ状態データを、リファレンス実装は (S, S, H) の順で保存しますが、Strata のカーネルは (S, H, S) の順で保存します。コメントはこう警告しています。2 つの並べ方は同じ 3 つの数を使うので、<strong>取り違えてもエラーにならない</strong>、と。<span class="ev ev-code">コード上の事実</span>[S17]</p>
+<p>数は同じなのに、保存の順番を変えるだけで、なぜここまで念を押すのでしょうか。コンピュータにとって、「この数が第何行・第何列にあるか」と「この数がメモリの何番目のマスにあるか」は別の話だからです。この章ではまず行列の掛け算をきちんと計算し、そのあと 1 枚の表がメモリという 1 本の線にどう並べられるかを見ます。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>モデルの計算はほぼすべて「重みの 1 行と入力の 1 列を掛けて足す」ことです。そしてテンソル = 数の並び + 「座標をアドレスに変換するルール」です。形状はどんな座標があるかを表し、ストライドは各座標が何マス進むかを表します。</p>
+
+<h2 id="sec-1">3.1 モデルの中身は数の表</h2>
+<p>モデルのファイルを開くと、中身はほとんど数ばかりで、用途ごとに 1 枚ずつの表に並んでいます。1 列だけのものを<dfn>ベクトル</dfn>、行と列があるものを<dfn>行列</dfn>と呼びます。表を何枚か重ねると 3 次元の配列になります。これらをまとめて<dfn>テンソル</dfn>と呼びます。座標を持つ数のかたまりです。各軸の長さをまとめたものを<dfn>形状</dfn>と呼びます（図 3-1）。</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="図 3-1：ベクトルは 1 列の数、行列は 1 枚の表、3 次元テンソルは表を重ねたもの。形状は各軸の長さを書き表す">
+<text class="f-text" fill="#182f2b" x="45" y="24" font-size="13" font-weight="600" text-anchor="middle">ベクトル</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="25" y="40" width="40" height="28"/><text class="f-text" fill="#182f2b" x="45" y="59" font-size="12" text-anchor="middle">0.3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="25" y="68" width="40" height="28"/><text class="f-text" fill="#182f2b" x="45" y="87" font-size="12" text-anchor="middle">−1.2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="25" y="96" width="40" height="28"/><text class="f-text" fill="#182f2b" x="45" y="115" font-size="12" text-anchor="middle">0.8</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="25" y="124" width="40" height="28"/><text class="f-text" fill="#182f2b" x="45" y="143" font-size="12" text-anchor="middle">2.0</text>
+<text class="f-muted" fill="#5c6d66" x="45" y="174" font-size="12" text-anchor="middle">形状 (4)</text>
+<text class="f-muted" fill="#5c6d66" x="45" y="192" font-size="12" text-anchor="middle">順序のある数</text>
+<text class="f-text" fill="#182f2b" x="170" y="24" font-size="13" font-weight="600" text-anchor="middle">行列</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="68" width="40" height="28"/><text class="f-text" fill="#182f2b" x="130" y="87" font-size="12" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="68" width="40" height="28"/><text class="f-text" fill="#182f2b" x="170" y="87" font-size="12" text-anchor="middle">2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="190" y="68" width="40" height="28"/><text class="f-text" fill="#182f2b" x="210" y="87" font-size="12" text-anchor="middle">3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="96" width="40" height="28"/><text class="f-text" fill="#182f2b" x="130" y="115" font-size="12" text-anchor="middle">4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="96" width="40" height="28"/><text class="f-text" fill="#182f2b" x="170" y="115" font-size="12" text-anchor="middle">5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="190" y="96" width="40" height="28"/><text class="f-text" fill="#182f2b" x="210" y="115" font-size="12" text-anchor="middle">6</text>
+<text class="f-muted" fill="#5c6d66" x="170" y="174" font-size="12" text-anchor="middle">形状 (2, 3)</text>
+<text class="f-muted" fill="#5c6d66" x="170" y="192" font-size="12" text-anchor="middle">2 行 3 列の表 1 枚</text>
+<text class="f-text" fill="#182f2b" x="330" y="24" font-size="13" font-weight="600" text-anchor="middle">3 次元テンソル</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="292" y="56" width="30" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="322" y="56" width="30" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="352" y="56" width="30" height="24"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="292" y="80" width="30" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="322" y="80" width="30" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="352" y="80" width="30" height="24"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="278" y="72" width="30" height="24"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="308" y="72" width="30" height="24"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="338" y="72" width="30" height="24"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="278" y="96" width="30" height="24"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="308" y="96" width="30" height="24"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="338" y="96" width="30" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="330" y="174" font-size="12" text-anchor="middle">形状 (2, 2, 3)</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="192" font-size="12" text-anchor="middle">表 2 枚を重ねたもの</text>
+<text class="f-text" fill="#182f2b" x="200" y="222" font-size="12" text-anchor="middle">Strata：トークン 1 つが層から層へ渡すのは 2560 個の数</text>
+</svg><figcaption>図 3-1　ベクトル、行列、3 次元テンソル。形状が教えてくれるのは「各軸の長さ」だけで、数がメモリ上でどんな順番で並ぶかは分かりません。</figcaption></figure>
+<p>Strata が使うモデルでは、層と層の間でトークン 1 つが受け渡すデータは、2560 個の数からなるベクトルです。<span class="ev ev-code">コード上の事実</span>[S04] 第 10 章で扱うエキスパートの中身は 3 つの行列で、2560 個の数を 640 個に圧縮し、また 2560 個に戻します。[S04] モデルの計算は、ほとんどがこうした行列をベクトルに掛ける操作です。</p>
+
+<h2 id="sec-2">3.2 行列 × ベクトルを手で計算する</h2>
+<p>まず、紙と鉛筆で計算できる小さな例を見ましょう。W は 2 行 3 列で、x は 3 つの数です。</p>
+<div class="viz" data-viz="matvec-steps"><figure class="fig"><svg viewBox="0 0 400 222" role="img" aria-label="図 3-2：W に x を掛けると y になる。W の 1 行目と x を要素ごとに掛けて足すと −2、2 行目も同様に −2">
+<rect class="f-accent" fill="#136d5a" x="40" y="30" width="40" height="28"/><text class="f-on" fill="#ffffff" x="60" y="49" font-size="13" text-anchor="middle">1</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="30" width="40" height="28"/><text class="f-on" fill="#ffffff" x="100" y="49" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="30" width="40" height="28"/><text class="f-on" fill="#ffffff" x="140" y="49" font-size="13" text-anchor="middle">3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="58" width="40" height="28"/><text class="f-text" fill="#182f2b" x="60" y="77" font-size="13" text-anchor="middle">4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="58" width="40" height="28"/><text class="f-text" fill="#182f2b" x="100" y="77" font-size="13" text-anchor="middle">5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="120" y="58" width="40" height="28"/><text class="f-text" fill="#182f2b" x="140" y="77" font-size="13" text-anchor="middle">6</text>
+<text class="f-muted" fill="#5c6d66" x="180" y="63" font-size="16" text-anchor="middle">×</text>
+<rect class="f-soft" fill="#e5f1df" x="200" y="16" width="40" height="28"/><text class="f-text" fill="#182f2b" x="220" y="35" font-size="13" text-anchor="middle">1</text>
+<rect class="f-soft" fill="#e5f1df" x="200" y="44" width="40" height="28"/><text class="f-text" fill="#182f2b" x="220" y="63" font-size="13" text-anchor="middle">0</text>
+<rect class="f-soft" fill="#e5f1df" x="200" y="72" width="40" height="28"/><text class="f-text" fill="#182f2b" x="220" y="91" font-size="13" text-anchor="middle">−1</text>
+<text class="f-muted" fill="#5c6d66" x="262" y="63" font-size="16" text-anchor="middle">=</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="282" y="30" width="40" height="28"/><text class="f-text" fill="#182f2b" x="302" y="49" font-size="13" text-anchor="middle">−2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="282" y="58" width="40" height="28"/><text class="f-text" fill="#182f2b" x="302" y="77" font-size="13" text-anchor="middle">−2</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="120" font-size="12" text-anchor="middle">W（2 × 3）</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="120" font-size="12" text-anchor="middle">x（3 × 1）</text>
+<text class="f-muted" fill="#5c6d66" x="302" y="120" font-size="12" text-anchor="middle">y（2 × 1）</text>
+<text class="f-text" fill="#182f2b" x="200" y="152" font-size="13" text-anchor="middle">y₁ = 1×1 + 2×0 + 3×(−1) = −2</text>
+<text class="f-text" fill="#182f2b" x="200" y="176" font-size="13" text-anchor="middle">y₂ = 4×1 + 5×0 + 6×(−1) = −2</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="206" font-size="12" text-anchor="middle">出力 1 つ = W の 1 行と x の内積。積和は 2 × 3 = 6 回</text>
+</svg><figcaption>図 3-2　y = Wx：W の行数だけ内積を計算します。強調した 1 行目と x を要素ごとに掛けて足すと、y₁ = −2 になります。</figcaption></figure></div>
+<p>ルールは 1 つだけです。<strong>W の 1 行を取り、x と 1 つずつペアにして掛け、全部足す</strong>と、出力が 1 つ出ます。これを W の行数だけ繰り返します。この「ペアで掛けて足す」操作を<dfn>内積</dfn>、全体の演算を<dfn>行列とベクトルの積</dfn>と呼びます。専門用語では <dfn>GEMV</dfn> と書きます。</p>
+<p>形状にも決まりがあります。(2 × 3) の行列に掛けられるのは 3 つの数のベクトルだけで、結果は 2 つの数です。間の 3 が一致している必要があり、計算で「消えます」。実際のモデルの GEMV では、形状が (640 × 2560) になることもあります。2560 個の数を入れて、640 個を返す形です。</p>
+<aside class="primer" id="c03-dot-matmul">
+<h3>ベクトルの内積と行列の積</h3>
+<p>イメージ：スーパーで 3 品買います。単価は [5, 2, 8] 円、個数は [1, 3, 2] 個で、合計は 5×1 + 2×3 + 8×2 = 27 円です。「同じ長さの 2 つのリストを、対応する要素どうしで掛けて足す」のが<dfn>内積</dfn>です。これは<strong>重み付きの和</strong>で、片方のリストが重み、もう片方がデータになります。</p>
+<p>行列とベクトルの積は、同じデータ x と、W のそれぞれの行との内積を 1 回ずつ計算することです。W が m 行 d 列なら、内積は m 回、積和は m × d 回です。入力が b 個あるときは、それらを並べて d × b の行列 X にして WX を計算します。これが<dfn>行列積</dfn>（GEMM）です。数学的には b 回の GEMV を並べただけですが、工学的には大きな違いがあります。W を 1 回読み込めば、b 個の入力に順番に使い回せるからです（図 3-3）。</p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="図 3-3：GEMV では 1 回読んだ重みが入力 1 つにしか使われない。GEMM では同じ重みが 4 つの入力に同時に使われる">
+<text class="f-text" fill="#182f2b" x="95" y="24" font-size="13" font-weight="600" text-anchor="middle">GEMV：入力 1 つ</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="44" width="70" height="70"/><text class="f-on" fill="#ffffff" x="55" y="84" font-size="14" text-anchor="middle">W</text>
+<text class="f-muted" fill="#5c6d66" x="104" y="84" font-size="14" text-anchor="middle">×</text>
+<rect class="f-soft" fill="#e5f1df" x="116" y="44" width="14" height="70"/>
+<text class="f-muted" fill="#5c6d66" x="142" y="84" font-size="14" text-anchor="middle">=</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="44" width="14" height="70"/>
+<text class="f-text" fill="#182f2b" x="95" y="142" font-size="12" text-anchor="middle">重みを 1 回読んで 1 回使う</text>
+<text class="f-text" fill="#182f2b" x="300" y="24" font-size="13" font-weight="600" text-anchor="middle">GEMM：入力 4 つをまとめて</text>
+<rect class="f-accent" fill="#136d5a" x="205" y="44" width="56" height="70"/><text class="f-on" fill="#ffffff" x="233" y="84" font-size="14" text-anchor="middle">W</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="84" font-size="14" text-anchor="middle">×</text>
+<rect class="f-soft" fill="#e5f1df" x="280" y="44" width="9" height="70"/><rect class="f-soft" fill="#e5f1df" x="292" y="44" width="9" height="70"/><rect class="f-soft" fill="#e5f1df" x="304" y="44" width="9" height="70"/><rect class="f-soft" fill="#e5f1df" x="316" y="44" width="9" height="70"/>
+<text class="f-muted" fill="#5c6d66" x="335" y="84" font-size="14" text-anchor="middle">=</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="344" y="44" width="9" height="70"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="356" y="44" width="9" height="70"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="368" y="44" width="9" height="70"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="380" y="44" width="9" height="70"/>
+<text class="f-text" fill="#182f2b" x="300" y="142" font-size="12" text-anchor="middle">重みを 1 回読んで 4 回使う</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="178" font-size="12" text-anchor="middle">数学的には同じ変換です。違いは、重みを 1 回読んで何回使えるか</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="198" font-size="12" text-anchor="middle">だからプリフィルはデコードよりずっと速い（第 5、16 章）</text>
+</svg><figcaption>図 3-3　GEMV と GEMM。重みは最も場所を取るデータです。1 回読んで何回も使えれば、運ぶバイト数をずっと減らせます。</figcaption></figure>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E8%A1%8C%E5%88%97" target="_blank" rel="noopener noreferrer">Wikipedia：行列</a> · <a href="https://www.3blue1brown.com/topics/linear-algebra" target="_blank" rel="noopener noreferrer">3Blue1Brown：線形代数のエッセンス</a> · <a href="https://ja.wikipedia.org/wiki/%E5%86%85%E7%A9%8D" target="_blank" rel="noopener noreferrer">Wikipedia：内積</a> · <a href="https://ja.wikipedia.org/wiki/%E8%A1%8C%E5%88%97%E3%81%AE%E4%B9%97%E6%B3%95" target="_blank" rel="noopener noreferrer">Wikipedia：行列の乗法</a></p>
+</aside>
+<p>第 1 章で見たとおり、答えを書く段階では 1 ラウンドにトークンを 1 つしか出しません。そのため各層の計算は GEMV になります。問題を読む段階では長い質問をまとめて計算するので、GEMM になります。図 3-3 の違いは、実際のシステムではこの形で現れます。</p>
+
+<h2 id="sec-3">3.3 メモリは 1 本の線：行優先とストライド</h2>
+<p>行列は 2 次元ですが、メモリは長い 1 本の線にすぎません。各マスには番号があり、これを<dfn>アドレス</dfn>と呼びます。表をそこに入れるには、「どれを先に置くか」を最初に決める必要があります。</p>
+<aside class="primer" id="c03-memory-layout">
+<h3>配列のメモリ配置：行優先、列優先、ストライド</h3>
+<p>座席表を、細長いノートに書き込むところを想像してください。1 つ目の書き方は、1 行ずつ横に書く方法です。まず 0 行目の全座席、次に 1 行目、という順です。これを<dfn>行優先</dfn>（row-major）と呼びます。もう 1 つは縦に 1 本ずつ書く方法で、<dfn>列優先</dfn>（column-major）と呼びます。どちらも正しい書き方です。読む人が書き方を知ってさえいれば問題ありません（図 3-4）。</p>
+<figure class="fig"><svg viewBox="0 0 400 272" role="img" aria-label="図 3-4：同じ 2 行 3 列の行列でも、行優先と列優先でメモリに入れると要素の並ぶ順番が違う">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">論理的な形：2 行 3 列</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="26" width="40" height="26"/><text class="f-text" fill="#182f2b" x="160" y="44" font-size="13" text-anchor="middle">a</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="26" width="40" height="26"/><text class="f-text" fill="#182f2b" x="200" y="44" font-size="13" text-anchor="middle">b</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="220" y="26" width="40" height="26"/><text class="f-text" fill="#182f2b" x="240" y="44" font-size="13" text-anchor="middle">c</text>
+<rect class="f-accent" fill="#136d5a" x="140" y="52" width="40" height="26"/><text class="f-on" fill="#ffffff" x="160" y="70" font-size="13" text-anchor="middle">d</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="52" width="40" height="26"/><text class="f-on" fill="#ffffff" x="200" y="70" font-size="13" text-anchor="middle">e</text>
+<rect class="f-accent" fill="#136d5a" x="220" y="52" width="40" height="26"/><text class="f-on" fill="#ffffff" x="240" y="70" font-size="13" text-anchor="middle">f</text>
+<text class="f-text" fill="#182f2b" x="10" y="123" font-size="13" font-weight="600">行優先</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="104" width="46" height="28"/><text class="f-text" fill="#182f2b" x="103" y="123" font-size="13" text-anchor="middle">a</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="130" y="104" width="46" height="28"/><text class="f-text" fill="#182f2b" x="153" y="123" font-size="13" text-anchor="middle">b</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="104" width="46" height="28"/><text class="f-text" fill="#182f2b" x="203" y="123" font-size="13" text-anchor="middle">c</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="104" width="46" height="28"/><text class="f-on" fill="#ffffff" x="253" y="123" font-size="13" text-anchor="middle">d</text>
+<rect class="f-accent" fill="#136d5a" x="280" y="104" width="46" height="28"/><text class="f-on" fill="#ffffff" x="303" y="123" font-size="13" text-anchor="middle">e</text>
+<rect class="f-accent" fill="#136d5a" x="330" y="104" width="46" height="28"/><text class="f-on" fill="#ffffff" x="353" y="123" font-size="13" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="103" y="148" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="153" y="148" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="203" y="148" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="253" y="148" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="303" y="148" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="353" y="148" font-size="12" text-anchor="middle">5</text>
+<text class="f-text" fill="#182f2b" x="10" y="189" font-size="13" font-weight="600">列優先</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="170" width="46" height="28"/><text class="f-text" fill="#182f2b" x="103" y="189" font-size="13" text-anchor="middle">a</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="170" width="46" height="28"/><text class="f-on" fill="#ffffff" x="153" y="189" font-size="13" text-anchor="middle">d</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="170" width="46" height="28"/><text class="f-text" fill="#182f2b" x="203" y="189" font-size="13" text-anchor="middle">b</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="170" width="46" height="28"/><text class="f-on" fill="#ffffff" x="253" y="189" font-size="13" text-anchor="middle">e</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="170" width="46" height="28"/><text class="f-text" fill="#182f2b" x="303" y="189" font-size="13" text-anchor="middle">c</text>
+<rect class="f-accent" fill="#136d5a" x="330" y="170" width="46" height="28"/><text class="f-on" fill="#ffffff" x="353" y="189" font-size="13" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="103" y="214" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="153" y="214" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="203" y="214" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="253" y="214" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="303" y="214" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="353" y="214" font-size="12" text-anchor="middle">5</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="244" font-size="12" text-anchor="middle">行優先：(i, j) のアドレス = i × 3 + j</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="262" font-size="12" text-anchor="middle">列優先：(i, j) のアドレス = j × 2 + i</text>
+</svg><figcaption>図 3-4　同じ 2 × 3 の表を 2 通りに並べたもの。強調した 1 行目は、行優先では隣り合い、列優先ではばらばらになります。</figcaption></figure>
+<p>行優先では、(i, j) のアドレスは i × 列数 + j です。つまり、j が 1 増えるとアドレスは 1 増え、i が 1 増えるとアドレスは 1 行分の長さだけ増えます。「ある座標が 1 増えたとき、アドレスが何マス進むか」を、その軸の<dfn>ストライド</dfn>（stride）と呼びます。上の表のストライドは、行優先なら (3, 1)、列優先なら (1, 2) です。</p>
+<p>任意の次元に広げると、<strong>アドレス = 各座標 × そのストライドの合計</strong>です。最も速く変わる軸のストライドは 1 で、そこから前へ向かうと、各軸のストライドは「その後ろにあるすべての軸の長さの積」になります。だから、テンソルを説明するには形状だけでは足りず、ストライドも必要です。</p>
+<p class="further">さらに読む：<a href="https://en.wikipedia.org/wiki/Row-_and_column-major_order" target="_blank" rel="noopener noreferrer">Wikipedia: Row- and column-major order</a> · <a href="https://pytorch.org/docs/stable/generated/torch.Tensor.stride.html" target="_blank" rel="noopener noreferrer">PyTorch ドキュメント：Tensor.stride</a> · <a href="https://csapp.cs.cmu.edu/" target="_blank" rel="noopener noreferrer">『詳解 コンピュータシステム』（CS:APP）第 3、6 章</a></p>
+</aside>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>C 言語の 2 次元配列は行優先で、Fortran と MATLAB は列優先です。NumPy や PyTorch のテンソルは strides の組を持っていて、転置は多くの場合 2 つのストライドを入れ替えるだけで、1 バイトも動かしません。だからこそ、「形状が同じ」2 つのテンソルでも、メモリ上の並びはまったく違うことがあります。</p>
+
+<h2 id="sec-4">3.4 3 つの軸の例：同じ要素に 2 つのアドレス</h2>
+<p>冒頭の状態を小さくして見てみましょう。軸は i、h、j の 3 つで、長さはそれぞれ 2、3、2、全部で 12 個の数です。(i, h, j) の順なら j が最速、(i, j, h) の順なら h が最速です。下の図では要素をクリックして、2 通りの並べ方でどこに入るかを確認できます。</p>
+<div class="viz" data-viz="stride-explorer"><figure class="fig"><svg viewBox="0 0 400 196" role="img" aria-label="図 3-5：同じ 3 次元配列を 2 通りの順番でメモリに入れる。要素 (1, 2, 0) のアドレスは、1 つ目の並べ方では 10、2 つ目では 8">
+<text class="f-text" fill="#182f2b" x="20" y="20" font-size="12" font-weight="600">(i, h, j) の並べ方：j が最速（Strata カーネル）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="34.5" y="47" font-size="12" text-anchor="middle">000</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="64.5" y="47" font-size="12" text-anchor="middle">001</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="94.5" y="47" font-size="12" text-anchor="middle">010</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="124.5" y="47" font-size="12" text-anchor="middle">011</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="154.5" y="47" font-size="12" text-anchor="middle">020</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="170" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="184.5" y="47" font-size="12" text-anchor="middle">021</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="214.5" y="47" font-size="12" text-anchor="middle">100</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="230" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="244.5" y="47" font-size="12" text-anchor="middle">101</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="260" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="274.5" y="47" font-size="12" text-anchor="middle">110</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="304.5" y="47" font-size="12" text-anchor="middle">111</text>
+<rect class="f-accent" fill="#136d5a" x="320" y="30" width="29" height="26"/><text class="f-on" fill="#ffffff" x="334.5" y="47" font-size="12" text-anchor="middle">120</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="350" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="364.5" y="47" font-size="12" text-anchor="middle">121</text>
+<text class="f-muted" fill="#5c6d66" x="34.5" y="70" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="64.5" y="70" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="94.5" y="70" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="124.5" y="70" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="154.5" y="70" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="184.5" y="70" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="214.5" y="70" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="244.5" y="70" font-size="12" text-anchor="middle">7</text><text class="f-muted" fill="#5c6d66" x="274.5" y="70" font-size="12" text-anchor="middle">8</text><text class="f-muted" fill="#5c6d66" x="304.5" y="70" font-size="12" text-anchor="middle">9</text><text class="f-text" fill="#182f2b" x="334.5" y="70" font-size="12" font-weight="600" text-anchor="middle">10</text><text class="f-muted" fill="#5c6d66" x="364.5" y="70" font-size="12" text-anchor="middle">11</text>
+<text class="f-text" fill="#182f2b" x="20" y="100" font-size="12" font-weight="600">(i, j, h) の並べ方：h が最速（リファレンス実装）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="34.5" y="127" font-size="12" text-anchor="middle">000</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="64.5" y="127" font-size="12" text-anchor="middle">010</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="94.5" y="127" font-size="12" text-anchor="middle">020</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="124.5" y="127" font-size="12" text-anchor="middle">001</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="154.5" y="127" font-size="12" text-anchor="middle">011</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="170" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="184.5" y="127" font-size="12" text-anchor="middle">021</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="214.5" y="127" font-size="12" text-anchor="middle">100</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="230" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="244.5" y="127" font-size="12" text-anchor="middle">110</text>
+<rect class="f-accent" fill="#136d5a" x="260" y="110" width="29" height="26"/><text class="f-on" fill="#ffffff" x="274.5" y="127" font-size="12" text-anchor="middle">120</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="304.5" y="127" font-size="12" text-anchor="middle">101</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="334.5" y="127" font-size="12" text-anchor="middle">111</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="350" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="364.5" y="127" font-size="12" text-anchor="middle">121</text>
+<text class="f-muted" fill="#5c6d66" x="34.5" y="150" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="64.5" y="150" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="94.5" y="150" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="124.5" y="150" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="154.5" y="150" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="184.5" y="150" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="214.5" y="150" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="244.5" y="150" font-size="12" text-anchor="middle">7</text><text class="f-text" fill="#182f2b" x="274.5" y="150" font-size="12" font-weight="600" text-anchor="middle">8</text><text class="f-muted" fill="#5c6d66" x="304.5" y="150" font-size="12" text-anchor="middle">9</text><text class="f-muted" fill="#5c6d66" x="334.5" y="150" font-size="12" text-anchor="middle">10</text><text class="f-muted" fill="#5c6d66" x="364.5" y="150" font-size="12" text-anchor="middle">11</text>
+<text class="f-text" fill="#182f2b" x="200" y="182" font-size="12" text-anchor="middle">同じ要素 (1, 2, 0)：アドレスは 10 か 8 か？どちらも有効</text>
+</svg><figcaption>図 3-5　マスの中の 3 桁の数は座標 i、h、j です。同じ要素でも並べ方を変えるとアドレスが変わり、どちらのアドレスも 0–11 の範囲内です。</figcaption></figure></div>
+<p>強調した要素 (i=1, h=2, j=0) を手で計算してみましょう。(i, h, j) の並べ方のストライドは (6, 2, 1) で、アドレス = 1×6 + 2×2 + 0×1 = 10 です。(i, j, h) の並べ方のストライドは (6, 1, 3) です。i は 6、j は 3、h は 1 進むので、アドレス = 1×6 + 0×3 + 2×1 = 8 になります。</p>
+<p>どちらのアドレスも有効な範囲内です。つまり、データを書く人と読む人で並べ方が違っても、<strong>プログラムはクラッシュせず、範囲外アクセスも起きず、ただ静かに間違った数を読む</strong>だけです。最終的な結果は有限で、一見まともに見えますが、間違っています。この種のバグは最も見つけにくいものです。</p>
+
+<h2 id="sec-5">3.5 Strata がわざと並べ方を変える理由</h2>
+<p>冒頭のコメントに戻りましょう。Strata が使うモデルには、GDN という層が 36 層あり、どの層にも 1 つずつ状態があります。状態は 3 次元の配列で、2 つの軸の長さが 128、1 つの軸の長さが 48 です。<span class="ev ev-code">コード上の事実</span>[S04] リファレンス実装はこれを (S, S, H) = (i, j, h) として保存します。Strata のカーネルは (S, H, S) = (i, h, j) に変え、j を最速の軸にしています。<span class="ev ev-code">コード上の事実</span>[S17]</p>
+<p>理由はコメントに書かれています。i を固定すると、GPU 上のスレッドの組は j に沿って順に読んでいきます。j が最速なら、スレッドが読むのは<strong>連続した</strong>ひとまとまりのメモリです。j が最速でなければ、48 個おきに 1 つずつ読むことになります（図 3-6）。GPU が連続したメモリを読むときは、スレッドの組のリクエストを少数の大きな読み出しにまとめられます。これを<dfn>コアレスドメモリアクセス</dfn>（coalesced access）と呼びます。飛び飛びに読むと、まとめられません（第 15 章で詳しく説明します）。</p>
+<figure class="fig"><svg viewBox="0 0 400 212" role="img" aria-label="図 3-6：j が最速なら、スレッドの組は連続したメモリを読む。h が最速なら、隣り合う j の間は 48 個離れていて、スレッドは飛び飛びに読むしかない">
+<text class="f-text" fill="#182f2b" x="20" y="20" font-size="12" font-weight="600">Strata カーネル (S, H, S)：i を固定すると j が連続</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="42" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="64" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="86" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="108" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="130" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="152" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="174" y="32" width="21" height="24"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="218" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="240" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="262" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="284" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="306" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="328" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="32" width="21" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="74" font-size="12">8 スレッドが隣り合う 8 個を読む：1 回で読み切れる</text>
+<text class="f-text" fill="#182f2b" x="20" y="114" font-size="12" font-weight="600">リファレンス実装 (S, S, H)：j は 48 個ずつ飛ぶ</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="42" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="64" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="86" y="126" width="21" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="108" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="130" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="152" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="174" y="126" width="21" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="196" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="218" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="240" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="262" y="126" width="21" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="284" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="306" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="328" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="126" width="21" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="12">読む数が散らばる（図の間隔は目安。実際は 48 個おき）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="196" font-size="12">状態は実行時に作るバッファ。どの並べ方でも追加コストなし</text>
+</svg><figcaption>図 3-6　同じ数でも、並べ方によって読み方が決まります。Strata は j を最速の軸にして、スレッドの組が連続して読めるようにしています。</figcaption></figure>
+<p>コメントはこう続けます。この状態は実行時に作るバッファで、モデルファイルの重みではないため、どちらの並べ方を選んでも追加コストはかかりません。ただし、必ず明記する必要があります。2 つの並べ方は「同じ 3 つの数を指すので、取り違えても音もなく壊れる」からです。[S17] ついでに大きさを計算してみましょう。128 × 48 × 128 = 786,432 個の数を、1 個 4 バイトの FP32 で保存すると、ちょうど 3 MiB です。36 層で合計 108 MiB になります。<span class="ev ev-est">教育用の試算</span></p>
+<p>アテンション層の KV キャッシュにも、似た取り決めがあります。ソースコードは並べ方を [ページ][KV ヘッド][ページ内の位置][ヘッド次元] と書き、最後の軸が最速です。さらに、ヘッダファイル以外のコードがこの対応を自分で仮定することを<strong>禁止</strong>しています。テストでは、ページサイズ 1、4、512 の 3 通りと、シャッフルしたページテーブルでそれぞれ実行し、アテンションの出力が完全に一致することを要求します。<span class="ev ev-code">コード上の事実</span>[S18] 「並べ方」が、インターフェース契約の一部として扱われているのです。</p>
+
+<h2 id="sec-6">3.6 形状チェックはロード時に行い、それから計算する</h2>
+<p>並べ方を間違えても、形状を取り違えても自分ではエラーにならないので、自分から検査する必要があります。Strata の <code>layout.hpp</code> は、カーネルが依存するすべての寸法を <code>ModelGeometry</code> という構造体にまとめています。幅 2560、48 層、4 層ごとに 1 つのアテンション層、各層 512 個のエキスパート……。そして <code>check_layer</code> と <code>check_all</code> で、モデルファイルのすべてのテンソルの形状を 1 つずつ照合します。<span class="ev ev-code">コード上の事実</span>[S04]</p>
+<p>ファイル冒頭のコメントは、理由をはっきり書いています。不一致は<strong>ロード時</strong>に、テンソル名、実際の形状、要求される形状を添えて報告するべきです。4000 個目のトークンで、GEMV の中の誤った数になってから気づいてはいけません。コメントには、実際にあった教訓も残されています。ある開発ラウンドで、あるキャッシュのサイズを 4 倍に大きく計算してしまいました。「クエリヘッドの数」を「キーヘッドの数」と取り違えたためです。しかもこのバグは 1 ラウンド余計に生き延びました。VRAM の予算がかえって厳しくなり、むしろ「安全」に見えたからです。[S04]</p>
+<p>もう 1 つの検査は <code>layer.cpp</code> にあります。量子化テンソルは 3 つのブロック（コード、スケール係数、オフセット）でできていて、プログラムは 3 ブロックのバイト数の合計が、テンソル全体と<strong>ぴったり</strong>一致することを要求します。オフセットのフラグとオフセットのブロックが存在するかどうかも、一致していなければなりません。合わなければ、推測せずに拒否します。<span class="ev ev-code">コード上の事実</span>[S14] この「3 ブロック」が何なのかは、第 4 章で説明します。</p>
+<p><strong>手を動かす：</strong>この章のインタラクティブ実験「行列積を計算してみる」を開きます。まず紙の上で結果を予想し、次に入力要素を 1 つ変えて、どの出力が一緒に変わるかを見ます。続いて、このページの 2 つのインタラクティブ図を試しましょう。行列とベクトルの積では x を [0, 1, 0] にします。ストライド実験では同じ要素をクリックして、並べ方を切り替えます。最後に小さな練習をします。行列の各要素に、座標が分かる数を入れます（たとえば 1 行 2 列には 12）。そのうえで、わざとストライドを逆に書き、出力のどの数が「違う場所に行ってしまった」かを見てみましょう。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>行列とベクトルの積 = W の各行と x の内積を 1 回ずつ計算すること。複数の入力を並べて計算する（GEMM）と、1 つの重みを何度も使えます。</li>
+<li>メモリは 1 本の線です。テンソル = 数の並び + 形状 + ストライドで、アドレス = 各座標 × ストライドの合計です。</li>
+<li>並べ方を間違えてもエラーにならず、ひそかに計算が狂います。だから並べ方はインターフェースに書き、形状はロード時に検査します。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「形状が同じなら、2 つのテンソルはそのまま入れ替えられる。」</strong></p>
+<p>形状が表すのは、どんな座標があるかだけで、その座標がメモリのどのマスに対応するかは表しません。Strata の GDN 状態は、リファレンス実装とカーネルで形状は同じでも並べ方が違います。一方をそのままもう一方に渡すと、結果は有限でも誤った数になります。<span class="ev ev-code">コード上の事実</span>[S17] ほかにも、ストライド、軸の意味、データの状態（たとえば正規化済みかどうか）を確認する必要があります。</p></div>
+
+<details class="deep"><summary>もう一歩深く：アドレスの式、ヘッドの対応関係、インターフェース契約</summary>
+<h3>一般的なアドレスの式</h3>
+<p>任意の次元のテンソルで、<code>offset = Σ index[a] × stride[a]</code> です。形状はどの座標が有効かを教え、ストライドは各座標が 1 進むときに何要素を飛び越えるかを教えます。ストライドの単位ははっきり書いてください。「要素」なのか「バイト」なのかです。両者は要素サイズの倍数だけ違うので、混ぜて使うのはもう 1 つのよくある誤りです。</p>
+<h3>例題：3 次元の要素の位置を求める</h3>
+<p>S = 2、H = 3 とし、(i, h, j) で j が最速の連続配置を使います。要素 (1, 2, 0) のオフセットは (1 × 3 + 2) × 2 + 0 = 10 です。もし誤って (i, j, h) として読むと、数学的に同じ要素のオフセットは (1 × 2 + 0) × 3 + 2 = 8 になります。どちらのアドレスも有効な範囲内なので、範囲チェックでは見つかりません。より一般的に言えば、<strong>メモリの安全性は、数値の意味が正しいことと同じではありません</strong>。アドレスが有効で、NaN がなく、最後の文が自然であっても、テンソルの配置が一致している証拠にはなりません。</p>
+<h3>ヘッドの対応関係：剰余か、整数除算か</h3>
+<p>「どのヘッドをどのヘッドと組にするか」も 1 つの添字ルールで、よく使われる 2 通りの書き方のどちらでも、形状が正しい結果が出ます。GDN 層には 48 個のバリューヘッドと 16 個のキーヘッドがあり、Strata は h 番目のバリューヘッドを h mod 16 番目のキーヘッドと組にします（剰余）。h ÷ 3（整数除算）ではありません。[S17] 一方、アテンション層には 24 個のクエリヘッドと 2 個の KV ヘッドがあり、規則は正反対です。q 番目のクエリヘッドは q ÷ 12 番目の KV ヘッドと組になり（整数除算）、q mod 2 では<strong>ありません</strong>。<span class="ev ev-code">コード上の事実</span>[S18] 例を挙げます。バリューヘッド 17 は、剰余ならキーヘッド 1 と、整数除算ならキーヘッド 5 と組になります。クエリヘッド 1 は、整数除算なら KV ヘッド 0 と、剰余なら KV ヘッド 1 と組になります。逆に書いても、プログラムは普通に動きます。だからソースコードのコメントは、リファレンス実装とテストがこの 2 つの規則を両方とも「釘付け」にしている、と述べています。</p>
+<h3>KV キャッシュのページ単位のアドレス</h3>
+<p>アテンション層の KV キャッシュは、ページ単位で保存されます。論理的に t 番目の位置、h 番目のヘッドの行は、物理的には次の位置にあります：<code>page = table[t / page_size]</code>、<code>row = (page × n_head_kv + h) × page_size + (t mod page_size)</code>。つまり、同じヘッドの連続した位置は 1 ページの中で隣り合います。これはアテンション計算が最も望む性質です。[S18] テストは 3 種類のページサイズとシャッフルしたページテーブルを使い、出力が完全に一致することを要求します。並べ方の選択が、結果に漏れてはいけないのです。</p>
+<h3>型システムの、もう 1 つの意味</h3>
+<p>C++ の <code>float*</code> が表すのは、「ここに浮動小数点数がいくつかある」ということだけです。正規化の前か後かのアクティベーションなのか、どの層の出力なのか、エキスパートの結果にすでにルーティング重みを掛けたのか、さらには CPU のメモリか VRAM かも表しません。Strata のサンプリングインターフェースには、大文字で書かれた警告が専用に置かれています。<code>logits</code> と <code>out</code> は <strong>VRAM のポインタ</strong>で、引数名や型からは分かりません。渡し間違えると、エラーは次の同期呼び出しで出て、まったく無関係なバッファを指します。<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/sampler.hpp#L30-L43" target="_blank" rel="noopener noreferrer">sampler.hpp</a></p>
+<p>設計の段階で、<code>NormalizedActivation</code> や <code>ExpertOutputUnweighted</code> のような意味を持つ型を加えることもできます。実際に型を変えなくても、インターフェースのコメントとテストに、次の 5 つははっきり書くべきです。<strong>形状、並べ方（ストライド）、正規化済みかどうか、ルーティング重みを掛けたかどうか、バッファの所有者と使える期間</strong>。第 10 章「もう一歩深く」にある <code>expert_source.hpp</code> のいくつかの契約が、この 5 つの実例です。</p>
+<h3>GEMV と GEMM：同じ変換、違う再利用</h3>
+<p>推論の GEMV は、行列にベクトルを 1 つ掛ける計算です。複数の入力を X にまとめると GEMM になります。2 つは同じ線形変換ですが、重みを再利用できる機会がまったく違います。だから「浮動小数点演算の総回数」だけでは、速さを比べられません。第 5 章では、ルーフラインモデルでこれを定量化します。</p>
+<h3>テストには、対称でない小さなサンプルを使う</h3>
+<p>W = [[1, 2, 3], [4, 5, 6]] と x = [1, 0, −1] で掛け算を実装します。次に、いくつかの x を 2 列にまとめて計算し、列ごとの結果が単独の GEMV と一致することを確認します。そのあと、わざとストライドを入れ替えて、テストが失敗することを確かめます。W の各位置の値がすべて違い、対称でもなければ、転置や行と列の取り違えのような誤りが、偶然に隠されにくくなります。</p>
+</details>

@@ -1,0 +1,171 @@
+<div class="hook"><span class="eyebrow">気づいたことはありませんか</span>
+<p>GPU の宣伝ページには、毎秒数十兆回の演算ができると書いてあります。ところが同じ GPU で大規模言語モデルを動かすと、出てくるトークンは毎秒数十個だけです。演算の回数だけで見れば、1 トークンを作るのにそんなに時間はかからないはずです。時間はどこへ消えているのでしょうか。</p>
+<p>Strata のソースコメントには、はっきりした結論が書かれています。このエンジンは「帯域幅ではなく、起動オーバーヘッドに律速されている」。もう 1 つあります。GEMV は 1 トークンの約 16% しか占めないので、数ポイント速くしても「合計は動かない」。<span class="ev ev-code">コード上の事実</span>[S13][S14] この章では、時間の行き先を探す 3 本のものさしを紹介します。帯域幅とレイテンシ、ルーフラインモデル、アムダールの法則です。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>ある計算にかかる時間は、少なくとも「計算の時間」と「データを運ぶ時間」の長いほうです。デコード（答えを書く段階）はデータが多く演算が少ないので、運搬で詰まります。最適化の前に、各部分の割合を測りましょう。全体の 16% しかない部分は、無限に速くしても全体は 19% しか速くなりません。</p>
+
+<h2 id="sec-1">5.1 GPU はこんなに速いのに、なぜトークンは遅いのか</h2>
+<p>ものすごい速さで野菜を切るシェフを想像してください。ただし食材は、階下の倉庫から何往復もして運び上げなければなりません。運搬が追いつかない限り、包丁がどんなに鋭くてもシェフは待つだけです。GPU の計算ユニットがこのシェフで、VRAM や RAM（メインメモリ）が倉庫です。その間の通路が毎秒何バイト運べるかで、シェフが忙しく働けるかどうかが決まります。</p>
+<p>デコード（decode、「答えを書く段階」）では、1 トークン作るたびに、その手順で使う重みを一度読み込みます。第 10 章で計算したとおり、エキスパートのデータだけで約 664 MB あります。Strata のソースには測定値が残っています。テストマシンでは、RAM からエキスパートを読む速度は 44.14 GB/s でした。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/core/expert_source.hpp#L378-L385" target="_blank" rel="noopener noreferrer">expert_source.hpp</a> もし 1 トークンごとに 663.6 MB のエキスパートをすべて RAM から読むなら、読むだけで 663.6 MB ÷ 44.14 GB/s ≈ 15 ms かかります。毎秒せいぜい 66 トークンで、計算はまだ始まってもいません。<span class="ev ev-est">教育用の試算</span></p>
+<p>だから Strata は、よく使うエキスパートを VRAM に置きます（VRAM のほうがずっと速く読めます）。さらに、ヒットしなかったエキスパートは CPU が RAM の中でそのまま計算します（データは PCIe を通りません）。上流の実測では、出力速度は毎秒 93 トークンでした（RTX 5070 12 GB、Q2_0、4K のプロンプト、エンジン 0.1.26、投機的デコーディング有効）。これは上の「全部 RAM から読む」場合の上限より高い値です。理由は 2 つあります。多くのエキスパートは、そもそも RAM から読まなくて済みます。そして投機的デコーディングは、1 ラウンドで 2 個以上のトークンを出せます（第 18 章）。<span class="ev ev-report">上流レポート</span>[S03]</p>
+<aside class="primer" id="c05-bandwidth-latency">
+<h3>帯域幅とレイテンシ</h3>
+<p>第 1 章の記憶階層のコラムでこの 2 つの言葉が出てきました。ここでは式にします。<dfn>レイテンシ</dfn>は「リクエストを出してから最初の 1 バイトが届くまで」の待ち時間です。宅配で言えば、注文してから荷物が出発するまでに当たります。<dfn>帯域幅</dfn>は「運び始めてから毎秒どれだけ運べるか」です。トラックの積載量のようなものです。データをまとめて運ぶ時間は、だいたい次のとおりです。</p>
+<div class="equation">転送時間 ≈ レイテンシ + データ量 ÷ 帯域幅</div>
+<p>どちらの項が効くかは、データ量で決まります（図 5-1）。小さい荷物は、ほぼレイテンシだけです。1 KB を運んでも 2 KB を運んでも、ほとんど同じ時間です。大きい荷物は、ほぼ帯域幅だけです。664 MB の時間は、帯域幅だけで決まります。だから、小さくて頻繁な操作を速くするには回数を減らします。大きな塊の転送を速くするには、帯域幅を上げるか、運ぶ量を減らします。</p>
+<figure class="fig"><svg viewBox="0 0 400 242" role="img" aria-label="図 5-1：1 KB を運ぶ時間はほぼレイテンシで、約 10 マイクロ秒。664 MB を運ぶ時間はほぼ帯域幅で、約 10.5 ミリ秒">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">転送時間 = レイテンシ + データ量 ÷ 帯域幅</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="40" font-size="12">教育用の仮定：レイテンシ 10 μs、帯域幅 63 GB/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="77" font-size="13">1 KB</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="60" width="289.5" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="379.5" y="60" width="1" height="24"/>
+<text class="f-text" fill="#182f2b" x="90" y="106" font-size="12">レイテンシが 99.8%、合計約 10 μs</text>
+<text class="f-text" fill="#182f2b" x="10" y="147" font-size="13">664 MB</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="130" width="1" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="91" y="130" width="289.5" height="24"/>
+<text class="f-text" fill="#182f2b" x="90" y="176" font-size="12">帯域幅が 99.9%、合計約 10.5 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="212" font-size="12">2 本とも、それぞれ全体を同じ長さに描いています。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="230" font-size="12">時間は約 1000 倍違います。警告色：レイテンシ、メイン色：転送</text>
+</svg><figcaption>図 5-1　小さい荷物はレイテンシ、大きい荷物は帯域幅で決まります。同じ通路でも、一度に運ぶ量でボトルネックが変わります。</figcaption></figure>
+<p class="further">参考リンク：<a href="https://ja.wikipedia.org/wiki/%E5%B8%AF%E5%9F%9F%E5%B9%85" target="_blank" rel="noopener noreferrer">Wikipedia：帯域幅</a> · <a href="https://ja.wikipedia.org/wiki/%E3%83%AC%E3%82%A4%E3%83%86%E3%83%B3%E3%82%B7" target="_blank" rel="noopener noreferrer">Wikipedia：レイテンシ</a> · <a href="https://ja.wikipedia.org/wiki/%E3%83%A1%E3%83%A2%E3%83%AA%E5%B8%AF%E5%9F%9F%E5%B9%85" target="_blank" rel="noopener noreferrer">Wikipedia：メモリ帯域幅</a></p>
+</aside>
+
+<h2 id="sec-2">5.2 2 枚の天井：ルーフラインモデル</h2>
+<p>「計算」と「運搬」を並べて見ましょう。ある計算が F 回の演算をし、ある記憶層を通して D バイトを運ぶとします。ハードウェアは毎秒最大 P 回の演算ができ、その層は毎秒最大 B バイトを運べます。ほかのコストを無視すると、時間は少なくとも次の値です。</p>
+<div class="equation">T ≥ max(F ÷ P, D ÷ B)</div>
+<p>2 つの項のうち、大きいほうが効きます。ここで<dfn>演算強度</dfn> I = F ÷ D を決めます。1 バイト運ぶごとに何回演算できるか、という値です。出せる速度は 2 枚の「天井」に押さえられます。毎秒の演算回数 ≤ min(P, B × I) です。描くと屋根のような形になるので、<dfn>ルーフラインモデル</dfn>（roofline model）と呼びます（図 5-2）。</p>
+<div class="viz" data-viz="roofline-lab"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="図 5-2：ルーフライン図。斜めの線が帯域幅の天井、水平の線が演算性能の天井。一度に 1 トークンだけ計算すると演算強度は約 1 で、斜めの線の上にある。一度に 128 トークン計算すると折れ点を越えて、水平の線に届く">
+<text class="f-muted" fill="#5c6d66" x="60" y="20" font-size="12">到達できる演算性能（TFLOPS、対数目盛）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M60 40V200H380"/>
+<text class="f-muted" fill="#5c6d66" x="56" y="204" font-size="12" text-anchor="end">0.01</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="164" font-size="12" text-anchor="end">0.1</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="124" font-size="12" text-anchor="end">1</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="84" font-size="12" text-anchor="end">10</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="56" font-size="12" text-anchor="end">100</text>
+<text class="f-muted" fill="#5c6d66" x="60" y="218" font-size="12" text-anchor="middle">0.1</text>
+<text class="f-muted" fill="#5c6d66" x="140" y="218" font-size="12" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="218" font-size="12" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="218" font-size="12" text-anchor="middle">100</text>
+<text class="f-muted" fill="#5c6d66" x="378" y="218" font-size="12" text-anchor="end">1000</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M60 166.9L289.7 52H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M289.7 52V200"/>
+<text class="f-muted" fill="#5c6d66" x="380" y="44" font-size="12" text-anchor="end">演算性能の上限 P = 50 TFLOPS（仮定）</text>
+<text class="f-muted" fill="#5c6d66" x="295" y="190" font-size="12">折れ点 ≈ 74</text>
+<circle class="f-warn" fill="#9e5d24" cx="140" cy="126.9" r="6"/>
+<text class="f-text" fill="#182f2b" x="150" y="146" font-size="12">デコード：b = 1、I ≈ 1</text>
+<circle class="f-accent" fill="#136d5a" cx="308.6" cy="52" r="6"/>
+<text class="f-text" fill="#182f2b" x="340" y="76" font-size="12" text-anchor="middle">プリフィル：</text>
+<text class="f-text" fill="#182f2b" x="340" y="90" font-size="12" text-anchor="middle">b = 128</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="244" font-size="12" text-anchor="middle">演算強度 I（FLOP/バイト、対数目盛）</text>
+</svg><figcaption>図 5-2　ルーフライン：斜めの線が帯域幅の天井、水平の線が演算性能の天井です。デコードは 1 ラウンドで 1 トークンしか計算しないので、点は斜めの線の上に乗り、演算性能の大半は遊んでいます。帯域幅は RTX 5070 の VRAM 仕様 672 GB/s、重みは FP16 としています。</figcaption></figure></div>
+<aside class="primer" id="c05-roofline">
+<h3>演算性能とルーフライン</h3>
+<p><dfn>演算性能</dfn>は、毎秒に何回の浮動小数点演算ができるかです。単位は FLOPS で、1 TFLOPS は毎秒 1 兆回です。ルーフラインモデルは、ある計算がどこまで速くなれるかを、どちらの天井の下にいるかで見ます。2 枚の天井が交わる点を<dfn>折れ点</dfn>（ridge point）と呼び、位置は I = P ÷ B です。I が折れ点より小さければ<strong>帯域幅律速</strong>です。演算性能がどれだけ高くても、データを待っています。I が折れ点より大きければ<strong>演算律速</strong>です。データは十分に届いていて、演算が詰まっています。</p>
+<p>行列とベクトルの積で I を求めましょう。各重みは、各入力に対して乗算 1 回と加算 1 回、合計 2 回の演算をします。重みを FP16 で持てば、1 個 2 バイトです。1 回に 1 トークンだけ計算するなら、I = 2 ÷ 2 = 1 です。演算性能を P = 50 TFLOPS（教育用の仮定）、帯域幅を B = 672 GB/s とすると、折れ点は約 74 です。I = 1 では最大 0.672 TFLOPS しか使えず、上限の 2% に届きません。<span class="ev ev-est">教育用の試算</span></p>
+<p>注意が 2 つあります。1 つ目。D は、<strong>どの層を通る</strong>バイト数なのかをはっきりさせる必要があります。VRAM、RAM、PCIe、SSD のどれかです。RAM にあるエキスパートの読み出し時間を VRAM の帯域幅で計算するのは、高速道路の制限速度を田舎道に当てはめるようなものです。2 つ目。これは<strong>下界</strong>であって、予測ではありません。実際の時間は、起動オーバーヘッド、同期、不規則なメモリアクセス、データ依存でさらに伸びます。</p>
+<p class="further">参考リンク：<a href="https://en.wikipedia.org/wiki/Roofline_model" target="_blank" rel="noopener noreferrer">Wikipedia: Roofline model</a> · <a href="https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html" target="_blank" rel="noopener noreferrer">NVIDIA Nsight Compute ドキュメント：Roofline 分析</a> · <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html" target="_blank" rel="noopener noreferrer">CUDA C++ ベストプラクティスガイド</a></p>
+</aside>
+
+<h2 id="sec-3">5.3 1 人で食べる食事と、大勢で囲む食卓</h2>
+<p>同じ料理を出すとき、1 人で食べても大勢で食べても、料理を運ぶ手間は同じです。食べられる人数は 10 倍違います。重みも同じです。1 回読んで 1 トークンに使うのと、32 トークンに使うのとで、運ぶ量はほとんど変わりません。</p>
+<p>具体例で計算します。<span class="ev ev-est">教育用の試算</span> ある線形層に重みが約 800 万個あり、1 個 2 バイトで合計約 16 MB とします。入力 1 個だけなら、演算は約 1600 万回で、I ≈ 1 です。32 個の入力をまとめて計算しても、重みは 1 回読むだけです。演算は約 5.12 億回、重みの転送量は約 16 MB のままで、I ≈ 32 になります。入力と出力にも転送量があるので近似ですが、桁は外れません。</p>
+<p>これが、第 1 章で見た「プリフィルは速く、デコードは遅い」理由です。プリフィル（prefill、「問題を読む」段階）では、プロンプト全体をまとめて計算します。1 つの重みを、何千ものトークンが共有します。デコードでは、1 ラウンドにトークンは 1 つだけです。上流は同じマシンで測っています。4K 長のプロンプトで、プリフィルは毎秒 1,299 トークン、デコードは毎秒 93.0 トークンでした（RTX 5070 12 GB、Q2_0、エンジン 0.1.26）。<span class="ev ev-report">上流レポート</span>[S03] この 2 つに、同じ「1 トークンあたりの速さ」を期待してはいけません。</p>
+<p>量子化も I を押し上げます。同じ重みが占めるバイト数が減るので、同じ帯域幅でより多くの演算を養えます。第 4 章の Q2_0 は、重み 1 個が 0.28125 バイトです。1 トークンを計算するときの I は 1 から約 7 になります。代償として、使う前に重みをデコードしなければなりません。この追加の演算は、ルーフラインの 2 枚の天井のどちらにも描かれていません。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは「コンピュータアーキテクチャ」の授業で習う、メモリ律速と演算律速の区別そのものです。CPU でタイリング（tiling）を使ってキャッシュの再利用を上げるのと同じ考え方です。読み込んだ 1 バイトを、できるだけ多くの演算に使うのです。</p>
+
+<h2 id="sec-4">5.4 依存の鎖：並列にできない仕事がある</h2>
+<p>家に洗濯機と乾燥機が両方あっても、1 回分の洗濯物は、洗い終わってからでないと乾かせません。機械がいくつあっても、この 1 回分は速くなりません。誰が誰を待つのかを図にしたとき、最初から最後までの最も長い鎖を<dfn>クリティカルパス</dfn>と呼びます。全体の時間は、少なくともその長さになります。</p>
+<p>Strata の各層の計算には、そういう鎖があります。ある層の出力を先に合流させておかないと、次の層は正しい入力を受け取れません。層と層の間は、厳密に直列です。ソースコメントははっきり書いています。各層で CPU がエキスパートを計算している時間は、<strong>厳密に直列な残差の鎖の中には隠せません</strong>。その間に GPU が並列にできるのは、共有エキスパートのわずかな仕事だけです。合流のあとのすべてが、エキスパートの結果に依存するからです。<span class="ev ev-code">コード上の事実</span>[S13] 図 5-3 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 296" role="img" aria-label="図 5-3：1 つの層のタイムライン。GPU がまずアテンションとルーティングを計算し、そのあと GPU がヒットしたエキスパート、CPU がヒットしなかったエキスパートを計算する。GPU が先に終わっても待つだけで、合流は CPU の終了を待ち、次の層は合流を待つ">
+<text class="f-text" fill="#182f2b" x="10" y="51" font-size="13" font-weight="600">GPU</text>
+<text class="f-text" fill="#182f2b" x="10" y="111" font-size="13" font-weight="600">CPU</text>
+<rect class="f-accent" fill="#136d5a" x="46" y="26" width="110" height="40" rx="4"/><text class="f-on" fill="#ffffff" x="101" y="43" font-size="12" text-anchor="middle">アテンション</text><text class="f-on" fill="#ffffff" x="101" y="59" font-size="12" text-anchor="middle">+ ルーティング</text>
+<rect class="f-soft" fill="#e5f1df" x="158" y="26" width="90" height="40" rx="4"/><text class="f-text" fill="#182f2b" x="203" y="43" font-size="12" text-anchor="middle">ヒットした</text><text class="f-text" fill="#182f2b" x="203" y="59" font-size="12" text-anchor="middle">エキスパート</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="26" width="38" height="40" rx="4"/><text class="f-muted" fill="#5c6d66" x="269" y="51" font-size="12" text-anchor="middle">待ち</text>
+<rect class="f-accent" fill="#136d5a" x="290" y="26" width="38" height="40" rx="4"/><text class="f-on" fill="#ffffff" x="309" y="51" font-size="12" text-anchor="middle">合流</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="330" y="26" width="64" height="40" rx="4"/><text class="f-text" fill="#182f2b" x="362" y="51" font-size="12" text-anchor="middle">次の層…</text>
+<rect class="f-accent" fill="#136d5a" x="158" y="86" width="132" height="40" rx="4"/><text class="f-on" fill="#ffffff" x="224" y="103" font-size="12" text-anchor="middle">ヒットしなかった</text><text class="f-on" fill="#ffffff" x="224" y="119" font-size="12" text-anchor="middle">エキスパート</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M290 94L302 68"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M46 146H390"/>
+<text class="f-muted" fill="#5c6d66" x="390" y="164" font-size="12" text-anchor="end">時間 →（模式図、縮尺は不正確）</text>
+<text class="f-text" fill="#182f2b" x="10" y="192" font-size="12">メイン色：クリティカルパス</text>
+<text class="f-text" fill="#182f2b" x="10" y="212" font-size="12">アテンション + ルーティング → CPU のエキスパート</text>
+<text class="f-text" fill="#182f2b" x="10" y="232" font-size="12">→ 合流 → 次の層</text>
+<text class="f-text" fill="#182f2b" x="10" y="256" font-size="12">次の層は、この層で合流した結果を使うので、先には始められません</text>
+<text class="f-text" fill="#182f2b" x="10" y="276" font-size="12">CPU の区間が長いほど、鎖全体も長くなります。</text>
+<text class="f-text" fill="#182f2b" x="10" y="292" font-size="12">その間、GPU は待つしかありません</text>
+</svg><figcaption>図 5-3　1 つの層のクリティカルパス。2 つの経路を並列に走らせると、この区間の時間は遅いほうで決まります。GPU が先に終わっても意味はなく、合流は CPU を待ちます。</figcaption></figure>
+<p>並列な 2 つの経路 A、B について、この区間の時間は、近似的に max(T<sub>A</sub>, T<sub>B</sub>) に合流の時間を足したものです。直列な 2 ステップなら T<sub>A</sub> + T<sub>B</sub> です。そこで CPU の区間に対する Strata の答えは、「もっとうまく重ねる」ことではありません。より多くのエキスパートを VRAM キャッシュに置いて、CPU の計算を減らすことです（第 10、12 章）。ソースコメントの原文は、CPU のこの項は第 3 段階の VRAM キャッシュで解決するもので、このパイプラインで解決するものではない、というものです。[S13]</p>
+<p>もう 1 つ、錯覚にも気をつけてください。「2 つの仕事が同時に起動した」ことは、「本当に重なった」ことと同じではありません。Strata は診断用のカウンターを専用に追加しました。CPU が仕事を始めたのは GPU がまだ計算している間だったのか、GPU が終わったあとだったのかを数えます。どちらの場合でもトークンは正しく、層ごとの時間を見ても同じに見えます。重なりが本当に起きたかどうかは、このカウンターだけが教えてくれます。<span class="ev ev-code">コード上の事実</span>[S13]</p>
+
+<h2 id="sec-5">5.5 一部を最適化すると、全体はどれだけ速くなるか</h2>
+<p>全体の時間の 20% を占める手順を、2 倍速くしたとします。全体はどれだけ速くなるでしょうか。2 倍でも 1.2 倍でもありません。新しい時間 = 80% + 20% ÷ 2 = 90% なので、全体は 1.11 倍しか速くなりません。下のインタラクティブな図で、この 2 つの数を自由に変えられます。</p>
+<div class="viz" data-viz="amdahl-bar"><figure class="fig"><svg viewBox="0 0 400 218" role="img" aria-label="図 5-4：GEMV が 16% を占めるとき、それを 2 倍に高速化すると総時間は 92% になり、全体は 1.087 倍速くなる。無限に高速化しても総時間は 84% で、全体は 1.19 倍になる">
+<text class="f-text" fill="#182f2b" x="10" y="30" font-size="12">最適化前</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="14" width="235.2" height="22"/><text class="f-text" fill="#182f2b" x="217.6" y="30" font-size="12" text-anchor="middle">その他 84%</text>
+<rect class="f-accent" fill="#136d5a" x="335.2" y="14" width="44.8" height="22"/><text class="f-on" fill="#ffffff" x="357.6" y="30" font-size="12" text-anchor="middle">16%</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="54" font-size="12">100%</text>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">GEMV 2 倍</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="72" width="235.2" height="22"/><text class="f-text" fill="#182f2b" x="217.6" y="88" font-size="12" text-anchor="middle">その他 84%</text>
+<rect class="f-warn" fill="#9e5d24" x="335.2" y="72" width="22.4" height="22"/>
+<text class="f-muted" fill="#5c6d66" x="100" y="112" font-size="12">92%：全体は 1.087 倍速い</text>
+<text class="f-text" fill="#182f2b" x="10" y="146" font-size="12">GEMV ∞ 倍</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="130" width="235.2" height="22"/><text class="f-text" fill="#182f2b" x="217.6" y="146" font-size="12" text-anchor="middle">その他 84%</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="170" font-size="12">84%：全体は 1.19 倍速い。これが上限</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="194" font-size="12">16%：Strata のソースコメントにある、</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">1 トークンに占める GEMV の割合</text>
+</svg><figcaption>図 5-4　アムダールの法則：最適化されなかった部分はまったく減りません。その部分が、全体の高速化の上限を決めます。</figcaption></figure></div>
+<aside class="primer" id="c05-amdahl">
+<h3>アムダールの法則とクリティカルパス</h3>
+<p>全体の時間のうち割合 f の部分を s 倍に高速化し、残りは変えないとします。全体の高速化率は次のとおりです。</p>
+<div class="equation">S = 1 ÷ [(1 − f) + f ÷ s]</div>
+<p>これが<dfn>アムダールの法則</dfn>（Amdahl's law）です。s を無限大に近づけると、S は 1 ÷ (1 − f) に近づきます。f = 16% なら上限は 1.19 倍、f = 50% なら 2 倍、f = 90% なら 10 倍です。結論は素朴です。最適化の見返りを決めるのは「その部分が何倍速くなったか」ではなく、「その部分がどれだけの割合を占めるか」です。</p>
+<p>クリティカルパスとは、組になって働きます。アムダールの法則は「割合の小さい部分は、最適化しても効かない」と言います。クリティカルパスは「最長の鎖に乗っていない部分は、最適化しても<strong>まったく</strong>効かない」と言います。全体の時間は最も長い鎖で決まるので、ほかの鎖がどれだけ速くても、早く待ち始めるだけだからです。だから性能分析の第一歩は、いつもタイムラインを測ることです。どの手順がクリティカルパスに乗っていて、それぞれがどれだけ占めるかを調べます。</p>
+<p class="further">参考リンク：<a href="https://ja.wikipedia.org/wiki/%E3%82%A2%E3%83%A0%E3%83%80%E3%83%BC%E3%83%AB%E3%81%AE%E6%B3%95%E5%89%87" target="_blank" rel="noopener noreferrer">Wikipedia：アムダールの法則</a> · <a href="https://ja.wikipedia.org/wiki/%E3%82%AF%E3%83%AA%E3%83%86%E3%82%A3%E3%82%AB%E3%83%AB%E3%83%BB%E3%83%91%E3%82%B9" target="_blank" rel="noopener noreferrer">Wikipedia：クリティカル・パス</a> · <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html" target="_blank" rel="noopener noreferrer">CUDA C++ ベストプラクティスガイド（アムダールの法則の節あり）</a></p>
+</aside>
+<p>Strata のソースには、教科書のような例があります。開発者は、別のツールが 1 行あたりのスレッド数を 32 から 64 に変えて帯域幅を上げているのを見つけました。「ただの高速化」に見えます。ところが実測では、エキスパート込みで 64 スレッドが毎秒 11.75 トークン、32 スレッドが 11.99 トークンでした。エキスパートなしでは 20.19 対 20.26 で、誤差の範囲で同じか、むしろわずかに悪い結果です。コメントが挙げる理由が、まさにアムダールです。GEMV は 1 トークンの約 16% しか占めないので、そこが数ポイント速くなっても合計は動きません。<span class="ev ev-code">コード上の事実</span>[S14] ここでの token/s は開発初期の測定値です。今の速度とそのまま比べてはいけません。</p>
+<p>同じソースは、本当の大物も測っています。起動オーバーヘッドです。48 個の数だけを処理する小さなカーネルでも、測ると約 0.028 ms かかります。このマシンでカーネルを 1 つ起動するコストが、それだからです。GDN 1 層で約 19 個、1 ブロックで約 45 個のカーネルを起動します。1 ブロックの 43 ノードを CUDA Graph に記録して 1 回で再生すると、時間は 2.393 ms から 1.585 ms に下がり、1.51 倍速くなりました。減った分は、すべて起動オーバーヘッドです。<span class="ev ev-code">コード上の事実</span>[S13] 図 5-5 を見てください。5.1 節のコラムにある「小さい荷物はレイテンシで決まる」の再現です。カーネルの起動は、1 回ごとに小さな荷物です。</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="図 5-5：同じ計算で、カーネルを 1 つずつ直接起動すると 2.393 ミリ秒かかり、CUDA Graph に記録して再生すると 1.585 ミリ秒で済む">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">同じ仕事、2 通りの発行方法</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">カーネルを 1 つずつ直接起動</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="56" width="280" height="22"/>
+<text class="f-text" fill="#182f2b" x="296" y="72" font-size="12">2.393 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="12">CUDA Graph に記録して 1 回で再生</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="114" width="185.4" height="22"/>
+<text class="f-text" fill="#182f2b" x="201" y="130" font-size="12">1.585 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">差の約 0.8 ms は、すべて起動コスト：1.51 倍速い</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="188" font-size="12">1 ブロックの 43 ノード。バーの長さは縮尺どおり。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">上流ソースコメントの測定値</text>
+</svg><figcaption>図 5-5　小さなカーネルが大量にあると、時間を決めるのは帯域幅ではなく起動オーバーヘッドです。CUDA Graph は一連の起動を 1 回にまとめます。詳しくは第 15 章で扱います。</figcaption></figure>
+
+<h2 id="sec-6">5.6 指標は体験に合わせる。そして手を動かす</h2>
+<p>最後に、よく混同される指標を整理します。<dfn>TTFT</dfn>（最初のトークンまでの時間）は、リクエストを出してから最初のトークンが見えるまでの時間です。待ち行列、テンプレート適用、トークン化、プリフィル、最初の 1 手順の生成を含みます。<dfn>出力速度</dfn>は、生成したトークン数を、生成にかかった時間で割った値です。「最終的な文字数 ÷ 全体の時間」ではありません。複数の人が同時に使うときは<dfn>総スループット</dfn>もあります。全員の出力を合計して毎秒どれだけか、という値です。総スループットが高くても、全員が長く待たされるシステムはあり得ます。短いリクエストは速いのに、長いリクエストがずっと後ろに押しやられることもあります。だから第 25、27 章では待ち行列とパーセンタイルを扱います。1 つの token/s の数字だけを全体像と考えてはいけません。</p>
+<p><strong>手を動かす：</strong>この章のインタラクティブ実験「演算か帯域幅か」を開きましょう。</p>
+<ol>
+<li>演算量、運搬量、演算性能、帯域幅を入力して、ボトルネックが運搬から計算へどう移るかを見ます。</li>
+<li>「隠せない起動時間」を足して、下界がどれだけ持ち上がるか見ます。</li>
+<li>ある段階を 2 倍に高速化して、エンドツーエンドがなぜ 2 倍にならないのか確かめます。</li>
+</ol>
+<p>結果を報告するときは、数字の前に、すべての仮定と単位を書きましょう。見出しには「理論的な下界 / 教育用の試算」と書きます。宣伝ページのピーク演算性能を代入して得た数字を、その GPU の実測と呼んではいけません。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>時間は少なくとも max(演算量 ÷ 演算性能, バイト数 ÷ 帯域幅) です。バイト数は、どの層を通るものかを明示します。デコードでは I が小さく、運搬で詰まります。</li>
+<li>複数のトークンをまとめて計算すると、1 つの重みが何度も使われ、I が大きくなって演算性能を使い切れます。これが、プリフィルがデコードより十数倍速い理由です。</li>
+<li>最適化の前にタイムラインを測ります。クリティカルパスに乗っていない部分は、最適化しても効きません。割合の小さい部分も、最適化してもあまり効きません（アムダール）。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「GPU の演算性能が 2 倍になれば、生成速度も 2 倍になる」</strong></p>
+<p>デコードの速度は、主にデータの運搬と依存の鎖で詰まっています。演算性能の大半は遊んでいるので、2 倍にしても遊びが増えるだけです。Strata の場合、むしろ VRAM の大きさのほうが重要です。上流のドキュメントによると、速い GPU より大きな VRAM のほうが大切で、VRAM が 1 GB 増えるごとに約 700 個のエキスパートを置けます。GPU に載ったエキスパートが 1 個増えるたびに、CPU の計算は 1 個減ります。<span class="ev ev-report">上流レポート</span>[S02]</p></div>
+
+<details class="deep"><summary>もう一歩深く：下界、重なり、性能の報告のしかた</summary>
+<h3>下界は予測ではない</h3>
+<p>ルーフラインが与える T ≥ max(F ÷ P, D ÷ B) は、下界にすぎません。実際の T は、カーネルの起動、同期、不規則なメモリアクセス、並列度の不足、ページフォールト、直列の依存にも左右されます。ある種のコストがなかったとしても、すべてのピークを<strong>同時に</strong>出せるとは限りません。D は、どの層を通るのかを説明する必要があります。VRAM、RAM、PCIe、SSD のどれかです。同じ計算でも、層が違えば I も違います。</p>
+<h3>例題：同じ重み行列を、1 個で使う場合とバッチで使う場合</h3>
+<p>教育用の仮定：ある線形層の重みが約 800 万個、1 個 2 バイトで約 16 MB とします。入力ベクトル 1 個で約 1600 万回の演算になり、ほかの読み書きを無視すると I ≈ 1 です。32 個の入力をまとめて計算し、重みは 1 回だけ読むなら、演算は約 5.12 億回です。重みの転送量はやはり約 16 MB なので、理想的な I ≈ 32 です。活性化と出力が転送量を増やすので、これは理解しやすくするための近似です。この例は、プリフィルの GEMM とデコードの GEMV に、同じ速さを期待してはいけない理由を説明します。</p>
+<h3>重なりはタイムラインで証明する</h3>
+<p>並列にできる 2 つの経路 A、B について、この区間の時間は近似的に max(T<sub>A</sub>, T<sub>B</sub>) + T<sub>合流</sub> です。直列な 2 ステップなら T<sub>A</sub> + T<sub>B</sub> です。「同時に起動したから」といって、測った重なりの時間の代わりにするのは、よくある性能分析の誤りです。Strata のセッションのコードに、反例の検出方法があります。ホストが「この層は計算済み」と読んだ時点で、GPU のイベント照会も完了を示していれば、その層は早く終わっていたことになります。つまり CPU は GPU が空いてから仕事を始めたので、パイプライン全体は実質的に直列です。この違いは戻り値からは見えず、層ごとの時間からも見えません。だから専用のカウンターが要ります。[S13]</p>
+<h3>アムダールの 2 つの数</h3>
+<p>GEMV が 20% を占め、カーネルを 2 倍速くすると、総時間は 0.8 + 0.2 ÷ 2 = 0.9 になり、全体は <strong>1.111 倍</strong>しか速くなりません。無限に速くしても、上限は 1.25 倍です。本当の最適化のチャンスは、<strong>対象ワークロードのクリティカルパス</strong>の上でどれだけの割合を占めるかで決まります。マイクロベンチマークの成績がどれだけ立派かでは決まりません。</p>
+<h3>指標の定義は省略せずに書く</h3>
+<p>TTFT には、待ち行列、テンプレート、トークン化、プリフィル、最初の 1 手順の生成、ネットワーク転送が含まれることがあります。報告するときは、何を含むのかを明記します。出力速度は、分子と分母を明記します。生成したトークン数を生成段階の時間で割ったのか、それとも別の定義なのか、という点です。上流の速度表は、条件をすべて書いています。GPU、CPU、メモリ、OS、エンジンのバージョン、コンテキスト長、生成トークン数、投機的デコーディングの有無です。[S03] さらに、投機的デコーディングの速度は文章の中身にも左右されます。同じプロンプトでも、回答が違うだけで数ポイント変わります。[S03]</p>
+<h3>報告のテンプレート</h3>
+<p>結果の前に仮定を書きます。ハードウェアの型番と仕様、モデルと量子化形式、コンテキスト長、エンジンのバージョン、何回測ったか、平均か中央値か、です。見出しには「理論的な下界」「教育用の試算」「実測」のどれなのかを明記します。第 27 章でこの方法を完全に説明します。</p>
+</details>
