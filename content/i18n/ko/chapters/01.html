@@ -1,0 +1,279 @@
+<div class="hook"><span class="eyebrow">먼저 이상한 일 하나</span>
+<p>Strata의 README는 이렇게 시작해요. 내 게임용 컴퓨터에서 1250억 개 파라미터짜리 AI 모델을 돌린다고요. 그래픽 카드는 VRAM 12 GB부터 필요하다고 해요.<span class="ev ev-report">업스트림 보고</span>[S01]</p>
+<p>상식대로 계산해 볼까요? 1250억 개 파라미터는 하나당 1바이트만 잡아도 125 GB예요. 12 GB짜리 그래픽 카드에 이게 어떻게 들어갈까요? 이 책은 이런 질문에 답해요. AI 모델은 내 컴퓨터 안에서 실제로 어떻게 돌아갈까요? 이 질문을 따라가며 컴퓨터 구조, 운영체제, 알고리즘, 네트워크 같은 기초 지식을 한 줄로 엮어 볼 거예요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 채팅 AI는 한 번에 토큰을 딱 하나만 만들어요. 토큰 하나를 만들 때 GPU, RAM, CPU, SSD가 모두 일해요. Strata의 비결은 이 네 가지를 딱 필요한 만큼씩만 쓰도록 배치하는 거예요.</p>
+
+<h2 id="sec-1">1.1 엔터를 누르면 무슨 일이 일어날까</h2>
+<p>채팅창에 문장을 입력하고 엔터를 눌러요. 몇 초 뒤 답변이 한 글자씩 나타나요. 그 사이에 내 문장은 여섯 번 모습을 바꿔요. 그림 1-1을 보세요.</p>
+<div class="viz" data-viz="token-journey"><figure class="fig"><svg viewBox="0 0 400 486" role="img" aria-label="그림 1-1: 문장 하나가 입력에서 출력까지 거치는 여섯 번의 변환. 4~6단계는 토큰을 하나 만들 때마다 한 번씩 반복돼요">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="30" font-size="14" font-weight="600" text-anchor="middle">① 내 메시지</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="48" font-size="12" text-anchor="middle">"MoE가 뭔지 설명해 줘"</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="80" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="102" font-size="14" font-weight="600" text-anchor="middle">② 채팅 템플릿</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="120" font-size="12" text-anchor="middle">역할 표시, 시스템 프롬프트, 도구 설명 추가</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="152" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="174" font-size="14" font-weight="600" text-anchor="middle">③ 토크나이저</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="192" font-size="12" text-anchor="middle">글자 → 토큰 번호 목록(정수)</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="224" width="300" height="50" rx="10"/>
+<text class="f-on" fill="#ffffff" x="190" y="246" font-size="14" font-weight="600" text-anchor="middle">④ 추론 엔진: 층별 계산</text>
+<text class="f-on" fill="#ffffff" x="190" y="264" font-size="12" text-anchor="middle">48개 층 계산 → 다음 토큰의 확률</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="296" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="318" font-size="14" font-weight="600" text-anchor="middle">⑤ 샘플링</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="336" font-size="12" text-anchor="middle">확률에 따라 토큰 하나를 고름</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="368" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="390" font-size="14" font-weight="600" text-anchor="middle">⑥ 디코딩과 전송</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="408" font-size="12" text-anchor="middle">번호 → 글자, 내 화면으로 전송</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M190 58V78M190 130V150M190 202V222M190 274V294M190 346V366"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M340 393H372V249H346"/>
+<path class="f-muted" fill="#5c6d66" d="M346 249l8-5v10z"/>
+<text class="f-muted" fill="#5c6d66" x="190" y="446" font-size="12" text-anchor="middle">점선: 답변이 안 끝났으면 새 토큰을 끝에 붙이고</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="464" font-size="12" text-anchor="middle">④단계로 돌아가 한 바퀴 더. 한 바퀴에 토큰 하나.</text>
+</svg><figcaption>그림 1-1　문장 하나가 거치는 여섯 번의 변환. ④–⑥단계는 토큰을 하나 만들 때마다 반복돼요.</figcaption></figure></div>
+<p>그림에 새로운 말이 몇 개 나왔어요. 쉬운 말로 풀어 볼게요.</p>
+<p><dfn>토큰</dfn>(token)은 모델이 글을 읽고 쓰는 가장 작은 단위예요. 글자 하나일 수도, 단어 하나일 수도, 영어 단어의 절반이나 문장 부호 하나일 수도 있어요. 모델은 글자를 직접 알아보지 못하고 토큰 번호만 알아요. <dfn>토크나이저</dfn>(tokenizer)는 글을 토큰으로 자르고 번호로 바꾸는 프로그램이에요. 그림 1-2를 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 210" role="img" aria-label="그림 1-2: 토크나이저가 문장을 토큰으로 자르고 정수 번호로 바꿔요. 모델은 번호만 봐요">
+<text class="f-muted" fill="#5c6d66" x="200" y="20" font-size="12" text-anchor="middle">원문: 추론 엔진이 글자를 숫자로 바꿔요</text>
+<rect class="f-soft" fill="#e5f1df" x="29" y="34" width="48" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="53" y="56" font-size="14" text-anchor="middle">추론</text>
+<rect class="f-soft" fill="#e5f1df" x="83" y="34" width="48" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="107" y="56" font-size="14" text-anchor="middle">엔진</text>
+<rect class="f-soft" fill="#e5f1df" x="137" y="34" width="36" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="155" y="56" font-size="14" text-anchor="middle">이</text>
+<rect class="f-soft" fill="#e5f1df" x="179" y="34" width="60" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="209" y="56" font-size="14" text-anchor="middle">글자를</text>
+<rect class="f-soft" fill="#e5f1df" x="245" y="34" width="60" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="275" y="56" font-size="14" text-anchor="middle">숫자로</text>
+<rect class="f-soft" fill="#e5f1df" x="311" y="34" width="60" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="341" y="56" font-size="14" text-anchor="middle">바꿔요</text>
+<text class="f-muted" fill="#5c6d66" x="53" y="88" font-size="12" text-anchor="middle">18723</text><text class="f-muted" fill="#5c6d66" x="107" y="88" font-size="12" text-anchor="middle">40121</text><text class="f-muted" fill="#5c6d66" x="155" y="88" font-size="12" text-anchor="middle">1204</text><text class="f-muted" fill="#5c6d66" x="209" y="88" font-size="12" text-anchor="middle">29871</text><text class="f-muted" fill="#5c6d66" x="275" y="88" font-size="12" text-anchor="middle">31650</text><text class="f-muted" fill="#5c6d66" x="341" y="88" font-size="12" text-anchor="middle">26425</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 100V118"/>
+<path class="f-muted" fill="#5c6d66" d="M200 124l-5-8h10z"/>
+<rect class="f-accent" fill="#136d5a" x="30" y="130" width="340" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="149" font-size="12" text-anchor="middle">모델이 보는 것은 이것뿐:</text>
+<text class="f-on" fill="#ffffff" x="200" y="168" font-size="12" text-anchor="middle">[18723, 40121, 1204, 29871, 31650, 26425]</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="200" font-size="12" text-anchor="middle">예시: 실제 분할과 번호는 토크나이저에 따라 달라요</text>
+</svg><figcaption>그림 1-2　토큰화: 글을 먼저 토큰으로 자르고, 각 토큰을 표에서 찾아 번호로 바꿔요. 모델은 처음부터 끝까지 이 정수들만 다뤄요.</figcaption></figure>
+<p><dfn>샘플링</dfn>(sampling)은 ⑤단계예요. 모델은 다음 단어를 곧바로 "말하지" 않아요. 후보 토큰마다 확률을 내놓고, 샘플링이 그 확률에 따라 하나를 골라요. 2장에서 자세히 다뤄요.</p>
+<p>그림 1-1의 점선을 보세요. 모델은 한 바퀴에 토큰을 하나만 만들어요. 토큰 300개짜리 답변을 쓰려면 ④~⑥단계를 300번 반복해야 해요. 그래서 "생성 속도"는 보통 초당 토큰 수로 재고, token/s라고 써요.</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 생성 과정 전체는 반복문 하나예요. <code>while 안 끝남: 확률 = 모델(지금까지의 토큰); t = 샘플링(확률); 지금까지의 토큰.append(t)</code>. 매 바퀴의 입력에는 앞 바퀴의 출력이 들어 있어요. 이렇게 "자기 출력을 다시 먹는" 모델을 <dfn>자기회귀</dfn>(autoregressive) 모델이라고 해요.</p>
+
+<h2 id="sec-2">1.2 왜 첫 글자는 늘 조금 느릴까</h2>
+<p>질문을 보내고 나면 첫 글자가 나올 때까지 잠깐 기다리게 되고, 그 뒤로는 글자가 빠르게 나오는 걸 느껴 봤을 거예요. 답변 한 번이 두 단계로 나뉘기 때문이에요. 그림 1-3을 보세요.</p>
+<div class="viz" data-viz="first-token-wait"><figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="그림 1-3: 답변 한 번의 타임라인. 먼저 질문 전체를 한꺼번에 읽고, 그다음 한 바퀴에 토큰 하나씩 답을 써요">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">답변 한 번의 타임라인(개념도, 축척 아님)</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="32" width="150" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="85" y="52" font-size="13" font-weight="600" text-anchor="middle">프리필(prefill)</text>
+<text class="f-on" fill="#ffffff" x="85" y="70" font-size="12" text-anchor="middle">질문 전체를 한 번에 계산</text>
+<rect class="f-soft" fill="#e5f1df" x="168" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="186" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="204" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="222" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="240" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="258" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="276" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="294" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="312" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="330" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="348" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="366" y="32" width="14" height="48" rx="3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 88V94H160V88M168 88V94H380V88"/>
+<text class="f-muted" fill="#5c6d66" x="85" y="110" font-size="12" text-anchor="middle">첫 글자까지 걸리는 시간</text>
+<text class="f-muted" fill="#5c6d66" x="274" y="110" font-size="12" text-anchor="middle">디코드: 한 바퀴에 토큰 하나</text>
+<text class="f-text" fill="#182f2b" x="10" y="142" font-size="12">업스트림 실측(RTX 5070 12 GB, Q2_0, 4K 길이 질문):</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">· 프리필: 초당 약 1,299 토큰</text>
+<text class="f-text" fill="#182f2b" x="10" y="184" font-size="12">· 디코드: 초당 약 93 토큰</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">프리필이 10배 넘게 빠름: 토큰을 한꺼번에 계산(16장)</text>
+</svg><figcaption>그림 1-3　먼저 질문을 읽고, 그다음 답을 써요. 프리필은 질문 전체를 한꺼번에 계산해서 같은 시간에 훨씬 많은 토큰을 처리해요. 디코드는 하나씩 차례로만 갈 수 있어요.</figcaption></figure></div>
+<p>첫 번째 단계는 <dfn>프리필</dfn>(prefill, 「문제 읽기」 단계)이에요. 모델이 내 질문 전체를 한 번에 읽어요. 질문 속 토큰은 모두 이미 알고 있으니 한꺼번에 계산할 수 있어요. 두 번째 단계는 <dfn>디코드</dfn>(decode, 「답 쓰기」 단계)예요. 새 토큰은 모두 바로 앞 토큰에 기대기 때문에 하나씩만 만들 수 있어요.</p>
+<p>Strata 업스트림의 측정에 따르면, 같은 기계에서 프리필은 초당 약 1,299 토큰, 디코드는 초당 약 93 토큰을 처리해요. <span class="ev ev-report">업스트림 보고</span>[S03] 그래서 질문이 길수록 첫 글자까지 오래 기다려요. README도 이렇게 알려 줘요. 대화의 첫 메시지는 전부 읽어야 해서 토큰 30,000개당 약 1분이 걸려요. 그 뒤의 추가 질문은 새로 늘어난 부분만 읽으니 몇 초 만에 답하기 시작해요. [S01]</p>
+
+<h2 id="sec-3">1.3 모델, 엔진, 앱: 자주 헷갈리는 세 가지 역할</h2>
+<p>식당에 비유해 볼게요. 그림 1-4를 보세요. Strata 자체 문서도 주방 비유를 써요. [S02]</p>
+<figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="그림 1-4: 앱, 추론 엔진, 모델 세 역할은 식당의 카운터, 주방, 레시피에 해당해요">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="110" height="70" rx="10"/>
+<text class="f-text" fill="#182f2b" x="65" y="40" font-size="15" font-weight="600" text-anchor="middle">앱</text>
+<text class="f-muted" fill="#5c6d66" x="65" y="62" font-size="12" text-anchor="middle">식당 카운터</text>
+<text class="f-text" fill="#182f2b" x="134" y="30" font-size="12">손님을 맞고 주문을 전달해요</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="50" font-size="12">템플릿 적용, 토큰화, 출력 해석</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="70" font-size="12">Strata: serve/ 안의 Python 서버</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M65 80V108"/>
+<text class="f-muted" fill="#5c6d66" x="74" y="99" font-size="12">토큰 번호</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="110" width="110" height="70" rx="10"/>
+<text class="f-on" fill="#ffffff" x="65" y="140" font-size="15" font-weight="600" text-anchor="middle">추론 엔진</text>
+<text class="f-on" fill="#ffffff" x="65" y="162" font-size="12" text-anchor="middle">주방과 요리사</text>
+<text class="f-text" fill="#182f2b" x="134" y="130" font-size="12">내 하드웨어에서 계산을 해내요</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="150" font-size="12">VRAM, RAM, CPU, GPU를 배분해요</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="170" font-size="12">Strata 본체: C++ / CUDA / HIP</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M65 180V208"/>
+<text class="f-muted" fill="#5c6d66" x="74" y="199" font-size="12">파라미터 읽기</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="210" width="110" height="70" rx="10"/>
+<text class="f-text" fill="#182f2b" x="65" y="240" font-size="15" font-weight="600" text-anchor="middle">모델</text>
+<text class="f-muted" fill="#5c6d66" x="65" y="262" font-size="12" text-anchor="middle">레시피</text>
+<text class="f-text" fill="#182f2b" x="134" y="230" font-size="12">학습된 파라미터 + 고정된 계산 규칙</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="250" font-size="12">파라미터 약 1250억 개</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="270" font-size="12">Qwen3.8-Flash-Next</text>
+</svg><figcaption>그림 1-4　세 역할은 각자 한 구간을 맡아요. 앱은 토큰 번호 목록을 엔진에 넘기고, 엔진은 모델의 레시피대로 계산해요.</figcaption></figure>
+<ul>
+<li><strong>모델은 레시피예요.</strong> 학습으로 만들어진 엄청나게 많은 숫자("파라미터" 또는 "가중치")와 고정된 계산 규칙이 모델이에요. Qwen3.8-Flash-Next가 하나의 모델이에요.</li>
+<li><strong>추론 엔진은 주방과 요리사예요.</strong> 내 하드웨어에서 레시피대로 계산을 해내요. Strata가 추론 엔진이고, llama.cpp와 vLLM도 마찬가지예요.</li>
+<li><strong>앱은 카운터예요.</strong> 손님인 나를 맞아 내 말을 정리해 주방에 넘기고, 완성된 요리를 가져다줘요. Strata에 들어 있는 웹 채팅 화면과 API로 연결되는 코딩 도구가 모두 이 층에 있어요. [S01]</li>
+</ul>
+<p>이 세 층을 구분하면 문제가 생겼을 때 엉뚱한 곳을 뒤지지 않아요. 엔진이 아무리 빨라도 모델이 똑똑해지지는 않아요. 레시피가 같으면 주방이 달라도 요리 맛은 같아야 해요. 반대로 답변 품질이 떨어졌다면 원인은 레시피(모델을 바꿨거나 너무 심하게 압축함), 주방(엔진 버그로 계산이 틀림), 카운터(템플릿이나 프로토콜이 내 말을 잘못 전달함) 중 어디에든 있을 수 있어요.</p>
+
+<h2 id="sec-4">1.4 컴퓨터 안의 세 겹 "창고"</h2>
+<p>주방이 얼마나 빠른지는 재료를 어디에 두느냐에 크게 달려 있어요. 컴퓨터도 마찬가지예요. 추론과 관련된 저장 공간은 세 겹이에요. 그림 1-5를 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="그림 1-5: VRAM, RAM, SSD 세 겹의 저장 공간. 위로 갈수록 빠르고 작아요. Strata가 각 층에 무엇을 두는지도 보여 줘요">
+<rect class="f-accent" fill="#136d5a" x="70" y="10" width="260" height="92" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="34" font-size="14" font-weight="600" text-anchor="middle">GPU 메모리(VRAM) 12–24 GB</text>
+<text class="f-on" fill="#ffffff" x="200" y="54" font-size="12" text-anchor="middle">작업대: 손만 뻗으면 닿아요</text>
+<text class="f-on" fill="#ffffff" x="200" y="74" font-size="12" text-anchor="middle">모든 토큰이 쓰는 부분 + 자주 쓰는</text>
+<text class="f-on" fill="#ffffff" x="200" y="91" font-size="12" text-anchor="middle">전문가 수천 개 + 대화 기록</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="118" width="320" height="92" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="142" font-size="14" font-weight="600" text-anchor="middle">RAM(메인 메모리) 32–64 GB</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="162" font-size="12" text-anchor="middle">창고: 몇 걸음 걸어야 꺼내요</text>
+<text class="f-text" fill="#182f2b" x="200" y="182" font-size="12" text-anchor="middle">전문가 24,576개 전부</text>
+<text class="f-text" fill="#182f2b" x="200" y="199" font-size="12" text-anchor="middle">GPU에 없는 전문가는 CPU가 바로 계산</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="226" width="380" height="80" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="250" font-size="14" font-weight="600" text-anchor="middle">SSD(솔리드 스테이트 드라이브)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="270" font-size="12" text-anchor="middle">지하 창고: 가장 크고 가장 느려요</text>
+<text class="f-text" fill="#182f2b" x="200" y="290" font-size="12" text-anchor="middle">28.8 GB 조회 테이블, 토큰마다 몇 행만 읽음</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="334" font-size="12" text-anchor="middle">위로 갈수록 빠르고, 작고, 비싸요</text>
+</svg><figcaption>그림 1-5　Strata가 세 겹의 저장 공간을 쓰는 방식. 용량은 README가 밝힌 하드웨어 요구 사양이고, 역할 분담은 업스트림 문서에서 가져왔어요. [S01][S02]</figcaption></figure>
+<p>그래픽 카드(GPU)는 계산이 가장 빠르지만 VRAM이 가장 작아요. 흔한 게임용 카드는 12–24 GB뿐이에요. RAM은 훨씬 크지만 그래픽 카드에서 멀어요. 데이터를 보내려면 PCIe라는 버스를 거쳐야 해요. SSD는 가장 크고 가장 느려요.</p>
+<p>Strata는 이렇게 역할을 나눠요 <span class="ev ev-report">업스트림 보고</span>[S02]:</p>
+<ol>
+<li>모든 토큰이 쓰는 부분과 가장 자주 쓰는 수천 개의 "전문가"는 VRAM에 둬요.</li>
+<li>전문가 전부는 RAM에 둬요. GPU에 없는 전문가는 CPU가 RAM에서 바로 계산해요. GPU와 동시에 일해요.</li>
+<li>SSD에는 28.8 GB짜리 조회 테이블을 두고, 토큰마다 그중 몇 행만 읽어요.</li>
+</ol>
+<p>"전문가"가 무엇인지는 10장에서 따로 다뤄요. 지금은 이것만 알면 돼요. 전문가는 Strata가 작은 그래픽 카드에서 큰 모델을 돌리는 열쇠예요.</p>
+<aside class="primer" id="c01-memory-hierarchy">
+<h3>메모리 계층 구조</h3>
+<p>컴퓨터의 저장 장치는 "빠름", "큼", "저렴함" 사이에서 늘 하나를 포기해야 해요. 빠른 것은 작고 비싸고, 큰 것은 느려요. 그래서 컴퓨터는 저장 장치를 피라미드로 쌓아요. 가장 자주 쓰는 데이터는 가장 빠른 층에 두고, 덜 쓰는 데이터는 아래에 두었다가 필요할 때 위로 올려요. 이것이 <dfn>메모리 계층 구조</dfn>(memory hierarchy)예요.</p>
+<p>"빠르다"를 재는 지표는 두 가지예요. <dfn>대역폭</dfn>(bandwidth)은 1초에 몇 바이트를 옮길 수 있는지로, 수도관의 굵기와 같아요. <dfn>지연 시간</dfn>(latency)은 요청을 보내고 첫 바이트를 받을 때까지 기다리는 시간으로, 수도꼭지에서 물이 컵까지 흘러오는 시간과 같아요. 추론 엔진은 토큰 하나를 만들 때마다 엄청난 양의 파라미터를 읽기 때문에 대역폭을 가장 신경 써요. 그림 1-6은 업스트림 측정 장비에서 각 층의 이론상 대역폭이에요.</p>
+<figure class="fig"><svg viewBox="0 0 400 234" role="img" aria-label="그림 1-6: 업스트림 측정 장비에서 각 저장 층의 이론상 대역폭. VRAM 약 672 GB/s, RAM 약 83 GB/s, PCIe 5.0 약 63 GB/s, SSD 약 7 GB/s">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">이론상 최대 대역폭, 단위 GB/s(막대 길이는 비례)</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">VRAM</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="36" width="250" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="348" y="49" font-size="12">672</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">RAM</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="72" width="31" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="129" y="85" font-size="12">83(DDR5-5200 듀얼 채널)</text>
+<text class="f-text" fill="#182f2b" x="10" y="120" font-size="12">PCIe 버스</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="108" width="23" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="121" y="121" font-size="12">약 63(PCIe 5.0 x16, 단방향)</text>
+<text class="f-text" fill="#182f2b" x="10" y="156" font-size="12">SSD</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="144" width="3" height="16" rx="1"/>
+<text class="f-text" fill="#182f2b" x="101" y="157" font-size="12">약 7(일반적인 NVMe 순차 읽기)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="190" font-size="12">VRAM은 RTX 5070 사양, RAM은 업스트림 테스트 장비 기준.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="207" font-size="12">실측값은 보통 더 낮아요.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="224" font-size="12">VRAM에서 읽는 속도는 SSD보다 약 100배 빨라요.</text>
+</svg><figcaption>그림 1-6　같은 컴퓨터 안에서도 저장 층마다 대역폭이 백 배까지 차이 나요. 자주 쓰는 데이터를 빠른 층에 두는 것이 모든 캐시 설계의 출발점이에요.</figcaption></figure>
+<p>Strata의 설계는 모두 이 피라미드 위에 데이터를 배치하는 일로 볼 수 있어요. 인기 있는 전문가는 VRAM에, 전문가 전부는 RAM에, 큰 조회 테이블은 SSD에 둬요. 뒤 장들에서 이 그림으로 계속 돌아와요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EB%A9%94%EB%AA%A8%EB%A6%AC_%EA%B3%84%EC%B8%B5_%EA%B5%AC%EC%A1%B0" target="_blank" rel="noopener noreferrer">위키백과: 메모리 계층 구조</a> · <a href="https://en.wikipedia.org/wiki/Memory_hierarchy" target="_blank" rel="noopener noreferrer">Wikipedia: Memory hierarchy</a> · <a href="https://csapp.cs.cmu.edu/" target="_blank" rel="noopener noreferrer">Computer Systems: A Programmer's Perspective(CS:APP) 6장</a></p>
+</aside>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 컴퓨터 구조 수업에서 배운 메모리 계층 구조 그대로예요. VRAM이라는 층이 하나 더 있을 뿐이에요. CPU에게 VRAM은 다른 장치에 달린 메모리예요. CPU가 자기 RAM처럼 직접 읽고 쓸 수 없고, 데이터를 PCIe로 옮겨야 해요(14장에서 DMA를 다뤄요).</p>
+
+<h2 id="sec-5">1.5 계산해 보기: 24,576과 480</h2>
+<p>README는 이 모델이 "전문가" 24,576개로 이루어져 있고, 단어 하나를 쓸 때는 그중 10개만 쓴다고 해요. [S01] 이 문장은 이해하기 쉽게 단순화한 거예요. 소스 코드에서 확인해 볼게요.</p>
+<p>소스 코드가 정의한 모델 구조는 48개 층에 층마다 전문가 512개예요 <span class="ev ev-code">코드 사실</span>[S04]. 토큰 하나는 <strong>모든 층에서</strong> 전문가 10개를 골라요 <span class="ev ev-code">코드 사실</span>[S13]. 그림 1-7이 이 구조를 그린 거예요.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="그림 1-7: 48개 층, 층마다 전문가 512개, 층마다 10개 선택. 토큰 하나가 전문가 선택을 모두 480번 해요">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">한 줄 = 한 층의 전문가 512개, 색칠 = 고른 10개</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="43" font-size="12">1번 층</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="34" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="87.2" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="101.7" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="121.9" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="165.3" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="212.0" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="285.1" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="301.5" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="318.5" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="341.8" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="355.6" y="34" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="61" font-size="12">2번 층</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="52" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="118.1" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="160.9" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="180.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="195.6" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="209.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="268.1" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="287.6" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="301.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="311.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="323.5" y="52" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="79" font-size="12">3번 층</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="70" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="72.7" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="84.7" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="124.4" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="134.5" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="147.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="215.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="256.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="314.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="344.3" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="355.6" y="70" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="115" font-size="12">46번 층</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="106" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="64.5" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="87.8" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="119.3" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="147.1" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="177.3" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="194.3" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="203.8" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="217.0" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="259.2" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="328.5" y="106" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="133" font-size="12">47번 층</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="124" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="92.2" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="106.7" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="147.7" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="181.7" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="207.6" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="219.5" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="260.5" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="271.8" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="297.0" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="383.4" y="124" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="151" font-size="12">48번 층</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="142" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="76.5" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="92.2" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="155.9" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="176.7" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="227.7" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="244.7" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="268.1" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="296.4" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="328.5" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="345.6" y="142" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="225" y="97" font-size="13" text-anchor="middle">⋮(중간에 42개 층이 더 있어요)</text>
+<text class="f-text" fill="#182f2b" x="200" y="180" font-size="13" font-weight="600" text-anchor="middle">48개 층 × 층당 10개 = 선택 480번</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="202" font-size="12" text-anchor="middle">48개 층 × 층당 512개 = 전문가 24,576개(전체)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="224" font-size="12" text-anchor="middle">"단어 하나에 전문가 10개"는 한 층 기준이에요</text>
+</svg><figcaption>그림 1-7　토큰 하나는 48개 층을 모두 지나고 층마다 새로 전문가 10개를 골라요. 그래서 모두 480번 선택해요. 10번이 아니에요.</figcaption></figure>
+<ul>
+<li>48 × 512 = <strong>24,576</strong>. 전문가의 총 개수예요.</li>
+<li>토큰 하나는 48개 층을 모두 지나며 층마다 10개를 골라요. 모두 48 × 10 = <strong>480</strong>번 전문가를 선택해요.</li>
+</ul>
+<p>"10개"는 한 층 기준이지 모델 전체 기준이 아니에요. 모델 전체가 전문가 10개만 쓴다고 읽으면, 계산량과 데이터 이동량을 48배나 적게 어림하게 돼요. 이 책이 계속 강조하는 습관이 바로 이거예요. <strong>숫자에는 단위와 범위를 함께 붙여요.</strong></p>
+
+<h2 id="sec-6">1.6 이 책을 읽는 방법: 모든 숫자에는 출처가 있어요</h2>
+<p>이 책의 모든 결론에는 어떤 종류의 근거인지 표시가 붙어요.</p>
+<ul>
+<li><span class="ev ev-code">코드 사실</span>고정된 버전의 소스 코드에서 직접 읽은 것이에요. 예: "48개 층".</li>
+<li><span class="ev ev-report">업스트림 보고</span>Strata 작성자가 문서에 쓴 설명이나 측정한 데이터예요. 이 책이 다시 측정하지는 않았어요. 예: "RTX 5070에서 초당 94 토큰 생성". [S01]</li>
+<li><span class="ev ev-est">교육용 추정</span>이 책이 단순한 모델로 계산한 결과예요. 감을 잡도록 돕는 용도이고 실측이 아니에요. 브라우저의 인터랙티브 실험은 모두 여기에 속해요.</li>
+<li>기초 원리: 수학이나 컴퓨터의 일반 법칙으로 Strata와 상관없어요. 따로 표시를 붙이지 않아요.</li>
+</ul>
+<p>왜 이렇게 까다로울까요? AI 분야의 숫자는 엉뚱한 곳으로 옮겨지기 쉽기 때문이에요. 남의 그래픽 카드에서 나온 속도, 특정 설정에서의 VRAM 사용량, 홍보 이미지 속 단순화된 설명은 조건에서 떨어져 나오면 사람을 오해하게 만들 수 있어요. "이 숫자는 어떤 조건에서 얻었지?"라고 묻는 법을 익히는 것이 숫자 하나를 외우는 것보다 훨씬 쓸모 있어요.</p>
+<p>이 책의 소스 코드 읽기는 2026-10-03의 커밋 하나에 고정되어 있어요. 커밋 번호는 페이지 하단에 있어요. Strata는 아직 빠르게 바뀌고 있어서 새 버전의 숫자는 이미 다를 수 있어요.</p>
+<p><strong>직접 해 보기:</strong> 이 장의 인터랙티브 실험 「토큰 하나의 여정」을 열어 보세요. 그림 1-1의 경로를 하나씩 확인할 수 있는 단계로 나눠서, 각 단계의 입력과 출력을 볼 수 있어요. 화살표 하나를 골라 "여기가 잘못되면 어떻게 될까?" 하는 예를 생각해 보세요. 템플릿이 바뀌었거나, 토크나이저가 모델과 맞지 않는 경우 같은 거예요. 실험 속 숫자는 모두 교육용 추정이고, 내 컴퓨터에서 잰 실측이 아니에요.</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>모델은 레시피, 추론 엔진은 주방, 앱은 카운터예요. 셋은 각자 한 구간을 맡아요.</li>
+<li>먼저 프리필, 그다음 디코드예요. 프리필은 질문 전체를 한꺼번에 계산하고, 디코드는 한 바퀴에 토큰 하나만 만들어요.</li>
+<li>숫자를 볼 때마다 물어보세요. 코드 사실인가, 업스트림 보고인가, 추정인가? 단위와 범위는 무엇인가?</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: "모델 파일이 크면 그만큼 VRAM이 필요하다."</strong></p>
+<p>꼭 그렇지는 않아요. 파일 크기는 가중치가 디스크에서 차지하는 바이트 수일 뿐이에요. 실행할 때는 가중치 일부를 RAM에 두고 CPU가 계산하거나 필요할 때 GPU로 보낼 수 있어요. VRAM에는 대화 기록과 임시 데이터도 들어가야 해요. Strata는 약 70 GB짜리 모델을 내려받지만 12 GB 그래픽 카드에서 돌아가요. [S01]</p></div>
+
+<details class="deep"><summary>한 걸음 더: 소스 코드를 읽고 싶은 분께</summary>
+<h3>서비스 층과 엔진의 실제 경계</h3>
+<p>Strata의 서비스 코드에서 앱 층이 엔진에 넘기는 것은 HTTP 요청도, 날것의 JSON도 아니에요. 토큰 번호 목록이에요. 인터페이스는 <code>Engine.generate(ids, max_new, sampling, cancel)</code>이고, 토큰 번호를 하나씩 내놓는 이터레이터를 돌려줘요. <span class="ev ev-code">코드 사실</span>[S15] 템플릿 렌더링, 토큰화, 프로토콜 파싱은 모두 이 경계 바깥에서 일어나요. 그래서 문제를 찾을 때 첫 단계는 오류가 경계의 어느 쪽에서 생겼는지 가려내는 거예요.</p>
+<p>같은 파일은 서비스가 한 번에 시퀀스 하나만 처리하고, 요청은 먼저 온 순서대로(FIFO) 줄을 선다는 것도 알려 줘요. [S15] "OpenAI 호환 API를 지원한다"는 말이 "여러 사람이 동시에 쓸 수 있다"는 뜻은 아니에요. 다중 사용자로 넓히려면 무엇이 필요한지는 25장에서 다뤄요.</p>
+<h3>층마다 다른 "캐시"를 한데 섞으면 안 돼요</h3>
+<p>CPU의 하드웨어 캐시는 최근에 접근한 메모리 라인을 보관해요. Strata의 전문가 캐시는 가중치 일부를 VRAM에 올려 둬요. KV 캐시는 대화 기록의 중간 결과를 보관해요. 세션 캐시는 복원할 수 있는 시퀀스 전체의 상태를 보관해요. 조회 테이블의 행 캐시는 SSD에서 읽은 테이블 행을 보관해요. 이들은 캐시하는 대상, 수명, 무효가 되는 조건이 모두 달라요. "캐시를 하나 추가하자"는 말은 <strong>무엇을 캐시하는지, 같은 대상인지 어떻게 확인하는지, 언제 무효가 되는지</strong>를 말해야 비로소 의미가 있어요.</p>
+<h3>주석은 사실이 아니에요</h3>
+<p>소스 코드의 주석은 옛 개발 단계에 머물러 있을 수 있어요. 예를 들어 <code>expert_source.hpp</code> 맨 위에는 "Phase 2에는 캐시가 없다(히트율 h = 0)"라고 쓰여 있고, Phase 3에서 이 객체를 VRAM 캐시로 바꾼다고 설명해요. [S06] 하지만 현재 버전의 엔진에는 전문가 캐시가 실제로 있어요. [S02][S05] 이런 모순을 만나면 주석 한 줄만 보고 결론 내리면 안 돼요. 현재의 호출 경로, 기본 설정, 테스트를 따라가 봐야 해요. 이 책의 소스 코드 안내가 살펴본 것은 목록에 나온 핵심 파일의 일부 구간이고, <strong>저장소 전체를 한 줄씩 감사한 것은 아니에요</strong>.</p>
+<h3>수업 활동: 토큰 하나의 책임 경계 그리기</h3>
+<p>종이에 상자 다섯 개를 그려요. 서비스 층, 시퀀스 상태, 가중치 저장소, 계산 커널, 하드웨어예요. 상자마다 입력 하나, 출력 하나, 항상 성립해야 하는 조건 하나를 적어요. 예를 들어 "시퀀스 상태는 자기 대화에만 속한다"처럼요. 그다음 세 가지 고장을 원인이 될 만한 상자에 넣어 보세요. "답은 맞는데 느리다", "답이 매번 무작위로 바뀐다", "뒷부분 글자가 깨진다"예요. 목표는 단번에 맞히는 것이 아니라, 이 가설들을 가려낼 수 있는 실험을 설계하는 법을 익히는 거예요.</p>
+</details>

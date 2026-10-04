@@ -1,0 +1,214 @@
+<div class="hook"><span class="eyebrow">먼저 이상한 이야기 하나</span>
+<p>Strata 소스 코드에는 「일부러 참조 구현과 다르게 만든」 부분을 설명하는 주석이 있어요. 같은 상태 데이터를 참조 구현은 (S, S, H) 순서로 저장하는데, Strata의 커널은 굳이 (S, H, S) 순서로 저장해요. 주석은 이렇게 경고해요. 두 배치 방식은 똑같은 수 세 개를 쓰기 때문에 <strong>헷갈려도 오류가 나지 않아요</strong>.<span class="ev ev-code">코드 사실</span>[S17]</p>
+<p>수는 그대로인데 저장 순서만 바꿨을 뿐인데, 왜 이렇게 크게 다룰까요? 컴퓨터에게 「이 수가 몇 번째 행, 몇 번째 열에 있다」와 「이 수가 메모리 몇 번째 칸에 있다」는 전혀 다른 이야기이기 때문이에요. 이 장에서는 먼저 행렬 곱셈을 직접 계산해 보고, 그다음 표 하나가 메모리라는 한 줄 위에 어떻게 펼쳐지는지 살펴봐요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 모델의 계산은 거의 전부 「가중치 한 행에 입력을 곱해서 더하는」 일이에요. 그리고 텐서 = 수의 나열 + 「좌표를 주소로 바꾸는 규칙」이에요. 형상(shape)은 어떤 좌표가 있는지 알려 주고, 스트라이드(stride)는 좌표가 1 늘 때 몇 칸을 건너뛰는지 알려 줘요.</p>
+
+<h2 id="sec-1">3.1 모델 안에는 수의 표가 가득해요</h2>
+<p>모델 파일을 열어 보면 거의 전부 수예요. 이 수들은 용도에 따라 표 여러 장으로 나뉘어 있어요. 한 열뿐인 것을 <dfn>벡터(vector)</dfn>, 행과 열이 있는 것을 <dfn>행렬(matrix)</dfn>이라고 해요. 표 여러 장을 쌓으면 3차원 배열이 돼요. 이 모두를 <dfn>텐서(tensor)</dfn>라고 불러요. 좌표가 붙은 수의 묶음이에요. 각 축의 길이를 모아서 <dfn>형상(shape)</dfn>이라고 해요. 그림 3-1을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="그림 3-1: 벡터는 수 한 줄, 행렬은 표 한 장, 3차원 텐서는 표 여러 장을 쌓은 것이에요. 형상은 각 축의 길이를 적은 것이에요">
+<text class="f-text" fill="#182f2b" x="45" y="24" font-size="13" font-weight="600" text-anchor="middle">벡터</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="25" y="40" width="40" height="28"/><text class="f-text" fill="#182f2b" x="45" y="59" font-size="12" text-anchor="middle">0.3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="25" y="68" width="40" height="28"/><text class="f-text" fill="#182f2b" x="45" y="87" font-size="12" text-anchor="middle">−1.2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="25" y="96" width="40" height="28"/><text class="f-text" fill="#182f2b" x="45" y="115" font-size="12" text-anchor="middle">0.8</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="25" y="124" width="40" height="28"/><text class="f-text" fill="#182f2b" x="45" y="143" font-size="12" text-anchor="middle">2.0</text>
+<text class="f-muted" fill="#5c6d66" x="45" y="174" font-size="12" text-anchor="middle">형상 (4)</text>
+<text class="f-muted" fill="#5c6d66" x="45" y="192" font-size="12" text-anchor="middle">수 한 줄</text>
+<text class="f-text" fill="#182f2b" x="170" y="24" font-size="13" font-weight="600" text-anchor="middle">행렬</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="68" width="40" height="28"/><text class="f-text" fill="#182f2b" x="130" y="87" font-size="12" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="68" width="40" height="28"/><text class="f-text" fill="#182f2b" x="170" y="87" font-size="12" text-anchor="middle">2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="190" y="68" width="40" height="28"/><text class="f-text" fill="#182f2b" x="210" y="87" font-size="12" text-anchor="middle">3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="96" width="40" height="28"/><text class="f-text" fill="#182f2b" x="130" y="115" font-size="12" text-anchor="middle">4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="96" width="40" height="28"/><text class="f-text" fill="#182f2b" x="170" y="115" font-size="12" text-anchor="middle">5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="190" y="96" width="40" height="28"/><text class="f-text" fill="#182f2b" x="210" y="115" font-size="12" text-anchor="middle">6</text>
+<text class="f-muted" fill="#5c6d66" x="170" y="174" font-size="12" text-anchor="middle">형상 (2, 3)</text>
+<text class="f-muted" fill="#5c6d66" x="170" y="192" font-size="12" text-anchor="middle">2행 3열의 표</text>
+<text class="f-text" fill="#182f2b" x="330" y="24" font-size="13" font-weight="600" text-anchor="middle">3차원 텐서</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="292" y="56" width="30" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="322" y="56" width="30" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="352" y="56" width="30" height="24"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="292" y="80" width="30" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="322" y="80" width="30" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="352" y="80" width="30" height="24"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="278" y="72" width="30" height="24"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="308" y="72" width="30" height="24"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="338" y="72" width="30" height="24"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="278" y="96" width="30" height="24"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="308" y="96" width="30" height="24"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="338" y="96" width="30" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="330" y="174" font-size="12" text-anchor="middle">형상 (2, 2, 3)</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="192" font-size="12" text-anchor="middle">표 두 장을 겹침</text>
+<text class="f-text" fill="#182f2b" x="200" y="222" font-size="12" text-anchor="middle">Strata: 토큰 하나가 층 사이에 전하는 수는 2560개</text>
+</svg><figcaption>그림 3-1　벡터, 행렬, 3차원 텐서. 형상은 「각 축이 얼마나 긴지」만 알려 줘요. 이 수들을 메모리에 어떤 순서로 놓는지는 알려 주지 않아요.</figcaption></figure>
+<p>Strata가 쓰는 모델에서 토큰 하나가 층과 층 사이에 전달하는 데이터는 2560개 수로 된 벡터예요.<span class="ev ev-code">코드 사실</span>[S04] 10장에서 다룰 전문가는 내부가 행렬 세 개예요. 2560개 수를 640개로 줄였다가 다시 2560개로 늘려요.[S04] 모델의 계산은 거의 다 이런 행렬에 벡터를 곱하는 일이에요.</p>
+
+<h2 id="sec-2">3.2 행렬-벡터 곱을 손으로 계산해 보기</h2>
+<p>먼저 펜으로 계산할 수 있을 만큼 작은 예를 볼게요. W는 2행 3열이고, x는 수 3개예요.</p>
+<div class="viz" data-viz="matvec-steps"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="그림 3-2: W 곱하기 x는 y예요. W의 첫 번째 행과 x를 하나씩 곱해서 더하면 −2이고, 두 번째 행도 같은 방식으로 −2가 나와요">
+<rect class="f-accent" fill="#136d5a" x="40" y="30" width="40" height="28"/><text class="f-on" fill="#ffffff" x="60" y="49" font-size="13" text-anchor="middle">1</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="30" width="40" height="28"/><text class="f-on" fill="#ffffff" x="100" y="49" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="30" width="40" height="28"/><text class="f-on" fill="#ffffff" x="140" y="49" font-size="13" text-anchor="middle">3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="58" width="40" height="28"/><text class="f-text" fill="#182f2b" x="60" y="77" font-size="13" text-anchor="middle">4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="58" width="40" height="28"/><text class="f-text" fill="#182f2b" x="100" y="77" font-size="13" text-anchor="middle">5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="120" y="58" width="40" height="28"/><text class="f-text" fill="#182f2b" x="140" y="77" font-size="13" text-anchor="middle">6</text>
+<text class="f-muted" fill="#5c6d66" x="180" y="63" font-size="16" text-anchor="middle">×</text>
+<rect class="f-soft" fill="#e5f1df" x="200" y="16" width="40" height="28"/><text class="f-text" fill="#182f2b" x="220" y="35" font-size="13" text-anchor="middle">1</text>
+<rect class="f-soft" fill="#e5f1df" x="200" y="44" width="40" height="28"/><text class="f-text" fill="#182f2b" x="220" y="63" font-size="13" text-anchor="middle">0</text>
+<rect class="f-soft" fill="#e5f1df" x="200" y="72" width="40" height="28"/><text class="f-text" fill="#182f2b" x="220" y="91" font-size="13" text-anchor="middle">−1</text>
+<text class="f-muted" fill="#5c6d66" x="262" y="63" font-size="16" text-anchor="middle">=</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="282" y="30" width="40" height="28"/><text class="f-text" fill="#182f2b" x="302" y="49" font-size="13" text-anchor="middle">−2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="282" y="58" width="40" height="28"/><text class="f-text" fill="#182f2b" x="302" y="77" font-size="13" text-anchor="middle">−2</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="120" font-size="12" text-anchor="middle">W（2 × 3）</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="120" font-size="12" text-anchor="middle">x（3 × 1）</text>
+<text class="f-muted" fill="#5c6d66" x="302" y="120" font-size="12" text-anchor="middle">y（2 × 1）</text>
+<text class="f-text" fill="#182f2b" x="200" y="152" font-size="13" text-anchor="middle">y₁ = 1×1 + 2×0 + 3×(−1) = −2</text>
+<text class="f-text" fill="#182f2b" x="200" y="176" font-size="13" text-anchor="middle">y₂ = 4×1 + 5×0 + 6×(−1) = −2</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="206" font-size="12" text-anchor="middle">출력 하나 = W의 한 행과 x의 내적</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="226" font-size="12" text-anchor="middle">곱셈-덧셈은 모두 2 × 3 = 6번</text>
+</svg><figcaption>그림 3-2　y = Wx: W에 행이 몇 개 있으면 내적도 그만큼 해요. 강조된 첫 번째 행을 x와 하나씩 곱해서 더하면 y₁ = −2가 돼요.</figcaption></figure></div>
+<p>규칙은 하나뿐이에요. <strong>W의 한 행을 x와 짝지어 하나씩 곱한 뒤 전부 더해요</strong>. 그러면 출력 하나가 나와요. W에 행이 몇 개든 그만큼 반복해요. 이 「짝지어 곱한 뒤 더하기」를 <dfn>내적(dot product)</dfn>이라 하고, 연산 전체를 <dfn>행렬-벡터 곱</dfn>이라고 해요. 업계 용어로는 <dfn>GEMV</dfn>라고 써요.</p>
+<p>형상에도 규칙이 있어요. (2 × 3) 행렬은 수 3개짜리 벡터하고만 곱할 수 있고, 결과는 수 2개예요. 가운데 3이 맞아야 하고, 곱하고 나면 「사라져요」. 실제 모델의 GEMV 하나는 형상이 (640 × 2560)일 수 있어요. 수 2560개가 들어가서 640개가 나와요.</p>
+<aside class="primer" id="c03-dot-matmul">
+<h3>벡터의 내적과 행렬 곱셈</h3>
+<p>직관은 이래요. 마트에서 물건 3가지를 사요. 단가가 [5, 2, 8]원이고 수량이 [1, 3, 2]개면 총액은 5×1 + 2×3 + 8×2 = 27원이에요. 「길이가 같은 두 목록을 같은 자리끼리 곱해서 더하는」 것이 <dfn>내적</dfn>이에요. 일종의 <strong>가중합</strong>이에요. 한 목록은 가중치, 다른 목록은 데이터 역할을 해요.</p>
+<p>행렬-벡터 곱은 같은 데이터 x와 W의 각 행이 한 번씩 내적을 하는 거예요. W가 m행 d열이면 내적 m번, 곱셈-덧셈 m × d번이 필요해요. 입력이 b개라면 이들을 나란히 놓아 d × b 행렬 X를 만들고 WX를 계산해요. 이것이 <dfn>행렬 곱(GEMM)</dfn>이에요. 수학적으로는 GEMV b번을 나란히 놓은 것뿐이에요. 하지만 공학적으로는 차이가 커요. W를 한 번 읽어 오면 b개의 입력이 돌아가며 쓸 수 있어요. 그림 3-3을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="그림 3-3: GEMV는 가중치 한 벌이 입력 하나만 처리하고, GEMM은 가중치 한 벌이 입력 네 개를 동시에 처리해요">
+<text class="f-text" fill="#182f2b" x="95" y="24" font-size="13" font-weight="600" text-anchor="middle">GEMV: 입력 하나</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="44" width="70" height="70"/><text class="f-on" fill="#ffffff" x="55" y="84" font-size="14" text-anchor="middle">W</text>
+<text class="f-muted" fill="#5c6d66" x="104" y="84" font-size="14" text-anchor="middle">×</text>
+<rect class="f-soft" fill="#e5f1df" x="116" y="44" width="14" height="70"/>
+<text class="f-muted" fill="#5c6d66" x="142" y="84" font-size="14" text-anchor="middle">=</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="44" width="14" height="70"/>
+<text class="f-text" fill="#182f2b" x="95" y="142" font-size="12" text-anchor="middle">가중치를 1번 읽어 1번 사용</text>
+<text class="f-text" fill="#182f2b" x="300" y="24" font-size="13" font-weight="600" text-anchor="middle">GEMM: 입력 네 개를 한꺼번에</text>
+<rect class="f-accent" fill="#136d5a" x="205" y="44" width="56" height="70"/><text class="f-on" fill="#ffffff" x="233" y="84" font-size="14" text-anchor="middle">W</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="84" font-size="14" text-anchor="middle">×</text>
+<rect class="f-soft" fill="#e5f1df" x="280" y="44" width="9" height="70"/><rect class="f-soft" fill="#e5f1df" x="292" y="44" width="9" height="70"/><rect class="f-soft" fill="#e5f1df" x="304" y="44" width="9" height="70"/><rect class="f-soft" fill="#e5f1df" x="316" y="44" width="9" height="70"/>
+<text class="f-muted" fill="#5c6d66" x="335" y="84" font-size="14" text-anchor="middle">=</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="344" y="44" width="9" height="70"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="356" y="44" width="9" height="70"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="368" y="44" width="9" height="70"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="380" y="44" width="9" height="70"/>
+<text class="f-text" fill="#182f2b" x="300" y="142" font-size="12" text-anchor="middle">가중치를 1번 읽어 4번 사용</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="178" font-size="12" text-anchor="middle">수학적으로는 같은 변환이에요.</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="198" font-size="12" text-anchor="middle">차이는 가중치를 한 번 읽어 몇 번 쓰느냐예요.</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="218" font-size="12" text-anchor="middle">프리필이 디코드보다 훨씬 빠른 이유예요 (5장, 16장)</text>
+</svg><figcaption>그림 3-3　GEMV와 GEMM. 가중치는 자리를 가장 많이 차지하는 데이터예요. 한 번 읽어서 여러 번 쓸수록 옮기는 바이트가 크게 줄어요.</figcaption></figure>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%ED%96%89%EB%A0%AC" target="_blank" rel="noopener noreferrer">위키백과: 행렬</a> · <a href="https://www.3blue1brown.com/topics/linear-algebra" target="_blank" rel="noopener noreferrer">3Blue1Brown: 선형대수의 본질</a> · <a href="https://ko.wikipedia.org/wiki/%EC%8A%A4%EC%B9%BC%EB%9D%BC%EA%B3%B1" target="_blank" rel="noopener noreferrer">위키백과: 스칼라곱(내적)</a> · <a href="https://ko.wikipedia.org/wiki/%ED%96%89%EB%A0%AC_%EA%B3%B1%EC%85%88" target="_blank" rel="noopener noreferrer">위키백과: 행렬 곱셈</a></p>
+</aside>
+<p>1장에서 말했듯이 답을 쓸 때는 한 번에 토큰 하나만 나오기 때문에 각 층의 계산은 GEMV예요. 문제를 읽을 때는 긴 질문을 한꺼번에 계산하기 때문에 GEMM이 돼요. 그림 3-3의 차이가 실제 시스템에서 이렇게 나타나요.</p>
+
+<h2 id="sec-3">3.3 메모리는 한 줄뿐이에요: 행 우선과 스트라이드</h2>
+<p>행렬은 2차원이지만 메모리는 길게 이어진 한 줄이에요. 칸마다 번호가 있고, 이 번호를 <dfn>주소(address)</dfn>라고 해요. 표를 여기에 넣으려면 「누가 먼저, 누가 나중인지」부터 약속해야 해요.</p>
+<aside class="primer" id="c03-memory-layout">
+<h3>배열의 메모리 배치: 행 우선, 열 우선, 스트라이드</h3>
+<p>좌석표를 길쭉한 공책에 옮겨 적는다고 상상해 보세요. 한 방법은 한 줄씩 적는 거예요. 0번 줄의 모든 좌석을 먼저 적고, 그다음 1번 줄을 적어요. 이것을 <dfn>행 우선(row-major)</dfn>이라고 해요. 다른 방법은 한 열씩 적는 건데, <dfn>열 우선(column-major)</dfn>이라고 해요. 어느 쪽이든 맞아요. 읽는 사람이 어떻게 적었는지만 알면 돼요. 그림 3-4를 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 272" role="img" aria-label="그림 3-4: 같은 2행 3열 행렬을 행 우선과 열 우선으로 메모리에 놓으면 원소의 순서가 서로 달라요">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">논리적 배치: 2행 3열</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="26" width="40" height="26"/><text class="f-text" fill="#182f2b" x="160" y="44" font-size="13" text-anchor="middle">a</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="26" width="40" height="26"/><text class="f-text" fill="#182f2b" x="200" y="44" font-size="13" text-anchor="middle">b</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="220" y="26" width="40" height="26"/><text class="f-text" fill="#182f2b" x="240" y="44" font-size="13" text-anchor="middle">c</text>
+<rect class="f-accent" fill="#136d5a" x="140" y="52" width="40" height="26"/><text class="f-on" fill="#ffffff" x="160" y="70" font-size="13" text-anchor="middle">d</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="52" width="40" height="26"/><text class="f-on" fill="#ffffff" x="200" y="70" font-size="13" text-anchor="middle">e</text>
+<rect class="f-accent" fill="#136d5a" x="220" y="52" width="40" height="26"/><text class="f-on" fill="#ffffff" x="240" y="70" font-size="13" text-anchor="middle">f</text>
+<text class="f-text" fill="#182f2b" x="10" y="123" font-size="13" font-weight="600">행 우선</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="104" width="46" height="28"/><text class="f-text" fill="#182f2b" x="103" y="123" font-size="13" text-anchor="middle">a</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="130" y="104" width="46" height="28"/><text class="f-text" fill="#182f2b" x="153" y="123" font-size="13" text-anchor="middle">b</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="104" width="46" height="28"/><text class="f-text" fill="#182f2b" x="203" y="123" font-size="13" text-anchor="middle">c</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="104" width="46" height="28"/><text class="f-on" fill="#ffffff" x="253" y="123" font-size="13" text-anchor="middle">d</text>
+<rect class="f-accent" fill="#136d5a" x="280" y="104" width="46" height="28"/><text class="f-on" fill="#ffffff" x="303" y="123" font-size="13" text-anchor="middle">e</text>
+<rect class="f-accent" fill="#136d5a" x="330" y="104" width="46" height="28"/><text class="f-on" fill="#ffffff" x="353" y="123" font-size="13" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="103" y="148" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="153" y="148" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="203" y="148" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="253" y="148" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="303" y="148" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="353" y="148" font-size="12" text-anchor="middle">5</text>
+<text class="f-text" fill="#182f2b" x="10" y="189" font-size="13" font-weight="600">열 우선</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="170" width="46" height="28"/><text class="f-text" fill="#182f2b" x="103" y="189" font-size="13" text-anchor="middle">a</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="170" width="46" height="28"/><text class="f-on" fill="#ffffff" x="153" y="189" font-size="13" text-anchor="middle">d</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="170" width="46" height="28"/><text class="f-text" fill="#182f2b" x="203" y="189" font-size="13" text-anchor="middle">b</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="170" width="46" height="28"/><text class="f-on" fill="#ffffff" x="253" y="189" font-size="13" text-anchor="middle">e</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="170" width="46" height="28"/><text class="f-text" fill="#182f2b" x="303" y="189" font-size="13" text-anchor="middle">c</text>
+<rect class="f-accent" fill="#136d5a" x="330" y="170" width="46" height="28"/><text class="f-on" fill="#ffffff" x="353" y="189" font-size="13" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="103" y="214" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="153" y="214" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="203" y="214" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="253" y="214" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="303" y="214" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="353" y="214" font-size="12" text-anchor="middle">5</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="244" font-size="12" text-anchor="middle">행 우선: (i, j)의 주소 = i × 3 + j</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="262" font-size="12" text-anchor="middle">열 우선: (i, j)의 주소 = j × 2 + i</text>
+</svg><figcaption>그림 3-4　같은 2 × 3 표를 두 가지로 놓은 모습. 강조된 1행은 행 우선에서는 붙어 있고, 열 우선에서는 흩어져요.</figcaption></figure>
+<p>행 우선에서 (i, j)의 주소는 i × 열 수 + j예요. 즉 j가 1 늘면 주소는 1 늘고, i가 1 늘면 주소는 한 행의 길이만큼 늘어요. 「어떤 좌표가 1 늘 때 주소가 몇 칸 건너뛰는지」를 그 축의 <dfn>스트라이드(stride)</dfn>라고 해요. 위 표의 행 우선 스트라이드는 (3, 1)이고, 열 우선은 (1, 2)예요.</p>
+<p>어떤 차원 수로든 일반화할 수 있어요. <strong>주소 = 각 좌표 × 그 축의 스트라이드를 모두 더한 값</strong>이에요. 가장 빠르게 변하는 축의 스트라이드는 1이고, 앞쪽 축의 스트라이드는 그 뒤에 있는 모든 축의 길이를 곱한 값이에요. 그래서 텐서를 설명하려면 형상만으로는 부족하고 스트라이드도 필요해요.</p>
+<p class="further">더 읽을거리: <a href="https://en.wikipedia.org/wiki/Row-_and_column-major_order" target="_blank" rel="noopener noreferrer">Wikipedia: Row- and column-major order</a> · <a href="https://pytorch.org/docs/stable/generated/torch.Tensor.stride.html" target="_blank" rel="noopener noreferrer">PyTorch 문서: Tensor.stride</a> · <a href="https://csapp.cs.cmu.edu/" target="_blank" rel="noopener noreferrer">『컴퓨터 시스템: 프로그래머 관점』(CS:APP) 3장, 6장</a></p>
+</aside>
+<p class="bridge"><strong>CS를 배운 분께:</strong> C 언어의 2차원 배열은 행 우선이고, Fortran과 MATLAB은 열 우선이에요. NumPy와 PyTorch의 텐서에는 strides가 붙어 있어요. 전치(transpose)는 대개 스트라이드 두 개만 맞바꾸는 일이라 바이트는 하나도 옮기지 않아요. 그래서 「형상이 같은」 텐서 두 개도 메모리 안의 배열은 완전히 다를 수 있어요.</p>
+
+<h2 id="sec-4">3.4 축이 세 개인 예: 같은 원소, 두 개의 주소</h2>
+<p>처음에 나온 상태를 작게 줄여서 볼게요. 축 세 개를 i, h, j라 하고 길이는 각각 2, 3, 2예요. 수는 모두 12개예요. (i, h, j) 순서로 놓으면 j가 가장 빠르고, (i, j, h) 순서로 놓으면 h가 가장 빨라요. 아래에서 원소를 아무거나 눌러 보면, 두 배치에서 각각 어디에 놓이는지 볼 수 있어요.</p>
+<div class="viz" data-viz="stride-explorer"><figure class="fig"><svg viewBox="0 0 400 196" role="img" aria-label="그림 3-5: 같은 3차원 배열을 두 가지 순서로 메모리에 놓은 모습. 원소 (1, 2, 0)의 주소는 첫 번째 배치에서 10이고 두 번째 배치에서 8이에요">
+<text class="f-text" fill="#182f2b" x="20" y="20" font-size="12" font-weight="600">(i, h, j) 배치: j가 가장 빠름 (Strata 커널)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="34.5" y="47" font-size="12" text-anchor="middle">000</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="64.5" y="47" font-size="12" text-anchor="middle">001</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="94.5" y="47" font-size="12" text-anchor="middle">010</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="124.5" y="47" font-size="12" text-anchor="middle">011</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="154.5" y="47" font-size="12" text-anchor="middle">020</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="170" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="184.5" y="47" font-size="12" text-anchor="middle">021</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="214.5" y="47" font-size="12" text-anchor="middle">100</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="230" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="244.5" y="47" font-size="12" text-anchor="middle">101</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="260" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="274.5" y="47" font-size="12" text-anchor="middle">110</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="304.5" y="47" font-size="12" text-anchor="middle">111</text>
+<rect class="f-accent" fill="#136d5a" x="320" y="30" width="29" height="26"/><text class="f-on" fill="#ffffff" x="334.5" y="47" font-size="12" text-anchor="middle">120</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="350" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="364.5" y="47" font-size="12" text-anchor="middle">121</text>
+<text class="f-muted" fill="#5c6d66" x="34.5" y="70" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="64.5" y="70" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="94.5" y="70" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="124.5" y="70" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="154.5" y="70" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="184.5" y="70" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="214.5" y="70" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="244.5" y="70" font-size="12" text-anchor="middle">7</text><text class="f-muted" fill="#5c6d66" x="274.5" y="70" font-size="12" text-anchor="middle">8</text><text class="f-muted" fill="#5c6d66" x="304.5" y="70" font-size="12" text-anchor="middle">9</text><text class="f-text" fill="#182f2b" x="334.5" y="70" font-size="12" font-weight="600" text-anchor="middle">10</text><text class="f-muted" fill="#5c6d66" x="364.5" y="70" font-size="12" text-anchor="middle">11</text>
+<text class="f-text" fill="#182f2b" x="20" y="100" font-size="12" font-weight="600">(i, j, h) 배치: h가 가장 빠름 (참조 구현)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="34.5" y="127" font-size="12" text-anchor="middle">000</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="64.5" y="127" font-size="12" text-anchor="middle">010</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="94.5" y="127" font-size="12" text-anchor="middle">020</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="124.5" y="127" font-size="12" text-anchor="middle">001</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="154.5" y="127" font-size="12" text-anchor="middle">011</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="170" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="184.5" y="127" font-size="12" text-anchor="middle">021</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="214.5" y="127" font-size="12" text-anchor="middle">100</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="230" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="244.5" y="127" font-size="12" text-anchor="middle">110</text>
+<rect class="f-accent" fill="#136d5a" x="260" y="110" width="29" height="26"/><text class="f-on" fill="#ffffff" x="274.5" y="127" font-size="12" text-anchor="middle">120</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="304.5" y="127" font-size="12" text-anchor="middle">101</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="334.5" y="127" font-size="12" text-anchor="middle">111</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="350" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="364.5" y="127" font-size="12" text-anchor="middle">121</text>
+<text class="f-muted" fill="#5c6d66" x="34.5" y="150" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="64.5" y="150" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="94.5" y="150" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="124.5" y="150" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="154.5" y="150" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="184.5" y="150" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="214.5" y="150" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="244.5" y="150" font-size="12" text-anchor="middle">7</text><text class="f-text" fill="#182f2b" x="274.5" y="150" font-size="12" font-weight="600" text-anchor="middle">8</text><text class="f-muted" fill="#5c6d66" x="304.5" y="150" font-size="12" text-anchor="middle">9</text><text class="f-muted" fill="#5c6d66" x="334.5" y="150" font-size="12" text-anchor="middle">10</text><text class="f-muted" fill="#5c6d66" x="364.5" y="150" font-size="12" text-anchor="middle">11</text>
+<text class="f-text" fill="#182f2b" x="200" y="182" font-size="12" text-anchor="middle">같은 원소 (1, 2, 0)의 주소: 10? 8? 둘 다 유효</text>
+</svg><figcaption>그림 3-5　칸 안의 세 자리 수는 좌표 i, h, j예요. 같은 원소도 배치를 바꾸면 주소가 달라지고, 두 주소 모두 0–11 범위 안에 있어요.</figcaption></figure></div>
+<p>강조된 원소 (i=1, h=2, j=0)를 손으로 계산해 볼게요. (i, h, j) 배치의 스트라이드는 (6, 2, 1)이고, 주소 = 1×6 + 2×2 + 0×1 = 10이에요. (i, j, h) 배치의 스트라이드는 (6, 1, 3)이에요. i는 6칸, j는 3칸, h는 1칸을 건너뛰어서 주소 = 1×6 + 0×3 + 2×1 = 8이에요.</p>
+<p>두 주소 모두 유효한 범위 안에 있어요. 그래서 데이터를 쓰는 쪽이 한 배치를 쓰고 읽는 쪽이 다른 배치를 쓰면, <strong>프로그램은 죽지도 않고 범위를 벗어나지도 않으면서 조용히 엉뚱한 수를 읽어요</strong>. 최종 결과는 유한하고 멀쩡해 보이지만 틀려요. 이런 오류가 가장 찾기 어려워요.</p>
+
+<h2 id="sec-5">3.5 Strata가 굳이 배치를 바꾼 이유</h2>
+<p>처음의 주석으로 돌아가 볼게요. Strata가 쓰는 모델에는 GDN이라는 층이 36개 있고, 층마다 상태가 하나씩 있어요. 이 상태는 3차원 배열이고, 두 축의 길이는 128, 한 축의 길이는 48이에요.<span class="ev ev-code">코드 사실</span>[S04] 참조 구현은 이것을 (S, S, H) = (i, j, h)로 저장해요. Strata의 커널은 (S, H, S) = (i, h, j)로 바꿔서 j를 가장 빠른 축으로 만들었어요.<span class="ev ev-code">코드 사실</span>[S17]</p>
+<p>이유는 주석에 적혀 있어요. i를 고정하면 GPU의 스레드 묶음이 j 방향으로 차례로 읽어 가요. j가 가장 빠르면 이 스레드들은 <strong>연속된</strong> 메모리 한 덩어리를 읽어요. j가 가장 빠르지 않으면 48개 수마다 하나씩 건너뛰며 읽어야 해요. 그림 3-6을 보세요. GPU가 연속된 메모리를 읽으면 스레드 묶음의 요청을 큰 읽기 몇 번으로 합칠 수 있어요. 이것을 <dfn>메모리 병합 접근(coalescing)</dfn>이라고 해요. 건너뛰며 읽으면 합칠 수 없어요(15장에서 자세히 다뤄요).</p>
+<figure class="fig"><svg viewBox="0 0 400 244" role="img" aria-label="그림 3-6: j가 가장 빠르면 스레드 묶음이 연속된 메모리 한 덩어리를 읽어요. h가 가장 빠르면 이웃한 j가 48개 수만큼 떨어져 있어서 스레드가 건너뛰며 읽어야 해요">
+<text class="f-text" fill="#182f2b" x="20" y="20" font-size="12" font-weight="600">Strata 커널 (S, H, S): i 고정, j가 연속</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="42" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="64" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="86" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="108" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="130" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="152" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="174" y="32" width="21" height="24"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="218" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="240" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="262" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="284" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="306" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="328" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="32" width="21" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="74" font-size="12">스레드 8개가 이웃한 수 8개를 읽어요: 한 번에 한 덩어리</text>
+<text class="f-text" fill="#182f2b" x="20" y="114" font-size="12" font-weight="600">참조 구현 (S, S, H): i 고정, j마다 48칸 점프</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="42" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="64" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="86" y="126" width="21" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="108" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="130" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="152" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="174" y="126" width="21" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="196" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="218" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="240" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="262" y="126" width="21" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="284" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="306" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="328" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="126" width="21" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="12">읽을 수들이 여기저기 흩어져 있어요</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="186" font-size="12">(그림의 간격은 예시예요. 실제로는 48칸 간격)</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="212" font-size="12">상태는 원래 실행 중에 만드는 버퍼예요.</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="230" font-size="12">어떤 배치를 골라도 추가 비용이 없어요.</text>
+</svg><figcaption>그림 3-6　같은 수라도 배치가 읽는 방식을 정해요. Strata는 j를 가장 빠른 축으로 만들어서 스레드 묶음이 연속으로 읽을 수 있게 했어요.</figcaption></figure>
+<p>주석은 이어서 말해요. 이 상태는 실행 중에 만드는 버퍼이고 모델 파일의 가중치가 아니에요. 그래서 어떤 배치를 골라도 추가 비용이 없어요. 다만 반드시 적어 두어야 해요. 두 배치가 「똑같은 수 세 개를 가리키기 때문에, 헷갈려도 아무 소리도 나지 않기」 때문이에요.[S17] 크기도 계산해 볼게요. 128 × 48 × 128 = 786,432개이고, 각각 4바이트 FP32로 저장하면 딱 3 MiB예요. 36층이면 모두 108 MiB예요.<span class="ev ev-est">교육용 추정</span></p>
+<p>어텐션 층의 KV 캐시에도 비슷한 약속이 있어요. 소스 코드는 배치를 [페이지][KV 헤드][페이지 내 위치][헤드 차원]으로 적고, 마지막 축이 가장 빨라요. 그리고 헤더 파일 밖의 코드가 이 매핑을 마음대로 가정하는 것을 <strong>금지해요</strong>. 테스트는 페이지 크기 1, 4, 512 세 가지와 섞인 페이지 테이블로 각각 돌려서 어텐션 출력이 완전히 같아야 한다고 요구해요.<span class="ev ev-code">코드 사실</span>[S18] 「배치」가 인터페이스 계약의 일부가 된 거예요.</p>
+
+<h2 id="sec-6">3.6 형상 검사는 로드할 때 하고, 그다음 직접 해 봐요</h2>
+<p>배치를 잘못 쓰거나 형상이 틀려도 스스로 오류를 내지 않아요. 그러니 일부러 검사해야 해요. Strata의 <code>layout.hpp</code>는 커널이 기대하는 모든 크기를 <code>ModelGeometry</code>라는 구조체 하나에 적어 둬요. 너비 2560, 48개 층, 4층마다 어텐션 층 하나, 층마다 전문가 512개 등이에요. 그리고 <code>check_layer</code>와 <code>check_all</code>로 모델 파일 안의 모든 텐서 형상을 하나씩 대조해요.<span class="ev ev-code">코드 사실</span>[S04]</p>
+<p>파일 맨 앞의 주석이 이유를 잘 설명해요. 불일치는 <strong>로드할 때</strong> 보고해야 해요. 텐서 이름, 실제 형상, 요구되는 형상을 적어서요. 4000번째 토큰에서 GEMV 안의 틀린 수로 나타날 때까지 기다리면 안 돼요. 주석에는 실제 교훈도 하나 적혀 있어요. 어떤 개발 라운드에서 한 캐시의 크기를 4배 크게 계산했어요. 「쿼리 헤드 수」를 「키 헤드 수」로 착각했기 때문이에요. 이 오류는 한 라운드 더 살아남았어요. VRAM 예산이 더 빠듯해져서 오히려 더 「안전해」 보였거든요.[S04]</p>
+<p>다른 검사는 <code>layer.cpp</code>에 있어요. 양자화 텐서는 세 덩어리(코드, 스케일, 오프셋)로 이루어져 있어요. 프로그램은 세 덩어리의 바이트 수를 더한 값이 텐서 전체와 <strong>정확히</strong> 같을 것을 요구해요. 오프셋 플래그와 오프셋 덩어리가 있는지도 서로 맞아야 해요. 맞지 않으면 추측하지 않고 거부해요.<span class="ev ev-code">코드 사실</span>[S14] 이 「세 덩어리」가 무엇인지는 4장에서 다뤄요.</p>
+<p><strong>직접 해 보기:</strong> 이 장의 인터랙티브 실습 「행렬 곱을 직접 계산하기」를 열어 보세요. 먼저 종이에 결과를 예측하고, 입력 원소 하나를 바꿔서 어떤 출력이 따라 바뀌는지 보세요. 그다음 이 페이지의 인터랙티브 그림 두 개를 써 보세요. 행렬-벡터 곱에서 x를 [0, 1, 0]으로 놓고, 스트라이드 실험에서는 같은 원소를 누른 채 배치를 바꿔 보세요. 마지막으로 작은 연습을 하나 해 봐요. 행렬의 각 원소에 좌표가 보이는 수를 채우세요(예를 들어 1행 2열에는 12). 그리고 일부러 스트라이드를 거꾸로 적어서, 출력에서 어떤 수가 「엉뚱한 자리로 갔는지」 확인해 보세요.</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>행렬-벡터 곱 = W의 각 행과 x가 한 번씩 내적하는 것이에요. 입력 여러 개를 나란히 놓고 계산하면(GEMM) 가중치 하나를 여러 번 쓸 수 있어요.</li>
+<li>메모리는 한 줄이에요. 텐서 = 수의 나열 + 형상 + 스트라이드예요. 주소 = 각 좌표에 스트라이드를 곱해서 더한 값이에요.</li>
+<li>배치를 잘못 써도 오류가 나지 않고 조용히 틀리게 계산해요. 그래서 배치는 인터페이스에 적어 두고, 형상은 로드할 때 검사해야 해요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: 「두 텐서의 형상이 같으면 서로 그대로 바꿔 써도 된다.」</strong></p>
+<p>형상은 어떤 좌표가 있는지만 알려 줘요. 그 좌표가 메모리의 어느 칸에 대응하는지는 알려 주지 않아요. Strata의 GDN 상태는 참조 구현과 커널에서 형상은 같고 배치는 달라요. 한쪽 것을 그대로 다른 쪽에 넘기면 결과는 유한하지만 틀린 수가 돼요.<span class="ev ev-code">코드 사실</span>[S17] 스트라이드, 축의 의미, 데이터가 어떤 상태인지(예를 들어 정규화를 이미 했는지)도 함께 확인해야 해요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 주소 공식, 헤드 대응 관계, 인터페이스 계약</summary>
+<h3>일반 주소 공식</h3>
+<p>어떤 차원의 텐서든 <code>offset = Σ index[a] × stride[a]</code>예요. 형상은 어떤 좌표가 유효한지 알려 주고, 스트라이드는 좌표가 한 걸음 나아갈 때 원소 몇 개를 건너뛰는지 알려 줘요. 스트라이드의 단위는 분명히 적어야 해요. 「원소」인지 「바이트」인지요. 둘은 원소 크기의 배수만큼 차이가 나고, 섞어 쓰는 것은 또 다른 흔한 실수예요.</p>
+<h3>예제: 3차원 원소의 위치 찾기</h3>
+<p>S = 2, H = 3이고 (i, h, j) 순서에 j가 가장 빠른 연속 배치를 쓴다고 해요. 원소 (1, 2, 0)의 오프셋은 (1 × 3 + 2) × 2 + 0 = 10이에요. 만약 잘못해서 (i, j, h)로 읽으면, 같은 수학적 원소의 오프셋은 (1 × 2 + 0) × 3 + 2 = 8이에요. 두 주소 모두 유효한 범위 안에 있어서 범위 검사로는 찾을 수 없어요. 더 일반적으로 말하면 <strong>메모리 안전성이 곧 수치 의미의 정확성은 아니에요</strong>. 주소가 유효하고, NaN이 없고, 마지막 문장이 자연스러워도 텐서 배치가 일관되다는 증거는 되지 못해요.</p>
+<h3>헤드 대응 관계: 나머지 연산인가, 정수 나눗셈인가</h3>
+<p>「어떤 헤드가 어떤 헤드와 짝인지」도 일종의 인덱싱 규칙이에요. 그리고 흔한 두 가지 쓰는 법이 모두 형상이 맞는 결과를 내요. GDN 층에는 값(value) 헤드 48개와 키(key) 헤드 16개가 있어요. Strata는 h번째 값 헤드를 h mod 16번째 키 헤드와 짝짓도록 정했어요(나머지 연산). h ÷ 3(정수 나눗셈)이 아니에요.[S17] 반면 어텐션 층에는 쿼리 헤드 24개와 KV 헤드 2개가 있고, 규칙은 정확히 반대예요. q번째 쿼리 헤드는 q ÷ 12번째 KV 헤드와 짝이에요(정수 나눗셈). q mod 2가 <strong>아니에요</strong>.<span class="ev ev-code">코드 사실</span>[S18] 예를 들어 값 헤드 17은 나머지 연산이면 키 헤드 1, 정수 나눗셈이면 키 헤드 5와 짝이에요. 쿼리 헤드 1은 정수 나눗셈이면 KV 헤드 0, 나머지 연산이면 KV 헤드 1과 짝이에요. 반대로 쓰면 프로그램은 그래도 돌아가요. 그래서 소스 주석은 참조 구현과 테스트가 이 두 규칙을 모두 「못 박아 두었다」고 말해요.</p>
+<h3>KV 캐시의 페이지 주소</h3>
+<p>어텐션 층의 KV 캐시는 페이지 단위로 저장해요. 논리적으로 t번째 위치, h번째 헤드의 한 행은 물리적으로 이렇게 놓여요. <code>page = table[t / page_size]</code>, <code>row = (page × n_head_kv + h) × page_size + (t mod page_size)</code>. 즉 같은 헤드의 연속된 위치가 한 페이지 안에 붙어 있어요. 어텐션 계산이 가장 원하는 성질이에요.[S18] 테스트는 페이지 크기 세 가지와 섞인 페이지 테이블로 출력이 완전히 같아야 한다고 요구해요. 배치 선택이 결과로 새어 나가면 안 돼요.</p>
+<h3>타입 시스템의 두 번째 의미</h3>
+<p>C++의 <code>float*</code>는 「여기에 부동소수점 수가 있다」고만 말해요. 이것이 정규화 전의 활성값인지 후의 값인지, 어느 층의 출력인지, 전문가의 결과에 라우팅 가중치를 이미 곱했는지, 심지어 CPU 메모리에 있는지 VRAM에 있는지도 말해 주지 않아요. Strata의 샘플링 인터페이스에는 이 문제를 경고하는 대문자 문단이 따로 있어요. <code>logits</code>와 <code>out</code>은 <strong>VRAM 포인터</strong>인데, 매개변수 이름과 타입만 봐서는 알 수 없어요. 잘못 넘기면 오류는 다음 동기화 호출에서 나타나고, 전혀 상관없는 버퍼를 가리켜요. <a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/sampler.hpp#L30-L43" target="_blank" rel="noopener noreferrer">sampler.hpp</a></p>
+<p>설계에서 의미 타입을 추가할 수 있어요. 예를 들면 <code>NormalizedActivation</code>, <code>ExpertOutputUnweighted</code>예요. 타입을 실제로 바꾸지 않더라도 인터페이스 주석과 테스트에 다섯 가지는 분명히 적어야 해요. <strong>형상, 배치(스트라이드), 정규화 여부, 라우팅 가중치를 이미 곱했는지, 버퍼의 소유자와 사용할 수 있는 기간</strong>이에요. 10장 「한 걸음 더」의 <code>expert_source.hpp</code>에 있는 계약 몇 가지가 이 다섯 가지의 실제 예예요.</p>
+<h3>GEMV와 GEMM: 같은 변환, 다른 재사용</h3>
+<p>추론의 GEMV는 행렬에 벡터 하나를 곱하는 것이에요. 입력 여러 개를 X로 합치면 GEMM이에요. 둘은 같은 종류의 선형 변환이지만 가중치를 재사용할 기회가 완전히 달라요. 그래서 「부동소수점 연산이 모두 몇 번이냐」만으로는 속도를 비교할 수 없어요. 5장에서 루프라인 모델로 이것을 수치로 따져 봐요.</p>
+<h3>테스트에는 비대칭인 작은 샘플을 쓰세요</h3>
+<p>W = [[1, 2, 3], [4, 5, 6]]과 x = [1, 0, −1]로 곱셈을 구현해 보세요. 그다음 x 몇 개를 두 열로 합쳐 각각 계산하고, 열마다의 결과가 따로 한 GEMV와 같아야 한다고 요구하세요. 그러고 나서 일부러 스트라이드를 맞바꿔 테스트가 실패하는지 확인하세요. W의 위치마다 값이 다르고 대칭도 아니면, 전치나 행과 열을 뒤바꾼 오류가 우연에 가려지기 어려워요.</p>
+</details>

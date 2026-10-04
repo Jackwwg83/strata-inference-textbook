@@ -1,0 +1,247 @@
+<div class="hook"><span class="eyebrow">이런 적 있지 않나요?</span>
+<p>같은 질문을 두 번 하면 채팅 AI의 답이 달라질 때가 많아요. 컴퓨터는 같은 입력에 같은 출력을 내야 하는데, 어떻게 이런 일이 생길까요?</p>
+<p>답은 1장의 여섯 단계 중 ⑤단계에 숨어 있어요. 모델은 다음 단어를 곧바로 「말하지」 않아요. 확률표 하나를 내놓고, 주사위를 굴리듯 그 표에서 하나를 골라요. 이 장에서는 그 표가 어떻게 만들어지는지, 주사위를 어떻게 굴리는지, 굴리기 전에 어떤 걸러내기를 하는지를 한 걸음씩 풀어 봐요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 모델은 매 단계에서 객관식 문제 하나만 풀어요. 앞 문맥을 보고 어휘 속 모든 토큰에 점수를 매기면, 소프트맥스가 점수를 확률로 바꾸고, 난수 하나로 그 확률대로 하나를 골라요. 온도, top-k, top-p 같은 파라미터는 모두 「고르기」 전에 이 확률표를 고치는 장치예요.</p>
+
+<h2 id="sec-1">2.1 모델이 읽는 것은 글자가 아니라 번호 목록이에요</h2>
+<p>1장에서 <dfn>토크나이저</dfn>(tokenizer)가 글을 토큰으로 자르고 정수 번호로 바꾼다고 했어요. Strata의 토크나이저에는 토큰이 248,320개 있고, 자르는 방식은 <dfn>바이트 수준 BPE</dfn>예요. 먼저 글을 가장 작은 단위인 바이트로 쪼갠 다음, 학습 데이터에서 자주 붙어 나오는 조각을 반복해서 하나의 토큰으로 합쳐요. 흔한 단어는 토큰 하나가 되고, 드문 글자는 몇 조각으로 나뉘어요.<span class="ev ev-code">코드 사실</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/tools/strata_tokenizer.py#L3-L14" target="_blank" rel="noopener noreferrer">strata_tokenizer.py</a></p>
+<p>가장 밑바닥이 바이트라서 어떤 글이든 표현할 수 있어요. 「이 글자는 모르겠어요」 같은 일이 생기지 않아요. 이 토크나이저의 설명에는 가장 중요하게 여기는 검사도 적혀 있어요. 글을 인코딩했다가 디코딩하면 바이트 하나 틀리지 않고 원문으로 돌아와야 해요. 이모지, 여러 바이트짜리 글자, 연속된 공백도 모두 검사 대상이에요.</p>
+<p>그래서 토큰 하나가 글자 하나는 아니에요. Strata의 README에는 「토큰 하나는 영어 단어의 약 ¾개」라고 적혀 있어요.[S01] 이건 영어에서 얻은 경험값이고, 한국어나 중국어, 코드, 표는 비율이 모두 달라요. 어떤 글이 토큰 몇 개인지 알려면, 실제로 이 토크나이저로 잘라 보는 것이 유일하게 믿을 만한 방법이에요.</p>
+<p>놓치기 쉬운 점이 하나 더 있어요. 여러분이 입력한 문장이 모델이 읽는 전부는 아니에요. ②단계의 <dfn>채팅 템플릿</dfn>이 앞뒤에 역할 표시, 시스템 프롬프트, 도구 설명을 붙여요. 그림 2-1을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="그림 2-1: 내 메시지에 채팅 템플릿을 씌우고, 토크나이저가 번호로 바꾸면, 엔진은 이 번호 목록만 받는다">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="320" height="44" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="27" font-size="13" font-weight="600" text-anchor="middle">① 내 메시지</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="44" font-size="12" text-anchor="middle">"안녕"</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 52V70"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="72" width="320" height="64" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="92" font-size="13" font-weight="600" text-anchor="middle">② 채팅 템플릿 씌우기</text>
+<text class="f-text" fill="#182f2b" x="200" y="111" font-size="12" text-anchor="middle">&lt;사용자&gt;안녕&lt;끝&gt;&lt;어시스턴트&gt;</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="128" font-size="12" text-anchor="middle">생각 수준과 도구 설명도 이 글에 함께 들어가요</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 136V154"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="156" width="320" height="48" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="176" font-size="13" font-weight="600" text-anchor="middle">③ 토크나이저</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="195" font-size="12" text-anchor="middle">글 → [3, 1023, 4, 5] (번호는 예시)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 204V222"/>
+<rect class="f-accent" fill="#136d5a" x="40" y="224" width="320" height="44" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="251" font-size="13" font-weight="600" text-anchor="middle">④ 엔진은 이 번호 목록만 받아요</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="12" text-anchor="middle">템플릿이 바뀌면 번호도 바뀌어요. 모델에게는 다른 문제예요</text>
+</svg><figcaption>그림 2-1　내 말은 템플릿을 씌우고 번호로 자른 다음에야 모델에게 가요. 템플릿도 내가 입력한 글자와 똑같이 입력의 일부예요.</figcaption></figure>
+<p>Strata의 서빙 계층은 모델에 딸린 Jinja 템플릿으로 글을 만들어요. 결과가 Hugging Face의 방식과 완전히 같아야 하고, 표준 예제 10개로 확인했어요. 생각 모드와 도구 호출도 그 안에 들어 있어요.<span class="ev ev-code">코드 사실</span>[S16] 화면에서 고르는 「생각 수준」도 파라미터로 템플릿에 전달돼요. high를 고르면 템플릿에 실제로 가는 값은 xhigh이고, none을 고르면 「생각 끄기」가 가요.[S16] 이런 값은 모두 마지막 번호 목록을 바꿔요.</p>
+<p>서빙 계층과 엔진 사이의 인터페이스는 <code>Engine.generate(prompt_ids, max_new, sampling, cancel)</code>예요. 들어가는 것은 번호 목록이고, 나오는 것은 토큰 번호 하나하나예요.[S15] 글자는 이 경계 밖에만 있어요.</p>
+
+<h2 id="sec-2">2.2 한 번에 하나만 맞히기: 연쇄 법칙</h2>
+<p>스마트폰 키보드는 글자를 치는 동안 다음 단어를 추측해요. 큰 모델도 같은 일을 하는데, 훨씬 정확하게 맞혀요. 모델은 매 단계에서 질문 하나에만 답해요. <strong>앞의 토큰을 모두 알 때, 다음 토큰은 무엇일까?</strong> 답은 단어 하나가 아니라 확률표예요. 어휘 속 토큰마다 확률이 하나씩 있고, 모두 더하면 1이에요.</p>
+<p>문장 전체의 확률은 한 단계씩 추측한 확률을 모두 곱한 값이에요. 그림 2-2를 보세요. 이 규칙을 <dfn>연쇄 법칙</dfn>(chain rule)이라고 해요.</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="그림 2-2: 문장의 확률은 각 단계의 조건부 확률을 곱한 값이다. 나는 너를 사랑해의 확률은 0.20 곱하기 0.10 곱하기 0.60, 즉 0.012">
+<text class="f-text" fill="#182f2b" x="75" y="18" font-size="13" font-weight="600" text-anchor="middle">1단계</text>
+<text class="f-muted" fill="#5c6d66" x="75" y="36" font-size="12" text-anchor="middle">아는 것: 처음</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">2단계</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="36" font-size="12" text-anchor="middle">아는 것: 나는</text>
+<text class="f-text" fill="#182f2b" x="325" y="18" font-size="13" font-weight="600" text-anchor="middle">3단계</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="36" font-size="12" text-anchor="middle">아는 것: 나는 너를</text>
+<rect class="f-accent" fill="#136d5a" x="23" y="48" width="104" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="35" y="66" font-size="13">나는</text><text class="f-on" fill="#ffffff" x="117" y="66" font-size="12" text-anchor="end">0.20</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="23" y="80" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="35" y="98" font-size="13">너는</text><text class="f-muted" fill="#5c6d66" x="117" y="98" font-size="12" text-anchor="end">0.15</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="23" y="112" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="35" y="130" font-size="13">오늘</text><text class="f-muted" fill="#5c6d66" x="117" y="130" font-size="12" text-anchor="end">0.10</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="148" y="48" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="160" y="66" font-size="13">지금</text><text class="f-muted" fill="#5c6d66" x="242" y="66" font-size="12" text-anchor="end">0.30</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="148" y="80" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="160" y="98" font-size="13">매일</text><text class="f-muted" fill="#5c6d66" x="242" y="98" font-size="12" text-anchor="end">0.20</text>
+<rect class="f-accent" fill="#136d5a" x="148" y="112" width="104" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="160" y="130" font-size="13">너를</text><text class="f-on" fill="#ffffff" x="242" y="130" font-size="12" text-anchor="end">0.10</text>
+<rect class="f-accent" fill="#136d5a" x="273" y="48" width="104" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="285" y="66" font-size="13">사랑해</text><text class="f-on" fill="#ffffff" x="367" y="66" font-size="12" text-anchor="end">0.60</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="273" y="80" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="285" y="98" font-size="13">만나</text><text class="f-muted" fill="#5c6d66" x="367" y="98" font-size="12" text-anchor="end">0.10</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="273" y="112" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="285" y="130" font-size="13">좋아해</text><text class="f-muted" fill="#5c6d66" x="367" y="130" font-size="12" text-anchor="end">0.05</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M127 61H137V125H146M252 125H262V61H271"/>
+<text class="f-text" fill="#182f2b" x="200" y="170" font-size="13" font-weight="600" text-anchor="middle">P(나는 너를 사랑해) = 0.20 × 0.10 × 0.60 = 0.012</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="196" font-size="12" text-anchor="middle">각 단계는 앞 문맥이 주어진 조건부 확률이에요</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="216" font-size="12" text-anchor="middle">강조한 칸이 실제로 지나간 길이에요. 확률은 예시예요</text>
+</svg><figcaption>그림 2-2　연쇄 법칙: 문장 전체의 확률은 각 단계의 조건부 확률을 곱한 값이에요. 2단계에서 고른 「너를」은 1등이 아니에요. 문장은 매 단계 1등만 고르지 않아도 돼요.</figcaption></figure>
+<aside class="primer" id="c02-chain-rule">
+<h3>조건부 확률과 연쇄 법칙</h3>
+<p>먼저 감을 잡아 봐요. 길에서 아무나 만났을 때 그 사람이 우산을 들고 있을 확률은 높지 않아요. 그런데 「밖에 비가 온다」는 걸 알면 그 확률이 훨씬 높아져요. 「B가 일어났을 때 A가 일어날 확률」을 <dfn>조건부 확률</dfn>이라 하고, P(A | B)라고 써요. 정의는 P(A | B) = P(A 그리고 B) ÷ P(B)예요.</p>
+<p>정의를 한 번 옮기면 곱셈 공식이 나와요. P(A 그리고 B) = P(B) × P(A | B). 이 공식을 반복해서 쓰면, 긴 사건 열의 결합 확률이 조건부 확률의 곱으로 쪼개져요. P(x₁, x₂, x₃) = P(x₁) × P(x₂ | x₁) × P(x₃ | x₁, x₂). 이것이 <dfn>연쇄 법칙</dfn>이에요. 아무 가정도 필요 없고, 모든 확률분포에서 성립해요.</p>
+<p>언어 모델은 바로 이 공식대로 만들어졌어요. 모델이 매 단계에서 배우는 것은 P(다음 토큰 | 앞의 모든 토큰) 하나뿐이에요. 그림 2-2에서 「나는 너를 사랑해」의 확률 0.012는 조건부 확률 세 개를 곱한 값이에요. 조건에 들어가는 것이 <strong>앞의 모든</strong> 토큰이라는 점에 주의하세요. 앞 문맥에서 글자 하나만 바뀌어도 뒤의 모든 단계의 확률표가 따라 바뀔 수 있어요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EC%A1%B0%EA%B1%B4%EB%B6%80_%ED%99%95%EB%A5%A0" target="_blank" rel="noopener noreferrer">위키백과: 조건부 확률</a> · <a href="https://ko.wikipedia.org/wiki/%EB%8F%85%EB%A6%BD_%28%ED%99%95%EB%A5%A0%EB%A1%A0%29" target="_blank" rel="noopener noreferrer">위키백과: 독립 (확률론)</a> · <a href="https://en.wikipedia.org/wiki/Chain_rule_(probability)" target="_blank" rel="noopener noreferrer">Wikipedia: Chain rule (probability)</a></p>
+</aside>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 이건 《확률론》의 곱셈 공식이에요. 마르코프 체인과 달리 조건이 직전 상태 하나가 아니라 <strong>모든</strong> 이력이에요. 조건에 모든 이력이 들어가기 때문에, 엔진은 이력을 저장해 두고 반복해서 써요(17장의 KV 캐시).</p>
+<p>흔한 혼동도 하나 짚고 갈게요. 생성하는 동안 모델의 파라미터는 하나도 바뀌지 않아요. 바뀌는 것은 「이미 나온 토큰」이라는 이력뿐이에요. 파라미터는 학습할 때만 바뀌어요. 10장에서 다루는 전문가 캐시는 대화에 따라 조정되지만, 조정되는 것은 파라미터가 <strong>어디에 놓이는지</strong>이지 파라미터가 <strong>얼마인지</strong>가 아니에요. 그래서 그것도 「모델이 배우는 것」이 아니에요.</p>
+
+<h2 id="sec-3">2.3 점수에서 확률로: 소프트맥스와 온도</h2>
+<p>모델의 마지막 층이 내놓는 것은 확률이 아니라 <dfn>점수</dfn> 묶음이에요. 전문 용어로는 <dfn>로짓(logits)</dfn>이라고 해요. 어휘 속 토큰마다 숫자 하나씩이고, 양수도 음수도 될 수 있고, 모두 더해도 1이 아니에요. 이것을 확률로 바꾸려면 <dfn>소프트맥스</dfn>(softmax)라는 함수를 거쳐요. 먼저 각 점수에 지수 e<sup>z</sup>를 취해서 양수로 만들고, 그다음 모든 지수의 합으로 나눠서 총합이 1이 되게 해요.</p>
+<p>지수를 취하기 전에, 각 점수를 어떤 수 T로 먼저 나눌 수도 있어요. 이 T가 <dfn>온도</dfn>(temperature)예요. T가 1보다 작으면 점수 사이의 차이가 커져서 높은 점수가 더 높아지고, 분포가 「뾰족해지고」, 답이 보수적이 돼요. T가 1보다 크면 차이가 줄어서 분포가 「평평해지고」, 인기 없는 단어에게도 기회가 생기고, 답이 더 퍼져요. 그림 2-3은 같은 점수를 세 가지 온도로 본 모습이에요.</p>
+<div class="viz" data-viz="softmax-temperature"><figure class="fig"><svg viewBox="0 0 400 248" role="img" aria-label="그림 2-3: 같은 점수를 온도 0.5, 1, 2로 바꿨을 때의 확률. 온도가 낮을수록 점수가 가장 높은 고양이가 유리해서 각각 86%, 62%, 42%예요">
+<text class="f-text" fill="#182f2b" x="72" y="18" font-size="12" font-weight="600" text-anchor="middle">T = 0.5 (더 뾰족)</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="12" font-weight="600" text-anchor="middle">T = 1</text>
+<text class="f-text" fill="#182f2b" x="328" y="18" font-size="12" font-weight="600" text-anchor="middle">T = 2 (더 평평)</text>
+<rect class="f-accent" fill="#136d5a" x="17" y="68" width="16" height="112"/>
+<rect class="f-muted" fill="#5c6d66" x="40" y="164.8" width="16" height="15.2"/>
+<rect class="f-muted" fill="#5c6d66" x="63" y="177.9" width="16" height="2.1"/>
+<rect class="f-muted" fill="#5c6d66" x="86" y="179" width="16" height="1"/>
+<rect class="f-muted" fill="#5c6d66" x="109" y="179" width="16" height="1"/>
+<text class="f-text" fill="#182f2b" x="25" y="62" font-size="12" text-anchor="middle">86%</text>
+<rect class="f-accent" fill="#136d5a" x="145" y="98.9" width="16" height="81.1"/>
+<rect class="f-muted" fill="#5c6d66" x="168" y="150.2" width="16" height="29.8"/>
+<rect class="f-muted" fill="#5c6d66" x="191" y="169" width="16" height="11"/>
+<rect class="f-muted" fill="#5c6d66" x="214" y="173.3" width="16" height="6.7"/>
+<rect class="f-muted" fill="#5c6d66" x="237" y="178.5" width="16" height="1.5"/>
+<text class="f-text" fill="#182f2b" x="153" y="92" font-size="12" text-anchor="middle">62%</text>
+<rect class="f-accent" fill="#136d5a" x="273" y="125.7" width="16" height="54.3"/>
+<rect class="f-muted" fill="#5c6d66" x="296" y="147.1" width="16" height="32.9"/>
+<rect class="f-muted" fill="#5c6d66" x="319" y="160" width="16" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="342" y="164.5" width="16" height="15.5"/>
+<rect class="f-muted" fill="#5c6d66" x="365" y="172.7" width="16" height="7.3"/>
+<text class="f-text" fill="#182f2b" x="281" y="119" font-size="12" text-anchor="middle">42%</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M12 180.5H130M140 180.5H258M268 180.5H386"/>
+<text class="f-muted" fill="#5c6d66" x="17" y="196" font-size="12" text-anchor="start">고양이</text><text class="f-muted" fill="#5c6d66" x="48" y="211" font-size="12" text-anchor="middle">개</text><text class="f-muted" fill="#5c6d66" x="71" y="196" font-size="12" text-anchor="middle">새</text><text class="f-muted" fill="#5c6d66" x="94" y="211" font-size="12" text-anchor="middle">쥐</text><text class="f-muted" fill="#5c6d66" x="125" y="196" font-size="12" text-anchor="end">자동차</text>
+<text class="f-muted" fill="#5c6d66" x="145" y="196" font-size="12" text-anchor="start">고양이</text><text class="f-muted" fill="#5c6d66" x="176" y="211" font-size="12" text-anchor="middle">개</text><text class="f-muted" fill="#5c6d66" x="199" y="196" font-size="12" text-anchor="middle">새</text><text class="f-muted" fill="#5c6d66" x="222" y="211" font-size="12" text-anchor="middle">쥐</text><text class="f-muted" fill="#5c6d66" x="253" y="196" font-size="12" text-anchor="end">자동차</text>
+<text class="f-muted" fill="#5c6d66" x="273" y="196" font-size="12" text-anchor="start">고양이</text><text class="f-muted" fill="#5c6d66" x="304" y="211" font-size="12" text-anchor="middle">개</text><text class="f-muted" fill="#5c6d66" x="327" y="196" font-size="12" text-anchor="middle">새</text><text class="f-muted" fill="#5c6d66" x="350" y="211" font-size="12" text-anchor="middle">쥐</text><text class="f-muted" fill="#5c6d66" x="381" y="196" font-size="12" text-anchor="end">자동차</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="238" font-size="12" text-anchor="middle">점수: 고양이 3, 개 2, 새 1, 쥐 0.5, 자동차 −1 (교육용 가정)</text>
+</svg><figcaption>그림 2-3　같은 점수라도 온도가 다르면 확률표의 모양이 달라져요. 온도는 「뾰족한가 평평한가」만 바꾸고, 누가 1등인지는 바꾸지 않아요.</figcaption></figure></div>
+<p>소프트맥스 공식에는 지수가 들어 있어요. 지수는 아주 빨리 커져요. 컴퓨터에서는 이게 문제를 일으켜요. 아래 칼럼에서 이유와, 한 줄로 해결하는 방법을 설명해요.</p>
+<aside class="primer" id="c02-softmax-overflow">
+<h3>소프트맥스와 부동소수점 오버플로</h3>
+<p>컴퓨터는 소수를 <dfn>부동소수점 수</dfn>로 저장해요. 자릿수가 한정되어 있어서 표현할 수 있는 최댓값도 한정돼요. 가장 많이 쓰는 32비트 부동소수점(FP32)은 최댓값이 약 3.4 × 10³⁸이에요. 엄청 커 보이지만 e<sup>89</sup>만 돼도 이 한도를 넘어요. 한도를 넘은 결과는 「무한대」(∞)가 되고, 이를 <dfn>오버플로</dfn>(overflow)라고 해요. 분자와 분모가 모두 ∞이면, ∞ ÷ ∞는 부동소수점에서 <dfn>NaN</dfn>(Not a Number)이 되고, 확률표 전체가 망가져요.</p>
+<p>해결법은 한 줄이에요. 지수를 취하기 전에, 모든 점수에서 그중 최댓값 m을 먼저 빼요. e<sup>z−m</sup> = e<sup>z</sup> ÷ e<sup>m</sup>이라서, 분자와 분모를 똑같이 e<sup>m</sup>으로 나눈 셈이고 비율은 조금도 바뀌지 않아요. 그런데 빼고 나면 가장 큰 수가 0이 되고, e<sup>0</sup> = 1이고, 나머지는 모두 1보다 작아서 더는 오버플로가 안 나요. 수학적으로는 같고 수치적으로는 안전해요. 이런 쓰는 법을 <dfn>수치적으로 안정적</dfn>(numerically stable)이라고 해요.</p>
+<p>예를 들어 점수 [1000, 999]에 바로 지수를 취하면 두 항이 모두 ∞예요. 먼저 1000을 빼면 [0, −1]이 되고, 지수는 [1, 0.3679], 확률은 [0.7311, 0.2689]예요. Strata의 샘플링 커널도 이렇게 해요. 모든 항에서 먼저 최댓값을 빼고, 지수의 합과 누적 확률은 배정밀도로 계산해요.<span class="ev ev-code">코드 사실</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L366-L408" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EC%86%8C%ED%94%84%ED%8A%B8%EB%A7%A5%EC%8A%A4_%ED%95%A8%EC%88%98" target="_blank" rel="noopener noreferrer">위키백과: 소프트맥스 함수</a> · <a href="https://docs.python.org/ko/3/tutorial/floatingpoint.html" target="_blank" rel="noopener noreferrer">Python 문서: 부동 소수점 산술: 문제점 및 한계</a> · <a href="https://en.wikipedia.org/wiki/LogSumExp" target="_blank" rel="noopener noreferrer">Wikipedia: LogSumExp (the same max-subtraction trick)</a></p>
+</aside>
+<p>부동소수점에 왜 한도가 있는지, FP32와 FP16이 어떻게 다른지는 4장에서 자세히 다뤄요.</p>
+
+<h2 id="sec-4">2.4 주사위 굴리기: 확률대로 하나 고르기</h2>
+<p>확률표가 있으면 「확률대로 고르기」는 어떻게 할까요? 길이가 1인 자를 떠올려 보세요. 후보마다 확률만큼의 길이를 차례로 이어 붙여요. 고양이가 앞쪽 0.62, 개가 그다음 0.23, 이런 식으로 자 전체를 딱 채워요. 그러고 나서 바늘을 무작위로 던져요. 바늘이 떨어진 구간의 단어가 선택돼요. 그림 2-4를 보세요. 확률이 큰 구간은 길어서 바늘에 찍힐 가능성도 커요.</p>
+<div class="viz" data-viz="sampling-dice"><figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="그림 2-4: 후보 다섯 개의 확률이 0에서 1까지의 선분을 차례로 채우고, 난수 u = 0.8이 개 구간에 떨어져서 개가 선택된다">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="12">확률 크기대로 [0, 1) 위에 차례로 깔아요</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="44" width="224.5" height="34"/>
+<rect class="f-accent" fill="#136d5a" x="244.5" y="44" width="82.6" height="34"/>
+<rect class="f-soft" fill="#e5f1df" x="327.1" y="44" width="30.4" height="34"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="357.5" y="44" width="18.4" height="34"/>
+<rect class="f-muted" fill="#5c6d66" x="375.9" y="44" width="4.1" height="34"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 44V78M244.5 44V78M327.1 44V78M357.5 44V78M375.9 44V78M380 44V78"/>
+<text class="f-text" fill="#182f2b" x="132" y="66" font-size="13" text-anchor="middle">고양이 0.62</text>
+<text class="f-on" fill="#ffffff" x="286" y="66" font-size="13" text-anchor="middle">개 0.23</text>
+<text class="f-text" fill="#182f2b" x="342" y="66" font-size="12" text-anchor="middle">새</text>
+<text class="f-text" fill="#182f2b" x="366.7" y="66" font-size="12" text-anchor="middle">쥐</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M378 80V108H372"/>
+<text class="f-muted" fill="#5c6d66" x="368" y="112" font-size="12" text-anchor="end">자동차 (약 1%)</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="96" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="244.5" y="96" font-size="12" text-anchor="middle">0.62</text>
+<text class="f-muted" fill="#5c6d66" x="318" y="96" font-size="12" text-anchor="middle">0.85</text>
+<path class="f-warn" fill="#9e5d24" d="M308 40l-5-10h10z"/>
+<text class="f-warn" fill="#9e5d24" x="308" y="24" font-size="12" text-anchor="middle">u = 0.8</text>
+<text class="f-text" fill="#182f2b" x="200" y="132" font-size="13" font-weight="600" text-anchor="middle">0.62 ≤ 0.8 &lt; 0.85 이므로 「개」를 골라요</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="154" font-size="12" text-anchor="middle">u는 [0, 1)에서 고르게 뽑은 난수예요.</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="172" font-size="12" text-anchor="middle">그리디 디코딩은 늘 첫 번째 구간을 골라요.</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="192" font-size="12" text-anchor="middle">온도 T = 1, 점수는 그림 2-3과 같아요</text>
+</svg><figcaption>그림 2-4　확률대로 토큰 하나 고르기: 확률이 구간 길이를 정하고, 난수 u가 바늘이 찍히는 곳을 정해요. 분포와 뽑기는 서로 다른 두 가지예요.</figcaption></figure></div>
+<p>이 방법을 <dfn>역변환 샘플링</dfn>이라고 해요. 먼저 누적 확률(0.62, 0.85, 0.94 …)을 구하고, u보다 처음으로 커지는 위치를 찾아요. Strata의 샘플링 커널도 이렇게 골라요. 누적 확률을 항목마다 더해 올라가다가 처음으로 u를 넘는 항목이 결과예요.<span class="ev ev-code">코드 사실</span>[S07]</p>
+<p>다른 방법은 <dfn>그리디 디코딩</dfn>(greedy decoding)이에요. 주사위를 굴리지 않고 언제나 확률이 가장 높은 것을 골라요. 출력이 완전히 정해져 있어서, 안정적인 답이 필요한 문제 풀이나 테스트에 알맞아요. Strata의 샘플링 파라미터에는 온도가 0 이하이면 그리디로 간다는 약속이 있어요. 요청에 온도를 쓰지 않으면, 서빙 계층의 설명에 따라 엔진의 기본값도 그리디예요.<span class="ev ev-code">코드 사실</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/sampler.hpp#L15-L28" target="_blank" rel="noopener noreferrer">sampler.hpp</a> · <a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/serve/server.py#L297-L302" target="_blank" rel="noopener noreferrer">server.py</a></p>
+<p>남은 문제가 하나 있어요. 컴퓨터는 바늘을 어떻게 「무작위로」 던질까요? 사실 무작위처럼 보이는 수를 <strong>계산해서</strong> 만들어요.</p>
+<aside class="primer" id="c02-prng">
+<h3>의사 난수와 시드</h3>
+<p>컴퓨터는 결정적인 기계예요. 같은 입력에는 언제나 같은 출력이 나와요. 컴퓨터가 만드는 「난수」는 사실 공식으로 계산한 수열이고, 규칙이 전혀 없어 보일 뿐이에요. 이것을 <dfn>의사 난수</dfn>(pseudo-random number)라고 해요. 공식의 출발점이 <dfn>시드</dfn>(seed)예요. 시드가 같으면 수열 전체가 같아요. 이건 좋은 점이에요. 문제가 생기면 같은 시드로 현장을 그대로 다시 재생할 수 있어요.</p>
+<p>흔한 생성기는 <strong>순차식</strong>이에요. 각 수가 바로 앞의 수에서 계산되기 때문에, 1000번째 수가 필요하면 앞의 999개를 먼저 계산해야 해요. <strong>카운터 기반</strong> 생성기도 있어요. n번째 수를 (시드, n)에서 바로 계산하고, 앞에서 몇 개를 계산했는지와 상관이 없어요. 그림 2-5를 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="그림 2-5: 순차식 생성기는 하나씩 차례로 계산해야 하고, 카운터 기반 생성기는 시드와 위치로 아무 난수나 바로 계산한다">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">순차식: 하나씩 차례로</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="41" y="52" font-size="12" text-anchor="middle">시드</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="102" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="133" y="52" font-size="12" text-anchor="middle">r₁</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="194" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="225" y="52" font-size="12" text-anchor="middle">r₂</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="286" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="317" y="52" font-size="12" text-anchor="middle">r₃</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M72 47H100M164 47H192M256 47H284"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="82" font-size="12">r₃를 얻으려면 먼저 r₁과 r₂를 계산해야 해요</text>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="13" font-weight="600">카운터 기반: 위치로 바로 계산</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="130" width="100" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="60" y="150" font-size="12" text-anchor="middle">(시드, 0)</text>
+<rect class="f-soft" fill="#e5f1df" x="145" y="130" width="100" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="195" y="150" font-size="12" text-anchor="middle">(시드, 1)</text>
+<rect class="f-soft" fill="#e5f1df" x="280" y="130" width="100" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="330" y="150" font-size="12" text-anchor="middle">(시드, 2)</text>
+<text class="f-text" fill="#182f2b" x="60" y="182" font-size="12" text-anchor="middle">↓ u₀</text>
+<text class="f-text" fill="#182f2b" x="195" y="182" font-size="12" text-anchor="middle">↓ u₁</text>
+<text class="f-text" fill="#182f2b" x="330" y="182" font-size="12" text-anchor="middle">↓ u₂</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="204" font-size="12">각 위치가 서로 독립이라 순서와 상관없이,</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="222" font-size="12">동시에 계산할 수 있어요. Strata는 이 방식이에요</text>
+</svg><figcaption>그림 2-5　의사 난수 생성기 두 종류. 카운터 기반은 결과가 (시드, 위치)로만 정해지므로, 병렬로 계산하거나 건너뛰며 계산해도 똑같이 재현돼요.</figcaption></figure>
+<p>Strata의 샘플링은 Philox라는 카운터 기반 생성기를 써요. t번째 토큰에 쓰는 난수는 (시드, 위치 t)로만 정해져요. 소스 코드의 주석에 이렇게 고른 이유가 나와 있어요. 토큰 묶음을 어떤 순서로 샘플링해도 결과를 그대로 재현할 수 있기 때문이에요. 만들어진 u는 2진 24비트를 쓰고, 반드시 [0, 1) 안에 들어가요. 반올림으로 1이 되는 일이 없어요.<span class="ev ev-code">코드 사실</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L38-L63" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EB%82%9C%EC%88%98_%EC%83%9D%EC%84%B1" target="_blank" rel="noopener noreferrer">위키백과: 난수 생성</a> · <a href="https://docs.python.org/ko/3/library/random.html" target="_blank" rel="noopener noreferrer">Python 문서: random 모듈</a> · <a href="https://en.wikipedia.org/wiki/Pseudorandom_number_generator" target="_blank" rel="noopener noreferrer">Wikipedia: Pseudorandom number generator</a> · <a href="https://en.wikipedia.org/wiki/Counter-based_random_number_generator" target="_blank" rel="noopener noreferrer">Wikipedia: Counter-based RNG</a></p>
+</aside>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 역변환 샘플링은 누적 분포 함수(CDF)에서 값을 찾는 일이에요. [0, 1)의 균등분포를 임의의 이산 분포로 바꿔 줘요. 후보가 많으면 누적 배열이 정렬되어 있으므로, 이진 탐색으로 샘플링 한 번을 O(log n)으로 줄일 수 있어요.</p>
+
+<h2 id="sec-5">2.5 샘플링 체인: 순서도 의미예요</h2>
+<p>실제 엔진은 주사위를 굴리기 전에 확률표를 몇 번 더 「다듬어요」. Strata의 샘플링 체인은 여섯 단계이고 순서가 정해져 있어요. 그림 2-6을 보세요.<span class="ev ev-code">코드 사실</span>[S07]</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="그림 2-6: Strata의 샘플링 체인. 차례로 반복 페널티, top-k, top-p, min-p, 온도, 난수로 선택">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">오른쪽: 이 단계 뒤에 남는 후보 수</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="322" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="45" font-size="13" font-weight="600">① 반복 페널티</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="62" font-size="12">최근에 나온 토큰은 점수를 조금 깎아요</text>
+<text class="f-text" fill="#182f2b" x="390" y="52" font-size="12" text-anchor="end">248,320</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="80" width="322" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="99" font-size="13" font-weight="600">② top-k</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="116" font-size="12">점수가 가장 높은 k개만 남겨요 (기본 20)</text>
+<text class="f-text" fill="#182f2b" x="390" y="106" font-size="12" text-anchor="end">20</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="134" width="322" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="153" font-size="13" font-weight="600">③ top-p</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="170" font-size="12">높은 확률부터 더해 p에 닿으면 멈춰요 (기본 0.95)</text>
+<text class="f-text" fill="#182f2b" x="390" y="160" font-size="12" text-anchor="end">≤ 20</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="188" width="322" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="207" font-size="13" font-weight="600">④ min-p</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="224" font-size="12">1등 확률의 min_p배에 못 미치면 제외 (기본: 꺼짐)</text>
+<text class="f-text" fill="#182f2b" x="390" y="214" font-size="12" text-anchor="end">더 적음</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="242" width="322" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="261" font-size="13" font-weight="600">⑤ 온도</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="278" font-size="12">남은 후보 안에서 분포의 뾰족함만 조절해요</text>
+<text class="f-text" fill="#182f2b" x="390" y="268" font-size="12" text-anchor="end">그대로</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="296" width="322" height="44" rx="8"/>
+<text class="f-on" fill="#ffffff" x="22" y="315" font-size="13" font-weight="600">⑥ 선택</text>
+<text class="f-on" fill="#ffffff" x="22" y="332" font-size="12">난수 u 하나로 누적 확률에 따라 하나를 골라요</text>
+<text class="f-text" fill="#182f2b" x="390" y="322" font-size="12" text-anchor="end">1</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M171 70V80M171 124V134M171 178V188M171 232V242M171 286V296"/>
+</svg><figcaption>그림 2-6　Strata의 샘플링 체인. 온도는 잘라내기 뒤에 와요. top-k와 top-p가 원래 분포로 먼저 후보를 자르고, 온도는 남은 후보 안에서만 조절할 수 있어요. 기본값은 샘플링 파라미터의 정의에서 왔어요.</figcaption></figure>
+<ul>
+<li><strong>반복 페널티</strong>: 최근에 나온 토큰은 점수를 낮춰서, 모델이 같은 말을 되풀이하지 않게 해요.</li>
+<li><strong>top-k</strong>: 점수가 가장 높은 k개만 남겨요. Strata 샘플링 파라미터의 기본값은 20이에요. 서빙 계층은 top-k를 1에서 64로 제한해요. 엔진의 샘플링 경로가 후보를 최대 64개까지만 남기기 때문이에요.<span class="ev ev-code">코드 사실</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/serve/server.py#L456-L459" target="_blank" rel="noopener noreferrer">server.py</a></li>
+<li><strong>top-p</strong>: 확률이 높은 순서로 더하다가 p에 닿으면 멈추고, 그 뒤는 모두 잘라내요. 기본값은 p = 0.95예요.</li>
+<li><strong>min-p</strong>: 1등 확률의 min_p배에 못 미치는 후보를 없애요. 기본값은 0이고, 꺼진 상태예요.</li>
+<li><strong>온도</strong>와 <strong>선택</strong>: 앞에서 설명했어요.</li>
+</ul>
+<p>순서가 왜 중요할까요? 온도의 자리를 보세요. 온도는 잘라내기 뒤에 와요. 그래서 top-p의 칼질은 온도 1일 때의 확률로 이루어져요. 온도를 아무리 높여도 이미 잘려 나간 후보는 살릴 수 없어요. 반대로 온도를 맨 앞으로 옮기면, 같은 파라미터로도 잘려 나가는 후보가 달라져요.</p>
+<p>Strata도 이 함정에 빠진 적이 있어요. 소스 코드 주석에 수정 기록이 남아 있어요. 초기 버전은 반복 페널티를 두 번 적용했고(온도 뒤에 한 번 더), min-p를 top-p보다 앞에 놓았어요. 주석은 이렇게 솔직하게 말해요. <strong>어떤 순서든 「합법적인」 토큰을 하나 내놓기 때문에</strong> 출력만 봐서는 절대 알 수 없고, 확률분포 단계에서 독립적으로 계산한 결과와 항목별로 비교해야 한다고요.<span class="ev ev-code">코드 사실</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L1-L11" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p>여기서 중요한 습관이 하나 나와요. <strong>두 샘플링 구현이 같은지 판단하려면 확률표를 비교해야 하고, 마지막에 나온 글만 비교하면 안 돼요.</strong> 글이 같아도 분포는 다를 수 있어요. 분포가 아주 조금만 달라도, 글은 어느 단계에서 갈라질 수 있어요.</p>
+
+<h2 id="sec-6">2.6 직접 해 보기: 「분포」와 「뽑기」를 나눠서 보기</h2>
+<p>이 장의 인터랙티브 실험 「로짓에서 확률까지」를 열어 보세요. 점수는 세 개뿐이고, 온도와 난수 u가 서로 독립인 두 개의 손잡이로 되어 있어요.</p>
+<ol>
+<li><strong>u를 고정하고 온도만 바꿔 보세요.</strong> 확률 막대의 길이가 바뀌고, 선택된 토큰도 따라 바뀔 수 있어요. 온도가 바꾸는 것은 <strong>분포</strong>예요.</li>
+<li><strong>온도를 고정하고 u만 바꿔 보세요.</strong> 확률 막대는 꿈쩍도 않고, 바늘이 찍히는 위치만 바뀌어요. u가 바꾸는 것은 <strong>분포에서 어떤 표본을 뽑느냐</strong>예요.</li>
+<li>세 확률을 더해 보세요. 화면에 보이는 숫자를 반올림한 값은 합이 0.999나 1.001이 될 수 있어요. 버그가 아니에요. 「합이 1이다」를 판단할 때는 아주 작은 부동소수점 오차를 허용해야 해요.</li>
+</ol>
+<p>실험과 이 페이지의 두 인터랙티브 그림은 모두 교육용 추정이에요. 점수는 가정한 값이고, 난수는 간단한 해시 함수로 만든 것이며 Strata의 Philox가 아니에요.</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>모델은 매 단계에서 「다음 토큰」의 확률표 하나만 내놓아요. 문장 전체의 확률은 각 단계 조건부 확률의 곱이에요(연쇄 법칙).</li>
+<li>소프트맥스는 점수를 확률로 바꿔요. 최댓값을 먼저 빼도 결과는 같고, 부동소수점 오버플로도 막아요. 온도는 분포의 뾰족함만 바꿔요.</li>
+<li>샘플링 = 의사 난수 하나로 누적 확률에 따라 하나 고르기. 샘플링 체인의 순서도 의미예요. 순서가 다르면 확률표가 달라져요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: 「온도를 0으로 하면 같은 질문에 늘 한 글자도 틀리지 않고 같은 답이 나온다.」</strong></p>
+<p>온도 0이 보장하는 것은 「매 단계에서 최고 점수를 고른다」뿐이에요. 그런데 그 최고 점수 자체가 부동소수점 연산의 결과라서, 합을 구하는 순서가 달라지면 마지막 몇 자리가 달라질 수 있어요. 두 후보의 점수가 아주 가까우면 이 작은 차이로 토큰 하나가 바뀌고, 그 뒤 전체가 갈라져요. Strata 문서에 이런 경우가 기록되어 있어요. IQ 계열 모델을 쓸 때, CPU가 토큰 하나를 계산할 때와 여러 개를 한꺼번에 계산할 때는 서로 다른 커널을 쓰고 반올림이 조금 달라요. 그래서 같은 프롬프트가 온도 0에서도 다른(똑같이 그럴듯한) 답을 낼 수 있어요. 바이트 단위로 똑같게 하려면 프롬프트 캐시, 전문가 교체, PCIe 분산 같은 몇 가지 설정도 꺼야 해요. 업스트림 측정(IQ3_XXS, 토큰 약 3,600개짜리 프롬프트, 4회 반복): 이 스위치를 모두 켜면 4번 모두 같은 답 1종류만 나왔고, 기본 설정에서는 2종류가 나왔어요.<span class="ev ev-report">업스트림 보고</span>[S03]</p></div>
+
+<details class="deep"><summary>한 걸음 더: 손으로 계산해 보고, 서빙 계층의 약속도 보기</summary>
+<h3>연쇄 법칙의 정식 표기</h3>
+<p>수열을 x₁…xₙ이라고 하면 연쇄 법칙은 다음과 같아요.</p>
+<div class="equation">P(x₁…xₙ) = ∏ₜ P(xₜ | x₁…xₜ₋₁)</div>
+<p>추론 루프는 한 번 돌 때마다 조건부 분포 하나를 계산해요. 「이력」은 있어도 그만인 배경이 아니라 함수의 입력이에요. 앞쪽 토큰 하나를 바꾸면 그 뒤의 모든 조건부 분포가 바뀔 수 있어요. 앞 문맥의 계산 결과를 캐시해 두는 방법(20장의 세션 캐시)이 접두사가 완전히 같을 때만 재사용되는 것도 이 때문이에요.</p>
+<h3>소프트맥스와 샘플링 한 번을 손으로 계산하기</h3>
+<p>z = [2, 1, 0], T = 1로 해 봐요. 최댓값 2를 빼면 [0, −1, −2]이고, 지수는 약 [1, 0.3679, 0.1353], 합은 1.5032이고, 정규화하면 <strong>[0.6652, 0.2447, 0.0900]</strong>이에요. 누적 확률은 약 [0.6652, 0.9100, 1]이에요. u = 0.8이면 처음으로 이를 넘는 누적값은 0.9100이므로 두 번째 항목을 골라요. u = 0.5이면 첫 번째, u = 0.95이면 세 번째예요. 그리디는 언제나 첫 번째를 골라요.</p>
+<h3>온도가 0에 가까워지는 것과 그리디는 같은 일이 아니에요</h3>
+<p>수학적으로는 T가 0으로 가면 소프트맥스는 「최고 점수 항목의 확률이 1」에 가까워져요. 하지만 프로그램에서 z ÷ 0을 진짜로 계산할 수는 없어서, 실제 구현은 모두 그리디를 별도의 분기로 써요. 또 하나 중요한 것은 <strong>동점</strong>이에요. 점수가 완전히 같을 때 누구를 고를지는 정해진 규칙이 있어야 해요. Strata의 그리디 커널은 번호가 작은 쪽이 이기도록 정했고, 병렬 버전도 이 규칙을 지켜요. 주석은 이것을 「정확성 논증 전체의 핵심」이라고 불러요.<span class="ev ev-code">코드 사실</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L98-L99" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<h3>반복 페널티의 부호 함정</h3>
+<p>반복 페널티는 「점수를 낮춘다」니까, 1보다 큰 수로 나누면 될 것 같아요. 하지만 점수가 음수일 수 있어요. 음수를 1.1로 나누면 오히려 커져요. Strata는 llama.cpp의 규칙을 그대로 따랐어요. 점수가 양수이면 페널티 계수로 나누고, 0 이하이면 계수를 곱해요. 주석은 이렇게 경고해요. 무조건 나누는 것은 논문을 읽을 때 가장 자연스러운 표기이지만, 어휘의 절반에서 페널티를 보너스로 바꿔 버려요. 또 하나, 「나온 적 있음」 페널티(presence)는 나왔는지 아닌지만 보는 0/1 스위치이고, 몇 번 나왔는지는 보지 않아요. <a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L65-L80" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<h3>시드가 같다고 출력이 같은 것은 아니에요</h3>
+<p>후보 A의 점수가 원래 가장 높은데, 이력에서 여러 번 반복되었다고 해 봐요. top-k를 먼저 하고 페널티를 주는 것과, 페널티를 먼저 주고 top-k를 하는 것은 후보 집합이 완전히 다를 수 있어요. 그래서 「시드가 같다」만으로는 출력이 같다는 증거가 한참 모자라요. 이력, 샘플링 파라미터, 처리 순서, 그리고 logits를 계산하는 수치 경로까지 모두 고정해야 해요. Strata의 결합 드래프트 인터페이스는 이것을 약속으로 적어 두었어요. 검증 구간의 t번째 행은 Philox(시드, pos₀ + t)로 샘플링하고, 드래프트는 이 행의 샘플링 결과와 <strong>같을 때만</strong> 수락돼요. 그래서 출력은 시드만의 함수이고, 드래프트는 한 라운드에 토큰이 몇 개 나오는지만 정해요. 이 모드는 기본으로 꺼져 있어요.<span class="ev ev-code">코드 사실</span>[S07]</p>
+<h3>서빙 계층의 약속: 조용히 자르지 않고 거절해요</h3>
+<p><code>serve/frontend.py</code>를 읽을 때는 먼저 <code>ChatTemplate.render</code>가 messages, tools, generation prompt를 어떻게 넘기는지 보고, 그다음 <code>effort_kwargs</code>가 여러 가지로 쓴 「생각 수준」을 템플릿이 아는 네 단계로 어떻게 맞추는지 봐요.[S16] 그리고 <code>serve/server.py</code>의 파일 머리말을 보세요. 프롬프트에 최대 출력 길이를 더한 값이 컨텍스트를 넘으면 요청을 400으로 거절하고, <strong>절대 자르지 않아요</strong>. 최대 출력을 비우거나 0 또는 −1로 쓰면 「컨텍스트에 남은 만큼 쓸 수 있다」는 뜻이에요.[S15] 계산할 때는 <code>CTX_SLACK = 8</code>개 자리의 여유도 남겨서 엔진 쪽의 검사와 맞춰요.[S15] 이 8개 자리는 모델의 수학 상수가 아니라 프런트엔드와 백엔드 사이의 약속이에요.</p>
+<h3>샘플링 구현을 어떻게 검수할까요?</h3>
+<p>실험에서 온도를 끌어 보면서 확률을 관찰하세요. 마지막에 선택된 토큰만 보면 안 돼요. 검수할 때 비교하는 것은 분포예요. 같은 logits와 같은 파라미터라면 두 구현이 내놓는 확률표가 부동소수점 허용 오차 안에서 같아야 해요. 화면에서 반올림한 숫자의 합이 딱 1이 될 필요는 없어요.</p>
+</details>
