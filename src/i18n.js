@@ -150,6 +150,28 @@
       searchCount: (h, t, s) => `${h} 个章节匹配 · ${t} 个术语 · ${s} 项来源（每类展示有上限）`,
       searchTerm: '术语', searchSource: '来源',
       searchNone: '没有找到匹配内容。可尝试较短关键词，如“状态”“量化”“页表”。',
+      // page shell (scripts/build.cjs)
+      htmlLang: 'zh-CN', langName: '中文',
+      bDesc: '以 Strata 为真实项目线索，连接大学计算机基础的中文推理系统教材。28 章、14 个交互实验、84 道解析自测与 16 周教师手册。',
+      bSkip: '跳到正文', bMenuOpen: '展开课程目录', bMenuClose: '关闭课程目录', bHomeAria: '从 Strata 学推理系统：首页',
+      bBrand: '推理系统 · Strata', bNavAria: '主要功能',
+      navCourse: '课程', navLabs: '实验室', navSources: '源码地图', navTeacher: '教师手册', navNotes: '学习笔记',
+      bSearchAria: '搜索教材，快捷键 Control 或 Command K', bSearch: '搜索', bTheme: '切换主题', bGithub: '在 GitHub 查看源码与提交勘误',
+      bLang: '切换语言',
+      bNoscript: '互动教材需要 JavaScript。', bNoscriptLink: '打开无需 JavaScript 的完整教材与答案', bNoscriptEnd: '。',
+      bSearchDialog: '搜索教材', bSearchLabel: '搜索正文、标题和术语', bSearchPlaceholder: '搜索原理、源码与术语…', bCloseSearch: '关闭搜索', bCloseSearchText: '关闭 / ESC',
+      // labels drawn by CSS
+      cssInput: 'INPUT // 先想一想', cssOutput: 'OUTPUT >', cssPrimer: 'PRIMER // 基础知识', cssSummary: 'SUMMARY // 记住这三点', cssVerdict: '> 结论',
+      // static full book (dist/fullbook.html)
+      sTitle: '从 Strata 学推理系统 · 完整教材与解析', sHeading: '从 Strata 学推理系统<br>一颗 token 的计算机科学之旅',
+      sCounts: '28 章 · 84 道解析自测 · 28 道开放题 · 14 项实验说明 · 16 周教师手册',
+      sEdition: '独立教学初版 ', sCommit: '固定代码：', sAuthor: (a, l) => `作者：${a} · 许可：${l}`, sErrata: '初版，未经同行审阅。发现错误请提交勘误：',
+      sOpenApp: '打开交互式教材', sPrintable: ' · 本页不需要 JavaScript，可直接用浏览器打印。', sToc: '目录',
+      sCourses: '关联基础课程：', sGoals: '学习目标', sQuiz: '自测与解析',
+      sWeekHead: ['周', '章节与主题', '实验', '交付'],
+      sLabs: '实验目录与边界', sTask: '任务：', sOpenLab: '在主站打开此交互实验',
+      sWalk: '八份源码逻辑导读', sWalkHint: '摘编仅用于教学，省略上下文；完整实现与行号见原始链接。部分片段是头文件数学说明，不是完整可编译代码。',
+      sSources: '来源与阅读范围', sDisclaimer: '本教材并非 Strata 官方作品或其作者背书；引用源码保留上游 MIT 许可。不附带模型权重、字体文件或全仓库。全文尚未经过正式同行外审。',
     },
   };
   const lang = (root.document && document.documentElement.lang || 'zh').slice(0, 2).toLowerCase();
