@@ -1,6 +1,6 @@
 <div class="hook"><span class="eyebrow">先从一件怪事说起</span>
 <p>Strata 的 README 开头写着：在你自己的游戏电脑上，运行一个 1250 亿参数的 AI 模型。它对显卡的要求是 12 GB 显存起步。<span class="ev ev-report">上游报告</span>[S01]</p>
-<p>按常识算一下：1250 亿个参数，就算每个只占 1 字节，也要 125 GB。一张 12 GB 的显卡，怎么装得下？这本书要回答的就是这类问题：一个 AI 模型在你的电脑里，到底是怎样跑起来的。</p></div>
+<p>按常识算一下：1250 亿个参数，就算每个只占 1 字节，也要 125 GB。一张 12 GB 的显卡，怎么装得下？这本书要回答的就是这类问题：一个 AI 模型在你的电脑里，到底是怎样跑起来的。顺着这个问题，我们会把计算机组成、操作系统、算法、网络这些基础知识串起来。</p></div>
 <p class="tldr"><strong>一句话：</strong>聊天 AI 每次只生成一个 token。生成这一个 token，要动用显卡、内存、处理器和硬盘。Strata 的本事，是把这四样东西安排得刚好够用。</p>
 
 <h2 id="sec-1">1.1 你按下回车之后，发生了什么</h2>
@@ -30,16 +30,72 @@
 <text class="f-muted" fill="#5c6d66" x="190" y="446" font-size="12" text-anchor="middle">虚线：回答没写完，就把新 token 接到末尾，</text>
 <text class="f-muted" fill="#5c6d66" x="190" y="464" font-size="12" text-anchor="middle">回到第 ④ 步再来一轮。一轮只产出一个 token。</text>
 </svg><figcaption>图 1-1　一句话的六次转换。第 ④–⑥ 步每生成一个 token 就重复一次。</figcaption></figure>
-<p>图里有三个新词，先用大白话解释：</p>
-<ul>
-<li><dfn>token</dfn>：模型读写文字的最小单位。它可能是一个汉字、半个英文单词，或者一个标点。模型不直接认字，只认 token 的编号。</li>
-<li><dfn>分词器</dfn>：把文字切成 token、再换成编号的程序。</li>
-<li><dfn>采样</dfn>：模型不会直接“说出”下一个词。它给出每个候选 token 的概率，采样就是按这些概率挑一个。第 2 章细讲。</li>
-</ul>
-<p>注意图里那条虚线。模型每一轮只生成一个 token。要写一段 300 个 token 的回答，第 ④ 到第 ⑥ 步就要重复 300 次。所以“生成速度”通常用每秒多少个 token 来衡量，写作 token/s。</p>
+<p>图里有几个新词，先用大白话解释。</p>
+<p><dfn>token</dfn>是模型读写文字的最小单位。它可能是一个汉字、一个词、半个英文单词，或者一个标点。模型不直接认字，只认 token 的编号。<dfn>分词器</dfn>就是把文字切成 token、再换成编号的程序，见图 1-2。</p>
+<figure class="fig"><svg viewBox="0 0 400 196" role="img" aria-label="图 1-2：分词器把一句话切成 token，再换成整数编号，模型只看到编号">
+<text class="f-muted" fill="#5c6d66" x="200" y="20" font-size="12" text-anchor="middle">原文：推理引擎把文字变成数字</text>
+<rect class="f-soft" fill="#e5f1df" x="27" y="34" width="56" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="55" y="56" font-size="14" text-anchor="middle">推理</text>
+<rect class="f-soft" fill="#e5f1df" x="89" y="34" width="56" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="117" y="56" font-size="14" text-anchor="middle">引擎</text>
+<rect class="f-soft" fill="#e5f1df" x="151" y="34" width="36" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="169" y="56" font-size="14" text-anchor="middle">把</text>
+<rect class="f-soft" fill="#e5f1df" x="193" y="34" width="56" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="221" y="56" font-size="14" text-anchor="middle">文字</text>
+<rect class="f-soft" fill="#e5f1df" x="255" y="34" width="56" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="283" y="56" font-size="14" text-anchor="middle">变成</text>
+<rect class="f-soft" fill="#e5f1df" x="317" y="34" width="56" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="345" y="56" font-size="14" text-anchor="middle">数字</text>
+<text class="f-muted" fill="#5c6d66" x="55" y="88" font-size="11" text-anchor="middle">18723</text><text class="f-muted" fill="#5c6d66" x="117" y="88" font-size="11" text-anchor="middle">40121</text><text class="f-muted" fill="#5c6d66" x="169" y="88" font-size="11" text-anchor="middle">1204</text><text class="f-muted" fill="#5c6d66" x="221" y="88" font-size="11" text-anchor="middle">29871</text><text class="f-muted" fill="#5c6d66" x="283" y="88" font-size="11" text-anchor="middle">31650</text><text class="f-muted" fill="#5c6d66" x="345" y="88" font-size="11" text-anchor="middle">26425</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 100V118"/>
+<path class="f-muted" fill="#5c6d66" d="M200 124l-5-8h10z"/>
+<rect class="f-accent" fill="#136d5a" x="30" y="130" width="340" height="32" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="151" font-size="12" text-anchor="middle">模型只看到：[18723, 40121, 1204, 29871, 31650, 26425]</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="186" font-size="11" text-anchor="middle">示意：真实的切分方式和编号，由模型自带的分词器决定</text>
+</svg><figcaption>图 1-2　分词：文字先被切成 token，再查表换成编号。模型从头到尾只和这些整数打交道。</figcaption></figure>
+<p><dfn>采样</dfn>是第 ⑤ 步。模型不会直接“说出”下一个词，而是给出每个候选 token 的概率，采样就是按这些概率挑一个。第 2 章细讲。</p>
+<p>注意图 1-1 里那条虚线。模型每一轮只生成一个 token：要写 300 个 token 的回答，第 ④ 到第 ⑥ 步就要重复 300 次。所以“生成速度”通常用每秒多少个 token 来衡量，写作 token/s。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>整个生成过程就是一个循环：<code>while 没结束: 概率 = 模型(已有 token); t = 采样(概率); 已有 token.append(t)</code>。每一轮的输入都包含上一轮的输出，这种“用自己的输出喂自己”的模型叫<dfn>自回归</dfn>模型。</p>
 
-<h2 id="sec-2">1.2 模型、引擎、应用：三个常被混为一谈的角色</h2>
-<p>用一家餐厅来比喻。Strata 自己的文档也用了厨房的比喻。[S02]</p>
+<h2 id="sec-2">1.2 为什么第一个字总是慢一点</h2>
+<p>你可能注意到：发出问题后，要等一会儿才出现第一个字；之后的字就出得很快。这是因为一次回答分成两个阶段，见图 1-3。</p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="图 1-3：一次回答的时间线。先一次性读完整段提问，再一轮一个 token 地写答案">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">一次回答的时间线（示意，不按比例）</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="32" width="150" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="85" y="52" font-size="13" font-weight="600" text-anchor="middle">读题（prefill）</text>
+<text class="f-on" fill="#ffffff" x="85" y="70" font-size="11" text-anchor="middle">整段提问一起算</text>
+<rect class="f-soft" fill="#e5f1df" x="168" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="186" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="204" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="222" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="240" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="258" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="276" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="294" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="312" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="330" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="348" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="366" y="32" width="14" height="48" rx="3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 88V94H160V88M168 88V94H380V88"/>
+<text class="f-muted" fill="#5c6d66" x="85" y="110" font-size="11" text-anchor="middle">等第一个字的时间</text>
+<text class="f-muted" fill="#5c6d66" x="274" y="110" font-size="11" text-anchor="middle">写答案（decode）：一轮一个 token</text>
+<text class="f-text" fill="#182f2b" x="10" y="142" font-size="12">上游实测（RTX 5070 12 GB，Q2_0，4K 长度的提问）：</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">· 读题：每秒约 1,299 个 token</text>
+<text class="f-text" fill="#182f2b" x="10" y="184" font-size="12">· 写答案：每秒约 93 个 token</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="11">读题快十几倍，因为提问里的 token 能一起算（第 16 章）</text>
+</svg><figcaption>图 1-3　先读题，后写答案。读题时整段提问一起算，所以单位时间处理的 token 多得多；写答案只能一个接一个。</figcaption></figure>
+<p>第一阶段叫 <dfn>prefill</dfn>（读题）：模型把你的整段提问一次读进去。提问里的 token 都是已知的，可以一起算。第二阶段叫 <dfn>decode</dfn>（写答案）：每个新 token 都依赖上一个，只能一个一个来。</p>
+<p>Strata 的上游测量显示，同一台机器上，读题每秒能处理约 1,299 个 token，写答案每秒约 93 个。<span class="ev ev-report">上游报告</span>[S03] 所以提问越长，等第一个字的时间越长。README 也提醒：一段对话的第一条消息要完整读一遍，大约每 30,000 个 token 需要 1 分钟；之后的追问只读新增部分，几秒就能开始回答。[S01]</p>
+
+<h2 id="sec-3">1.3 模型、引擎、应用：三个常被混为一谈的角色</h2>
+<p>用一家餐厅来比喻，见图 1-4。Strata 自己的文档也用了厨房的比喻。[S02]</p>
+<figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="图 1-4：应用、推理引擎、模型三个角色，分别对应餐厅的前台、厨房和配方">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="110" height="70" rx="10"/>
+<text class="f-text" fill="#182f2b" x="65" y="40" font-size="15" font-weight="600" text-anchor="middle">应用</text>
+<text class="f-muted" fill="#5c6d66" x="65" y="62" font-size="12" text-anchor="middle">餐厅前台</text>
+<text class="f-text" fill="#182f2b" x="134" y="30" font-size="12">接待你，整理好话，再端上菜</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="50" font-size="12">套模板、分词、把输出解析成文字</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="70" font-size="12">Strata：serve/ 下的 Python 服务</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M65 80V108"/>
+<text class="f-muted" fill="#5c6d66" x="74" y="99" font-size="11">token 编号</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="110" width="110" height="70" rx="10"/>
+<text class="f-on" fill="#ffffff" x="65" y="140" font-size="15" font-weight="600" text-anchor="middle">推理引擎</text>
+<text class="f-on" fill="#ffffff" x="65" y="162" font-size="12" text-anchor="middle">厨房和厨师</text>
+<text class="f-text" fill="#182f2b" x="134" y="130" font-size="12">在你的硬件上把计算做出来</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="150" font-size="12">安排显存、内存、CPU 和 GPU</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="170" font-size="12">Strata 本体：C++ / CUDA / HIP</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M65 180V208"/>
+<text class="f-muted" fill="#5c6d66" x="74" y="199" font-size="11">读取参数</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="210" width="110" height="70" rx="10"/>
+<text class="f-text" fill="#182f2b" x="65" y="240" font-size="15" font-weight="600" text-anchor="middle">模型</text>
+<text class="f-muted" fill="#5c6d66" x="65" y="262" font-size="12" text-anchor="middle">配方</text>
+<text class="f-text" fill="#182f2b" x="134" y="230" font-size="12">训练好的参数 ＋ 固定的计算规则</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="250" font-size="12">约 1250 亿个参数</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="270" font-size="12">Qwen3.8-Flash-Next</text>
+</svg><figcaption>图 1-4　三个角色各管一段。应用交给引擎的是一串 token 编号，引擎按模型的配方计算。</figcaption></figure>
 <ul>
 <li><strong>模型是配方。</strong>它是训练好的一大堆数字（叫“参数”或“权重”），加上一套固定的计算规则。Qwen3.8-Flash-Next 就是一个模型。</li>
 <li><strong>推理引擎是厨房和厨师。</strong>它负责在你的硬件上，按配方把计算做出来。Strata 就是一个推理引擎；llama.cpp、vLLM 也是。</li>
@@ -47,9 +103,9 @@
 </ul>
 <p>分清这三层，排查问题时就不会找错地方。引擎做得再快，模型也不会变聪明：配方不变，换个厨房，菜的味道应该一样。反过来，如果回答质量变差，原因可能在配方（换了模型或压缩得太狠），可能在厨房（引擎有 bug，算错了），也可能在前台（模板或协议把你的话传错了）。</p>
 
-<h2 id="sec-3">1.3 一台电脑里的三层“仓库”</h2>
-<p>厨房快不快，很大程度取决于东西放在哪。电脑也一样。和推理有关的存储有三层，见图 1-2。</p>
-<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="图 1-2：显存、内存、硬盘三层存储，越往上越快越小，以及 Strata 在每一层放了什么">
+<h2 id="sec-4">1.4 一台电脑里的三层“仓库”</h2>
+<p>厨房快不快，很大程度取决于东西放在哪。电脑也一样。和推理有关的存储有三层，见图 1-5。</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="图 1-5：显存、内存、硬盘三层存储，越往上越快越小，以及 Strata 在每一层放了什么">
 <rect class="f-accent" fill="#136d5a" x="90" y="10" width="220" height="92" rx="10"/>
 <text class="f-on" fill="#ffffff" x="200" y="34" font-size="14" font-weight="600" text-anchor="middle">显卡显存（VRAM）12–24 GB</text>
 <text class="f-on" fill="#ffffff" x="200" y="54" font-size="12" text-anchor="middle">台面：伸手就拿</text>
@@ -65,7 +121,7 @@
 <text class="f-muted" fill="#5c6d66" x="200" y="270" font-size="12" text-anchor="middle">地下仓库：最大，也最慢</text>
 <text class="f-text" fill="#182f2b" x="200" y="290" font-size="11" text-anchor="middle">一张 28.8 GB 的查找表，每个 token 只读其中几行</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="334" font-size="12" text-anchor="middle">越往上：越快、越小、越贵</text>
-</svg><figcaption>图 1-2　Strata 怎样使用三层存储。容量是 README 给出的硬件要求，分工来自上游文档。[S01][S02]</figcaption></figure>
+</svg><figcaption>图 1-5　Strata 怎样使用三层存储。容量是 README 给出的硬件要求，分工来自上游文档。[S01][S02]</figcaption></figure>
 <p>显卡（GPU）算得最快，但显存最小，常见的游戏卡只有 12–24 GB。内存（RAM）大得多，但它离显卡远，数据要经过一条叫 PCIe 的总线才能送过去。硬盘（SSD）最大，也最慢。</p>
 <p>Strata 的分工是这样的 <span class="ev ev-report">上游报告</span>[S02]：</p>
 <ol>
@@ -74,17 +130,121 @@
 <li>硬盘上放一张 28.8 GB 的查找表，每个 token 只读其中几行。</li>
 </ol>
 <p>“专家”是什么，第 10 章专门讲。现在只需要知道：它是 Strata 能在小显卡上跑大模型的关键。</p>
+<aside class="primer" id="c01-memory-hierarchy">
+<h3>存储层次结构</h3>
+<p>计算机里的存储设备，总是在“快”“大”“便宜”三者之间取舍：越快的越小、越贵，越大的越慢。于是计算机把它们叠成一座金字塔：最常用的数据放在最快的一层，不常用的放在下面，需要时再往上搬。这就是<dfn>存储层次结构</dfn>。</p>
+<p>衡量“快”有两个指标。<dfn>带宽</dfn>是每秒能搬多少字节，像水管的粗细；<dfn>延迟</dfn>是从发出请求到拿到第一个字节要等多久，像水从龙头流到杯子的时间。推理引擎每生成一个 token 都要读大量参数，所以最在意带宽。图 1-6 是上游测速机器上各层的理论带宽。</p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="图 1-6：上游测速机器各层存储的理论带宽，显存约 672 GB/s，内存约 83 GB/s，PCIe 5.0 约 63 GB/s，固态硬盘约 7 GB/s">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">理论峰值带宽，单位 GB/s（条长按比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">显存</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="36" width="250" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="348" y="49" font-size="12">672</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">内存</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="72" width="31" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="129" y="85" font-size="12">83（DDR5-5200 双通道）</text>
+<text class="f-text" fill="#182f2b" x="10" y="120" font-size="12">PCIe 总线</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="108" width="23" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="121" y="121" font-size="12">约 63（PCIe 5.0 x16，单向）</text>
+<text class="f-text" fill="#182f2b" x="10" y="156" font-size="12">固态硬盘</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="144" width="3" height="16" rx="1"/>
+<text class="f-text" fill="#182f2b" x="101" y="157" font-size="12">约 7（常见 NVMe 顺序读）</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="190" font-size="11">显存：RTX 5070 规格；内存：上游测速机配置。实际可用带宽通常更低。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="11">从显存读数据，比从硬盘读快约一百倍。</text>
+</svg><figcaption>图 1-6　同一台电脑里，各层存储的带宽相差可达百倍。把常用数据放在快的一层，是一切缓存设计的出发点。</figcaption></figure>
+<p>Strata 的全部设计，都可以看成在这座金字塔上摆放数据：热门的专家放显存，全部专家放内存，大查找表放硬盘。后面的章节会反复回到这张图。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/記憶體階層" target="_blank" rel="noopener noreferrer">维基百科：存储器层次结构</a> · <a href="https://en.wikipedia.org/wiki/Memory_hierarchy" target="_blank" rel="noopener noreferrer">Wikipedia: Memory hierarchy</a> · <a href="https://csapp.cs.cmu.edu/" target="_blank" rel="noopener noreferrer">《深入理解计算机系统》（CS:APP）第 6 章</a></p>
+</aside>
+<p class="bridge"><strong>学过计算机的同学：</strong>这就是《计算机组成原理》里的存储层次，只是多了显存这一层。对 CPU 来说，显存是另一块设备上的内存，CPU 不能像访问自己的内存那样直接读写它，数据要经 PCIe 搬运（第 14 章讲 DMA）。</p>
 
-<h2 id="sec-4">1.4 算一笔账：24,576 和 480</h2>
+<h2 id="sec-5">1.5 算一笔账：24,576 和 480</h2>
 <p>README 说，这个模型由 24,576 个“专家”组成，每写一个词只需要其中 10 个。[S01] 为了好懂，这句话做了简化。我们去源码里核对一下。</p>
-<p>源码定义的模型结构是 48 层、每层 512 个专家 <span class="ev ev-code">代码事实</span>[S04]；每个 token 在<strong>每一层</strong>选 10 个专家 <span class="ev ev-code">代码事实</span>[S13]。所以：</p>
+<p>源码定义的模型结构是 48 层、每层 512 个专家 <span class="ev ev-code">代码事实</span>[S04]；每个 token 在<strong>每一层</strong>选 10 个专家 <span class="ev ev-code">代码事实</span>[S13]。图 1-7 把这个结构画了出来。</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 1-7：48 层，每层 512 个专家，每层选中 10 个，一个 token 一共做 480 次专家选择">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="11">每一行是一层的 512 个专家；高亮的是这一层选中的 10 个</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="43" font-size="11">第 1 层</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="34" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="87.2" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="101.7" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="121.9" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="165.3" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="212.0" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="285.1" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="301.5" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="318.5" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="341.8" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="355.6" y="34" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="61" font-size="11">第 2 层</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="52" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="118.1" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="160.9" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="180.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="195.6" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="209.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="268.1" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="287.6" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="301.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="311.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="323.5" y="52" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="79" font-size="11">第 3 层</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="70" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="72.7" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="84.7" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="124.4" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="134.5" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="147.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="215.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="256.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="314.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="344.3" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="355.6" y="70" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="115" font-size="11">第 46 层</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="106" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="64.5" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="87.8" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="119.3" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="147.1" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="177.3" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="194.3" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="203.8" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="217.0" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="259.2" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="328.5" y="106" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="133" font-size="11">第 47 层</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="124" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="92.2" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="106.7" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="147.7" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="181.7" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="207.6" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="219.5" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="260.5" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="271.8" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="297.0" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="383.4" y="124" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="151" font-size="11">第 48 层</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="142" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="76.5" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="92.2" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="155.9" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="176.7" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="227.7" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="244.7" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="268.1" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="296.4" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="328.5" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="345.6" y="142" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="225" y="97" font-size="13" text-anchor="middle">⋮（中间还有 42 层）</text>
+<text class="f-text" fill="#182f2b" x="200" y="180" font-size="13" font-weight="600" text-anchor="middle">48 层 × 每层 10 个 ＝ 480 次选择</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="202" font-size="12" text-anchor="middle">48 层 × 每层 512 个 ＝ 24,576 个专家（总数）</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="224" font-size="11" text-anchor="middle">“每个词只要 10 个专家”，说的是每一层</text>
+</svg><figcaption>图 1-7　一个 token 要走完 48 层，每层都重新挑 10 个专家，所以一共是 480 次选择，而不是 10 次。</figcaption></figure>
 <ul>
 <li>48 × 512 = <strong>24,576</strong>，这是专家的总数。</li>
 <li>一个 token 要走完 48 层，每层选 10 个，一共 48 × 10 = <strong>480</strong> 次专家选择。</li>
 </ul>
 <p>“10 个”说的是每一层，不是整个模型。如果理解成整个模型只用 10 个专家，你估算的计算量和数据搬运量会少 48 倍。这是本书反复强调的习惯：<strong>一个数字要带着它的单位和范围</strong>。</p>
 
-<h2 id="sec-5">1.5 读这本书的方法：每个数字都有出处</h2>
+<h2 id="sec-6">1.6 读这本书的方法：每个数字都有出处</h2>
 <p>本书的每个结论，都会标明它属于哪一类证据：</p>
 <ul>
 <li><span class="ev ev-code">代码事实</span>从固定版本的源码里直接读到的。例如“48 层”。</li>
@@ -94,13 +254,11 @@
 </ul>
 <p>为什么要这么讲究？因为 AI 圈里的数字特别容易被搬错地方。别人显卡上的速度、某个配置下的显存占用、一张宣传图里的简化说法，一旦脱离了条件，就可能误导人。学会问“这个数字是在什么条件下得到的”，比记住任何一个数字都有用。</p>
 <p>本书的源码阅读固定在 2026-10-03 的一个提交上，页脚有它的编号。Strata 还在快速迭代，新版本里的数字可能已经不同。</p>
-
-<h2 id="sec-6">1.6 动手：跟着一个 token 走一遍</h2>
-<p>打开本章的交互实验「一个 token 的旅程」。它把图 1-1 的路径拆成可以逐步检查的环节，让你看清每一步的输入是什么、输出是什么。试着为其中一条箭头想一个“出错会怎样”的例子：比如模板换了，或者分词器和模型不配套。实验里的数字都是教学推演，不是你电脑上的实测。</p>
+<p><strong>动手：</strong>打开本章的交互实验「一个 token 的旅程」。它把图 1-1 的路径拆成可以逐步检查的环节，让你看清每一步的输入和输出。试着为其中一条箭头想一个“出错会怎样”的例子：比如模板换了，或者分词器和模型不配套。实验里的数字都是教学推演，不是你电脑上的实测。</p>
 
 <div class="recap"><h3>记住这三点</h3><ol>
 <li>模型是配方，推理引擎是厨房，应用是前台。三者各管一段。</li>
-<li>模型每轮只生成一个 token；回答越长，这一轮就重复越多次。</li>
+<li>先读题、后写答案：读题时整段提问一起算，写答案只能一轮一个 token。</li>
 <li>每个数字都要问：它是代码事实、上游报告，还是推算？它的单位和范围是什么？</li>
 </ol></div>
 <div class="myth"><p><strong>常见误解：“模型文件多大，就要多大显存。”</strong></p>

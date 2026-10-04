@@ -1,61 +1,132 @@
 <div class="hook"><span class="eyebrow">你可能注意到过</span>
 <p>有些总参数上千亿的模型，居然能在一张普通显卡上跑起来；而一个只有几百亿参数的普通模型，同样的显卡反而装不下。这些“能跑”的大模型，大多是 <dfn>MoE</dfn>（Mixture of Experts，混合专家）模型。</p>
-<p>秘密在于：MoE 模型每生成一个 token，只动用一小部分参数。剩下的参数可以先放在别处，用到再说。这一章讲清楚三件事：专家是什么、谁来挑专家、挑剩的专家放在哪。</p></div>
-<p class="tldr"><strong>一句话：</strong>Strata 用的模型每层有 512 个专家，每个 token 在每层只挑 10 个干活。参数虽多，每一步只用其中约 5%，所以能把不常用的专家放在内存里，而不是全塞进显卡。</p>
+<p>秘密在于：MoE 模型每生成一个 token，只叫醒一小部分参数干活，其余的可以先放在别处。这一章讲清楚三件事：专家是什么、谁来挑专家、挑剩的专家放在哪。</p></div>
+<p class="tldr"><strong>一句话：</strong>Strata 用的模型每层有 512 个专家，每个 token 在每层只挑 10 个。参数虽多，每一步只用约 5%，所以冷门专家可以待在内存里，不必全挤进显卡。</p>
 
 <h2 id="sec-1">10.1 专家是什么</h2>
-<p>先想象一家医院。普通模型像一位全科医生：每个病人来了，他都要动用全部知识。MoE 模型像一家有很多专科医生的医院：每个病人先到分诊台，分诊台只叫来最对口的几位医生会诊。</p>
-<p>在模型里，<dfn>专家</dfn>就是一组参数，负责一种计算变换。它不是一个有独立意识的小模型，也不一定对应人能理解的“专业”，比如“数学专家”“语文专家”。哪个专家擅长什么，是训练自动形成的。<dfn>路由器</dfn>就是分诊台：它看一眼当前 token 的数据，给所有专家打分，挑出得分最高的几个。</p>
-<p>Strata 用的模型有 48 层，每层都有自己的 512 个专家和自己的路由器。每个 token 在每一层挑 10 个专家。<span class="ev ev-code">代码事实</span>[S04][S13] 另外每层还有一个<dfn>共享专家</dfn>，不经挑选，每个 token 都会用到。[S13]</p>
+<p>先想象一家医院。普通模型像一位全科医生：每个病人来了，他都要动用全部知识。MoE 模型像一家有很多专科医生的医院：病人先到分诊台，分诊台只叫来最对口的几位医生会诊，其他人照常喝茶。图 10-1 把两种模型放在一起对比。</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="图 10-1：稠密模型每个 token 动用全部参数，MoE 模型每层只叫醒少数专家">
+<defs>
+<pattern id="c10-dense" width="17" height="17" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="14" height="14" rx="2"/></pattern>
+<pattern id="c10-sparse" width="17" height="17" patternUnits="userSpaceOnUse"><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x=".5" y=".5" width="13" height="13" rx="2"/></pattern>
+</defs>
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">稠密模型</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="11" text-anchor="middle">每个 token 动用全部参数</text>
+<rect fill="url(#c10-dense)" x="17" y="52" width="167" height="167"/>
+<text class="f-text" fill="#182f2b" x="303" y="20" font-size="13" font-weight="600" text-anchor="middle">MoE 模型</text>
+<text class="f-muted" fill="#5c6d66" x="303" y="38" font-size="11" text-anchor="middle">每层只叫醒少数专家</text>
+<rect fill="url(#c10-sparse)" x="220" y="52" width="167" height="167"/>
+<rect class="f-accent" fill="#136d5a" x="271" y="86" width="14" height="14" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="339" y="154" width="14" height="14" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="100" y="242" font-size="11" text-anchor="middle">全部都在工作</text>
+<text class="f-muted" fill="#5c6d66" x="303" y="242" font-size="11" text-anchor="middle">Strata：每层 512 个里挑 10 个（约 2%）</text>
+</svg><figcaption>图 10-1　稠密模型每一步都要动用全部参数；MoE 模型每一步只叫醒少数专家，其余的这一步完全不参与计算。</figcaption></figure>
+<p>在模型里，<dfn>专家</dfn>就是一组参数，负责一种计算变换。它不是一个有独立意识的小模型，也不一定对应人能理解的“专业”，比如“数学专家”“语文专家”。哪个专家擅长什么，是训练时自动形成的。</p>
+<p>Strata 用的模型有 48 层。每一层都有自己的 512 个专家，外加一个每次都参与的<dfn>共享专家</dfn>。<span class="ev ev-code">代码事实</span>[S04][S13] 一个专家内部长什么样，见图 10-2。</p>
+<figure class="fig"><svg viewBox="0 0 400 330" role="img" aria-label="图 10-2：一个专家内部由 gate、up、down 三个矩阵组成，共 491 万个参数">
+<rect class="f-soft" fill="#e5f1df" x="110" y="8" width="180" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">输入：2560 个数</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V58H110V72M200 58H290V72"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="74" width="160" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="110" y="95" font-size="13" font-weight="600" text-anchor="middle">gate 矩阵</text>
+<text class="f-muted" fill="#5c6d66" x="110" y="113" font-size="11" text-anchor="middle">2560 → 640</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="74" width="160" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="290" y="95" font-size="13" font-weight="600" text-anchor="middle">up 矩阵</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="113" font-size="11" text-anchor="middle">2560 → 640</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M110 122V136H290V122M200 136V148"/>
+<rect class="f-accent" fill="#136d5a" x="110" y="150" width="180" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="175" font-size="12" text-anchor="middle">gate 激活后，与 up 逐个相乘</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 190V214"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="120" y="216" width="160" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="237" font-size="13" font-weight="600" text-anchor="middle">down 矩阵</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="255" font-size="11" text-anchor="middle">640 → 2560</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 264V276"/>
+<text class="f-text" fill="#182f2b" x="200" y="292" font-size="12" text-anchor="middle">输出：2560 个数</text>
+<text class="f-text" fill="#182f2b" x="200" y="320" font-size="12" font-weight="600" text-anchor="middle">参数量：3 × 2560 × 640 ＝ 4,915,200</text>
+</svg><figcaption>图 10-2　一个专家就是三个矩阵：先把 2560 维的输入压到 640 维，再展开回 2560 维。每个专家约 491 万个参数。</figcaption></figure>
+<p>模型的主宽度是 2560，专家内部宽度是 640。<span class="ev ev-code">代码事实</span>[S04][S06] 三个矩阵加起来，每个专家约 491 万个参数。记住这个数，下一节要用。</p>
 
-<h2 id="sec-2">10.2 路由器怎样挑专家</h2>
-<p>一层里的过程见图 10-1：</p>
-<figure class="fig"><svg viewBox="0 0 400 420" role="img" aria-label="图 10-1：一层 MoE 的计算过程。路由器给 512 个专家打分，选出 10 个，按分数加权求和，再加上共享专家">
-<defs><pattern id="p10-grid" width="10" height="10" patternUnits="userSpaceOnUse"><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-width=".6" x=".5" y=".5" width="8" height="8" rx="1.5"/></pattern></defs>
+<h2 id="sec-2">10.2 分诊台怎样挑专家</h2>
+<p>每一层都有一个<dfn>路由器</dfn>，也就是分诊台。它看一眼当前 token 的数据，给本层 512 个专家每人打一个分，挑出分数最高的 10 个。这一步叫 <dfn>top-k 选择</dfn>，这里 k = 10。<span class="ev ev-code">代码事实</span>[S13]</p>
+<p>被选中的 10 个专家各算一份结果。路由器再把分数换算成“话语权”，也就是加权系数，按权重把 10 份结果加起来，再加上共享专家的结果，交给下一层。没被选中的 502 个专家，这一步完全不参与计算。这种“算不算取决于输入”的做法，叫<dfn>条件计算</dfn>。</p>
+<p>光看文字很难有感觉。下面的模拟器把这个过程放慢了，按<strong>单步</strong>一步一步看：</p>
+<div class="viz" data-viz="moe-router"><figure class="fig"><svg viewBox="0 0 400 420" role="img" aria-label="图 10-3：一层 MoE 的计算过程。路由器给 512 个专家打分，选出 10 个，按分数加权求和，再加上共享专家">
+<defs><pattern id="c10-grid" width="10" height="10" patternUnits="userSpaceOnUse"><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-width=".6" x=".5" y=".5" width="8" height="8" rx="1.5"/></pattern></defs>
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="6" width="280" height="38" rx="9"/>
 <text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" font-weight="600" text-anchor="middle">这一层的输入：当前 token 的数据</text>
 <rect class="f-soft" fill="#e5f1df" x="60" y="64" width="280" height="38" rx="9"/>
 <text class="f-text" fill="#182f2b" x="200" y="88" font-size="13" font-weight="600" text-anchor="middle">路由器：给 512 个专家逐一打分</text>
-<rect fill="url(#p10-grid)" x="40" y="122" width="320" height="160"/>
-<g>
+<rect fill="url(#c10-grid)" x="40" y="122" width="320" height="160"/>
 <rect class="f-accent" fill="#136d5a" x="70.5" y="132.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="210.5" y="142.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="320.5" y="162.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="120.5" y="182.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="260.5" y="192.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="160.5" y="212.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="340.5" y="222.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="90.5" y="242.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="230.5" y="252.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="300.5" y="272.5" width="8" height="8" rx="1.5"/>
-</g>
 <text class="f-muted" fill="#5c6d66" x="200" y="300" font-size="12" text-anchor="middle">512 个格子 = 512 个专家；高亮的 10 个 = 得分最高、被选中</text>
 <rect class="f-accent" fill="#136d5a" x="60" y="318" width="280" height="38" rx="9"/>
-<text class="f-on" fill="#ffffff" x="200" y="342" font-size="13" font-weight="600" text-anchor="middle">10 个专家各算一份，按分数加权相加</text>
+<text class="f-on" fill="#ffffff" x="200" y="342" font-size="13" font-weight="600" text-anchor="middle">10 个专家各算一份，按权重相加</text>
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="376" width="280" height="38" rx="9"/>
 <text class="f-text" fill="#182f2b" x="200" y="400" font-size="13" font-weight="600" text-anchor="middle">＋ 共享专家 → 交给下一层</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V62M200 102V120M200 304V316M200 356V374"/>
-</svg><figcaption>图 10-1　一层 MoE 的计算。48 层每层都走一遍，所以一个 token 一共挑 48 × 10 = 480 次。</figcaption></figure>
-<ol>
-<li>路由器给本层 512 个专家每个打一个分。</li>
-<li>选出分数最高的 10 个。这一步叫 <dfn>top-k 选择</dfn>，这里 k = 10。</li>
-<li>这 10 个专家各自对输入做一次计算，得到 10 份结果。</li>
-<li>按路由器给的分数做加权求和：分数高的专家，话语权大。</li>
-<li>再加上共享专家的结果，交给下一层。</li>
-</ol>
-<p>没被选中的 502 个专家，这一步完全不参与计算。这就是 MoE 省算力的来源，也叫<dfn>条件计算</dfn>：算不算，取决于输入。</p>
+</svg><figcaption>图 10-3　一层 MoE 的计算。48 层每层都走一遍，所以一个 token 一共挑 48 × 10 = 480 次。</figcaption></figure></div>
+<p class="bridge"><strong>学过计算机的同学：</strong>从 512 个分数里找前 10 名，不必把 512 个全排序。下面的专栏讲了三种做法和它们的复杂度。</p>
+<aside class="primer" id="c10-top-k">
+<h3>top-k 选择：从 n 个数里找最大的 k 个</h3>
+<p>最直接的办法是把 n 个数全部排序，取前 k 个，复杂度 O(n log n)。可我们只要前 10 名，后面 502 名的顺序根本不关心，全排序做了很多无用功。</p>
+<p>更省的办法是用一个只装 k 个数的<dfn>最小堆</dfn>：从头扫一遍，遇到比堆顶（当前第 k 名）大的数就替换它。堆的大小一直是 k，每次调整只要 O(log k)，总复杂度 O(n log k)。n = 512、k = 10 时，大约是全排序工作量的三分之一。</p>
+<p>还有一种叫<dfn>快速选择</dfn>的方法，借用快速排序的“分区”思路，平均只要 O(n)。在 GPU 上，人们还会用并行归约，让很多线程同时比较。用哪种取决于硬件和 k 的大小；本书没有核实 Strata 内核用的是哪一种。</p>
+<p>不管用哪种算法，都要规定<strong>分数相同时选谁</strong>。否则同样的输入，两次运行可能选出不同的专家。</p>
+<p class="further">延伸阅读：<a href="https://oi-wiki.org/ds/heap/" target="_blank" rel="noopener noreferrer">OI Wiki：堆</a> · <a href="https://oi-wiki.org/basic/quick-sort/" target="_blank" rel="noopener noreferrer">OI Wiki：快速排序（含“线性找第 k 个数”）</a> · <a href="https://zh.wikipedia.org/zh-cn/选择算法" target="_blank" rel="noopener noreferrer">维基百科：选择算法</a></p>
+</aside>
 
 <h2 id="sec-3">10.3 算一笔账：1250 亿参数，每个 token 用多少</h2>
-<p>源码给出了专家的尺寸：模型主宽度 2560，专家内部宽度 640。<span class="ev ev-code">代码事实</span>[S04][S06] 一个专家由三个矩阵组成，所以每个专家约有 3 × 2560 × 640 = <strong>4,915,200</strong> 个参数。</p>
+<p>有了“每个专家 491 万参数”和“每个 token 挑 480 次”，就能算出一个 token 到底动用了多少参数：</p>
 <div class="table-wrap"><table><thead><tr><th>项目</th><th>算式</th><th>结果</th></tr></thead><tbody>
 <tr><td>全部路由专家的参数</td><td>4,915,200 × 24,576</td><td>约 1208 亿</td></tr>
 <tr><td>模型总参数（README）</td><td>—</td><td>约 1250 亿 <span class="ev ev-report">上游报告</span></td></tr>
-<tr><td>专家以外的参数</td><td>1250 亿 − 1208 亿</td><td>约 40 亿 <span class="ev ev-est">教学推演</span></td></tr>
+<tr><td>专家以外的参数</td><td>1250 亿 − 1208 亿</td><td>约 42 亿 <span class="ev ev-est">教学推演</span></td></tr>
 <tr><td>一个 token 用到的专家参数</td><td>4,915,200 × 480</td><td>约 24 亿</td></tr>
-<tr><td>一个 token 实际动用的参数</td><td>24 亿 ＋ 约 40 亿</td><td>约 64 亿，占总数约 5% <span class="ev ev-est">教学推演</span></td></tr>
+<tr><td>一个 token 实际动用的参数</td><td>24 亿 ＋ 约 42 亿</td><td>约 66 亿，占总数约 5% <span class="ev ev-est">教学推演</span></td></tr>
 </tbody></table></div>
-<p>结论很直观：这个模型 97% 的参数都在专家里，而每个 token 只用到其中一小部分。<span class="ev ev-est">教学推演</span>[S01][S04] 这里“专家以外的参数”是用 README 的约数相减得到的粗略值，只用来建立数量级的直觉。</p>
-<p>再看字节数。源码规定，一个专家在标准格式下占 1,382,400 字节。<span class="ev ev-code">代码事实</span>[S06] 平摊到 4,915,200 个参数上，每个参数约 2.25 bit。也就是说，这个格式把每个参数压缩到了两比特多一点，比原始的 16 bit 小了 7 倍多。这种压缩叫<dfn>量化</dfn>，第 4 章细讲。按这个格式，24,576 个专家合计约 34 GB。<span class="ev ev-est">教学推演</span></p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="图 10-4：模型 97% 的参数在路由专家里，而每个 token 只动用约 5% 的参数">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="11">参数都花在哪（条长按比例）</text>
+<text class="f-text" fill="#182f2b" x="20" y="44" font-size="12" font-weight="600">模型全部参数：约 1250 亿</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="52" width="347.9" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="367.9" y="52" width="12.1" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="88" font-size="11">主色：路由专家约 1208 亿（97%）· 橙色：其他约 42 亿（3%）</text>
+<text class="f-text" fill="#182f2b" x="20" y="122" font-size="12" font-weight="600">每个 token 实际动用：约 66 亿（5%）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="130" width="360" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="130" width="6.9" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="26.9" y="130" width="12.1" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="166" font-size="11">选中的专家约 24 亿 ＋ 每步都用的部分约 42 亿</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="188" font-size="11">浅色部分：这一步没用到的参数，可以先放在内存里</text>
+</svg><figcaption>图 10-4　这个模型 97% 的参数都在路由专家里，可每个 token 只动用约 5%。这就是“能把冷门专家放到别处”的底气。</figcaption></figure>
+<p>“专家以外的参数”是用 README 的约数相减得到的，只用来建立数量级的直觉。<span class="ev ev-est">教学推演</span>[S01][S04]</p>
+<p>再看字节数。源码规定，一个专家在标准格式下占 1,382,400 字节。<span class="ev ev-code">代码事实</span>[S06] 平摊到 491 万个参数上，每个参数约 2.25 bit，比原始的 16 bit 小了 7 倍多。这种压缩叫<dfn>量化</dfn>，第 4 章细讲。按这个格式，24,576 个专家合计约 34 GB；一个 token 要读的 480 个专家约 664 MB。<span class="ev ev-est">教学推演</span></p>
 
 <h2 id="sec-4">10.4 挑剩的专家放在哪</h2>
-<p>34 GB 的专家放不进 12 GB 的显卡。Strata 的办法是分层存放：<span class="ev ev-report">上游报告</span>[S02]</p>
+<p>34 GB 的专家放不进 12 GB 的显卡。Strata 的办法是分层存放 <span class="ev ev-report">上游报告</span>[S02]：</p>
 <ul>
 <li><strong>显卡</strong>先放每个 token 都要用的部分，剩下的显存全部用来缓存<strong>最常被选中的专家</strong>。</li>
-<li><strong>内存</strong>放全部专家。一个专家被选中但不在显卡上（叫“未命中”），就由 CPU 在内存里直接计算，和显卡同时进行。</li>
+<li><strong>内存</strong>放全部专家。被选中但不在显卡上的专家叫“未命中”，主要由 CPU 在内存里直接计算，和显卡同时进行。</li>
 </ul>
-<p>为什么不把未命中的专家临时搬到显卡上算？算一下就明白了。一个 token 要用 480 个专家，按 1,382,400 字节算，约 664 MB。显卡和内存之间的 PCIe 4.0 x16 总线，理论带宽约 32 GB/s。如果每个 token 都把这 664 MB 搬一遍，光搬运就要约 21 毫秒，速度最多每秒 48 个 token，还没开始计算。<span class="ev ev-est">教学推演</span> 所以 Strata 让 CPU 就地计算大部分未命中的专家，这些数据就不用过这条窄路。上游文档还提到，它会把一小部分未命中的专家经 PCIe 交给显卡算，让两边的工作量更均衡。<span class="ev ev-report">上游报告</span>[S03]</p>
-<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 10-2：24,576 个专家里有多少放在显卡上。默认 1,589 个，把对话历史移出显存后 3,872 个，速度从每秒 50.9 提高到 62.6 个 token">
+<p>为什么不把未命中的专家临时搬到显卡上算？关键在<dfn>带宽</dfn>，也就是每秒能搬多少字节。下面让四个地方同时搬这 664 MB，看谁先到终点：</p>
+<div class="viz" data-viz="transfer-race"><figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="图 10-5：从显存、内存、PCIe、固态硬盘搬 664 MB 分别约需 1.0、8.0、10.5、94.9 毫秒">
+<text class="f-muted" fill="#5c6d66" x="10" y="14" font-size="11">搬 664 MB 要多久（理论峰值，条长按比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="42" font-size="12">显存</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="30" width="2.3" height="16"/>
+<text class="f-text" fill="#182f2b" x="106" y="43" font-size="12">1.0 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="82" font-size="12">内存</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="70" width="18.5" height="16"/>
+<text class="f-text" fill="#182f2b" x="122" y="83" font-size="12">8.0 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="122" font-size="12">PCIe 5.0</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="110" width="24.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="128" y="123" font-size="12">10.5 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="162" font-size="12">固态硬盘</text>
+<rect class="f-warn" fill="#9e5d24" x="96" y="150" width="220" height="16"/>
+<text class="f-text" fill="#182f2b" x="322" y="163" font-size="12">94.9 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="11">时间 = 664 MB ÷ 带宽（672 / 83 / 63 / 7 GB/s）</text>
+</svg><figcaption>图 10-5　走 PCIe 搬一遍要 10.5 毫秒，光搬运就把速度压到每秒 94 个 token 以内；从硬盘读则要近 0.1 秒。</figcaption></figure></div>
+<p>结论很清楚：不能每个 token 都经 PCIe 搬一遍。所以 Strata 让 CPU 在内存里就地计算大部分未命中的专家，这些数据就不用过这条窄路。上游文档还提到，它会把一小部分未命中的专家经 PCIe 交给显卡算，让两边的工作量更均衡。<span class="ev ev-report">上游报告</span>[S03]</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这正是《计算机组成原理》里存储层次的思路：把最常用的数据放在最快的一层。第 1 章的「存储层次结构」专栏有各层带宽的对比。</p>
+<p>显卡上能缓存多少专家，直接影响速度。图 10-6 是上游文档里的一组实测。</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 10-6：24,576 个专家里有多少放在显卡上。默认 1,589 个，把对话历史移出显存后 3,872 个，速度从每秒 50.9 提高到 62.6 个 token">
 <text class="f-text" fill="#182f2b" x="20" y="22" font-size="13" font-weight="600">全部 24,576 个专家（条的长度按比例）</text>
 <text class="f-muted" fill="#5c6d66" x="20" y="54" font-size="12">默认设置</text>
 <rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="62" width="360" height="22" rx="4"/>
@@ -66,30 +137,54 @@
 <rect class="f-accent" fill="#136d5a" x="20" y="146" width="56.7" height="22" rx="4"/>
 <text class="f-text" fill="#182f2b" x="20" y="188" font-size="12">显卡上 3,872 个（约 16%）· 每秒 62.6 个 token</text>
 <text class="f-muted" fill="#5c6d66" x="20" y="222" font-size="11">上游实测：RTX 5070 12 GB，Q2_0，262K 上下文，引擎 0.1.5</text>
-</svg><figcaption>图 10-2　显卡上缓存的专家越多，CPU 要算的就越少，速度越快。数据来自上游文档。[S03]</figcaption></figure>
-<p>图 10-2 是上游文档里的一组实测。<span class="ev ev-report">上游报告</span>[S03] 在 262K 的长上下文下，对话历史本身就要占不少显存。把其中大部分挪到内存后，显卡腾出的空间能多放 2,283 个专家，生成速度从每秒 50.9 个 token 提高到 62.6 个。文档还说，每多 1 GB 显存，大约能多放 700 个专家。[S02] 这和前面的字节数对得上：1 GB ÷ 1,382,400 字节 ≈ 723 个。</p>
-<p>缓存能帮多大忙，取决于专家被选中的频率是否均匀。如果少数热门专家承担了大量工作，缓存住它们就能让显卡多干活、CPU 少干活；如果每个专家被选中的机会完全均等，缓存 6% 的专家，大约也只能命中 6%。这一点在下一节和实验里还会用到。</p>
+</svg><figcaption>图 10-6　显卡上缓存的专家越多，CPU 要算的就越少，速度越快。数据来自上游文档。[S03]</figcaption></figure>
+<p>在 262K 的长上下文下，对话历史本身就要占不少显存。把其中大部分挪到内存后，显卡腾出的空间多放了 2,283 个专家，生成速度从每秒 50.9 个 token 提高到 62.6 个。<span class="ev ev-report">上游报告</span>[S03] 文档还说，每多 1 GB 显存大约能多放 700 个专家。[S02] 这和字节数对得上：1 GB ÷ 1,382,400 字节 ≈ 723 个。</p>
 
 <h2 id="sec-5">10.5 热门专家会变：缓存要跟着对话走</h2>
-<p>哪些专家热门，取决于你在聊什么。写代码时常用的专家，和写中文散文时常用的，可能很不一样。所以 Strata 的专家缓存不是一次定死的，而是在你聊天的过程中不断调整：把最近常被选中的专家换进显卡，把冷门的换出去。<span class="ev ev-report">上游报告</span>[S02]</p>
-<p>这和你整理厨房台面是一个道理：最近天天做川菜，花椒辣椒就摆在手边；换成烘焙，台面上的东西也跟着换。台面大小不变，摆什么由最近的使用情况决定。第 12 章会细讲这个缓存怎样决定“换谁进、换谁出”。</p>
-<p>注意一点：缓存只改变专家<strong>在哪里算</strong>，不改变<strong>算什么</strong>。被换出显卡的专家依然在内存里，被选中时由 CPU 计算，模型本身没有少任何东西。（第 26 章会讲到，CPU 和 GPU 的计算在最后几位小数上可能略有差异，但这不是“丢了专家”。）</p>
+<p>哪些专家热门，取决于你在聊什么。写代码时常用的专家，和写中文散文时常用的，可能很不一样。所以 Strata 的专家缓存不是一次定死的，而是在你聊天的过程中不断调整：把最近常被选中的专家换进显卡，把冷门的换出去。<span class="ev ev-report">上游报告</span>[S02] 图 10-7 是一个示意。</p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="图 10-7：话题从代码换成散文后，显存缓存换出两个冷门专家，换入两个热门专家，槽位总数不变">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="11">显存里的专家缓存（示意：只画 8 个槽位）</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">聊代码时</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="96" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="112.5" y="48" font-size="11" text-anchor="middle">#027</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="133" y="30" width="33" height="26" rx="3"/><text class="f-muted" fill="#5c6d66" x="149.5" y="48" font-size="11" text-anchor="middle">#331</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="170" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="186.5" y="48" font-size="11" text-anchor="middle">#045</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="207" y="30" width="33" height="26" rx="3"/><text class="f-muted" fill="#5c6d66" x="223.5" y="48" font-size="11" text-anchor="middle">#408</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="260.5" y="48" font-size="11" text-anchor="middle">#156</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="281" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="297.5" y="48" font-size="11" text-anchor="middle">#073</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="318" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="334.5" y="48" font-size="11" text-anchor="middle">#219</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="355" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="371.5" y="48" font-size="11" text-anchor="middle">#360</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M149.5 58V96M223.5 58V96"/>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="12">换成写散文</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="96" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="112.5" y="118" font-size="11" text-anchor="middle">#027</text>
+<rect class="f-accent" fill="#136d5a" x="133" y="100" width="33" height="26" rx="3"/><text class="f-on" fill="#ffffff" x="149.5" y="118" font-size="11" text-anchor="middle">#112</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="170" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="186.5" y="118" font-size="11" text-anchor="middle">#045</text>
+<rect class="f-accent" fill="#136d5a" x="207" y="100" width="33" height="26" rx="3"/><text class="f-on" fill="#ffffff" x="223.5" y="118" font-size="11" text-anchor="middle">#290</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="260.5" y="118" font-size="11" text-anchor="middle">#156</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="281" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="297.5" y="118" font-size="11" text-anchor="middle">#073</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="318" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="334.5" y="118" font-size="11" text-anchor="middle">#219</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="355" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="371.5" y="118" font-size="11" text-anchor="middle">#360</text>
+<text class="f-text" fill="#182f2b" x="10" y="156" font-size="11">换出：#331、#408（最近很少被选中，回到内存里待命）</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="11">换入：#112、#290（最近频繁被选中，搬进显存）</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="202" font-size="11">槽位总数不变，变的是“谁住在显存里”。编号是示意。</text>
+</svg><figcaption>图 10-7　话题变了，热门专家也会变。缓存把冷门专家换出、热门专家换入，显存总量不变。</figcaption></figure>
+<p>这和整理厨房台面是一个道理：最近天天做川菜，花椒辣椒就摆在手边；换成烘焙，台面上的东西也跟着换。台面大小不变，摆什么由最近的使用情况决定。第 12 章会细讲这个缓存怎样决定“换谁进、换谁出”。</p>
+<p>注意一点：缓存只改变专家<strong>在哪里算</strong>，不改变<strong>算什么</strong>。被换出的专家依然在内存里，被选中时由 CPU 计算，模型本身一个专家都没少。（第 26 章会讲到，CPU 和 GPU 算同一个专家时，最后几位小数可能略有差异，但这不是“丢了专家”。）</p>
 
 <h2 id="sec-6">10.6 动手：体会“热门”带来的命中率</h2>
-<p>打开本章的交互实验「缓存轨迹与冲突」。它用一串访问记录，比较几种常见的缓存替换策略。试两组访问记录：一组集中在少数几个键上，一组均匀分散。同样的槽位数，看命中率差多少。访问越集中，有限的缓存就越值钱。实验里的策略是教科书里的通用算法，不是 Strata 实际使用的自适应策略。</p>
+<p>缓存能帮多大忙，取决于专家被选中的频率是否均匀。如果少数热门专家承担了大量工作，缓存住它们，显卡就能多干活、CPU 少干活；如果每个专家被选中的机会完全均等，缓存 6% 的专家，大约也只能命中 6%。</p>
+<p>打开本章的交互实验「缓存轨迹与冲突」，试两组访问记录：一组集中在少数几个键上，一组均匀分散。同样的槽位数，看命中率差多少。访问越集中，有限的缓存就越值钱。实验里的策略是教科书里的通用算法，不是 Strata 实际使用的自适应策略。</p>
 
 <div class="recap"><h3>记住这三点</h3><ol>
-<li>MoE 模型每层有很多专家，路由器为每个 token 挑少数几个。Strata 用的模型是每层 512 个挑 10 个。</li>
-<li>参数总量大，不等于每一步都用很多参数：这个模型每个 token 只动用约 5% 的参数。</li>
-<li>Strata 把热门专家缓存在显卡上，全部专家放在内存里，没命中的由 CPU 就地计算。显存越大，缓存越多，速度越快。</li>
+<li>MoE 模型每层有很多专家，路由器为每个 token 挑少数几个。Strata 用的模型每层 512 个挑 10 个，一个 token 一共挑 480 次。</li>
+<li>参数多，不等于每一步都用很多参数：这个模型每个 token 只动用约 5% 的参数。</li>
+<li>热门专家缓存在显卡上，全部专家放在内存里，没命中的主要由 CPU 就地计算。显存越大，缓存越多，速度越快。</li>
 </ol></div>
 <div class="myth"><p><strong>常见误解：“没被选中的专家没用，删掉就能省空间。”</strong></p>
 <p>这一步没被选中，下一个 token 就可能用到它。删掉专家会改变模型本身。Strata 提供的 Coder 版本就删掉了一半专家：据其作者，它在编程测试 SWE-bench Verified 上保留了原模型 91% 的分数，但在中文等其他文本上明显变弱。上游因此建议，写中文请选保留全部专家的版本。<span class="ev ev-report">上游报告</span>[S01]</p></div>
 
 <details class="deep"><summary>深入一层：top-k 的边界、接口契约与评估方法</summary>
 <h3>top-k 是一条不连续的边界</h3>
-<p>把 512 个分数全排序可以得到前 10 名，也可以用选择算法或并行归约减少工作。无论怎么实现，都必须规定分数并列时的顺序。更要紧的是：第 10 名和第 11 名的分数可能非常接近。一个极小的数值误差，就可能换掉整个专家，造成的输出差异远大于分数差本身。</p>
-<p>所以，“所有路由分数的误差都小于 10⁻⁴”不足以证明两次计算选中了相同的专家。测试要分别记录选中的专家编号、各自的权重和合并后的输出，并专门构造边界样本、并列样本和异常值。</p>
+<p>第 10 名和第 11 名的分数可能非常接近。一个极小的数值误差，就可能换掉整个专家，造成的输出差异远大于分数差本身。所以，“所有路由分数的误差都小于 10⁻⁴”不足以证明两次计算选中了相同的专家。测试要分别记录选中的专家编号、各自的权重和合并后的输出，并专门构造边界样本、并列样本和异常值。</p>
 <h3>固定地址不等于固定内容</h3>
 <p><code>expert_source.hpp</code> 把接口契约写成了一条条警告。[S06] 第一条：每一层送给专家池的输入 <code>x_f</code>，用的是<strong>同一块</strong>锁页内存，地址永远不变，内容每层不同。如果有人按地址缓存它的量化结果，就会把第 0 层的数据重复用到后面 47 层。结果是一个有限的、看起来合理、但完全错误的 token。</p>
 <p>这对应数据结构里的“键设计”问题：对象在哪里，不等于对象是哪个版本。工程上要用显式的代数（generation）、层号、内容身份或受限的生命周期，不能只靠指针相等来判断数据相等。</p>

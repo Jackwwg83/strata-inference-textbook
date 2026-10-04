@@ -93,7 +93,10 @@ test('rewritten chapters follow the enthusiast template and print their deep div
   const html=fs.readFileSync(path.join(root,'content/chapters',c.id+'.html'),'utf8');
   for(const cls of ['class="tldr"','class="recap"','class="myth"','<details class="deep">'])assert.ok(html.includes(cls),c.id+' missing '+cls);
   const svgs=[...html.matchAll(/<svg\b[^>]*>/g)].map(m=>m[0]);
-  assert.ok(svgs.length>=1,c.id+' needs a figure');
+  assert.ok(svgs.length>=5,c.id+' needs at least 5 figures, has '+svgs.length);
+  assert.ok(html.includes('class="bridge"'),c.id+' needs a note for CS students');
+  const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]).filter(x=>!/^sec-\d+$/.test(x));
+  for(const id of ids)assert.ok(id.startsWith('c'+c.id+'-'),c.id+' svg id must be chapter-scoped: '+id);
   for(const s of svgs){assert.match(s,/role="img"/);assert.match(s,/aria-label="[^"]+"/);assert.match(s,/viewBox="/);}
   // Every drawn shape carries a fill attribute, so the figure renders in the unstyled print book too.
   for(const [tag] of html.matchAll(/<(rect|text|circle|path)\b[^>]*>/g))assert.match(tag,/\bfill="/,c.id+' shape without fallback fill: '+tag.slice(0,60));
@@ -104,4 +107,45 @@ test('rewritten chapters follow the enthusiast template and print their deep div
  assert.ok(full.includes('<details class="deep" open>'));
  const app=fs.readFileSync(path.join(root,'src/app.js'),'utf8');
  assert.ok(app.includes('<details class="deep" open>'),'exported book must open deep dives too');
+});
+const LINK_HOSTS=new Set(['zh.wikipedia.org','en.wikipedia.org','oi-wiki.org','developer.mozilla.org','docs.nvidia.com','rocm.docs.amd.com','arxiv.org','github.com','huggingface.co','pytorch.org','docs.python.org','www.rfc-editor.org','html.spec.whatwg.org','zh.cppreference.com','en.cppreference.com','pages.cs.wisc.edu','csapp.cs.cmu.edu','www.3blue1brown.com','jalammar.github.io','learn.microsoft.com','www.kernel.org','man7.org','neon.com']);
+test('primers explain CS foundations and cite only vetted public sources',()=>{
+ const htmlOf=id=>fs.readFileSync(path.join(root,'content/chapters',id+'.html'),'utf8');
+ const rewritten=chapters.filter(c=>htmlOf(c.id).includes('class="hook"'));
+ for(const c of rewritten){
+  const html=htmlOf(c.id);
+  const primers=[...html.matchAll(/<aside class="primer" id="(c\d{2}-[a-z0-9-]+)">([\s\S]*?)<\/aside>/g)];
+  assert.ok(primers.length>=1,c.id+' needs at least one CS primer');
+  for(const [,id,body] of primers){assert.ok(id.startsWith('c'+c.id+'-'),id);assert.match(body,/class="further"/,id+' needs further reading');}
+ }
+ for(const c of chapters){
+  const html=htmlOf(c.id);
+  for(const [tag,href] of html.matchAll(/<a\b[^>]*href="(https?:[^"]+)"[^>]*>/g)){
+   const u=new URL(href);assert.equal(u.protocol,'https:',href);assert.ok(LINK_HOSTS.has(u.hostname),c.id+' unvetted host '+u.hostname);
+   assert.match(tag,/target="_blank"/);assert.match(tag,/rel="noopener noreferrer"/);
+  }
+  for(const [,ch,id] of html.matchAll(/href="#chapter\/(\d{2})\/([a-z0-9-]+)"/g)){
+   assert.ok(htmlOf(ch).includes('id="'+id+'"'),c.id+' links to missing anchor '+ch+'/'+id);
+  }
+ }
+ const full=fs.readFileSync(path.join(root,'dist/fullbook.html'),'utf8');
+ assert.ok(!/href="#chapter\//.test(full),'print book must rewrite in-app chapter links');
+});
+test('every interactive figure in the chapters has a registered widget and a static fallback',()=>{
+ const vizDir=path.join(root,'src/viz');
+ require(path.join(vizDir,'core.js'));
+ const files=fs.readdirSync(vizDir).filter(f=>f.endsWith('.js')&&f!=='core.js').sort((a,b)=>(a.endsWith('.math.js')?0:1)-(b.endsWith('.math.js')?0:1)||a.localeCompare(b));
+ for(const f of files)require(path.join(vizDir,f));
+ const used=new Set();
+ for(const c of chapters){
+  const html=fs.readFileSync(path.join(root,'content/chapters',c.id+'.html'),'utf8');
+  for(const m of html.matchAll(/<div class="viz" data-viz="([a-z0-9-]+)">([\s\S]*?)<\/figure><\/div>/g)){
+   used.add(m[1]);
+   assert.ok(globalThis.Viz.has(m[1]),c.id+' uses unregistered widget '+m[1]);
+   assert.match(m[2],/^<figure class="fig"><svg\b/,c.id+' '+m[1]+' needs a static figure fallback');
+  }
+  const opened=(html.match(/<div class="viz"/g)||[]).length,closed=[...html.matchAll(/<div class="viz" data-viz="[a-z0-9-]+"><figure class="fig">[\s\S]*?<\/figure><\/div>/g)].length;
+  assert.equal(opened,closed,c.id+' viz blocks must be <div class="viz" data-viz="…"><figure class="fig">…</figure></div>');
+ }
+ for(const name of globalThis.Viz.names())assert.ok(used.has(name),'widget '+name+' is registered but no chapter uses it');
 });
