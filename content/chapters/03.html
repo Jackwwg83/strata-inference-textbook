@@ -1,18 +1,209 @@
-<h2 id="sec-1">3.1 从二维表到矩阵乘法</h2>
-<p>向量是一列有顺序的数，矩阵是一张有行列的数表。令 W 为 m×d，x 为 d×1，那么 y=Wx 是 m×1，且 yᵢ=ΣⱼWᵢⱼxⱼ。每个输出都把输入按一组权重加权求和。</p>
-<p>取 W=[[1,2,3],[4,5,6]]，x=[1,0,-1]。y=[-2,-2]。这个例子小到能用笔验算，因而比随机大矩阵更适合诊断转置、行列和索引错误：W 的每个位置不对称，错误不容易被掩盖。</p>
-<p>推理中的 GEMV 是矩阵乘向量；多个输入并成 X 后变成 GEMM。两者做的是相同线性变换，但有不同的权重复用机会。它们在性能上不能仅靠总浮点操作数比较。</p>
-<h2 id="sec-2">3.2 shape 不是内存顺序</h2>
-<p>连续存储的行优先二维矩阵，元素 (i,j) 的偏移是 i·d+j。列优先则是 j·m+i。对高维张量，通式是 <code>offset=Σ index[a]×stride[a]</code>。shape 告诉你合法坐标，stride 告诉你各坐标前进一步跨过多少元素。</p>
-<p>Strata 的 GDN 状态在参考表达里写成 (S,S,Hᵥ)，内核采用 (S,Hᵥ,S)，让固定 i、变化 j 的线程读连续内存。数学坐标没有变，物理地址改变了。[S17] 把两个布局的裸字节直接比较，会误报；不转换布局就把一个交给另一个，可能产生有限但错误的结果。</p>
-<h2 id="sec-3">3.3 例题：定位一个三维元素</h2>
-<p>取 S=2、Hᵥ=3，采用 <code>(i,h,j)</code>、j 最快的连续布局。元素 (1,2,0) 的偏移为 <code>(1×3+2)×2+0=10</code>。若错误地采用 <code>(i,j,h)</code>，同一数学元素偏移变成 <code>(1×2+0)×3+2=8</code>。两个地址都在合法范围内，所以越界检查可能完全发现不了。</p>
-<p>更一般地，<strong>内存安全不等于数值语义正确</strong>。地址有效、没有 NaN、最终句子通顺，都不是张量布局一致的证明。</p>
-<h2 id="sec-4">3.4 源码契约：名称、维度、表示共同决定含义</h2>
-<p><code>ModelGeometry</code> 列出内核依赖的维度；<code>LayerView</code> 按名字解析张量；<code>check_layer</code> 和 <code>check_all</code> 检查形状及层类型。[S04] 这些检查应发生在加载时，而不是让第 4000 个 token 才暴露问题。</p>
-<p><code>layer.cpp</code> 对量化代码、scale、offset 三个平面的字节和进行核验，并检查 offset 标志与真实平面一致。[S14] 这里的设计原则是<strong>只从权威元数据推导一次布局，其他模块验证而不重新猜测</strong>。不同模块重复猜测，往往会一致地猜错。</p>
-<h2 id="sec-5">3.5 类型系统的第二层含义</h2>
-<p>C++ 的 <code>float*</code> 只说明“指向浮点数”，没有说明它是未归一化激活、某层输出，还是已经加权的专家结果。编译器无法自动阻止把这些指针接反。</p>
-<p>我们可以在设计上加上语义类型，例如 <code>NormalizedActivation</code>、<code>ExpertOutputUnweighted</code>；即使不真的改类型，也应在接口注释和测试中明确 shape、布局、归一化状态、权重是否已经应用、有效期。把这五项写清楚，远比泛泛写“输入数据”有用。</p>
-<h2 id="sec-6">3.6 实验：先用不对称样本</h2>
-<p>用上面的 W 和 x 实现乘法；再把 X 放成两列分别计算。要求逐列结果等于单独 GEMV。随后故意交换 stride，确认测试失败。进一步给矩阵每个元素赋不同的十位 / 个位坐标标记，能更快指出读错了哪一个轴。</p>
+<div class="hook"><span class="eyebrow">先从一件怪事说起</span>
+<p>Strata 的源码里有一段注释，专门解释一个“故意和参考实现不一样”的地方：同一份状态数据，参考实现按 (S, S, H) 的顺序存，Strata 的内核偏要按 (S, H, S) 存。注释还警告：两种排法用的是同样三个数，<strong>弄混了不会报错</strong>。<span class="ev ev-code">代码事实</span>[S17]</p>
+<p>数还是那些数，换个顺序存，为什么要大书特书？因为对计算机来说，“这个数在第几行第几列”和“这个数在内存第几个格子”是两回事。这一章先把矩阵乘法算明白，再看一张表怎样摊平到内存这条线上。</p></div>
+<p class="tldr"><strong>一句话：</strong>模型的计算几乎全是“一行权重乘一列输入再相加”；而一个张量 = 一串数 + 一套“坐标怎么换算成地址”的规则。形状说明有哪些坐标，步长说明每个坐标跨几格。</p>
+
+<h2 id="sec-1">3.1 模型里装的是一张张数表</h2>
+<p>打开一个模型文件，里面几乎全是数，按用途排成一张张表。只有一列的叫<dfn>向量</dfn>；有行有列的叫<dfn>矩阵</dfn>；把几张表叠起来，就是三维的数组。这些统称<dfn>张量</dfn>：带坐标的一堆数。每个轴有多长，合起来叫<dfn>形状</dfn>，见图 3-1。</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="图 3-1：向量是一列数，矩阵是一张表，三维张量是几张表叠起来；形状写出每个轴的长度">
+<text class="f-text" fill="#182f2b" x="45" y="24" font-size="13" font-weight="600" text-anchor="middle">向量</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="25" y="40" width="40" height="28"/><text class="f-text" fill="#182f2b" x="45" y="59" font-size="12" text-anchor="middle">0.3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="25" y="68" width="40" height="28"/><text class="f-text" fill="#182f2b" x="45" y="87" font-size="12" text-anchor="middle">−1.2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="25" y="96" width="40" height="28"/><text class="f-text" fill="#182f2b" x="45" y="115" font-size="12" text-anchor="middle">0.8</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="25" y="124" width="40" height="28"/><text class="f-text" fill="#182f2b" x="45" y="143" font-size="12" text-anchor="middle">2.0</text>
+<text class="f-muted" fill="#5c6d66" x="45" y="174" font-size="12" text-anchor="middle">形状 (4)</text>
+<text class="f-muted" fill="#5c6d66" x="45" y="192" font-size="12" text-anchor="middle">一列有序的数</text>
+<text class="f-text" fill="#182f2b" x="170" y="24" font-size="13" font-weight="600" text-anchor="middle">矩阵</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="68" width="40" height="28"/><text class="f-text" fill="#182f2b" x="130" y="87" font-size="12" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="68" width="40" height="28"/><text class="f-text" fill="#182f2b" x="170" y="87" font-size="12" text-anchor="middle">2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="190" y="68" width="40" height="28"/><text class="f-text" fill="#182f2b" x="210" y="87" font-size="12" text-anchor="middle">3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="96" width="40" height="28"/><text class="f-text" fill="#182f2b" x="130" y="115" font-size="12" text-anchor="middle">4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="96" width="40" height="28"/><text class="f-text" fill="#182f2b" x="170" y="115" font-size="12" text-anchor="middle">5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="190" y="96" width="40" height="28"/><text class="f-text" fill="#182f2b" x="210" y="115" font-size="12" text-anchor="middle">6</text>
+<text class="f-muted" fill="#5c6d66" x="170" y="174" font-size="12" text-anchor="middle">形状 (2, 3)</text>
+<text class="f-muted" fill="#5c6d66" x="170" y="192" font-size="12" text-anchor="middle">2 行 3 列的一张表</text>
+<text class="f-text" fill="#182f2b" x="330" y="24" font-size="13" font-weight="600" text-anchor="middle">三维张量</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="292" y="56" width="30" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="322" y="56" width="30" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="352" y="56" width="30" height="24"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="292" y="80" width="30" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="322" y="80" width="30" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="352" y="80" width="30" height="24"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="278" y="72" width="30" height="24"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="308" y="72" width="30" height="24"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="338" y="72" width="30" height="24"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="278" y="96" width="30" height="24"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="308" y="96" width="30" height="24"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="338" y="96" width="30" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="330" y="174" font-size="12" text-anchor="middle">形状 (2, 2, 3)</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="192" font-size="12" text-anchor="middle">两张表叠在一起</text>
+<text class="f-text" fill="#182f2b" x="200" y="222" font-size="12" text-anchor="middle">Strata：一个 token 在层与层之间传的是 2560 个数</text>
+</svg><figcaption>图 3-1　向量、矩阵、三维张量。形状只说“每个轴有多长”，没说这些数在内存里按什么顺序放。</figcaption></figure>
+<p>Strata 用的模型里，一个 token 在层与层之间传递的数据，就是一个 2560 个数的向量。<span class="ev ev-code">代码事实</span>[S04] 第 10 章讲的专家，内部是三个矩阵：把 2560 个数压成 640 个，再展开回 2560 个。[S04] 模型的全部计算，几乎都是拿这样的矩阵去乘向量。</p>
+
+<h2 id="sec-2">3.2 手算一次矩阵乘向量</h2>
+<p>先看一个小到能用笔算的例子。W 是 2 行 3 列，x 是 3 个数：</p>
+<div class="viz" data-viz="matvec-steps"><figure class="fig"><svg viewBox="0 0 400 222" role="img" aria-label="图 3-2：W 乘 x 等于 y。W 的第一行与 x 逐个相乘再相加得到 −2，第二行同样得到 −2">
+<rect class="f-accent" fill="#136d5a" x="40" y="30" width="40" height="28"/><text class="f-on" fill="#ffffff" x="60" y="49" font-size="13" text-anchor="middle">1</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="30" width="40" height="28"/><text class="f-on" fill="#ffffff" x="100" y="49" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="30" width="40" height="28"/><text class="f-on" fill="#ffffff" x="140" y="49" font-size="13" text-anchor="middle">3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="58" width="40" height="28"/><text class="f-text" fill="#182f2b" x="60" y="77" font-size="13" text-anchor="middle">4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="58" width="40" height="28"/><text class="f-text" fill="#182f2b" x="100" y="77" font-size="13" text-anchor="middle">5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="120" y="58" width="40" height="28"/><text class="f-text" fill="#182f2b" x="140" y="77" font-size="13" text-anchor="middle">6</text>
+<text class="f-muted" fill="#5c6d66" x="180" y="63" font-size="16" text-anchor="middle">×</text>
+<rect class="f-soft" fill="#e5f1df" x="200" y="16" width="40" height="28"/><text class="f-text" fill="#182f2b" x="220" y="35" font-size="13" text-anchor="middle">1</text>
+<rect class="f-soft" fill="#e5f1df" x="200" y="44" width="40" height="28"/><text class="f-text" fill="#182f2b" x="220" y="63" font-size="13" text-anchor="middle">0</text>
+<rect class="f-soft" fill="#e5f1df" x="200" y="72" width="40" height="28"/><text class="f-text" fill="#182f2b" x="220" y="91" font-size="13" text-anchor="middle">−1</text>
+<text class="f-muted" fill="#5c6d66" x="262" y="63" font-size="16" text-anchor="middle">=</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="282" y="30" width="40" height="28"/><text class="f-text" fill="#182f2b" x="302" y="49" font-size="13" text-anchor="middle">−2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="282" y="58" width="40" height="28"/><text class="f-text" fill="#182f2b" x="302" y="77" font-size="13" text-anchor="middle">−2</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="120" font-size="12" text-anchor="middle">W（2 × 3）</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="120" font-size="12" text-anchor="middle">x（3 × 1）</text>
+<text class="f-muted" fill="#5c6d66" x="302" y="120" font-size="12" text-anchor="middle">y（2 × 1）</text>
+<text class="f-text" fill="#182f2b" x="200" y="152" font-size="13" text-anchor="middle">y₁ = 1×1 + 2×0 + 3×(−1) = −2</text>
+<text class="f-text" fill="#182f2b" x="200" y="176" font-size="13" text-anchor="middle">y₂ = 4×1 + 5×0 + 6×(−1) = −2</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="206" font-size="12" text-anchor="middle">每个输出 = W 的一行与 x 的点积；共 2 × 3 = 6 次乘加</text>
+</svg><figcaption>图 3-2　y = Wx：W 有几行，就做几次点积。高亮的第一行和 x 逐个相乘再相加，得到 y₁ = −2。</figcaption></figure></div>
+<p>规则只有一条：<strong>拿 W 的一行，和 x 一一配对相乘，再全部加起来</strong>，得到一个输出。W 有几行，就重复几次。这个“配对相乘再相加”叫<dfn>点积</dfn>，整个运算叫<dfn>矩阵乘向量</dfn>。行话里写作 <dfn>GEMV</dfn>。</p>
+<p>形状也有规矩：(2 × 3) 的矩阵只能乘 3 个数的向量，结果是 2 个数。中间那个 3 必须对上，然后“消掉”。真实模型里的一次 GEMV，形状可能是 (640 × 2560)：拿 2560 个数进来，交出 640 个。</p>
+<aside class="primer" id="c03-dot-matmul">
+<h3>向量点积与矩阵乘法</h3>
+<p>直觉：去超市买 3 样东西，单价是 [5, 2, 8] 元，数量是 [1, 3, 2] 件，总价就是 5×1 + 2×3 + 8×2 = 27 元。“两个等长的列表，对应相乘再相加”，就是<dfn>点积</dfn>。它是一种<strong>加权求和</strong>：一个列表当权重，另一个当数据。</p>
+<p>矩阵乘向量，就是同一份数据 x 和 W 的每一行各做一次点积。W 是 m 行 d 列，就要做 m 次点积、m × d 次乘加。如果有 b 个输入，把它们并排成一个 d × b 的矩阵 X，算 WX，就是<dfn>矩阵乘矩阵</dfn>（GEMM）。数学上它只是 b 次 GEMV 并排放；工程上差别很大：W 读进来一次，可以给 b 个输入轮流用，见图 3-3。</p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="图 3-3：GEMV 一份权重只服务一个输入；GEMM 一份权重同时服务四个输入">
+<text class="f-text" fill="#182f2b" x="95" y="24" font-size="13" font-weight="600" text-anchor="middle">GEMV：一个输入</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="44" width="70" height="70"/><text class="f-on" fill="#ffffff" x="55" y="84" font-size="14" text-anchor="middle">W</text>
+<text class="f-muted" fill="#5c6d66" x="104" y="84" font-size="14" text-anchor="middle">×</text>
+<rect class="f-soft" fill="#e5f1df" x="116" y="44" width="14" height="70"/>
+<text class="f-muted" fill="#5c6d66" x="142" y="84" font-size="14" text-anchor="middle">=</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="44" width="14" height="70"/>
+<text class="f-text" fill="#182f2b" x="95" y="142" font-size="12" text-anchor="middle">权重读 1 次，用 1 次</text>
+<text class="f-text" fill="#182f2b" x="300" y="24" font-size="13" font-weight="600" text-anchor="middle">GEMM：四个输入一起</text>
+<rect class="f-accent" fill="#136d5a" x="205" y="44" width="56" height="70"/><text class="f-on" fill="#ffffff" x="233" y="84" font-size="14" text-anchor="middle">W</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="84" font-size="14" text-anchor="middle">×</text>
+<rect class="f-soft" fill="#e5f1df" x="280" y="44" width="9" height="70"/><rect class="f-soft" fill="#e5f1df" x="292" y="44" width="9" height="70"/><rect class="f-soft" fill="#e5f1df" x="304" y="44" width="9" height="70"/><rect class="f-soft" fill="#e5f1df" x="316" y="44" width="9" height="70"/>
+<text class="f-muted" fill="#5c6d66" x="335" y="84" font-size="14" text-anchor="middle">=</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="344" y="44" width="9" height="70"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="356" y="44" width="9" height="70"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="368" y="44" width="9" height="70"/><rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="380" y="44" width="9" height="70"/>
+<text class="f-text" fill="#182f2b" x="300" y="142" font-size="12" text-anchor="middle">权重读 1 次，用 4 次</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="178" font-size="12" text-anchor="middle">数学上是同一种变换；差别在于读一次权重能用几次</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="198" font-size="12" text-anchor="middle">这正是“读题”比“写答案”快得多的原因（第 5、16 章）</text>
+</svg><figcaption>图 3-3　GEMV 和 GEMM。权重是最占地方的数据，读一次能多用几次，就能少搬很多字节。</figcaption></figure>
+<p class="further">延伸阅读：<a href="https://oi-wiki.org/math/linear-algebra/matrix/" target="_blank" rel="noopener noreferrer">OI Wiki：矩阵</a> · <a href="https://www.3blue1brown.com/topics/linear-algebra" target="_blank" rel="noopener noreferrer">3Blue1Brown：线性代数的本质</a> · <a href="https://zh.wikipedia.org/zh-cn/点积" target="_blank" rel="noopener noreferrer">维基百科：点积</a> · <a href="https://zh.wikipedia.org/zh-cn/矩陣乘法" target="_blank" rel="noopener noreferrer">维基百科：矩阵乘法</a></p>
+</aside>
+<p>第 1 章说过，写答案时一轮只出一个 token，所以每层的计算都是 GEMV；读题时一大段提问一起算，就变成了 GEMM。这就是图 3-3 的差别在真实系统里的样子。</p>
+
+<h2 id="sec-3">3.3 内存只有一条线：行主序与步长</h2>
+<p>矩阵是二维的，可内存只是一条长长的线，每个格子有一个编号，叫<dfn>地址</dfn>。一张表要放进去，就得先约定“谁先谁后”。</p>
+<aside class="primer" id="c03-memory-layout">
+<h3>数组的内存布局：行主序、列主序与步长</h3>
+<p>想象把一张座位表抄进一个长条笔记本。一种抄法是一排一排抄：先抄第 0 排的所有座位，再抄第 1 排。这叫<dfn>行主序</dfn>。另一种是一列一列抄，叫<dfn>列主序</dfn>。两种抄法都对，只要读的人知道当初是怎么抄的，见图 3-4。</p>
+<figure class="fig"><svg viewBox="0 0 400 256" role="img" aria-label="图 3-4：同一个 2 行 3 列的矩阵，按行主序和列主序放进内存后，元素的先后顺序不同">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">逻辑上：2 行 3 列</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="26" width="40" height="26"/><text class="f-text" fill="#182f2b" x="160" y="44" font-size="13" text-anchor="middle">a</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="26" width="40" height="26"/><text class="f-text" fill="#182f2b" x="200" y="44" font-size="13" text-anchor="middle">b</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="220" y="26" width="40" height="26"/><text class="f-text" fill="#182f2b" x="240" y="44" font-size="13" text-anchor="middle">c</text>
+<rect class="f-accent" fill="#136d5a" x="140" y="52" width="40" height="26"/><text class="f-on" fill="#ffffff" x="160" y="70" font-size="13" text-anchor="middle">d</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="52" width="40" height="26"/><text class="f-on" fill="#ffffff" x="200" y="70" font-size="13" text-anchor="middle">e</text>
+<rect class="f-accent" fill="#136d5a" x="220" y="52" width="40" height="26"/><text class="f-on" fill="#ffffff" x="240" y="70" font-size="13" text-anchor="middle">f</text>
+<text class="f-text" fill="#182f2b" x="10" y="123" font-size="13" font-weight="600">行主序</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="104" width="46" height="28"/><text class="f-text" fill="#182f2b" x="103" y="123" font-size="13" text-anchor="middle">a</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="130" y="104" width="46" height="28"/><text class="f-text" fill="#182f2b" x="153" y="123" font-size="13" text-anchor="middle">b</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="104" width="46" height="28"/><text class="f-text" fill="#182f2b" x="203" y="123" font-size="13" text-anchor="middle">c</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="104" width="46" height="28"/><text class="f-on" fill="#ffffff" x="253" y="123" font-size="13" text-anchor="middle">d</text>
+<rect class="f-accent" fill="#136d5a" x="280" y="104" width="46" height="28"/><text class="f-on" fill="#ffffff" x="303" y="123" font-size="13" text-anchor="middle">e</text>
+<rect class="f-accent" fill="#136d5a" x="330" y="104" width="46" height="28"/><text class="f-on" fill="#ffffff" x="353" y="123" font-size="13" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="103" y="148" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="153" y="148" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="203" y="148" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="253" y="148" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="303" y="148" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="353" y="148" font-size="12" text-anchor="middle">5</text>
+<text class="f-text" fill="#182f2b" x="10" y="189" font-size="13" font-weight="600">列主序</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="170" width="46" height="28"/><text class="f-text" fill="#182f2b" x="103" y="189" font-size="13" text-anchor="middle">a</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="170" width="46" height="28"/><text class="f-on" fill="#ffffff" x="153" y="189" font-size="13" text-anchor="middle">d</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="170" width="46" height="28"/><text class="f-text" fill="#182f2b" x="203" y="189" font-size="13" text-anchor="middle">b</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="170" width="46" height="28"/><text class="f-on" fill="#ffffff" x="253" y="189" font-size="13" text-anchor="middle">e</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="170" width="46" height="28"/><text class="f-text" fill="#182f2b" x="303" y="189" font-size="13" text-anchor="middle">c</text>
+<rect class="f-accent" fill="#136d5a" x="330" y="170" width="46" height="28"/><text class="f-on" fill="#ffffff" x="353" y="189" font-size="13" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="103" y="214" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="153" y="214" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="203" y="214" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="253" y="214" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="303" y="214" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="353" y="214" font-size="12" text-anchor="middle">5</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="244" font-size="12" text-anchor="middle">行主序：(i, j) 的地址 = i × 3 + j；列主序：= j × 2 + i</text>
+</svg><figcaption>图 3-4　同一张 2 × 3 的表，两种放法。高亮的第 1 行，在行主序里挨在一起，在列主序里被拆散了。</figcaption></figure>
+<p>行主序里，(i, j) 的地址是 i × 列数 + j。也就是说：j 每加 1，地址加 1；i 每加 1，地址加一整行的长度。“某个坐标加 1 时地址跨几格”，叫这个轴的<dfn>步长</dfn>（stride）。上面这张表的行主序步长是 (3, 1)，列主序是 (1, 2)。</p>
+<p>推广到任意维：<strong>地址 = 每个坐标 × 它的步长，再加起来</strong>。最快变化的那个轴步长是 1，往前每个轴的步长等于它后面所有轴的长度相乘。所以描述一个张量，光有形状不够，还得有步长。</p>
+<p class="further">延伸阅读：<a href="https://en.wikipedia.org/wiki/Row-_and_column-major_order" target="_blank" rel="noopener noreferrer">Wikipedia: Row- and column-major order</a> · <a href="https://pytorch.org/docs/stable/generated/torch.Tensor.stride.html" target="_blank" rel="noopener noreferrer">PyTorch 文档：Tensor.stride</a> · <a href="https://csapp.cs.cmu.edu/" target="_blank" rel="noopener noreferrer">《深入理解计算机系统》（CS:APP）第 3、6 章</a></p>
+</aside>
+<p class="bridge"><strong>学过计算机的同学：</strong>C 语言的二维数组是行主序，Fortran 和 MATLAB 是列主序。NumPy、PyTorch 的张量都带一组 strides，转置往往只是交换两个步长，一个字节都不搬。也正因为如此，“形状相同”的两个张量，内存里的排列可能完全不同。</p>
+
+<h2 id="sec-4">3.4 三个轴的例子：同一个元素，两个地址</h2>
+<p>把开场那份状态缩小来看。三个轴叫 i、h、j，长度分别是 2、3、2，一共 12 个数。按 (i, h, j) 排，j 最快；按 (i, j, h) 排，h 最快。下面可以点任何一个元素，看它在两种排法下分别住在哪：</p>
+<div class="viz" data-viz="stride-explorer"><figure class="fig"><svg viewBox="0 0 400 196" role="img" aria-label="图 3-5：同一个三维数组按两种顺序放进内存。元素 (1, 2, 0) 在第一种排法里地址是 10，在第二种里是 8">
+<text class="f-text" fill="#182f2b" x="20" y="20" font-size="12" font-weight="600">(i, h, j) 排法：j 最快（Strata 内核）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="34.5" y="47" font-size="12" text-anchor="middle">000</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="64.5" y="47" font-size="12" text-anchor="middle">001</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="94.5" y="47" font-size="12" text-anchor="middle">010</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="124.5" y="47" font-size="12" text-anchor="middle">011</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="154.5" y="47" font-size="12" text-anchor="middle">020</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="170" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="184.5" y="47" font-size="12" text-anchor="middle">021</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="214.5" y="47" font-size="12" text-anchor="middle">100</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="230" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="244.5" y="47" font-size="12" text-anchor="middle">101</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="260" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="274.5" y="47" font-size="12" text-anchor="middle">110</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="304.5" y="47" font-size="12" text-anchor="middle">111</text>
+<rect class="f-accent" fill="#136d5a" x="320" y="30" width="29" height="26"/><text class="f-on" fill="#ffffff" x="334.5" y="47" font-size="12" text-anchor="middle">120</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="350" y="30" width="29" height="26"/><text class="f-text" fill="#182f2b" x="364.5" y="47" font-size="12" text-anchor="middle">121</text>
+<text class="f-muted" fill="#5c6d66" x="34.5" y="70" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="64.5" y="70" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="94.5" y="70" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="124.5" y="70" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="154.5" y="70" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="184.5" y="70" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="214.5" y="70" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="244.5" y="70" font-size="12" text-anchor="middle">7</text><text class="f-muted" fill="#5c6d66" x="274.5" y="70" font-size="12" text-anchor="middle">8</text><text class="f-muted" fill="#5c6d66" x="304.5" y="70" font-size="12" text-anchor="middle">9</text><text class="f-text" fill="#182f2b" x="334.5" y="70" font-size="12" font-weight="600" text-anchor="middle">10</text><text class="f-muted" fill="#5c6d66" x="364.5" y="70" font-size="12" text-anchor="middle">11</text>
+<text class="f-text" fill="#182f2b" x="20" y="100" font-size="12" font-weight="600">(i, j, h) 排法：h 最快（参考实现）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="34.5" y="127" font-size="12" text-anchor="middle">000</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="64.5" y="127" font-size="12" text-anchor="middle">010</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="94.5" y="127" font-size="12" text-anchor="middle">020</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="124.5" y="127" font-size="12" text-anchor="middle">001</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="154.5" y="127" font-size="12" text-anchor="middle">011</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="170" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="184.5" y="127" font-size="12" text-anchor="middle">021</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="214.5" y="127" font-size="12" text-anchor="middle">100</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="230" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="244.5" y="127" font-size="12" text-anchor="middle">110</text>
+<rect class="f-accent" fill="#136d5a" x="260" y="110" width="29" height="26"/><text class="f-on" fill="#ffffff" x="274.5" y="127" font-size="12" text-anchor="middle">120</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="304.5" y="127" font-size="12" text-anchor="middle">101</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="334.5" y="127" font-size="12" text-anchor="middle">111</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="350" y="110" width="29" height="26"/><text class="f-text" fill="#182f2b" x="364.5" y="127" font-size="12" text-anchor="middle">121</text>
+<text class="f-muted" fill="#5c6d66" x="34.5" y="150" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="64.5" y="150" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="94.5" y="150" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="124.5" y="150" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="154.5" y="150" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="184.5" y="150" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="214.5" y="150" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="244.5" y="150" font-size="12" text-anchor="middle">7</text><text class="f-text" fill="#182f2b" x="274.5" y="150" font-size="12" font-weight="600" text-anchor="middle">8</text><text class="f-muted" fill="#5c6d66" x="304.5" y="150" font-size="12" text-anchor="middle">9</text><text class="f-muted" fill="#5c6d66" x="334.5" y="150" font-size="12" text-anchor="middle">10</text><text class="f-muted" fill="#5c6d66" x="364.5" y="150" font-size="12" text-anchor="middle">11</text>
+<text class="f-text" fill="#182f2b" x="200" y="182" font-size="12" text-anchor="middle">同一个元素 (1, 2, 0)：地址是 10 还是 8？两个都合法</text>
+</svg><figcaption>图 3-5　格子里的三位数是坐标 i、h、j。同一个元素换一种排法就换一个地址，而且两个地址都在 0–11 之内。</figcaption></figure></div>
+<p>手算一下高亮的元素 (i=1, h=2, j=0)。(i, h, j) 排法的步长是 (6, 2, 1)，地址 = 1×6 + 2×2 + 0×1 = 10。(i, j, h) 排法的步长是 (6, 1, 3)：i 跨 6，j 跨 3，h 跨 1，地址 = 1×6 + 0×3 + 2×1 = 8。</p>
+<p>两个地址都在合法范围内。这意味着：如果写数据的人按一种排法，读数据的人按另一种，<strong>程序不会崩溃，也不会越界，只会安安静静地读错数</strong>。最后算出来的结果是有限的、看起来正常的，但是错的。这类错误最难查。</p>
+
+<h2 id="sec-5">3.5 Strata 为什么特意换一种排法</h2>
+<p>回到开场那段注释。Strata 用的模型里，有 36 层叫 GDN 的层，每层都有一份状态，是一个三维数组：两个轴长 128，一个轴长 48。<span class="ev ev-code">代码事实</span>[S04] 参考实现把它存成 (S, S, H) = (i, j, h)；Strata 的内核改成 (S, H, S) = (i, h, j)，让 j 变成最快的轴。<span class="ev ev-code">代码事实</span>[S17]</p>
+<p>原因写在注释里：固定 i 时，GPU 上的一组线程会沿着 j 依次往下读。j 最快，这组线程读的就是一整段<strong>连续</strong>的内存；j 不是最快，它们就得隔 48 个数读一个，见图 3-6。GPU 读连续内存时，能把一组线程的请求合并成少数几次大的读取，叫<dfn>合并访存</dfn>；跳着读就合并不起来（第 15 章细讲）。</p>
+<figure class="fig"><svg viewBox="0 0 400 212" role="img" aria-label="图 3-6：j 最快时，一组线程读一段连续内存；h 最快时，相邻的 j 隔 48 个数，线程只能跳着读">
+<text class="f-text" fill="#182f2b" x="20" y="20" font-size="12" font-weight="600">Strata 内核 (S, H, S)：固定 i，j 连续</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="42" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="64" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="86" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="108" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="130" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="152" y="32" width="21" height="24"/><rect class="f-accent" fill="#136d5a" x="174" y="32" width="21" height="24"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="218" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="240" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="262" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="284" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="306" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="328" y="32" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="32" width="21" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="74" font-size="12">8 个线程读 8 个相邻的数：一次读完一整段</text>
+<text class="f-text" fill="#182f2b" x="20" y="114" font-size="12" font-weight="600">参考实现 (S, S, H)：固定 i，j 每步跨 48 个数</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="42" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="64" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="86" y="126" width="21" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="108" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="130" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="152" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="174" y="126" width="21" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="196" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="218" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="240" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="262" y="126" width="21" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="284" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="306" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="328" y="126" width="21" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="126" width="21" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="12">线程要读的数散落各处（图中间距只是示意，实际隔 48 个）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="196" font-size="12">状态本来就是运行时才建的缓冲，选哪种排法不花额外代价</text>
+</svg><figcaption>图 3-6　同样的数，排法决定了读的方式。Strata 让 j 变成最快的轴，一组线程就能连续地读。</figcaption></figure>
+<p>注释接着说：这份状态是运行时才建的缓冲区，不是模型文件里的权重，所以选哪种排法不花额外代价；但必须写明，因为两种排法“索引的是同样三个数，弄混了不会出声”。[S17] 顺手算一下它的大小：128 × 48 × 128 = 786,432 个数，按每个 4 字节的 FP32 存，正好 3 MiB；36 层一共 108 MiB。<span class="ev ev-est">教学推演</span></p>
+<p>注意力层的 KV 缓存也有类似的约定。源码把它的排法写成 [页][KV 头][页内位置][头维度]，最后一个轴最快；并要求头文件以外的代码<strong>不许</strong>自己假设这个映射。测试会用 1、4、512 三种页大小和打乱的页表各跑一遍，要求注意力的输出完全相同。<span class="ev ev-code">代码事实</span>[S18] “排法”被当成了接口契约的一部分。</p>
+
+<h2 id="sec-6">3.6 形状检查在加载时做，然后动手</h2>
+<p>既然用错排法、对错形状都不会自己报错，那就得主动检查。Strata 的 <code>layout.hpp</code> 把内核依赖的每个尺寸写成一个结构体 <code>ModelGeometry</code>：宽度 2560、48 层、每 4 层一个注意力层、每层 512 个专家……然后用 <code>check_layer</code> 和 <code>check_all</code> 逐个核对模型文件里每个张量的形状。<span class="ev ev-code">代码事实</span>[S04]</p>
+<p>文件开头的注释把理由说得很透：不匹配要在<strong>加载时</strong>报出来，写明张量名、实际形状和要求的形状，而不是等到第 4000 个 token 时变成 GEMV 里的一个错数。注释里还记了一个真实的教训：有一轮开发把某个缓存的大小算大了 4 倍，因为误把“查询头的个数”当成了“键头的个数”；这个错误还多活了一轮，因为它让显存预算变得更紧，看起来反而更“安全”。[S04]</p>
+<p>另一个检查在 <code>layer.cpp</code>：一个量化张量由三块组成（编码、缩放系数、偏移），程序要求三块的字节数加起来<strong>正好</strong>等于整个张量；偏移标志和偏移块是否存在，也必须一致。对不上就拒绝，不去猜。<span class="ev ev-code">代码事实</span>[S14] 这些“三块”是什么，第 4 章讲。</p>
+<p><strong>动手：</strong>打开本章的交互实验「把矩阵乘法算出来」。先在纸上预测结果，再改变一个输入元素，看哪些输出跟着变。然后试试本页的两个交互图：在矩阵乘向量里把 x 设成 [0, 1, 0]，在步长实验里点同一个元素、切换排法。最后做一个小练习：给矩阵的每个元素填一个能看出坐标的数（比如第 1 行第 2 列填 12），再故意把步长写反，看输出里哪个数“跑错了地方”。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>矩阵乘向量 = W 的每一行和 x 做一次点积。多个输入并排算（GEMM），一份权重能用好几次。</li>
+<li>内存是一条线。张量 = 一串数 + 形状 + 步长；地址 = 每个坐标乘步长再相加。</li>
+<li>排法用错不会报错，只会悄悄算错。所以排法要写进接口，形状要在加载时检查。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“两个张量形状一样，就能直接互相替换。”</strong></p>
+<p>形状只说明有哪些坐标，不说明这些坐标对应内存里的哪个格子。Strata 的 GDN 状态在参考实现和内核里形状相同，排法不同；直接把一份交给另一方，结果是有限但错误的数。<span class="ev ev-code">代码事实</span>[S17] 还要核对步长、轴的含义，以及数据是什么状态（比如是否已经归一化）。</p></div>
+
+<details class="deep"><summary>深入一层：地址公式、头的对应关系与接口契约</summary>
+<h3>通用地址公式</h3>
+<p>对任意维张量，<code>offset = Σ index[a] × stride[a]</code>。形状告诉你哪些坐标合法，步长告诉你每个坐标前进一步跨过多少个元素。步长的单位要写清楚：是“元素”还是“字节”。两者差一个元素大小的倍数，混用是另一类常见错误。</p>
+<h3>例题：定位一个三维元素</h3>
+<p>取 S = 2、H = 3，采用 (i, h, j)、j 最快的连续布局。元素 (1, 2, 0) 的偏移是 (1 × 3 + 2) × 2 + 0 = 10。若错误地按 (i, j, h) 去读，同一个数学元素的偏移是 (1 × 2 + 0) × 3 + 2 = 8。两个地址都在合法范围内，越界检查发现不了。更一般地说，<strong>内存安全不等于数值语义正确</strong>：地址有效、没有 NaN、最后的句子通顺，都不能证明张量布局一致。</p>
+<h3>头的对应关系：取模还是整除</h3>
+<p>“哪个头配哪个头”也是一种索引规则，而且两种常见写法都能产出形状正确的结果。GDN 层有 48 个值头、16 个键头，Strata 规定第 h 个值头配第 h mod 16 个键头（取模），不是 h ÷ 3（整除）。[S17] 而注意力层有 24 个查询头、2 个 KV 头，规定恰好相反：第 q 个查询头配第 q ÷ 12 个 KV 头（整除），<strong>不是</strong> q mod 2。<span class="ev ev-code">代码事实</span>[S18] 举个例子：值头 17 按取模配键头 1，按整除配键头 5；查询头 1 按整除配 KV 头 0，按取模配 KV 头 1。写反了，程序照样运行。所以源码注释说，参考实现和测试都把这两条规则“钉死”了。</p>
+<h3>KV 缓存的分页地址</h3>
+<p>注意力层的 KV 缓存按页存放。逻辑上第 t 个位置、第 h 个头的那一行，物理位置是：<code>page = table[t / page_size]</code>，<code>row = (page × n_head_kv + h) × page_size + (t mod page_size)</code>。也就是说，同一个头的连续位置在一页里挨在一起，这是注意力计算最想要的性质。[S18] 测试用三种页大小和打乱的页表，要求输出完全相同：排法的选择不能泄漏到结果里。</p>
+<h3>类型系统的第二层含义</h3>
+<p>C++ 的 <code>float*</code> 只说明“这里指向一些浮点数”。它没说这是归一化之前还是之后的激活、是哪一层的输出、专家的结果是否已经乘过路由权重，甚至没说它在 CPU 内存还是显存。Strata 的采样接口就专门写了一段大写的警告：<code>logits</code> 和 <code>out</code> 是<strong>显存指针</strong>，参数名和类型都看不出来；传错了，报错会出现在下一个同步调用里，指向一个毫不相干的缓冲区。<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/sampler.hpp#L30-L43" target="_blank" rel="noopener noreferrer">sampler.hpp</a></p>
+<p>可以在设计上加语义类型，例如 <code>NormalizedActivation</code>、<code>ExpertOutputUnweighted</code>。即使不真的改类型，也应该在接口注释和测试里写清五件事：<strong>形状、排法（步长）、是否已归一化、路由权重是否已乘、缓冲区归谁所有以及能用多久</strong>。第 10 章“深入一层”里 <code>expert_source.hpp</code> 的几条契约，就是这五件事的实例。</p>
+<h3>GEMV 与 GEMM：同一个变换，不同的复用</h3>
+<p>推理里的 GEMV 是矩阵乘一个向量；多个输入并成 X 后就是 GEMM。两者做的是同一种线性变换，但权重的复用机会完全不同，所以不能只靠“总共多少次浮点运算”来比较它们的速度。第 5 章用 roofline 模型把这件事量化。</p>
+<h3>测试要用不对称的小样本</h3>
+<p>用 W = [[1, 2, 3], [4, 5, 6]] 和 x = [1, 0, −1] 实现乘法；再把几个 x 并成两列分别计算，要求逐列结果等于单独的 GEMV。然后故意交换步长，确认测试会失败。W 的每个位置都不一样、也不对称，转置、行列颠倒这类错误就不容易被巧合掩盖。</p>
+</details>
