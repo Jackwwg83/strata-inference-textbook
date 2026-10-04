@@ -1,0 +1,257 @@
+<div class="hook"><span class="eyebrow">Picture this first</span>
+<p>You have Strata running on your computer at home, and your roommates and classmates want to use it too. Five people open the web page and ask questions at the same time. Strata's README says it plainly: it answers one request at a time. <span class="ev ev-report">Upstream report</span>[S01] So how long does the fifth person wait? And if one of them asks for a long essay, do the other four just sit there?</p>
+<p>This chapter is a <strong>design class</strong>. Upstream Strata serves one sequence behind a single first-in, first-out queue; multi-user scheduling is not one of its features but an extension we design ourselves. First we use scheduling algorithms and queueing theory to work out "how long the wait is", then we look at what has to change to turn one sequence into many.</p></div>
+<p class="tldr"><strong>In one line:</strong> who goes first, how long people wait, and whether requests can be computed together are three different questions, answered by the scheduling policy, queueing theory and batching respectively; and before you change anything, every sequence's state must be cleanly isolated.</p>
+
+<h2 id="sec-1">25.1 Where things stand: one lock, one queue</h2>
+<p>The top of <code>serve/server.py</code> says: "One sequence at a time, behind a FIFO." <span class="ev ev-code">Code fact</span>[S15] The implementation is simple: the serving layer has one lock, <code>self.fifo = threading.Lock()</code>. Whichever request holds the lock has the engine to itself; the other requests queue outside the lock, and the "queued" count on the status page goes up by one. <span class="ev ev-code">Code fact</span></p>
+<p>On the other hand, the HTTP server is Python's <code>ThreadingHTTPServer</code>, with one thread per connection, so five people can all <strong>connect</strong> at the same time. Connected is not the same as served; see Figure 25-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 286" role="img" aria-label="Figure 25-1: five connections arrive at once and queue at the FIFO lock; the engine serves one sequence at a time. Connections, queued requests and active sequences are three different numbers">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="44" y="31" font-size="13" text-anchor="middle">User 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="88" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="122" y="31" font-size="13" text-anchor="middle">User 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="166" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">User 3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="278" y="31" font-size="13" text-anchor="middle">User 4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="322" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="356" y="31" font-size="13" text-anchor="middle">User 5</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M44 42L150 74M122 42L170 74M200 42V74M278 42L230 74M356 42L250 74"/>
+<rect class="f-soft" fill="#e5f1df" x="70" y="76" width="260" height="40" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="101" font-size="13" text-anchor="middle">FIFO lock: others wait in line</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 116V138"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="140" width="260" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="165" font-size="13" text-anchor="middle">Engine: 1 sequence at a time</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="198" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="221" font-size="12">HTTP connections: 5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="198" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="215" y="221" font-size="12">Queued requests: 4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="242" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="265" font-size="12">Active sequences: 1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="242" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="215" y="265" font-size="12">Sequences per batch: 1</text>
+</svg><figcaption>Figure 25-1　Upstream Strata today: all five people can connect, but only one person's sequence is generating at any moment. The four numbers at the bottom must be counted separately; they can be completely different.</figcaption></figure>
+<p>Upstream does have one feature that touches on "multiple sessions": you can turn on a size-limited session parking area that keeps the state of a few conversations in RAM, so requests that take turns do not have to re-read their prompts from scratch every time. But the docs say clearly that it <strong>does not run requests concurrently</strong>. <span class="ev ev-report">Upstream report</span> The code that manages these parked sessions is also strict about reuse: the tokens must match exactly, the image identity must match, and the guidance mode must match; all three are required. <span class="ev ev-code">Code fact</span>[S10]</p>
+<p>So everything in the rest of this chapter, from comparing scheduling policies to isolating state for multiple sequences, is a <strong>design exercise</strong>, not something upstream can already do.</p>
+
+<h2 id="sec-2">25.2 Who goes first: FIFO, SJF, round-robin</h2>
+<aside class="primer" id="c25-scheduling">
+<h3>Scheduling algorithms: FIFO, SJF and round-robin</h3>
+<p>When there is one server and a crowd of customers, "whom to serve first" is the <dfn>scheduling</dfn> problem. An operating system giving processes CPU time, a printer ordering print jobs, and an inference service ordering requests are all the same problem. The three classic policies:</p>
+<ul>
+<li><dfn>FIFO</dfn> (first in, first out, also called FCFS, first come, first served): in order of arrival, one finishes before the next starts. Simple and fair, but one long job blocks every short job behind it; this is the <dfn>convoy effect</dfn>.</li>
+<li><dfn>SJF</dfn> (shortest job first): always do the shortest job next. You can prove that when all jobs arrive together, it gives the shortest average waiting time. It has two costs: you must know each job's length in advance, and a long job may be pushed back forever by a steady stream of short ones; this is <dfn>starvation</dfn>.</li>
+<li><dfn>Round-robin</dfn> (RR): everyone takes turns running a short stretch, called a <dfn>time slice</dfn>, and goes to the back of the line if not finished. Everyone gets started quickly, but switching back and forth costs something, and the average completion time is not necessarily shorter.</li>
+</ul>
+<p>There is more than one yardstick, too: <strong>waiting time</strong> (finish time − arrival time − own length), <strong>first response</strong> (how soon service starts; for chat, how soon you see the first word) and <strong>throughput</strong> (how much gets done per unit of time). Each policy wins on some measures and loses on others.</p>
+<p class="further">Further reading: <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-sched.pdf" target="_blank" rel="noopener noreferrer">OSTEP: Scheduling: Introduction</a> · <a href="https://en.wikipedia.org/wiki/Scheduling_%28computing%29" target="_blank" rel="noopener noreferrer">Wikipedia: Scheduling (computing)</a> · <a href="https://en.wikipedia.org/wiki/Resource_starvation" target="_blank" rel="noopener noreferrer">Wikipedia: Resource starvation</a> · <a href="https://en.wikipedia.org/wiki/Round-robin_scheduling" target="_blank" rel="noopener noreferrer">Wikipedia: Round-robin scheduling</a></p>
+</aside>
+<p>Start with the smallest example: three requests arrive together, with answers 8, 3 and 5 tokens long. Assume each token takes 1 time unit to generate and switching takes no time. <span class="ev ev-est">Teaching estimate</span></p>
+<div class="viz" data-viz="sched-race"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figure 25-2: three requests arrive together, lengths 8, 3 and 5. Under FIFO the first words appear at 1, 9 and 12; under round-robin with a time slice of 1 they appear at 1, 2 and 3, but the average wait goes from 6.33 to 7">
+<text class="f-text" fill="#182f2b" x="20" y="30" font-size="13" font-weight="600">FIFO: first word at 1, 9, 12; avg wait 6.33</text>
+<rect class="f-accent" fill="#136d5a" x="20.0" y="40" width="179.0" height="28"/>
+<text class="f-on" fill="#ffffff" x="110.0" y="59" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="200.0" y="40" width="66.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="233.8" y="59" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="267.5" y="40" width="111.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="323.8" y="59" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<text class="f-text" fill="#182f2b" x="20" y="114" font-size="13" font-weight="600">RR, slice 1: first word at 1, 2, 3; avg wait 7</text>
+<rect class="f-accent" fill="#136d5a" x="20.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="31.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="42.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="53.8" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="65.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="76.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="87.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="98.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="110.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="121.3" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="132.5" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="143.8" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="155.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="166.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="177.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="188.8" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="200.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="211.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="222.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="233.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-soft" fill="#e5f1df" x="245.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="256.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="267.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="278.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-soft" fill="#e5f1df" x="290.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="301.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="312.5" y="124" width="66.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="346.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 168H380"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="186" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="186" font-size="12" text-anchor="middle">8</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="186" font-size="12" text-anchor="middle">16</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="210" font-size="12" text-anchor="middle">Same length: same total work, only the order differs</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="228" font-size="12" text-anchor="middle">Interactive: 3 policies, 3 sets, adjustable slice</text>
+</svg><figcaption>Figure 25-2　The same three requests: round-robin (RR) lets everyone see a first word before time unit 3, yet the average wait rises from 6.33 to 7. There is no free lunch between fairness and efficiency. <span class="ev ev-est">Teaching estimate</span></figcaption></figure></div>
+<p>Work out FIFO: A finishes at 8, B at 11, C at 16; the waits are 0, 8 and 11, about 6.33 on average. SJF does B (3) first, then C (5), and A (8) last; the waits are 8, 0 and 3, about 3.67 on average, the shortest. Round-robin gives each one 1 unit in turn, so the first words appear at 1, 2 and 3, and everyone gets a quick response; but all three are dragged out until late, and the average wait is 7, the longest of all.</p>
+<p>If every switch also has to save and restore a big block of sequence state (such as the GDN recurrent state from Chapter 9), a slice that is too small lets the switching cost eat up a lot of time. Fairness is not free; you have to look at first-word time, completion time, throughput and how much state gets moved, all together.</p>
+<p class="bridge"><strong>If you studied CS:</strong> this is the CPU scheduling chapter from Operating Systems, with "process" replaced by "generation request" and "CPU time slice" by "token step". There is one key difference: when an operating system switches processes, it saves only a little context such as registers; when an inference engine switches sequences, behind it sit big blocks of data such as the KV cache and recurrent state.</p>
+
+<h2 id="sec-3">25.3 Queueing theory basics: at 80% busy, things start to jam</h2>
+<p>Scheduling decides who goes first, but there is a more basic question: how densely do requests arrive? However clever the scheduling policy, if work arrives faster than it gets done, the queue grows without limit.</p>
+<aside class="primer" id="c25-queueing">
+<h3>Queueing theory basics: Little's law and M/M/1</h3>
+<p><dfn>Queueing theory</dfn> studies systems of "arrive, queue, get served". It describes a system with a few quantities: the arrival rate λ (how many arrive per unit of time), the service rate μ (how many can be served per unit of time), and the <dfn>utilization</dfn> ρ = λ ÷ μ (the fraction of time the server is busy).</p>
+<p>The most useful result is <dfn>Little's law</dfn>: L = λ × W. The average number of customers in the system, L, equals the arrival rate times the average time each one stays, W. It needs almost no assumptions, and it applies to a bubble tea shop, a highway and an inference service alike. For example, if 3 requests arrive per minute and each stays 20 seconds (1/3 minute) on average, there is 1 request in the system on average.</p>
+<p>The simplest queueing model is called <dfn>M/M/1</dfn>: arrivals are random (the gaps between arrivals follow an exponential distribution), service times are random too, and there is only one server. Its average time in the system is W = 1 ÷ (μ − λ). This formula tells us something counterintuitive: <strong>the closer utilization gets to 100%, the more steeply the waiting time grows</strong>. At ρ = 50%, W is 2 times the service time; at 80%, 5 times; at 95%, 20 times.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Little%27s_law" target="_blank" rel="noopener noreferrer">Wikipedia: Little's law</a> · <a href="https://en.wikipedia.org/wiki/M/M/1_queue" target="_blank" rel="noopener noreferrer">Wikipedia: M/M/1 queue</a> · <a href="https://en.wikipedia.org/wiki/Queueing_theory" target="_blank" rel="noopener noreferrer">Wikipedia: Queueing theory</a></p>
+</aside>
+<p>Apply it to Strata. <span class="ev ev-est">Teaching estimate</span> Suppose an answer takes 10 seconds on average (say 500 tokens at 50 per second); then one Strata can serve at most μ = 6 requests per minute. If 3 arrive per minute on average (ρ = 50%), the average stay is 1 ÷ (6 − 3) minutes = 20 seconds; at 4.8 per minute (ρ = 80%), it is 1 ÷ 1.2 minutes = 50 seconds; at 5.7 per minute (ρ = 95%), it becomes 200 seconds. Requests went up by less than double, but the wait went up tenfold.</p>
+<div class="viz" data-viz="queue-load"><figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="Figure 25-3: average time in the system versus utilization under the M/M/1 model. 20 seconds at 50%, 50 seconds at 80%, 200 seconds at 95%, rising steeply near 100%">
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M56 20V206H382"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.6" stroke-dasharray="3 4" d="M56 144H382M56 82H382M56 20H382"/>
+<text class="f-muted" fill="#5c6d66" x="50" y="211" font-size="12" text-anchor="end">0</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="148" font-size="12" text-anchor="end">100</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="86" font-size="12" text-anchor="end">200</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="24" font-size="12" text-anchor="end">300</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M56.0 199.8L62.5 199.7L69.0 199.5L75.4 199.4L81.9 199.3L88.4 199.1L94.9 199.0L101.4 198.8L107.8 198.6L114.3 198.4L120.8 198.3L127.3 198.1L133.8 197.8L140.2 197.6L146.7 197.4L153.2 197.1L159.7 196.9L166.2 196.6L172.6 196.3L179.1 196.0L185.6 195.7L192.1 195.3L198.6 194.9L205.0 194.5L211.5 194.1L218.0 193.6L224.5 193.1L231.0 192.5L237.4 191.9L243.9 191.2L250.4 190.5L256.9 189.7L263.4 188.8L269.8 187.8L276.3 186.6L282.8 185.3L289.3 183.9L295.8 182.2L302.2 180.2L308.7 177.8L315.2 175.0L321.7 171.6L328.2 167.2L334.6 161.7L341.1 154.3L347.6 144.0L354.1 128.5L360.6 102.7L367.0 51.0L369.2 20.0"/>
+<circle class="f-warn" fill="#9e5d24" cx="218.0" cy="193.6" r="5"/>
+<circle class="f-warn" fill="#9e5d24" cx="315.2" cy="175.0" r="5"/>
+<circle class="f-warn" fill="#9e5d24" cx="363.8" cy="82.0" r="5"/>
+<text class="f-text" fill="#182f2b" x="218" y="180" font-size="12" text-anchor="middle">50%: 20 s</text>
+<text class="f-text" fill="#182f2b" x="300" y="160" font-size="12" text-anchor="end">80%: 50 s</text>
+<text class="f-text" fill="#182f2b" x="354" y="80" font-size="12" text-anchor="end">95%: 200 s</text>
+<text class="f-muted" fill="#5c6d66" x="218" y="226" font-size="12" text-anchor="middle">50%</text>
+<text class="f-muted" fill="#5c6d66" x="315" y="226" font-size="12" text-anchor="middle">80%</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="226" font-size="12" text-anchor="middle">100%</text>
+<text class="f-muted" fill="#5c6d66" x="62" y="16" font-size="12">Average time in system (s)</text>
+<text class="f-muted" fill="#5c6d66" x="219" y="246" font-size="12" text-anchor="middle">Utilization ρ (mean answer time 10 s)</text>
+</svg><figcaption>Figure 25-3　Waiting time climbs steeply with utilization. Before 80% the curve is fairly flat; past 90% it is nearly vertical. That is why a service needs headroom and must not be planned to be "exactly fully busy". <span class="ev ev-est">Teaching estimate</span></figcaption></figure></div>
+<p>M/M/1 is only a rough model: the lengths of large-model answers do not follow an exponential distribution, and prefill and decode take very different amounts of time. But its qualitative conclusion is very robust: <strong>as soon as you get close to full load, waiting gets out of hand</strong>. In a real system this means you either add machines, limit the rate (when the queue is too long, tell the user "please try again later" right away), or find a way to raise μ, which is the batching of the next section.</p>
+
+<h2 id="sec-4">25.4 Continuous batching: letting several sequences move together</h2>
+<p>The two sections above assumed the engine serves one sequence at a time. One way to raise μ is to let several sequences <strong>advance together in the same computation</strong>.</p>
+<aside class="primer" id="c25-continuous-batching">
+<h3>Continuous batching</h3>
+<p>To generate one token, the engine has to read the relevant weights from VRAM once. Serving one sequence, one read of the weights yields only one token; serving 8 sequences at once, one read yields 8 tokens. That is the payoff of <dfn>batching</dfn>: it turns matrix-times-vector into matrix-times-matrix, so the weights are read once and used many times (Chapter 16 covers this in detail).</p>
+<p>Naive <dfn>static batching</dfn> groups a few sequences into a batch that starts together and ends together. The problem is that answers vary in length: the short ones finish early, their places can only sit empty, and the next batch cannot start until the longest one is done.</p>
+<p><dfn>Continuous batching</dfn> (also called iteration-level scheduling) shrinks the unit of scheduling from "a batch of requests" to "one generation step": after every token, it checks whether any sequence has finished, and if so, a waiting sequence takes its place right away. The Orca system was one of the first to lay this idea out systematically; later, inference frameworks such as vLLM adopted it widely, together with paged KV cache management (Chapter 17).</p>
+<p class="further">Further reading: <a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener noreferrer">The vLLM / PagedAttention paper (arXiv)</a> · <a href="https://en.wikipedia.org/wiki/Batch_processing" target="_blank" rel="noopener noreferrer">Wikipedia: Batch processing</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 316" role="img" aria-label="Figure 25-4: three slots, six sequences. Static batching waits for the longest sequence in a batch before starting the next batch, taking 11 steps with 10 idle slot-steps; continuous batching fills a free slot at once, taking 9 steps with 4 idle">
+<text class="f-text" fill="#182f2b" x="10" y="22" font-size="13" font-weight="600">Static batching: start together, end together</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="51" font-size="12">#1</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="79" font-size="12">#2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="107" font-size="12">#3</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="13" font-weight="600">Continuous batching: fill a free slot at once</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="181" font-size="12">#1</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="209" font-size="12">#2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="237" font-size="12">#3</text>
+<rect class="f-accent" fill="#136d5a" x="50.0" y="34" width="83.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="92.5" y="51" font-size="13" font-weight="600" text-anchor="middle">P</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="135.0" y="34" width="83.5" height="24" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="220.0" y="34" width="55.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="248.3" y="51" font-size="13" font-weight="600" text-anchor="middle">S</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="276.7" y="34" width="83.5" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="50.0" y="62" width="168.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="135.0" y="79" font-size="13" font-weight="600" text-anchor="middle">Q</text>
+<rect class="f-warn" fill="#9e5d24" x="220.0" y="62" width="140.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="290.8" y="79" font-size="13" font-weight="600" text-anchor="middle">T</text>
+<rect class="f-soft" fill="#e5f1df" x="50.0" y="90" width="111.8" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="106.7" y="107" font-size="13" font-weight="600" text-anchor="middle">R</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="163.3" y="90" width="55.2" height="24" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" x="220.0" y="90" width="83.5" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="262.5" y="107" font-size="13" font-weight="600" text-anchor="middle">U</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="305.0" y="90" width="55.2" height="24" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="50.0" y="164" width="83.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="92.5" y="181" font-size="13" font-weight="600" text-anchor="middle">P</text>
+<rect class="f-accent" fill="#136d5a" x="135.0" y="164" width="55.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="163.3" y="181" font-size="13" font-weight="600" text-anchor="middle">S</text>
+<rect class="f-soft" fill="#e5f1df" x="191.7" y="164" width="83.5" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="234.2" y="181" font-size="13" font-weight="600" text-anchor="middle">U</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="276.7" y="164" width="26.8" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="50.0" y="192" width="168.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="135.0" y="209" font-size="13" font-weight="600" text-anchor="middle">Q</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="220.0" y="192" width="83.5" height="24" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" x="50.0" y="220" width="111.8" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="106.7" y="237" font-size="13" font-weight="600" text-anchor="middle">R</text>
+<rect class="f-warn" fill="#9e5d24" x="163.3" y="220" width="140.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="234.2" y="237" font-size="13" font-weight="600" text-anchor="middle">T</text>
+<text class="f-muted" fill="#5c6d66" x="50.0" y="266" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="106.7" y="266" font-size="12" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="163.3" y="266" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="220.0" y="266" font-size="12" text-anchor="middle">6</text>
+<text class="f-muted" fill="#5c6d66" x="276.7" y="266" font-size="12" text-anchor="middle">8</text>
+<text class="f-muted" fill="#5c6d66" x="333.3" y="266" font-size="12" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="390.0" y="266" font-size="12" text-anchor="middle">12</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="288" font-size="12" text-anchor="middle">Dashed = idle slot · rows #1–#3 = the three slots</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="306" font-size="12" text-anchor="middle">Static 11 steps, 10 idle · continuous 9 steps, 4 idle</text>
+</svg><figcaption>Figure 25-4　The same three slots and six sequences of different lengths. Continuous batching checks for a free slot at every step, so slots rarely sit idle and the whole job finishes sooner. <span class="ev ev-est">Teaching estimate</span></figcaption></figure>
+<p>For an MoE model like the one Strata runs, batching has one special twist. Each sequence picks 10 experts in every layer (Chapter 10), and different sequences often pick different experts. The more sequences in a batch, the bigger the <strong>union</strong> of experts a layer has to wake up; see Figure 25-5. <span class="ev ev-est">Teaching estimate</span></p>
+<figure class="fig"><svg viewBox="0 0 400 244" role="img" aria-label="Figure 25-5: each sequence picks 10 experts per layer; if every sequence picks independently and uniformly, 1 sequence uses 10 experts, 4 use about 39, 16 about 139 and 32 about 240">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">Experts a batch wakes in one layer (of 512)</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">1 sequence</text><text class="f-text" fill="#182f2b" x="390" y="44" font-size="12" text-anchor="end">10 (2%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="50" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="50" width="7.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">4 sequences (max 40)</text><text class="f-text" fill="#182f2b" x="390" y="88" font-size="12" text-anchor="end">about 38.8 (8%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="94" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="94" width="28.8" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="132" font-size="12">16 sequences (max 160)</text><text class="f-text" fill="#182f2b" x="390" y="132" font-size="12" text-anchor="end">about 138.6 (27%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="138" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="138" width="102.9" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">32 sequences (max 320)</text><text class="f-text" fill="#182f2b" x="390" y="176" font-size="12" text-anchor="end">about 239.6 (47%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="182" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="182" width="177.8" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">Assumes independent, uniform picks of 10 each</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="238" font-size="12">Expected = 512 × (1 − (1 − 10/512)^B), B = sequences</text>
+</svg><figcaption>Figure 25-5　The bigger the batch, the more experts wake up in each layer. For Strata, which keeps most experts in RAM and computes them on the CPU, the "read the weights once" saving of batching is partly offset by reading more experts. <span class="ev ev-est">Teaching estimate</span></figcaption></figure>
+<p>This estimate assumes experts are picked uniformly; real routing has hot and cold experts, so the union is smaller. But the direction is certain: in an architecture where "experts live in RAM and the CPU computes the missed ones", you cannot simply carry over what you know about batching dense models; you have to measure. That is also why this chapter treats it only as a design problem.</p>
+
+<h2 id="sec-5">25.5 Going multi-sequence: isolate state first, then talk speed</h2>
+<p>Suppose you decide to do it and make Strata serve two sequences at once. The first step is not writing a scheduler but making a clear list: what is shared, and what belongs to each sequence alone.</p>
+<p>The upstream code gives a great place to start reading. <code>SessionState</code> in <code>session.hpp</code> has a comment calling it "everything one sequence needs except the weights": each layer's state, scratch space for chunk computation, and the hand-off area between the GPU and CPU expert pools. <span class="ev ev-code">Code fact</span>[S13] In other words, in the upstream design one sequence corresponds to one <code>SessionState</code>.</p>
+<p>More important are these two lines in the comment. The 36 GDN layers <strong>share one set</strong> of scratch space, while their <strong>state</strong> is one per layer; the 12 QSA layers also share one set of scratch space, and the reason is in parentheses: "they never run at the same time". <span class="ev ev-code">Code fact</span>[S13] Under the premise of one sequence, layers run in order, this sharing is completely correct and also saves VRAM. But once two sequences run at the same time, the premise "never run at the same time" no longer holds: both sides write to the shared scratch space at once, and the two sequences' data get mixed into each other.</p>
+<p class="bridge"><strong>If you studied CS:</strong> this is the most classic trap in concurrent programming: code that was correct only because of a hidden assumption that "there is only one executor". When you go multi-threaded, you have to dig out every such assumption one by one and either prove mutual exclusion again or give each executor its own copy, not just put one global lock around the outside and call it done.</p>
+<p>Next comes the VRAM budget. Upstream allocates every layer's state for the maximum context all at once when the session starts, and the comment explains that this is because it requires <strong>zero allocation</strong> on the path that generates each token: a single temporary <code>cudaMalloc</code> can pass every other test and still fail this one. <span class="ev ev-code">Code fact</span>[S13] With multiple sequences, the same principle means: before you admit a new sequence, reserve all of its state space first. Figure 25-6 works out the budget with a set of teaching numbers.</p>
+<figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="Figure 25-6: a teaching budget. One sequence needs 26 GiB; five sequences sharing the weights need only 34 GiB; copying the whole thing five times would need 130 GiB">
+<text class="f-text" fill="#182f2b" x="10" y="22" font-size="12" font-weight="600">1 sequence: 20 + 2 + 2 + 2 = 26 GiB</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="30" width="55.4" height="18"/><rect class="f-warn" fill="#9e5d24" x="65.4" y="30" width="5.5" height="18"/><rect class="f-soft" fill="#e5f1df" x="70.9" y="30" width="5.5" height="18"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76.4" y="30" width="5.5" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="78" font-size="12" font-weight="600">5 sequences, shared: 20 + 5 × 2 + 2 + 2 = 34 GiB</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="86" width="55.4" height="18"/><rect class="f-warn" fill="#9e5d24" x="65.4" y="86" width="27.7" height="18"/><rect class="f-soft" fill="#e5f1df" x="93.1" y="86" width="5.5" height="18"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="98.6" y="86" width="5.5" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="12" font-weight="600">5 sequences, full copies: 5 × 26 = 130 GiB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="142" width="360" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="26" y="193" font-size="12">Shared weights &amp; cache</text>
+<rect class="f-warn" fill="#9e5d24" x="210" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="226" y="193" font-size="12">Per-sequence state</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="202" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="26" y="213" font-size="12">Scratch space</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="210" y="202" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="226" y="213" font-size="12">Reserve margin</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="233" font-size="12">Bars to scale; numbers are teaching assumptions</text>
+</svg><figcaption>Figure 25-6　The weights are needed only once; only the state is needed once per sequence. So five sequences need neither 5 times the VRAM nor as little as one sequence. <span class="ev ev-est">Teaching estimate</span></figcaption></figure>
+<p>These numbers are teaching assumptions: 20 GiB of shared weights and cache, 2 GiB of state per sequence, 2 GiB of scratch space and 2 GiB of reserve. <span class="ev ev-est">Teaching estimate</span> Five active sequences need 20 + 5 × 2 + 2 + 2 = 34 GiB. Note two things: sequences with different context lengths have different state sizes; and if the five sequences really compute at the same time, the scratch space must also be recomputed by the level of concurrency and can no longer be one shared copy.</p>
+<p>This gives the principle of <dfn>admission control</dfn>: before a sequence is promised "active", reserve its whole budget atomically; if the budget is not enough, let it queue or reject it clearly. You must not take in every request first and then hope the VRAM allocator does not fail.</p>
+
+<h2 id="sec-6">25.6 Hands-on: why the short request keeps waiting</h2>
+<p>Open this chapter's lab, "Why short requests keep waiting". It compares FIFO and round-robin on first-word time, completion time and switching cost. All requests are ready at time 0, 1 token takes 1 millisecond, and it does not model batching or prefill on a real GPU. Try these in order:</p>
+<ol>
+<li>With the default requests, compare FIFO and round-robin on first-word time: round-robin lets the short request start sooner.</li>
+<li>Turn up the switching cost: round-robin's total time grows, and the price of fairness becomes visible.</li>
+<li>Make the time slice bigger, until round-robin gives exactly the same result as FIFO.</li>
+</ol>
+<p>Then go back to this chapter's two interactive figures: in the scheduling comparison, try "short requests keep coming" and watch SJF starve the long request; on the queueing curve, push utilization to 95% and run the simulation several times. The lab's numbers are only for discussing scheduling trade-offs; they are not benchmarks of any real system.</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>Upstream Strata serves one sequence at a time, and the other requests queue at the FIFO lock. Multi-user scheduling is this chapter's design exercise, not an upstream feature. Count connections, queued requests and active sequences separately.</li>
+<li>FIFO is simple but gets blocked by long requests; SJF has the shortest average wait but starves long requests; round-robin lets everyone see a first word sooner but pays a switching cost. The closer utilization gets to 100%, the more steeply waiting grows.</li>
+<li>To go multi-sequence, first find every hidden "only one executor" assumption, such as the shared scratch space; then budget by "weights once, state once per sequence", and reserve atomically before admitting a new sequence.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "Strata's HTTP server is multi-threaded, so it can serve several users at the same time."</strong></p>
+<p>Multi-threading only lets several people <strong>connect</strong> at once. In front of the engine that does the real work there is a FIFO lock, and only one sequence generates at any moment. Connection concurrency, thread concurrency and sequence concurrency are three different levels; seeing <code>ThreadingHTTPServer</code> does not mean the engine supports continuous batching.</p></div>
+
+<details class="deep"><summary>Go deeper: four counts, budget details, switching cost and concurrency tests</summary>
+<h3>First, separate what exists from what is designed</h3>
+<p>The pinned upstream serving file says it plainly: one sequence at a time behind a FIFO. [S15] The person who started this book has mentioned a modified Strata branch that supports multiple concurrent requests, but that branch's source is outside the scope of this review. This chapter proposes <strong>a design and a test method for a multi-user extension</strong>; it does not claim to have audited or implemented that branch.</p>
+<p>Count four numbers separately: concurrent HTTP connections, queued requests, sequences generating, and sequences processed in the same kernel computation. They can be completely different. Opening more threads does not automatically solve the isolation of the KV cache, GDN state, PLE state, random numbers and scratch buffers.</p>
+<h3>List who owns each piece of mutable state</h3>
+<p>Read-only weights and read-only cache contents can be shared, with proper synchronization. Each sequence's token history, KV page map, GDN state, PLE state, sampling parameters, random-number counter and cancel flag must have a clear owner. Upstream's <code>SessionState</code> is a good place to start reading about "sequence state other than the weights" [S13]; note that the PLE history and token window are also explicitly called "sequence state" in the comments.</p>
+<p>Whether shared scratch space is safe depends on whether scheduling guarantees mutual exclusion. Scratch space that assumed "layers never run concurrently" breaks at once when two sessions use it at the same time, even though the code was correct before. When adding concurrency, list every single-sequence assumption instead of only looking for one global mutex.</p>
+<h3>Budget details</h3>
+<p>The 34 GiB in the main text is only a starting point. If the five sequences need their own scratch space, those 2 GiB must be recomputed by the actual concurrency; sequences with different context lengths also have different state sizes. Admission control must reserve the budget atomically before a sequence is promised active. The session parking area (an optional upstream feature) uses host RAM, which must be counted in the budget too. <span class="ev ev-report">Upstream report</span></p>
+<h3>The real cost of round-robin</h3>
+<p>The teaching simulation assumes switching costs nothing, or a fixed constant. When a real engine switches sequences, if it has to move one sequence's KV cache and recurrent state out of VRAM and move another's in, a slice that is too small lets the moving cost overwhelm the computing. So a "fairness" evaluation must look at first-word time, completion time, throughput and the amount of state moved, all together. SJF has one more practical problem: an answer's length is unknown until it is fully generated, so it can only be estimated; to prevent starvation, a common approach is to give requests a higher priority the longer they wait, which is called <dfn>aging</dfn>.</p>
+<h3>Worked example: the last slot, two requests at the same moment</h3>
+<p>Test assertions: exactly one request gets a valid budget and becomes active, and the other queues or is clearly rejected; nothing is reserved twice, and a client retry must not create two sessions. After completion or cancellation, the budget is released exactly once; an old request must not keep writing into the state of a new slot.</p>
+<h3>Concurrency tests must hit the "state leaking across" risk</h3>
+<p>Design two fixed requests, A and B, in different languages or tasks. First run each alone and record the reference outputs; then run them interleaved or in parallel. Cover these cases: A is cancelled while B continues; A is in a long prefill while B is decoding; the same prefix with different images; session restore; and two requests racing for the last slot of budget.</p>
+<p>Minimum pass conditions: state isolation is correct, no promise exceeds the budget, nothing ends twice, no output from an old request leaks in, and no long request starves. A system whose total throughput went up but that occasionally mixes up contexts is not an acceptable concurrent inference service.</p>
+<h3>The limits of the simulators' evidence</h3>
+<p>This chapter's two interactive figures and its lab are discrete teaching simulations: every token takes a fixed time, and there is no real prefill, draft verification, prefix hit, GPU kernel or cache contention. They are only for discussing scheduling trade-offs; the ratios they show must not be used to advertise the performance of any real system.</p>
+</details>

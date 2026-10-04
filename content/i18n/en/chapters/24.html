@@ -1,0 +1,269 @@
+<div class="hook"><span class="eyebrow">You may have noticed</span>
+<p>Chat web pages have a "Stop" button. Click it, and the text freezes at once. But did the graphics card (GPU) really stop?</p>
+<p>Strata's source has a very candid comment (issues #430 and #431): it used to be that after a client hung up, the request kept the engine busy until the answer was finished, or until the whole prompt had been read. The screen had long since stopped, and the GPU was still working for someone who had already left. This chapter covers three things: how a request is born and how it ends; how "stop" travels layer by layer down to the GPU; and who is allowed to put your GPU to work.</p></div>
+<p class="tldr"><strong>In one line:</strong> a request passes through four layers: the browser, the HTTP connection, the server process and the engine process. "Stop" is a signal that must be passed down and confirmed at every layer; "authentication" decides who can send a request in at all.</p>
+
+<h2 id="sec-1">24.1 You clicked "Stop". What actually stopped?</h2>
+<p>Between your click and the moment the GPU stops computing for this request lie several layers. Each layer means something different by "stopped"; see Figure 24-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 320" role="img" aria-label="Figure 24-1: a request passes through five layers, and each layer means something different by stopped. An upper layer stopping does not mean the lower layers stopped">
+<text class="f-muted" fill="#5c6d66" x="75" y="18" font-size="12" text-anchor="middle">Layer</text>
+<text class="f-muted" fill="#5c6d66" x="152" y="18" font-size="12">When is this layer "stopped"?</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="28" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="55" font-size="13" font-weight="600" text-anchor="middle">Browser</text>
+<text class="f-text" fill="#182f2b" x="152" y="55" font-size="12">No new words appear</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="84" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="111" font-size="13" font-weight="600" text-anchor="middle">HTTP connection</text>
+<text class="f-text" fill="#182f2b" x="152" y="111" font-size="12">Closed; server writes no more</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="140" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="167" font-size="13" font-weight="600" text-anchor="middle">Server process</text>
+<text class="f-text" fill="#182f2b" x="152" y="167" font-size="12">Request marked "cancelled"</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="196" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="223" font-size="13" font-weight="600" text-anchor="middle">Engine process</text>
+<text class="f-text" fill="#182f2b" x="152" y="223" font-size="12">Gets STOP, writes its DONE</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="252" width="130" height="44" rx="8"/>
+<text class="f-on" fill="#ffffff" x="75" y="279" font-size="13" font-weight="600" text-anchor="middle">GPU</text>
+<text class="f-text" fill="#182f2b" x="152" y="279" font-size="12">Finishes current work, then idle</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="314" font-size="12" text-anchor="middle">Stop flows down; upper stopped ≠ lower stopped</text>
+</svg><figcaption>Figure 24-1　"Stop" means something different at each layer. The browser layer stops first and the GPU layer stops last, and at every layer in between someone has to pass the signal on.</figcaption></figure>
+<p>To make this precise, first draw a <dfn>state machine</dfn> for the request: at any moment the request is in exactly one state, and only certain events can move it to another. Here is this book's teaching version:</p>
+<ul>
+<li><strong>Queued</strong>: the request has arrived, but the engine is serving someone else. Strata serves one sequence at a time, and later arrivals wait in a FIFO (first in, first out) queue. [S15]</li>
+<li><strong>Prefill</strong>: the engine reads your prompt chunk by chunk (the prefill, "reading the prompt", from Chapter 1).</li>
+<li><strong>Decode</strong>: it writes the answer one token at a time (decode, "writing the answer").</li>
+<li><strong>Done / Cancelled / Failed</strong>: three end states. Every request must end in one of them; none may be left hanging.</li>
+<li><strong>Cancelling</strong>: "stop" has been called, but the engine has not yet confirmed that it stopped. This in-between state is the easiest one to overlook.</li>
+</ul>
+<p>These state names are this book's abstraction, not an enum in the upstream code. What Strata actually records is whether a request is "queued" or "generating", plus a short phase note such as "reading the prompt" or "answering". <span class="ev ev-code">Code fact</span> The simulator below slows the whole process down:</p>
+<div class="viz" data-viz="request-lifecycle"><figure class="fig"><svg viewBox="0 0 400 280" role="img" aria-label="Figure 24-2: the teaching state machine of a request. Queued, prefill, decode, done is the normal path; cancelling is the in-between state after prefill or decode is cancelled, and only after confirmation does it become cancelled; a lost engine leads to failed">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="16" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="64" y="39" font-size="14" text-anchor="middle">Queued</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="152" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="200" y="39" font-size="14" text-anchor="middle">Prefill</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="288" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="39" font-size="14" text-anchor="middle">Decode</text>
+<rect class="f-accent" fill="#136d5a" x="152" y="104" width="96" height="36" rx="8"/><text class="f-on" fill="#ffffff" x="200" y="127" font-size="14" font-weight="600" text-anchor="middle">Cancelling</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="288" y="104" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="127" font-size="14" text-anchor="middle">Done</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="152" y="192" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="200" y="215" font-size="14" text-anchor="middle">Cancelled</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="288" y="192" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="215" font-size="14" text-anchor="middle">Failed</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M112 34H150M248 34H286M336 52V102M200 52V102M296 52L240 104M200 140V190M64 52V210H150"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M248 130L300 192"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="248" font-size="12" text-anchor="middle">Dashed: engine lost, the watchdog steps in</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="268" font-size="12" text-anchor="middle">Interactive: press Cancel in any state</text>
+</svg><figcaption>Figure 24-2　The teaching state machine of a request. When prefill or decode is cancelled, the request first enters "Cancelling", and counts as "Cancelled" only after the engine confirms it stopped. There are only three end states: Done, Cancelled and Failed.</figcaption></figure></div>
+<p class="bridge"><strong>If you studied CS:</strong> the process state diagram in Operating Systems (ready, running, blocked, terminated) is drawn the same way. The benefit of a state machine is that you can check it case by case: where does each state go on each event? Is there a state that can never reach an end?</p>
+
+<h2 id="sec-2">24.2 Processes and threads: who is actually doing the work</h2>
+<p>To know where "stop" must go, you first need to know who is doing the work.</p>
+<aside class="primer" id="c24-process-thread">
+<h3>The life cycle of processes and threads</h3>
+<p>A <dfn>process</dfn> is a running program. The operating system gives it its own separate block of memory, plus resources such as open files and network connections. By default two processes cannot see each other's memory; they can only pass messages through channels such as <dfn>pipes</dfn> or the network. When a process ends, the operating system takes back all the RAM and VRAM it held.</p>
+<p>A <dfn>thread</dfn> is one line of execution inside a process. A process can have several threads; they share the same memory, which makes exchanging data easy but also makes it easy for them to step on each other's toes.</p>
+<p>Both have a life cycle: created, running, waiting (for network data, say) and ended. There are two ways to end: <strong>finish on your own</strong>, or <strong>be ended by someone else</strong>. On Unix-like systems one process can send another a signal: SIGTERM means "please exit", and the receiver gets a chance to tidy up first; SIGKILL means "end right now", and the receiver gets no chance to clean up at all.</p>
+<p>How this relates to Strata: the server and the engine are <strong>two processes</strong> that pass text line by line through pipes; inside the server, several threads split the work, as Figure 24-3 shows.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Process_%28computing%29" target="_blank" rel="noopener noreferrer">Wikipedia: Process (computing)</a> · <a href="https://en.wikipedia.org/wiki/Thread_%28computing%29" target="_blank" rel="noopener noreferrer">Wikipedia: Thread (computing)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-intro.pdf" target="_blank" rel="noopener noreferrer">OSTEP: The Abstraction: The Process</a> · <a href="https://docs.python.org/3/library/subprocess.html" target="_blank" rel="noopener noreferrer">Python docs: subprocess</a> · <a href="https://man7.org/linux/man-pages/man7/signal.7.html" target="_blank" rel="noopener noreferrer">man 7 signal</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figure 24-3: Strata's server process holds request threads, a watcher thread and a reader thread, which take turns using the engine through a FIFO lock; the engine is a separate process, and the two exchange lines of text over standard input and output">
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="10" width="380" height="170" rx="10"/>
+<text class="f-text" fill="#182f2b" x="20" y="31" font-size="13" font-weight="600">Python server process: serve/server.py</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="76" y="62" font-size="13" font-weight="600" text-anchor="middle">Request</text>
+<text class="f-muted" fill="#5c6d66" x="76" y="79" font-size="12" text-anchor="middle">one thread per</text>
+<text class="f-muted" fill="#5c6d66" x="76" y="94" font-size="12" text-anchor="middle">connection</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="144" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="62" font-size="13" font-weight="600" text-anchor="middle">Watcher</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="79" font-size="12" text-anchor="middle">checks the link</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="94" font-size="12" text-anchor="middle">every 0.5 s</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="268" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="324" y="62" font-size="13" font-weight="600" text-anchor="middle">Reader</text>
+<text class="f-muted" fill="#5c6d66" x="324" y="79" font-size="12" text-anchor="middle">queues engine</text>
+<text class="f-muted" fill="#5c6d66" x="324" y="94" font-size="12" text-anchor="middle">output</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="116" width="360" height="48" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="145" font-size="13" text-anchor="middle">FIFO lock: one request at a time</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 180V228M250 228V180"/>
+<path class="f-muted" fill="#5c6d66" d="M100 232l-5-8h10z"/>
+<path class="f-muted" fill="#5c6d66" d="M250 176l-5 8h10z"/>
+<text class="f-muted" fill="#5c6d66" x="108" y="200" font-size="12">stdin: GEN, STOP, QUIT</text>
+<text class="f-muted" fill="#5c6d66" x="258" y="222" font-size="12">stdout: T, PP, DONE</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="234" width="380" height="56" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="257" font-size="13" font-weight="600" text-anchor="middle">Engine process: strata --serve</text>
+<text class="f-on" fill="#ffffff" x="200" y="278" font-size="12" text-anchor="middle">It owns the weights, expert cache and VRAM</text>
+</svg><figcaption>Figure 24-3　The server and the engine are two processes that pass text line by line through pipes. Each thread in the server has its own job, and the FIFO lock makes sure only one request uses the engine at a time.</figcaption></figure>
+<p>The server starts <code>strata --serve</code> with Python's <code>subprocess.Popen</code> and connects both its standard input and its standard output to pipes. <span class="ev ev-code">Code fact</span> Once the engine has loaded its weights, it first writes a few <code>INFO</code> lines, then a <code>READY</code> line with the context length; if that line also carries <code>stop</code>, this engine version supports stopping midway. Only when the server reads <code>READY</code> does it treat the engine as "alive". After that, the server writes a <code>GEN</code> line to submit a request, and the engine answers with <code>T</code> (one token), <code>PP</code> (prefill progress), <code>DONE</code> (finished) or <code>ERR</code> (error).</p>
+<p>A dedicated reader thread puts every line of engine output into a queue. That way, the thread handling a request can wait for the next line "with a timeout": if nothing comes, it can send a heartbeat and check the cancel flag first, instead of waiting blindly forever. <span class="ev ev-code">Code fact</span></p>
+<p>The engine process can also die unexpectedly. The code has a dedicated <code>EngineDied</code> exception, and its comment names the most common cause: on Linux, being killed by the OOM killer when memory runs out. [S15] When that happens, the current request ends with an error, and when the next request arrives, the server restarts the engine with the same command.</p>
+<p>Shutting the engine down normally also takes care. The server goes in three steps, waiting at most 20 seconds at each; see Figure 24-4.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figure 24-4: shutting down the engine process takes three steps: first write QUIT so it exits on its own, then terminate, then kill; if it is still alive after all three, report an error">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">Shutting down the engine: ask nicely first</text>
+<rect class="f-soft" fill="#e5f1df" x="8" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="51" y="54" font-size="13" font-weight="600" text-anchor="middle">QUIT</text>
+<text class="f-text" fill="#182f2b" x="51" y="76" font-size="12" text-anchor="middle">lets engine</text>
+<text class="f-text" fill="#182f2b" x="51" y="94" font-size="12" text-anchor="middle">free memory</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="106" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="149" y="54" font-size="13" font-weight="600" text-anchor="middle">terminate</text>
+<text class="f-text" fill="#182f2b" x="149" y="76" font-size="12" text-anchor="middle">exit signal</text>
+<text class="f-text" fill="#182f2b" x="149" y="94" font-size="12" text-anchor="middle">(SIGTERM)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="204" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="247" y="54" font-size="13" font-weight="600" text-anchor="middle">kill</text>
+<text class="f-text" fill="#182f2b" x="247" y="76" font-size="12" text-anchor="middle">force stop,</text>
+<text class="f-text" fill="#182f2b" x="247" y="94" font-size="12" text-anchor="middle">no cleanup</text>
+<rect class="f-warn" fill="#9e5d24" x="302" y="32" width="90" height="76" rx="8"/>
+<text class="f-on" fill="#ffffff" x="347" y="54" font-size="13" font-weight="600" text-anchor="middle">Still up</text>
+<text class="f-on" fill="#ffffff" x="347" y="76" font-size="12" text-anchor="middle">raise error,</text>
+<text class="f-on" fill="#ffffff" x="347" y="94" font-size="12" text-anchor="middle">not "freed"</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M94 70H104M192 70H202M290 70H300"/>
+<text class="f-muted" fill="#5c6d66" x="51" y="128" font-size="12" text-anchor="middle">wait 20 s</text>
+<text class="f-muted" fill="#5c6d66" x="149" y="128" font-size="12" text-anchor="middle">wait 20 s</text>
+<text class="f-muted" fill="#5c6d66" x="247" y="128" font-size="12" text-anchor="middle">wait 20 s</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">Why ask first: the engine locks tens of GB of RAM;</text>
+<text class="f-text" fill="#182f2b" x="10" y="184" font-size="12">an orderly release beats the OS tearing it away.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">On Windows the engine runs in a "job object": however</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">the server exits, the OS ends the engine with it.</text>
+</svg><figcaption>Figure 24-4　Three steps to shut down the engine. Each step gets 20 seconds; if all three fail, the server reports honestly that "the engine has not exited" instead of pretending the VRAM and RAM are already back.</figcaption></figure>
+<p>A comment explains why the first step is <code>QUIT</code>: the engine frees its memory itself, and unlocking tens of GB of pinned memory takes a while. <span class="ev ev-code">Code fact</span> If all three steps fail, the server raises <code>EngineStuck</code> and <strong>keeps</strong> its record of the process; it does not claim that the process's VRAM and RAM have been returned. Also, on Windows the server puts the engine into a job object set to "kill on close". That way, even if you simply close the console window, the engine ends with it and does not become an orphan process nobody looks after. <span class="ev ev-code">Code fact</span></p>
+
+<h2 id="sec-3">24.3 Cancellation: passing "stop" down layer by layer</h2>
+<aside class="primer" id="c24-cancel">
+<h3>Cancellation: why you can only say "please stop"</h3>
+<p>The most direct way to cancel is to cut off the working thread from outside. But that is dangerous: it might be holding a lock, be halfway through writing a data structure, or be borrowing a block of VRAM. Cut it off, and the lock is never released, the data is half new and half old, and everyone after it goes wrong.</p>
+<p>So most real systems use <dfn>cooperative cancellation</dfn>: the outside only sets a <dfn>cancel flag</dfn>, and the worker glances at the flag at agreed <dfn>checkpoints</dfn>; when it sees the flag, it cleans up and exits on its own. Python's <code>threading.Event</code>, Go's <code>context</code> and C#'s <code>CancellationToken</code> all follow this idea.</p>
+<p>Two rules follow. First, cancellation is not instant; in the worst case you wait until the next checkpoint. Second, the farther apart the checkpoints, the slower the cancellation. So "called stop" and "really stopped" are two different things, and the stretch between them is the "Cancelling" state in Figure 24-2.</p>
+<p class="further">Further reading: <a href="https://docs.python.org/3/library/threading.html" target="_blank" rel="noopener noreferrer">Python docs: threading (Event objects)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/threads-intro.pdf" target="_blank" rel="noopener noreferrer">OSTEP: Concurrency: An Introduction</a> · <a href="https://en.wikipedia.org/wiki/Multithreading_%28computer_architecture%29" target="_blank" rel="noopener noreferrer">Wikipedia: Multithreading</a></p>
+</aside>
+<p>Strata's cancellation is cooperative. At the start of each request, the server creates a <code>threading.Event</code> as the cancel flag. Two paths can set it:</p>
+<ul>
+<li><strong>A write fails</strong>: an error while the server writes an SSE event to the connection means the client has left, so the flag is set at once. The comment says: "Client went away: stop the engine." <span class="ev ev-code">Code fact</span></li>
+<li><strong>A watcher thread</strong>: a failed write alone is not enough. While a long prompt is being read, the server writes a keep-alive comment only once in a long while, and the first write after a hang-up usually still "succeeds". So each request gets its own watcher thread that checks the connection every 0.5 seconds: if the connection shows "readable" but yields no data, the other side has closed it, and the flag is set. <span class="ev ev-code">Code fact</span> This is exactly the fix for #430 and #431 mentioned at the start.</li>
+</ul>
+<p>Once the flag is set, it takes effect through checkpoints; see Figure 24-5.</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="Figure 24-5: six steps from the client hanging up to the FIFO being released: notice the hang-up, set the cancel flag, the generation loop writes STOP, the engine stops at a checkpoint, this request's DONE is read, the FIFO is released">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="8" width="360" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">① Client hangs up (you pressed Stop)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="56" width="360" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="79" font-size="13" text-anchor="middle">② Watcher sees the hang-up (≤ 0.5 s)</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="104" width="360" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="127" font-size="13" text-anchor="middle">③ Set the cancel flag, cancel</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="152" width="360" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="175" font-size="13" text-anchor="middle">④ Loop waiting on engine sees it, writes STOP</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="200" width="360" height="36" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="223" font-size="13" text-anchor="middle">⑤ Engine stops at its next checkpoint</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="248" width="360" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="271" font-size="13" text-anchor="middle">⑥ This request's DONE read; FIFO released</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V54M200 92V102M200 140V150M200 188V198M200 236V246"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="310" font-size="12" text-anchor="middle">Decode: the next token is a checkpoint, so fast</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="330" font-size="12" text-anchor="middle">Prefill: must finish the current chunk, maybe 10+ s</text>
+</svg><figcaption>Figure 24-5　The six steps of cancellation. The first three take under a second; step ⑤ waits for the engine to reach a checkpoint, so the phase you cancel in decides how long you wait.</figcaption></figure>
+<p>Where is the checkpoint in step ⑤? During decode, the loop glances at the flag every time it produces a token. During prefill, the engine reads chunk by chunk: <code>should_stop</code> in <code>prefill.hpp</code> is checked once <strong>before each chunk starts</strong>, and if it returns true the prefill ends early with the error message "cancelled". <span class="ev ev-code">Code fact</span>[S12] The server's comment also says so: a STOP sent during prefill is seen only after the current chunk has been read. One chunk can hold up to 32768 tokens. [S15] The "worst-case wait" in the interactive figure is computed from this.</p>
+<p>Step ⑥ matters just as much. After sending STOP, the server keeps reading the engine's output until it gets <strong>this request's own</strong> <code>DONE</code>, and holds the FIFO lock the whole time. The comment explains why: if it let go early, a leftover <code>DONE</code> from the previous request would still sit in the engine queue, and the next request would take it as its own end signal. <span class="ev ev-code">Code fact</span> This step also has a time limit: the wait for the STOP echo is never unbounded, because the FIFO stays taken during the wait and everyone behind is queuing.</p>
+<p>The <code>MockEngine</code> used in tests follows the same contract: before emitting each token, it glances at the cancel flag. [S15] So the cancellation logic can be tested on a machine with no GPU.</p>
+
+<h2 id="sec-4">24.4 What if it hangs? The watchdog</h2>
+<p>Cancellation relies on the engine "cooperating". What if the engine freezes and says nothing at all? The server needs a <dfn>watchdog</dfn>: after a period with no sign of life, it decides something has gone wrong.</p>
+<p>The hard part is "how long is too long". During decode, the engine writes a line for every token, so it is chatty; while reading a very long prompt, it may stay silent for minutes. A one-size-fits-all watchdog either kills an engine that is busy reading a prompt, or waits forever on one that is truly frozen. Strata gives a different limit for each phase [S15]:</p>
+<ul>
+<li>Base limit, 300 seconds: while a request is in progress, if the engine produces no output at all for longer than this, it is declared lost. The config can change this; 0 means wait forever.</li>
+<li>First prefill chunk: on top of the 300 seconds, add the time this chunk would take on "the slowest computer, reading only 50 tokens per second".</li>
+<li>After a chunk is read: the next chunk may take up to 3 times the time the last chunk actually took, but no less than 300 seconds.</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="Figure 24-6: the watchdog's limits. 300 seconds during decode; about 955 seconds for the first prefill chunk; after a chunk is read, still 300 seconds on a fast computer and about 983 seconds on a slow one">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">Allowed engine silence (s, bars to scale)</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">Decoding: the clock restarts at every token</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="50" width="90" height="14"/>
+<text class="f-text" fill="#182f2b" x="106" y="62" font-size="12">300</text>
+<text class="f-text" fill="#182f2b" x="10" y="92" font-size="12">First prefill chunk: 300 + 32768 ÷ 50</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="98" width="286.6" height="14"/>
+<text class="f-text" fill="#182f2b" x="302" y="110" font-size="12">≈ 955</text>
+<text class="f-text" fill="#182f2b" x="10" y="140" font-size="12">Later chunks, fast PC: max(300, 3 × 15.1)</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="146" width="90" height="14"/>
+<text class="f-text" fill="#182f2b" x="106" y="158" font-size="12">300</text>
+<text class="f-text" fill="#182f2b" x="10" y="188" font-size="12">Later chunks, slow PC: max(300, 3 × 327.7)</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="194" width="294.9" height="14"/>
+<text class="f-text" fill="#182f2b" x="310" y="206" font-size="12">≈ 983</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">Chunk = 32768 tokens; fast PC 2171/s, slow PC 100/s</text>
+</svg><figcaption>Figure 24-6　The watchdog's limit follows the phase of work. When a slow computer reads a big prompt chunk, the limit stretches to well over ten minutes on its own, so a working engine is not killed by mistake. <span class="ev ev-est">Teaching estimate</span></figcaption></figure>
+<p>The numbers in the figure come from plugging in the code's constants. <span class="ev ev-est">Teaching estimate</span> First chunk: 300 + 32768 ÷ 50 ≈ 955 seconds. A fast computer, at the upstream measured rate of 2171 tokens per second, reads a 32768-token chunk in about 15.1 seconds; 3 times that is 45.3 seconds, under 300, so the limit stays at 300 seconds. A slow computer at 100 tokens per second needs 327.7 seconds per chunk, and 3 times that is about 983 seconds.</p>
+<p>What happens after a timeout? The comment calls it "the two sides out of step": the engine's main thread is waiting for the next command, while the server is waiting for this request to end. The server ends the engine process, the request ends with an error, and the engine restarts when the next request arrives. [S15] Ending the process is crude, but it has one advantage: the VRAM and RAM are sure to come back with it.</p>
+<p>The same idea shows up at a lower level too. The <code>Verifier</code> that checks draft tokens has a <code>release_gpu_waits</code>: when a batch of GPU work is stuck and cannot finish normally, it forcibly releases every wait flag on the GPU so the batch drains out. But from then on, this Verifier <strong>refuses</strong> to run any new compute window, because that batch finished under untrusted conditions. <span class="ev ev-code">Code fact</span>[S08] A forced drain is not a normal finish; you cannot pretend nothing happened and keep serving the next request.</p>
+
+<h2 id="sec-5">24.5 Who may use your GPU: authentication and API keys</h2>
+<p>So far: "how to stop". This section: "who may start". If anyone can send requests to your Strata, your GPU becomes a public resource.</p>
+<aside class="primer" id="c24-auth">
+<h3>Authentication and API keys</h3>
+<p><dfn>Authentication</dfn> answers "who are you"; <dfn>authorization</dfn> answers "what may you do". The simplest form of authentication is an <dfn>API key</dfn>: the server and the client share a long random string in advance, and the client puts it in an HTTP header on every request, usually written as <code>Authorization: Bearer your-key</code>. If it matches, the server lets the request in; if not, it returns 401.</p>
+<p>An API key is like a shared door key: whoever holds it can open the door, so it must stay secret. Never put it in web page source code or commit it to a public repository. Send it over HTTPS whenever you can; otherwise anyone along the way can read it.</p>
+<p>The comparison itself needs care. An ordinary string comparison returns as soon as it hits a differing character, so the longer the correctly guessed prefix, the longer the comparison takes. By measuring the time, an attacker can guess the key one character at a time. Attacks that leak information through "side products" such as time or power use are called <dfn>side-channel attacks</dfn>, and this one is a <dfn>timing attack</dfn>. The defense is a <dfn>constant-time comparison</dfn>: wherever the strings first differ, it compares the whole string before returning.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/API_key" target="_blank" rel="noopener noreferrer">Wikipedia: API key</a> · <a href="https://en.wikipedia.org/wiki/Side-channel_attack" target="_blank" rel="noopener noreferrer">Wikipedia: Side-channel attack</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Authorization" target="_blank" rel="noopener noreferrer">MDN: Authorization header</a> · <a href="https://docs.python.org/3/library/hmac.html" target="_blank" rel="noopener noreferrer">Python docs: hmac.compare_digest</a> · <a href="https://www.rfc-editor.org/rfc/rfc6750" target="_blank" rel="noopener noreferrer">RFC 6750: Bearer tokens</a></p>
+</aside>
+<p>Strata's first line of defense is <strong>listening only to this computer by default</strong>: the server listens on <code>127.0.0.1</code> by default, so other devices cannot connect at all. <span class="ev ev-code">Code fact</span> In that case the README says any API key will do in your app. [S01] To reach it from a phone or another computer, you change it to listen on <code>0.0.0.0</code>, and the README says plainly to "always set a key". [S01] If you change the listen address but set no key, the server prints a warning at startup: there is no API key, so anyone on the network can use this model. <span class="ev ev-code">Code fact</span></p>
+<p>Once a key is set, requests to <code>/v1/*</code> must carry it: as <code>Authorization: Bearer …</code>, or in the <code>x-api-key</code> header (which Anthropic-style clients use). The comparison uses <code>hmac.compare_digest</code>, which a code comment calls "constant-time"; a mismatch returns 401 with the type <code>authentication_error</code>. <span class="ev ev-code">Code fact</span> Figure 24-7 shows the whole decision.</p>
+<figure class="fig"><svg viewBox="0 0 400 310" role="img" aria-label="Figure 24-7: how Strata checks the API key. With no key configured, the request passes; with a key, it takes the key the client sent and compares in constant time; a match is handled, a mismatch gets 401">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="8" width="200" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">Request hits /v1/…</text>
+<rect class="f-soft" fill="#e5f1df" x="100" y="62" width="200" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="84" font-size="13" text-anchor="middle">API key set in config?</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="316" y="62" width="76" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="354" y="84" font-size="13" text-anchor="middle">Allow</text>
+<text class="f-muted" fill="#5c6d66" x="308" y="56" font-size="12" text-anchor="middle">No</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="122" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="144" font-size="13" text-anchor="middle">Take Bearer / x-api-key</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="114" font-size="12">Yes</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="176" width="240" height="34" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="198" font-size="13" text-anchor="middle">hmac.compare_digest(…)</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="236" width="160" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="258" font-size="13" text-anchor="middle">Match: serve it</text>
+<rect class="f-warn" fill="#9e5d24" x="220" y="236" width="160" height="34" rx="8"/>
+<text class="f-on" fill="#ffffff" x="300" y="258" font-size="13" text-anchor="middle">No match: 401</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V60M300 79H314M200 96V120M200 156V174M160 210V222H100V234M240 210V222H300V234"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="300" font-size="12" text-anchor="middle">Before all this: listens on 127.0.0.1 only by default</text>
+</svg><figcaption>Figure 24-7　Strata's API key check. By default it listens only to this computer, so running without a key is safe; once it is open to the network, the key is the only lock on the door, and the comparison must be constant-time.</figcaption></figure>
+<p>Why must it be constant-time? The simulator below lets you play the attacker:</p>
+<div class="viz" data-viz="key-compare-timing"><figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="Figure 24-8: guessing the first character of the key. With early-exit comparison the right candidate compares one more character and its bar is clearly taller; with constant-time comparison all 16 candidates take exactly the same time">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="13" font-weight="600" text-anchor="middle">Early-exit compare</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="13" font-weight="600" text-anchor="middle">Constant-time compare</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="12" text-anchor="middle">Right guess: 1 more char</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="38" font-size="12" text-anchor="middle">Every guess: all 4 chars</text>
+<rect class="f-accent" fill="#136d5a" x="16" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="27" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="38" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="49" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="60" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="71" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="82" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="93" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="104" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="115" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="126" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="137" y="126" width="8" height="24"/><rect class="f-warn" fill="#9e5d24" x="148" y="102" width="8" height="48"/><rect class="f-accent" fill="#136d5a" x="159" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="170" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="181" y="126" width="8" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="216" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="227" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="238" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="249" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="260" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="271" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="282" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="293" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="304" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="315" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="326" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="337" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="348" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="359" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="370" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="381" y="54" width="8" height="96"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 150H194M210 150H394"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="12" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="152" y="168" font-size="12" text-anchor="middle">c</text>
+<text class="f-muted" fill="#5c6d66" x="185" y="168" font-size="12" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="168" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="385" y="168" font-size="12" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="194" font-size="12" text-anchor="middle">16 candidates for char 1 (the real key starts with c)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="214" font-size="12" text-anchor="middle">Interactive: guess one character at a time</text>
+</svg><figcaption>Figure 24-8　Early-exit comparison writes "how many characters were right" into the timing, so an attacker needs only 16 tries per character; constant-time comparison makes every candidate look exactly the same. <span class="ev ev-est">Teaching estimate</span></figcaption></figure></div>
+<p>In the real world each comparison differs by only a few nanoseconds, while network jitter is several milliseconds, so a real attack has to measure the same guess thousands upon thousands of times and dig out the difference with statistics. That is hard, but not impossible. Using <code>hmac.compare_digest</code> takes one line of code, so there is no reason to take the risk.</p>
+<p>Strata also defends against a sneakier attack: <dfn>DNS rebinding</dfn>. A malicious web page you open can briefly point its own domain name at <code>127.0.0.1</code>, then reach the service on your computer while posing as "its own site". So when no key is set, the server answers only requests whose <code>Host</code> header is a name it knows, such as <code>localhost</code> or an IP address; <code>POST</code> requests from an unknown web page origin are also refused. Once a key is set, the key decides, because someone else's web page cannot get your key. <span class="ev ev-report">Upstream report</span></p>
+<p class="bridge"><strong>If you studied CS:</strong> this section touches several basics from Computer Networks and Information Security: the difference between authentication and authorization, a minimal attack surface (listening only on the loopback address by default), and side-channel attacks. Security measures stack in layers, and each layer guards only against what it is meant to guard against.</p>
+
+<h2 id="sec-6">24.6 Hands-on: cancel a request yourself</h2>
+<p>This chapter has no separate lab page; the two interactive figures are the lab. Do three things in order:</p>
+<ol>
+<li>In the lifecycle simulator, press "Cancel" in each of the three states <strong>Queued, Prefill and Decode</strong>, and note the "worst-case wait". During prefill it is about 15.6 seconds; during decode only about 0.51 seconds. Think about it: if you were the designer, how would you make prefill stop faster too? What would it cost?</li>
+<li>After pressing Cancel, press "Engine lost" while in "Cancelling". See how the server wraps up, and why the wait for the STOP echo must also have a time limit.</li>
+<li>In the timing attack simulator, crack the key once with each comparison method, and count how many tries each takes.</li>
+</ol>
+<p>If you can write Python, you can use Strata's built-in <code>MockEngine</code> (<code>python -m serve.server --engine mock</code>) to start a server on a machine with no GPU, send a streaming request with <code>curl</code>, press Ctrl+C partway through to disconnect, and then check the request's outcome in the server window. [S15]</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>A request passes through the browser, the HTTP connection, the server process, the engine process and the GPU. Each layer means something different by "stopped"; the cancel signal must be passed down layer by layer, and confirmed.</li>
+<li>Strata's cancellation is cooperative: a watcher thread checks the connection every 0.5 seconds and sets the cancel flag; the engine stops at a checkpoint, and the server releases the FIFO only after reading this request's own DONE. During prefill the checkpoints are far apart, so cancellation is slow.</li>
+<li>Strata listens only to this computer by default. When you open it to the network you must set an API key, and the comparison uses the constant-time <code>hmac.compare_digest</code> to prevent timing attacks.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "Close the web page and the GPU stops."</strong></p>
+<p>Closing the web page stops only the top layer. The server first has to notice the connection is gone, then tell the engine, and the engine still has to reach its next checkpoint before it stops. Before Strata fixed #430 and #431, there were cases where the client had long since left while the engine kept computing. "Stopped" must be confirmed at each layer separately.</p></div>
+
+<details class="deep"><summary>Go deeper: the linearization point of cancellation, late stale replies and trust boundaries</summary>
+<h3>From which moment does cancellation "take effect"?</h3>
+<p>You can define cancellation like this: from some confirmed boundary on, no new token is committed to the user, and the related resources eventually stop being used. That boundary is the <dfn>linearization point</dfn> of the cancellation. If a flag has only been set and the prefill chunk loop or the decode loop has not yet seen it, the cancellation is not complete.</p>
+<p>From this book's reading of <code>serve/server.py</code>, a request still in the queue checks the cancel flag only after it gets the FIFO lock and sends the <code>GEN</code> command to the engine, inside the loop that waits for engine output: when the first token or prefill progress line arrives, or after 10 seconds with no output. <span class="ev ev-code">Code fact</span> This means a queued request whose client hung up long ago still makes the engine start reading its prompt, and only then receives STOP. A worthwhile extension exercise: check the flag once after getting the lock and before sending the command.</p>
+<h3>Worked example: a stale reply after a timeout</h3>
+<p>Request A times out, and the service starts on request B. If A's late results still get written into the shared output queue, B may receive A's tokens, or take A's <code>DONE</code> as its own end. The fix is to check who each output belongs to, and not to reuse the same mutable state until the old execution is confirmed finished.</p>
+<p>Strata does the latter: after sending STOP, it keeps reading until this request's own <code>DONE</code>, holding the FIFO lock the whole time; and when it records usage, it counts only the <code>DONE</code> that arrives during this request, because otherwise a failed or disconnected request would book the previous request's decode numbers as its own. <span class="ev ev-code">Code fact</span> This book has not audited every output-ownership path upstream; in class you can build this risk with a deliberately delayed mock engine, then verify the fix.</p>
+<h3>A watchdog must understand phases of work</h3>
+<p>Treating every "no text output for a while" as a deadlock kills healthy requests that are reading long prompts; waiting forever blocks the whole FIFO. A sound diagnosis must tell apart: queuing, a legitimate long computation, slow I/O, a lost child process and a protocol out of step, and it must report the state and the last progress instead of a vague "timeout". Strata adjusts its limit per prefill chunk and writes the reason for the loss into the error message, which is exactly this idea. [S15]</p>
+<p>In the same way, "explicit model control" (load, unload) must not interrupt requests that are running or queued: the code defines <code>ModelBusy</code> for exactly this. [S15] The upstream docs say the control API returns 409 in that case. <span class="ev ev-report">Upstream report</span></p>
+<h3>Tools, image URLs and local files are all trust boundaries</h3>
+<p>Model output is untrusted input. Tool arguments need schema validation and permission checks; fetching remote URLs involves outbound access and resource limits; reading local paths involves file permissions and path scope. Strata's image input supports three sources: base64 data, http(s) URLs and local file paths. [S15] Whether SSRF, path traversal and similar problems are prevented has to be audited entry point by entry point; you cannot declare the whole system safe because one place uses a safe library.</p>
+<p><code>frontend.py</code> renders templates in a sandboxed Jinja environment. [S16] That is a concrete choice at the template layer; it does not automatically prove that tool execution, URL fetching and file access are all safe. Each kind of resource needs its own threat model.</p>
+<h3>A checklist for "cancellation complete"</h3>
+<p>Inject these cases into the mock engine: cancel during prefill, output cut off, duplicate cancel, an unresponsive engine, late stale results, and a new request after recovery. Pass conditions: no new user-visible token is committed; every task that reads or writes the related buffers has stopped or finished; the queue and state are not misused by the next request; late stale output is recognized and dropped; resources are released exactly once; and the client gets a clear "cancelled" or "failed", not "success".</p>
+<p>One last reminder: this textbook is a static website. It contains no real inference API key and never reaches your model server directly from the browser. If it is ever connected to a real lab platform, that platform needs its own authentication, quotas, job isolation and a server-side proxy; never put a key into a course page.</p>
+</details>
