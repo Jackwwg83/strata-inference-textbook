@@ -1,20 +1,298 @@
-<h2 id="sec-1">19.1 窗口越长，不一定越快</h2>
-<p>多猜几个 token 可以让一次验证贡献更多输出，也增加草稿、验证和缺失专家计算。若后几个候选很少被接受，它们只是额外成本。一个合理控制器比较“预期提交多少”与“本轮花多久”，而不是无条件最大化窗口。</p>
-<p><code>src/spec/controller.cpp</code> 的 <code>choose</code> 正是比较期望 token 数除以估计 step_ms，并要求超过无草稿基线一定收益才选择草稿。[S09] 本章解析这个已读函数的逻辑，不据此声称我们已经追踪它在所有产品模式下的调用和实际启用情况。</p>
-<h2 id="sec-2">19.2 期望长度的推导不需要假定独立</h2>
-<p>设 pᵢ 是<strong>前 i−1 个都接受时，第 i 个也被接受的条件概率</strong>。长度为 k 的草稿贡献期望：</p>
-<div class="equation">E = 1 + p₁ + p₁p₂ + … + ∏ᵢ₌₁ᵏ pᵢ</div>
-<p>第一项 1 表示本轮目标推进。第 i 个草稿能贡献，要求前 i 个都接受，概率由条件乘法得到；不需要额外宣称各位置相互独立。</p>
-<p>取 p=[0.8,0.6,0.5]，E=1+0.8+0.48+0.24=<strong>2.52</strong>。若验证加起草总成本是 18 ms，速率约 140 token/s；无草稿一次 8 ms 得 125 token/s，净收益约 12%。这些数值是教学例题，不是 Strata 跑分。</p>
-<h2 id="sec-3">19.3 源码怎样建模成本？</h2>
-<p><code>step_ms</code> 将成本分为 dense、CPU miss、sync 和 draft。dense 使用随窗口大小变化的比例；CPU 部分乘 <code>(1−hit_rate)</code>，还考虑窗口内不同 token 触达专家集合的增长与同一专家多次使用的附加代价。[S09]</p>
-<p>这里体现 MoE 的复用：T 个 token 的专家集合通常不必机械地当成 T 份互不相交集合，但具体重叠要测。把“权重只读一次”的理想条件无条件应用到所有草稿，会高估收益；反过来完全不考虑复用又可能低估。</p>
-<h2 id="sec-4">19.4 只更新真正看到的结果</h2>
-<p>如果第一份草稿就错了，后面的草稿不再沿正确目标前缀被验证。因此后续位置是<strong>未观测</strong>，不是“观测为失败”。代码只更新接受的那些位置和第一个拒绝位置，用 EMA 调整概率；全接受时另有对更深先验的启发式更新。[S09]</p>
-<p>这连接统计学中的删失 / 选择性观测问题。把没试过的深位置全部记作零，会形成自我强化：窗口越短，深位置越差，控制器永远不愿再尝试更长窗口。</p>
-<h2 id="sec-5">19.5 先验不是物理常数</h2>
-<p>源码初始化的 MTP 接受率以及 lookup 分桶先验，是该策略的起点，不是任何语言、任何量化、任何 prompt 下的保证。[S09] 不同任务会改变草稿质量与专家复用；工作负载切换后模型可能需要重新适应。</p>
-<p>控制策略还应考虑波动、探索和稳定性。最优平均速率可能牺牲尾延迟；快速更新的 EMA 适应快但噪声大，慢更新稳定但可能落后。这里可以设计进阶作业，不能直接把教学改进称为上游已实现功能。</p>
-<h2 id="sec-6">19.6 实验与验收</h2>
-<p>投机收益实验列出 k=0…5 的 E、成本、净速率和相对基线。改变 p 或每份 draft 成本，观察最优 k 怎样变化。均匀 p 模式是教学简化；课程作业可以改为逐位置 p 数组。</p>
-<p>验收同时要求：当草稿成本很高时能退回 k=0；p=0 时额外草稿不应虚增收益；p=1 时 E=k+1；未观测位置不被计为失败。用这些边界比只看一条漂亮曲线更能检验实现。</p>
+<div class="hook"><span class="eyebrow">你可能注意到过</span>
+<p>看 Strata 写字，有时会觉得它是“一蹦一串”地往外冒，而不是一个字一个字地挤。README 的说法是：一个小帮手先猜后面几个词，大模型一次把这些猜测全部检查一遍，所以同样的答案能快 1.6–1.8 倍。<span class="ev ev-report">上游报告</span>[S01]</p>
+<p>上游文档还说，模型自带的猜测层一次最多猜 3 个 token。<span class="ev ev-report">上游报告</span>[S02] 问题来了：猜对的 token 等于白赚，为什么不一次猜 10 个？这一章回答两件事：猜几个最划算，以及接受率一直在变时，引擎怎样边跑边改主意。</p></div>
+<p class="tldr"><strong>一句话：</strong>多猜一个 token，期望多拿到的部分按几何级数越来越少，验证一轮的时间却一直在涨。Strata 比较的是“每毫秒期望提交几个 token”，并用指数移动平均边跑边更新接受率。</p>
+
+<h2 id="sec-1">19.1 猜一次、验一次：一轮能拿到几个 token</h2>
+<p>先复习第 18 章的<dfn>投机解码</dfn>：先便宜地猜，再让大模型批改。负责猜的是模型自带的 <dfn>MTP 层</dfn>（multi-token prediction，多 token 预测层），它猜出的候选叫<dfn>草稿</dfn>。<span class="ev ev-report">上游报告</span>[S02]</p>
+<p>大模型把“上一个已确定的 token + k 个草稿”排成一排，48 层只走一遍，就能同时给出每个位置“我认为这里该是什么”。这一排叫<dfn>验证窗口</dfn>，长 k + 1。图 19-1 走一遍 k = 3 的例子。</p>
+<figure class="fig"><svg viewBox="0 0 400 296" role="img" aria-label="图 19-1：一轮投机解码。猜 3 个草稿，前 2 个与大模型一致，第 3 个不一致，本轮提交 3 个 token">
+<text class="f-muted" fill="#5c6d66" x="150" y="22" font-size="11" text-anchor="middle">上一个</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="22" font-size="11" text-anchor="middle">草稿 1</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="22" font-size="11" text-anchor="middle">草稿 2</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="22" font-size="11" text-anchor="middle">草稿 3</text>
+<text class="f-text" fill="#182f2b" x="10" y="46" font-size="13" font-weight="600">① 起草</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="63" font-size="11">MTP 层猜 3 个</text>
+<rect class="f-soft" fill="#e5f1df" x="125" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="150" y="55" font-size="15" text-anchor="middle">去</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="185" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="210" y="55" font-size="15" text-anchor="middle">公</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="245" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="270" y="55" font-size="15" text-anchor="middle">园</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="305" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="55" font-size="15" text-anchor="middle">吧</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="13" font-weight="600">② 验证</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="123" font-size="11">48 层只走一遍</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="185" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="210" y="115" font-size="15" text-anchor="middle">公</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="245" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="270" y="115" font-size="15" text-anchor="middle">园</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="305" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="115" font-size="15" text-anchor="middle">玩</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="144" font-size="11" text-anchor="middle">大模型认为每个位置该是什么</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="13" font-weight="600">③ 比对</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="193" font-size="11">从左往右，错了就停</text>
+<text class="f-text" fill="#182f2b" x="210" y="184" font-size="13" text-anchor="middle">相同</text>
+<text class="f-text" fill="#182f2b" x="270" y="184" font-size="13" text-anchor="middle">相同</text>
+<text class="f-warn" fill="#9e5d24" x="330" y="184" font-size="13" font-weight="600" text-anchor="middle">不同</text>
+<text class="f-text" fill="#182f2b" x="10" y="232" font-size="13" font-weight="600">④ 提交</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="249" font-size="11">接受 2 个 + 自己 1 个</text>
+<rect class="f-accent" fill="#136d5a" x="185" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="210" y="241" font-size="15" text-anchor="middle">公</text>
+<rect class="f-accent" fill="#136d5a" x="245" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="270" y="241" font-size="15" text-anchor="middle">园</text>
+<rect class="f-accent" fill="#136d5a" x="305" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="330" y="241" font-size="15" text-anchor="middle">玩</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 80H390M10 154H390M10 204H390"/>
+<text class="f-text" fill="#182f2b" x="200" y="284" font-size="12" text-anchor="middle">一次验证，提交 3 个 token；草稿“吧”作废</text>
+</svg><figcaption>图 19-1　一轮投机解码：猜 3 个，前 2 个和大模型一致，第 3 个不一致。大模型在第 3 个位置的答案“玩”顺手提交，所以这一轮拿到 3 个 token。</figcaption></figure>
+<p>规则很简单：从左往右比，第一个不一致的地方就停。前面一致的草稿全部<strong>接受</strong>，再加上大模型在停下处自己的答案。所以接受 a 个草稿，这一轮就提交 a + 1 个 token。Strata 的生成循环正是这样数的：逐个比对窗口里的草稿和大模型的输出，再调用 <code>commit(a + 1)</code>。<span class="ev ev-code">代码事实</span></p>
+<p>就算一个都没猜对，这一轮也有大模型自己的 1 个 token，和不猜时一样多。猜错不会让答案变差，因为每个字都由大模型拍板。<span class="ev ev-report">上游报告</span>[S02] 猜错的代价只有一个：这一轮的验证白白多算了几个位置。</p>
+
+<h2 id="sec-2">19.2 平均一轮拿几个：期望值登场</h2>
+<p>每一轮接受几个草稿，事先说不准。我们能算的是<strong>平均</strong>一轮拿几个，也就是<dfn>期望值</dfn>。</p>
+<p>设第 i 个草稿的<dfn>条件接受率</dfn>是 pᵢ：在前面 i − 1 个都被接受的前提下，第 i 个也被接受的概率。“前提”两个字很要紧：前面一旦有一个被拒，后面的根本轮不到比对。</p>
+<p>第 i 个草稿能派上用场，要求前 i 个全部接受，概率是 p₁ × p₂ × … × pᵢ。把每个位置“派上用场的概率”加起来，就是一轮期望提交的 token 数：</p>
+<div class="equation">E = 1 + p₁ + p₁p₂ + … + p₁p₂…pₖ</div>
+<p>开头的 1 是大模型自己的那个 token，每轮必得。Strata 的源码就是这样一项一项乘、一项一项加的。<span class="ev ev-code">代码事实</span>[S09] 如果每个位置的接受率都一样，都是 p，这个和就是一个等比数列的前 k + 1 项。下面的专栏讲它为什么会“越加越没劲”。</p>
+<aside class="primer" id="c19-expected-value">
+<h3>期望值与几何级数</h3>
+<p>直觉：期望值就是“做很多很多次以后的平均结果”。掷一个公平的骰子，单次可能是 1 到 6 中的任意一个，平均下来是 3.5。<dfn>期望值</dfn>的定义是：每种结果乘以它的概率，再全部加起来。</p>
+<p>算“一轮拿几个 token”时，有一个更省事的办法：把每个位置“被用上的概率”加起来。位置 1 必定用上，概率 1；位置 2 用上的概率是 p；位置 3 是 p²……于是 E = 1 + p + p² + … + pᵏ。这种每一项都是前一项乘同一个数的和，叫<dfn>几何级数</dfn>（等比数列求和），有现成的公式：E = (1 − pᵏ⁺¹) ÷ (1 − p)。</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="图 19-2：p 等于 0.86、猜 3 个时，四个位置的期望贡献分别是 1、0.86、0.74、0.64，合计约 3.24">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">猜 3 个草稿时，每个位置平均贡献多少（p = 0.86）</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="12">大模型自己的</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="38" width="220" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="326" y="52" font-size="12">1（必得）</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">草稿 1</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="70" width="189.2" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="295" y="84" font-size="12">p = 0.86</text>
+<text class="f-text" fill="#182f2b" x="10" y="116" font-size="12">草稿 2</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="102" width="162.7" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="269" y="116" font-size="12">p² ≈ 0.74</text>
+<text class="f-text" fill="#182f2b" x="10" y="148" font-size="12">草稿 3</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="134" width="139.9" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="246" y="148" font-size="12">p³ ≈ 0.64</text>
+<text class="f-text" fill="#182f2b" x="10" y="182" font-size="12" font-weight="600">合计 E = 1 + 0.86 + 0.74 + 0.64 ≈ 3.24 个 token</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="11">猜无穷多个也有上限：E → 1 ÷ (1 − p) ≈ 7.1</text>
+</svg><figcaption>图 19-2　每多猜一个，它的贡献就再乘一次 p，条一根比一根短。猜 3 个平均能拿 3.24 个；猜到无穷多个，也超不过 7.1 个。</figcaption></figure>
+<p>所以多猜的收益是递减的：p = 0.86 时，第 8 个草稿只贡献 0.86⁸ ≈ 0.30 个 token。等比数列还有一个上限：项数趋于无穷时，和趋于 1 ÷ (1 − p)。p = 0.86 时，就算猜无穷多个，一轮平均也拿不到 7.2 个。</p>
+<p class="further">延伸阅读：<a href="https://oi-wiki.org/math/probability/exp/" target="_blank" rel="noopener noreferrer">OI Wiki：期望</a> · <a href="https://zh.wikipedia.org/zh-cn/期望值" target="_blank" rel="noopener noreferrer">维基百科：期望值</a> · <a href="https://zh.wikipedia.org/zh-cn/等比数列" target="_blank" rel="noopener noreferrer">维基百科：等比数列</a></p>
+</aside>
+<p class="bridge"><strong>学过计算机的同学：</strong>把“一轮提交的 token 数”记作随机变量 N，上面的算法就是概率论里的尾和公式 E[N] = Σ P(N ≥ i)。它对任意分布都成立，所以推导时用不着假设各位置相互独立，只要用条件概率连乘。</p>
+<p>代入 Strata 的数字。源码给 MTP 每个位置的初始接受率都是 0.86，注释说这来自在同一个模型上的测量。<span class="ev ev-code">代码事实</span>[S09] 猜 3 个时 E = 1 + 0.86 + 0.74 + 0.64 ≈ 3.24。上游文档报告的实际情况是：一次验证平均提交 2.4–3.2 个 token。<span class="ev ev-report">上游报告</span>[S02] 两者在同一个量级，说明 0.86 是个说得过去的起点。真实接受率随文本变化，这一点 19.4 节细讲。<span class="ev ev-est">教学推演</span></p>
+
+<h2 id="sec-3">19.3 账的另一半：窗口越宽，验证越贵</h2>
+<p>如果验证不花时间，当然是猜得越多越好。可验证是要时间的。Strata 的成本模型 <code>step_ms</code> 把一轮的时间拆成四块：<span class="ev ev-code">代码事实</span>[S09]</p>
+<ul>
+<li><strong>稠密部分</strong>：注意力等每个 token 都要算的部分。窗口越宽，这部分越慢，源码用一张按窗口长度查的倍率表。</li>
+<li><strong>CPU 算专家</strong>：没缓存在显卡上的专家由 CPU 算（第 10 章讲过）。窗口里的 token 越多，用到的<strong>不同</strong>专家越多，CPU 越忙。</li>
+<li><strong>同步</strong>：每轮固定的协调开销。</li>
+<li><strong>起草</strong>：MTP 层猜每个草稿也要时间。</li>
+</ul>
+<p>这几块的默认值写在头文件里：稠密部分 11 ms，480 个专家全在 CPU 上算要 15.8 ms，显存命中率 55%，同步 2.4 ms，每个 MTP 草稿 1.2 ms。注释说，倍率表这类默认值来自 9 月 23 日的测量，11 ms 是计划里的目标值，引擎里应换成实测值。<span class="ev ev-code">代码事实</span> 图 19-3 把这些默认值代进公式，看四块怎样随窗口变宽。</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="图 19-3：按 Strata 默认参数，一轮的时间从不猜的 20.5 毫秒涨到猜 8 个的 92.0 毫秒">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">一轮的时间由四块组成（单位 ms，条长按比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="54" font-size="12">k = 0</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="40" width="34.7" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="90.7" y="40" width="22.4" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="113.1" y="40" width="7.6" height="20"/>
+<text class="f-text" fill="#182f2b" x="127" y="55" font-size="12">20.5</text>
+<text class="f-text" fill="#182f2b" x="10" y="94" font-size="12">k = 1</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="80" width="36.4" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="92.4" y="80" width="39.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="132.2" y="80" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="139.8" y="80" width="3.8" height="20"/>
+<text class="f-text" fill="#182f2b" x="150" y="95" font-size="12">27.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="12">k = 3</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="120" width="50.3" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="106.3" y="120" width="70.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="177.1" y="120" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="184.7" y="120" width="11.3" height="20"/>
+<text class="f-text" fill="#182f2b" x="202" y="135" font-size="12">44.4</text>
+<text class="f-text" fill="#182f2b" x="10" y="174" font-size="12">k = 8</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="160" width="114.4" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="170.4" y="160" width="137.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="308.2" y="160" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="315.8" y="160" width="30.2" height="20"/>
+<text class="f-text" fill="#182f2b" x="352" y="175" font-size="12">92.0</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="24" y="205" font-size="11">稠密部分</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="104" y="205" font-size="11">CPU 算专家</text>
+<rect class="f-muted" fill="#5c6d66" x="180" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="194" y="205" font-size="11">同步</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="240" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="254" y="205" font-size="11">起草</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="226" font-size="11">猜得越多，CPU 要算的专家越多，但涨得比 token 数慢</text>
+</svg><figcaption>图 19-3　窗口从 1 个 token 变成 9 个，一轮的时间只涨到约 4.5 倍。原因是同一窗口里的 token 常常选中同一批专家，读一次权重能算好几个 token。<span class="ev ev-est">教学推演</span></figcaption></figure>
+<p>注意 CPU 那一块。9 个 token 如果各自用一套互不相同的专家，CPU 的活儿应该是 1 个 token 时的 9 倍。源码里的倍率表却只到 5.2 倍，注释说这张表来自路由轨迹的测量。<span class="ev ev-code">代码事实</span> 同一个窗口里的 token 经常选中同一批专家，这正是第 10 章说的“热门专家”在起作用。</p>
+<p>有了分子和分母，目标就清楚了：<strong>速度 = 一轮期望提交的 token 数 ÷ 一轮的时间</strong>。控制器对每个 k 都算一遍，挑速度最大的那个。<span class="ev ev-code">代码事实</span>[S09] 下面的交互图把这个计算摊开给你看。</p>
+<div class="viz" data-viz="draft-window"><figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="图 19-4：按 Strata 默认参数和 p 等于 0.86，k 从 0 到 8 的速度，k 等于 3 最快，约每秒 72.8 个 token">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">各窗口的速度，单位 token/s（p = 0.86，源码默认成本）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="102.4" width="26" height="97.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="85" y="66" width="26" height="134"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="124" y="58.6" width="26" height="141.4"/>
+<rect class="f-accent" fill="#136d5a" x="163" y="54.4" width="26" height="145.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="61.4" width="26" height="138.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="241" y="67.2" width="26" height="132.8"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="280" y="73.8" width="26" height="126.2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="319" y="80.2" width="26" height="119.8"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="358" y="84.8" width="26" height="115.2"/>
+<text class="f-text" fill="#182f2b" x="59" y="118" font-size="11" text-anchor="middle">49</text>
+<text class="f-text" fill="#182f2b" x="98" y="61" font-size="11" text-anchor="middle">67</text>
+<text class="f-text" fill="#182f2b" x="137" y="53" font-size="11" text-anchor="middle">71</text>
+<text class="f-text" fill="#182f2b" x="176" y="49" font-size="11" font-weight="600" text-anchor="middle">73</text>
+<text class="f-text" fill="#182f2b" x="215" y="56" font-size="11" text-anchor="middle">69</text>
+<text class="f-text" fill="#182f2b" x="254" y="62" font-size="11" text-anchor="middle">66</text>
+<text class="f-text" fill="#182f2b" x="293" y="68" font-size="11" text-anchor="middle">63</text>
+<text class="f-text" fill="#182f2b" x="332" y="75" font-size="11" text-anchor="middle">60</text>
+<text class="f-text" fill="#182f2b" x="371" y="79" font-size="11" text-anchor="middle">58</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="5 4" d="M40 97.6H390"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 200H390"/>
+<text class="f-muted" fill="#5c6d66" x="59" y="216" font-size="11" text-anchor="middle">k=0</text>
+<text class="f-muted" fill="#5c6d66" x="98" y="216" font-size="11" text-anchor="middle">k=1</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="216" font-size="11" text-anchor="middle">k=2</text>
+<text class="f-text" fill="#182f2b" x="176" y="216" font-size="11" font-weight="600" text-anchor="middle">k=3</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="216" font-size="11" text-anchor="middle">k=4</text>
+<text class="f-muted" fill="#5c6d66" x="254" y="216" font-size="11" text-anchor="middle">k=5</text>
+<text class="f-muted" fill="#5c6d66" x="293" y="216" font-size="11" text-anchor="middle">k=6</text>
+<text class="f-muted" fill="#5c6d66" x="332" y="216" font-size="11" text-anchor="middle">k=7</text>
+<text class="f-muted" fill="#5c6d66" x="371" y="216" font-size="11" text-anchor="middle">k=8</text>
+<text class="f-text" fill="#182f2b" x="10" y="238" font-size="11">高亮：k = 3 最快，72.8 token/s，是不猜（48.8）的 1.49 倍</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="256" font-size="11">虚线：不猜的速度 × 1.05，草稿必须超过它才会被采用</text>
+</svg><figcaption>图 19-4　速度先升后降。猜 3 个时最快；再往后，多猜的草稿贡献越来越少，验证却越来越贵。<span class="ev ev-est">教学推演</span></figcaption></figure></div>
+<p>这张图的数字是把源码默认值代进公式算出来的，不是实测：不猜时一轮 20.5 ms，每秒 48.8 个 token；猜 3 个时一轮 44.4 ms，期望 3.24 个，每秒 72.8 个。<span class="ev ev-est">教学推演</span> 它说明的是形状：曲线有一个山顶，山顶的位置取决于接受率和成本。</p>
+<p>还有一道门槛。最好的窗口必须比不猜快 5% 以上，控制器才会用它；否则宁可不猜。<span class="ev ev-code">代码事实</span>[S09] 头文件注释把这 5% 写成计划里的设定。<span class="ev ev-code">代码事实</span> 这样做的好处是：接受率的估计本身有误差，只快一两个百分点的“收益”很可能是误差造成的假象。</p>
+
+<h2 id="sec-4">19.4 接受率会变：边跑边学</h2>
+<p>0.86 只是起点。写代码时，后面的内容常常能从前文猜出来；写一首新诗，就难猜得多。上游文档也提到，同一个提示词换一个回答，输出速度就能差好几个百分点，因为被接受的草稿多少变了。<span class="ev ev-report">上游报告</span>[S03] 所以接受率必须边跑边估计。Strata 用的工具叫指数移动平均。</p>
+<aside class="primer" id="c19-ema">
+<h3>指数移动平均（EMA）</h3>
+<p>直觉：你想知道最近的平均气温，但不想存下每天的记录。办法是只记一个数“估计值”，每来一个新温度，就把估计值往新温度挪一小步：</p>
+<div class="equation">新估计 = 旧估计 + α × (新数据 − 旧估计)</div>
+<p>这就是<dfn>指数移动平均</dfn>，α（0 到 1 之间）叫更新权重。展开来看，最新的数据权重是 α，上一个是 α(1 − α)，再上一个是 α(1 − α)²……越旧的数据权重越小，按指数衰减，名字由此而来。它只需要一个数的内存，每次更新一次乘法、两次加减。</p>
+<p>α 决定了取舍。α 大，估计跟得快，但容易被一两次偶然结果带偏；α 小，估计稳，但变化来了要很久才反应过来。一个好用的量是<strong>半衰期</strong>：旧数据的权重降到一半要多少次更新，等于 ln 0.5 ÷ ln(1 − α)。α = 0.05 时约 13.5 次，α = 0.3 时不到 2 次。</p>
+<p>Strata 的控制器正是用这个式子更新每个位置的接受率：接受记 1，拒绝记 0。<span class="ev ev-code">代码事实</span>[S09] 头文件里 α 的默认值是 0.05。<span class="ev ev-code">代码事实</span></p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/移动平均" target="_blank" rel="noopener noreferrer">维基百科：移动平均</a> · <a href="https://en.wikipedia.org/wiki/Exponential_smoothing" target="_blank" rel="noopener noreferrer">Wikipedia: Exponential smoothing</a> · <a href="https://www.rfc-editor.org/rfc/rfc6298" target="_blank" rel="noopener noreferrer">RFC 6298：TCP 重传计时器</a></p>
+</aside>
+<p class="bridge"><strong>学过计算机的同学：</strong>《计算机网络》里 TCP 估计往返时间（RTT）用的就是 EMA：SRTT ← (1 − 1/8) × SRTT + 1/8 × 新的 RTT 样本，见 RFC 6298。估计接受率和估计网络延迟，是同一类问题：数据有噪声，环境会变，内存还要省。</p>
+<p>记账时还有一个陷阱。假设这一轮猜了 3 个，第 1 个就被拒了。第 2、3 个草稿怎么记？它们根本没被比对过，是<strong>没观测到</strong>，不是“失败”。统计学把这种“结果没被看到”的情况叫<dfn>删失</dfn>。</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 19-5：第 1 个草稿被拒后，正确记账只记位置 1 失败，错误记账把没验证的位置 2 和 3 也记成失败">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">一轮猜 3 个，第 1 个就被拒：后两个位置怎么记？</text>
+<text class="f-text" fill="#182f2b" x="10" y="58" font-size="13" font-weight="600">这一轮</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="130" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="167.5" y="49" font-size="11" text-anchor="middle">位置 1</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="66" font-size="12" font-weight="600" text-anchor="middle">被拒</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="49" font-size="11" text-anchor="middle">位置 2</text>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="66" font-size="12" text-anchor="middle">没比对</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="300" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="49" font-size="11" text-anchor="middle">位置 3</text>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="66" font-size="12" text-anchor="middle">没比对</text>
+<text class="f-text" fill="#182f2b" x="10" y="112" font-size="13" font-weight="600">正确记账</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="129" font-size="11">Strata 的做法</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="120" font-size="12" text-anchor="middle">记失败</text>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="120" font-size="12" text-anchor="middle">不记</text>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="120" font-size="12" text-anchor="middle">不记</text>
+<text class="f-text" fill="#182f2b" x="10" y="172" font-size="13" font-weight="600">错误记账</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="189" font-size="11">没看到也当失败</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="180" font-size="12" text-anchor="middle">记失败</text>
+<text class="f-warn" fill="#9e5d24" x="252.5" y="180" font-size="12" text-anchor="middle">记失败</text>
+<text class="f-warn" fill="#9e5d24" x="337.5" y="180" font-size="12" text-anchor="middle">记失败</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 88H390M10 146H390M10 204H390"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="226" font-size="11">错误记账下，p₃ 的估计会滑向 0.86³ ≈ 0.64，可真实值是 0.86</text>
+</svg><figcaption>图 19-5　只给真正比对过的位置记账。把“没看到”记成“失败”，越靠后的位置被冤枉得越厉害，控制器会以为长窗口不划算。</figcaption></figure>
+<p>Strata 的 <code>observe</code> 只更新被接受的那些位置，加上第一个被拒的位置；后面的位置一律不动。<span class="ev ev-code">代码事实</span>[S09] 还有一个反方向的情况：一轮猜的全部被接受，窗口外的位置也没被试过。如果永远不更新它们，窗口就再也长不大。源码的办法是把这些位置的估计往“最深一个已观测位置”的估计挪一小步。<span class="ev ev-code">代码事实</span>[S09]</p>
+<p>下面的追踪器让你亲手体会这两件事：α 的取舍，和记账方式的影响。</p>
+<div class="viz" data-viz="draft-ema"><figure class="fig"><svg viewBox="0 0 400 258" role="img" aria-label="图 19-6：真实接受率在第 150 轮从 0.86 掉到 0.55，α 等于 0.05 的估计平滑但慢，α 等于 0.3 的估计跟得快但乱跳">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">接受率从 0.86 掉到 0.55，两种 α 的估计怎样追</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="44" font-size="11" text-anchor="end">1.0</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="119" font-size="11" text-anchor="end">0.5</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="194" font-size="11" text-anchor="end">0</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width=".6" d="M40 40H380M40 115H380M40 190H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="2 3" d="M210 30V190"/>
+<text class="f-muted" fill="#5c6d66" x="214" y="36" font-size="11">换话题</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40.0 61.0L43.4 47.2L46.8 42.5L50.2 40.8L53.6 40.3L57.0 62.1L60.4 47.6L63.8 87.6L67.2 101.3L70.6 92.5L74.0 111.6L77.4 86.6L80.8 56.0L84.2 45.5L87.6 73.4L91.0 51.4L94.4 75.4L97.8 52.2L101.2 44.2L104.6 117.9L108.0 66.7L111.4 49.2L114.8 88.1L118.2 56.5L121.6 45.7L125.0 41.9L128.4 85.7L131.8 55.7L135.2 45.4L138.6 41.8L142.0 72.1L145.4 51.0L148.8 120.3L152.2 112.5L155.6 64.9L159.0 48.5L162.4 42.9L165.8 41.0L169.2 62.4L172.6 92.7L176.0 89.6L179.4 57.0L182.8 45.8L186.2 64.1L189.6 48.2L193.0 42.8L196.4 41.0L199.8 40.3L203.2 40.1L206.6 40.0L210.0 62.1L213.4 124.1L216.8 167.4L220.2 160.2L223.6 179.8L227.0 186.5L230.4 143.8L233.8 75.6L237.2 128.7L240.6 101.9L244.0 83.3L247.4 86.3L250.8 87.4L254.2 56.3L257.6 90.6L261.0 155.9L264.4 79.8L267.8 53.6L271.2 111.7L274.6 131.7L278.0 170.0L281.4 106.6L284.8 94.4L288.2 80.7L291.6 130.5L295.0 124.6L298.4 136.1L301.8 104.4L305.2 93.6L308.6 156.9L312.0 133.7L315.4 139.2L318.8 105.5L322.2 107.5L325.6 116.7L329.0 66.3L332.4 80.5L335.8 98.9L339.2 82.3L342.6 131.0L346.0 124.8L349.4 145.6L352.8 121.2L356.2 99.4L359.6 127.4L363.0 101.5L366.4 114.6L369.8 132.7L373.2 148.3L376.6 130.7L380.0 71.1"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M40.0 61.0L43.4 58.0L46.8 55.4L50.2 53.2L53.6 51.3L57.0 56.5L60.4 54.1L63.8 59.6L67.2 64.3L70.6 68.0L74.0 77.9L77.4 79.3L80.8 73.7L84.2 68.9L87.6 71.9L91.0 67.3L94.4 70.5L97.8 66.2L101.2 62.5L104.6 73.9L108.0 69.0L111.4 64.9L114.8 68.9L118.2 64.7L121.6 61.2L125.0 58.2L128.4 63.1L131.8 59.8L135.2 57.0L138.6 54.6L142.0 59.6L145.4 56.8L148.8 69.0L152.2 72.4L155.6 67.8L159.0 63.8L162.4 60.4L165.8 57.5L169.2 61.8L172.6 66.2L176.0 69.6L179.4 65.3L182.8 61.7L186.2 65.4L189.6 61.8L193.0 58.7L196.4 56.0L199.8 53.7L203.2 51.8L206.6 50.1L210.0 55.4L213.4 67.8L216.8 85.3L220.2 93.4L223.6 107.2L227.0 119.0L230.4 121.6L233.8 110.0L237.2 114.6L240.6 111.1L244.0 107.7L247.4 105.2L250.8 103.0L254.2 94.0L257.6 93.8L261.0 107.5L264.4 97.9L267.8 89.7L271.2 96.8L274.6 103.0L278.0 115.4L281.4 111.4L284.8 108.4L288.2 105.4L291.6 110.7L295.0 114.5L298.4 118.1L301.8 114.1L305.2 110.7L308.6 122.0L312.0 124.2L315.4 126.4L318.8 121.2L322.2 117.2L325.6 120.0L329.0 108.6L332.4 106.0L335.8 104.1L339.2 101.7L342.6 107.5L346.0 111.8L349.4 116.2L352.8 112.8L356.2 109.5L359.6 113.9L363.0 110.5L366.4 114.3L369.8 118.0L373.2 121.5L376.6 123.8L380.0 111.8"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="6 4" d="M40 61H210V107.5H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M10 210H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="214" font-size="11">粗线：α = 0.05，平滑，但换话题后要十几轮才跟上</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M10 230H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="234" font-size="11">细线：α = 0.3，跟得快，可上下乱跳</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="6 4" d="M10 250H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="254" font-size="11">虚线：真实接受率（控制器看不到）</text>
+</svg><figcaption>图 19-6　横轴是轮数（共 300 轮），纵轴是第 1 个草稿的接受率估计。α 小，估计稳但慢半拍；α 大，反应快但被噪声牵着走。接受与否是模拟的随机数。<span class="ev ev-est">教学推演</span></figcaption></figure></div>
+<p>越靠后的位置，被比对到的机会越少：第 3 个草稿只有在前两个都接受时才有一次记账。所以深位置的估计比浅位置更新得慢。追踪器里换话题之后，p₃ 的曲线明显比 p₁ 迟钝，原因就在这里。<span class="ev ev-est">教学推演</span></p>
+
+<h2 id="sec-5">19.5 Strata 真正在跑的是哪一个</h2>
+<p>到这里讲的控制器在 <code>src/spec/controller.cpp</code> 里。它编译进 <code>strata_spec</code> 库，有自己的单元测试 <code>controller_test</code>。<span class="ev ev-code">代码事实</span> 但打开生成主程序 <code>generate.cpp</code>（它就是可执行文件 <code>strata</code> 的源码），它引入的是另一个头文件 <code>draft_policy.hpp</code>，生成循环调用的是 <code>DraftPolicy</code>。本书检查过的引擎源码里，没有找到对 <code>Controller</code> 的调用。<span class="ev ev-code">代码事实</span> 图 19-7 把两者并排放。</p>
+<figure class="fig"><svg viewBox="0 0 400 268" role="img" aria-label="图 19-7：Controller 用公式模型估成本并决定 MTP 窗口，只在单元测试里被调用；DraftPolicy 用实测耗时，只决定要不要换成查找草稿，被生成主循环调用">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="185" height="200" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="32" font-size="13" font-weight="600">Controller</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="50" font-size="11">src/spec/controller.cpp</text>
+<text class="f-text" fill="#182f2b" x="22" y="76" font-size="12">决定 MTP 猜几个</text>
+<text class="f-text" fill="#182f2b" x="22" y="100" font-size="12">也比较查找草稿</text>
+<text class="f-text" fill="#182f2b" x="22" y="124" font-size="12">成本：公式模型</text>
+<text class="f-text" fill="#182f2b" x="22" y="148" font-size="12">接受率：EMA，α = 0.05</text>
+<text class="f-text" fill="#182f2b" x="22" y="172" font-size="12">门槛：快 5% 才猜</text>
+<text class="f-warn" fill="#9e5d24" x="22" y="196" font-size="12">调用者：单元测试</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="10" width="185" height="200" rx="8"/>
+<text class="f-text" fill="#182f2b" x="217" y="32" font-size="13" font-weight="600">DraftPolicy</text>
+<text class="f-muted" fill="#5c6d66" x="217" y="50" font-size="11">src/spec/draft_policy.cpp</text>
+<text class="f-text" fill="#182f2b" x="217" y="76" font-size="12">MTP 窗口由 --spec 定</text>
+<text class="f-text" fill="#182f2b" x="217" y="100" font-size="12">只决定：换不换查找草稿</text>
+<text class="f-text" fill="#182f2b" x="217" y="124" font-size="12">成本：实测每轮耗时</text>
+<text class="f-text" fill="#182f2b" x="217" y="148" font-size="12">MTP 产出：实测的平均</text>
+<text class="f-text" fill="#182f2b" x="217" y="172" font-size="12">门槛：快 3% 才换</text>
+<text class="f-text" fill="#182f2b" x="217" y="196" font-size="12" font-weight="600">调用者：生成主循环</text>
+<text class="f-text" fill="#182f2b" x="200" y="236" font-size="12" text-anchor="middle">两者的目标相同：每毫秒期望提交的 token 数</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="256" font-size="11" text-anchor="middle">区别在于分母：一个靠公式估，一个靠秒表测</text>
+</svg><figcaption>图 19-7　同一个目标函数，两种实现。真正在生成循环里做决定的是右边：它不再用公式猜成本，而是记下每种窗口实际跑了多久。</figcaption></figure>
+<p>先说 MTP 这一侧。生成循环里，MTP 的窗口长度来自启动参数 <code>--spec</code>，除第一轮外每轮固定；只有设置了 <code>--spec-min-p</code> 时才会缩短：草稿层对某个草稿的把握低于这个门槛，就不再往窗口里加。<span class="ev ev-code">代码事实</span> 上游文档的说法是 MTP 一次最多猜 3 个。<span class="ev ev-report">上游报告</span>[S02]</p>
+<p><code>DraftPolicy</code> 管的是另一件事：<dfn>提示词查找</dfn>（prompt lookup）。如果正在写的内容重复了上下文里的某一段，比如改代码时照抄原来的几行，那么上次那段后面跟着什么，这次多半也一样，可以直接拿来当草稿。查找草稿最多 5 个，而且只在实测的接受率和成本都说划算时才用。上游报告的效果是：改代码快 6–11%，普通文本不变。<span class="ev ev-report">上游报告</span>[S02] 生成循环里还有一个前提：启用 MTP 时，查找草稿的第一个 token 必须和 MTP 自己的第一个草稿一致，才交给 <code>DraftPolicy</code> 判断。<span class="ev ev-code">代码事实</span></p>
+<p><code>DraftPolicy</code> 的算法仍是这一章的公式：查找一侧 E(k) = 1 + q + q² + … + qᵏ，q 是按“匹配了多长”分桶统计的接受率；MTP 一侧直接用实测的每轮平均产出。分母不再是公式，而是每种窗口长度实测的每轮耗时，用 α = 0.1 的 EMA 平滑；没测过的长度，按一条预设的形状曲线从测过的长度换算。查找窗口要比 MTP 窗口快 3% 以上才会被选中。<span class="ev ev-code">代码事实</span></p>
+<p>这是一个很好的工程教训：成本模型写得再细，也比不上直接测。机器不同、上下文长度不同，每轮的时间都会变；实测值天然跟着机器走。</p>
+
+<h2 id="sec-6">19.6 动手：自己找最佳窗口</h2>
+<p>打开本章的交互实验「草稿值得猜多长」。它用一个更简单的成本式：基线时间加上每个草稿固定的验证和起草成本，每个位置用同一个接受率 p，比较 k = 0 到 5 的期望 token 数、时间和净收益。</p>
+<ol>
+<li>把 p 设成 0：所有 k 的期望都是 1，草稿只加时间。最佳答案应该是 k = 0。</li>
+<li>把 p 设成 1：期望正好是 k + 1。看看这时最长的窗口是不是总赢。</li>
+<li>保持 p 不变，把草稿成本调大：找到最佳 k 退回 0 的那个点。</li>
+</ol>
+<p>做完再回到本章的两个交互图对照。实验里的成本是一条直线；Strata 的成本模型里，专家共享让 CPU 那一块涨得比直线慢，而稠密部分的倍率在窗口长到 5 个 token 时跳了一大步。成本曲线的形状不同，山顶就会挪位置。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>一轮期望提交 E = 1 + p₁ + p₁p₂ + …：每多猜一个，贡献再乘一次接受率，收益递减。p = 0.86 时，猜无穷多个也超不过 7.1 个。</li>
+<li>该优化的是速度 = E ÷ 一轮的时间。窗口越宽，验证越贵，所以速度曲线有山顶；还要比不猜快出一截才值得猜。</li>
+<li>接受率要边跑边估计，用 EMA：α 大反应快但抖，α 小稳但慢。没被比对的位置是“没看到”，不能记成失败。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“接受率越高，速度一定越快。”</strong></p>
+<p>接受率只是分子的一部分。假设换一个更聪明但更慢的草稿方法，每轮期望从 2 个涨到 2.5 个，可每轮时间从 10 ms 涨到 15 ms：速度从每秒 200 个降到约 167 个。<span class="ev ev-est">教学推演</span> 判断草稿方法好不好，要看每毫秒提交几个 token，不能只看猜对了多少。</p></div>
+
+<details class="deep"><summary>深入一层：条件概率、删失、探索与验收标准</summary>
+<h3>期望公式不需要独立假设</h3>
+<p>pᵢ 定义为“前 i − 1 个都接受时，第 i 个也被接受的条件概率”。第 i 个草稿有贡献，当且仅当前 i 个都接受，其概率由条件概率的乘法公式直接得到 p₁p₂…pᵢ，不需要宣称各位置相互独立。例：p = [0.8, 0.6, 0.5]，E = 1 + 0.8 + 0.48 + 0.24 = 2.52。如果起草加验证一轮 18 ms，速度约 140 token/s；不猜一轮 8 ms，速度 125 token/s，净收益约 12%。这些是教学例题，不是 Strata 的跑分。<span class="ev ev-est">教学推演</span></p>
+<p>源码的 <code>expected</code> 有两种用法：MTP 用逐位置的数组；查找草稿每个位置用同一个 q，即等比数列。<span class="ev ev-code">代码事实</span>[S09]</p>
+<h3>成本模型逐项</h3>
+<p><code>step_ms(k)</code> 中 n = k + 1，被截到 1 到 K_MAX + 1 之间。稠密部分 = <code>dense_ms × dense_ratio[n−1]</code>。CPU 部分 = (1 − 命中率) × <code>cpu_all_miss_ms</code> × U × (1 + <code>extra_use_cost</code> × (n ÷ U − 1))，其中 U 是窗口里不同专家的数量相对单个 token 的倍数，n ÷ U 是每个专家平均被几个 token 用到。起草部分 = k × 每个草稿的时间。<span class="ev ev-code">代码事实</span>[S09] 头文件给出的默认值：K_MAX = 8；<code>extra_use_cost</code> = 0.25，意思是每多一个 token 用同一个专家，只多花一次读取的 25%；查找草稿每个 0.01 ms，几乎免费。<span class="ev ev-code">代码事实</span></p>
+<p>把“权重只读一次”的理想情况无条件套到所有草稿上，会高估收益；完全不考虑专家复用，又会低估。U 的具体值取决于路由，必须测。</p>
+<h3>先验不是物理常数</h3>
+<p>MTP 的初始接受率 0.86 和查找草稿按匹配长度分桶的先验 {0.35, 0.6, 0.8, 0.92}，都只是起点。注释说前者来自在同一模型上的测量，后者来自离线回放，之后都按会话学习。<span class="ev ev-code">代码事实</span>[S09] 换语言、换量化、换任务，草稿质量和专家复用都会变。<code>DraftPolicy</code> 的查找先验另成一套：{0.75, 0.88, 0.93, 0.96}，每个先验折合 4 次观测，几轮真实数据就能盖过它；旧观测每轮乘 0.97 衰减。<span class="ev ev-code">代码事实</span></p>
+<h3>删失、窗口外的位置与“探索”</h3>
+<p>第一个草稿被拒后，后面的位置不在“前缀都已接受”的条件下，属于未观测。把它们记为 0，会形成自我强化：窗口越短，深位置越显得差，控制器越不愿再试长窗口。全部接受时则相反：窗口外的位置从未被测试，源码把它们往最深已观测位置的估计拉，否则窗口永远长不大。<span class="ev ev-code">代码事实</span>[S09]</p>
+<p>单看 <code>Controller</code> 的两个函数，还有一个值得注意的边界：选了“不猜”之后，<code>observe</code> 会直接返回，估计不再更新。<span class="ev ev-code">代码事实</span>[S09] 如果噪声把估计一度压到门槛以下，单靠这两个函数就再也学不回来，需要调用方另行探索。（本章模块里有一个测试专门演示了这一点。）<code>DraftPolicy</code> 有显式的探索：一个没测过耗时的查找窗口，只要接受率估计不低于 0.85，前 3 次会被直接试用；注释说验证保证了输出不变，赌上的只是这一轮的速度。<span class="ev ev-code">代码事实</span></p>
+<h3>输出会不会因为草稿而变</h3>
+<p>原理上不会：每个提交的 token 都是大模型自己的选择。但上游文档指出一个浮点层面的例外：使用 IQ 量化的模型时，CPU 算一个 token 的专家和算多个 token 的专家用不同的内核，舍入略有不同；而一个专家被几个 token 共享，取决于验证窗口里的草稿。所以温度为 0 时，同一个提示词也可能得到另一个同样合理的回答。设置 <code>STRATA_IQ_MT_MIN=1</code> 后，所有分组都用多 token 内核，答案就不再依赖草稿。<span class="ev ev-report">上游报告</span>[S03]</p>
+<h3>验收标准</h3>
+<p>检验一个窗口控制器，边界比一条漂亮的曲线更有说服力：</p>
+<ul>
+<li>草稿成本很高时，能退回 k = 0。</li>
+<li>p = 0 时，额外草稿不产生任何虚假收益。</li>
+<li>p = 1 时，E 恰好等于 k + 1。</li>
+<li>未观测的位置不被计为失败；全部接受时，窗口外的位置能被拉高。</li>
+<li>只比不猜快不到门槛时，保持不猜。</li>
+</ul>
+<p>本章交互图的计算模块按这些边界写了测试，成本函数也对照源码默认值逐项核对。上游自己的 <code>controller_test</code> 测的是同类性质：先验下选中 2 到 5 个草稿，持续被拒后关闭投机，持续全中后窗口变宽。<span class="ev ev-code">代码事实</span></p>
+</details>
