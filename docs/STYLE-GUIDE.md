@@ -1,6 +1,6 @@
 # 章节写作规范（2026-10 改版）
 
-本规范约束 `content/chapters/NN.html` 的改写。第 1、10 章是样板：动手前先通读这两章的源码。
+本规范约束 `content/chapters/NN.html` 和 `src/viz/NN-*.js` 的改写。**第 10 章是样板**：动手前通读 `content/chapters/10.html`、`src/viz/10-moe.js`、`src/viz/10-moe.math.js`、`tests/viz-10.test.cjs` 和 `src/viz/core.js`。第 1 章是第二个参考（图多、专栏写法）。
 
 ## 1. 读者与深浅
 
@@ -120,10 +120,61 @@ SVG 技术约定（测试与打印版依赖这些规则）：
 4. 不确定的说法，宁可删掉，也不要写成事实。推算要标“教学推演”并写出算式。
 5. 上游数字要写清条件：硬件、模型版本、上下文长度、引擎版本。
 
-## 8. 中文写作
+## 8. 中文写作与语气
 
 短句，一句一事，主动语态。同一概念全书只用一个词（例如统一用“显存”，不混用“VRAM 内存”）。少用“不是……而是……”式的防御性否定，先正面讲清楚。
+
+语气像一个懂行的朋友在讲：可以用比喻、可以有一点幽默，但数字和结论一个都不能错。开场用读者见过的现象；每节先给直觉，再给数字，再给 Strata 的代码事实。避免教科书腔（“本节将讨论……”“综上所述……”）。
 
 ## 9. 元数据
 
 `content/chapters.json` 中对应章节的 `deck`、`prereq`、`goals`（3 条）、`quiz`（3 题，每题 3 个选项，`correct` 为零基索引）、`problem`、`answer`、`sources` 要与新正文一致。习题用读者语言，解析说清为什么。
+
+
+## 10. 交互图（src/viz）
+
+每章**至少 1 个**交互图，建议 2 个。交互图要能“教会人”，不只是会动。
+
+### 10.1 放进章节
+
+```html
+<div class="viz" data-viz="组件名"><figure class="fig"><svg …>静态兜底图（计入 5 张图）</svg><figcaption>…</figcaption></figure></div>
+```
+
+- 结构必须一字不差：`div.viz` 里直接是 `figure.fig`，再里面是 `svg`。打印版和不支持脚本时显示这张静态图。
+- 组件名用小写加连字符，带上本章主题，例如 `sampling-temperature`、`kv-budget`。全书唯一。
+
+### 10.2 写组件
+
+- 文件：`src/viz/NN-主题.js`（界面与交互），`src/viz/NN-主题.math.js`（纯计算，可选），`tests/viz-NN.test.cjs`（纯计算的测试，有 `.math.js` 就必须有）。只有本章用到的代码放在本章文件里。
+- 用 `Viz.register('组件名', { mount(el, ctx) { … } })` 注册。
+- **所有可见文字放进 `const T = Viz.t({ zh: { … } })`**，代码里不出现中文字面量。日后翻译只在表里加 `en`、`ja` 等键。
+- 计时一律用 `ctx.sleep / ctx.timeout / ctx.interval / ctx.raf`。翻页时框架会自动停掉它们；`ctx.sleep` 在组件销毁后会抛错，按 `10-moe.js` 的 `guard()` 写法吞掉。
+- 颜色只用 CSS 变量或类：`var(--accent)` `var(--a2)` `var(--a3)` `var(--frame)` `var(--muted)` `var(--ink)` `var(--paper)` `var(--side)`，以及 `viz-cell / score / pick`。不写死十六进制颜色，这样暗色和亮色主题都对。
+- 手机宽度 375px 下不能横向溢出：网格用 `minmax(0,1fr)`，SVG 用 `viewBox` 等比缩放，表单控件给 `min-width:0`。
+- 系统开启“减少动态效果”时（`ctx.reduced`），动画直接跳到终态。
+
+### 10.3 讲解零件（必备）
+
+按 `10-moe.js` 的顺序组合：
+
+1. `Viz.frame`：模块编号（英文大写下划线，如 `ROUTER_SIM`）+ 中文标题 + 证据标签 + 一两句 intro，说清“这是什么、怎么玩”。
+2. `Viz.legend`：每种颜色、每种形状代表什么。
+3. 过程类组件用 `Viz.pipe` 画流程条，动画走到哪一步，哪一步亮。
+4. `Viz.term`：每一步打印一句人话，说明此刻发生了什么、数字从哪来。
+5. `Viz.stat`：关键数字，下面一行写**算式**。
+6. `Viz.tryList`：3 个具体任务，每个都写明“做完能看出什么”。
+7. 结果类组件跑完后显示 `.viz-verdict` 结论。
+
+组件里的数字同样要遵守第 7 节：源自 Strata 的数字必须核实；随机数和教学假设要在标签或 intro 里说明。
+
+## 11. 并行改写的工作约定
+
+1. 只改自己负责的文件：`content/chapters/NN.html`、`src/viz/NN-*.js`、`tests/viz-NN.test.cjs`。不改 `chapters.json`、`app.js`、`machine.css`、`core.js`、测试总表或其他章节。需要框架新能力时，在汇报里提出，不要自己改共享文件。
+2. 章节元数据写到 scratchpad 的 `meta/NN.json`：`{ "title"?, "deck", "prereq", "goals":[3], "quiz":[3 × {text, choices:[3], correct, why}], "problem", "answer", "sources":[…] }`，由主任务合并进 `chapters.json`。
+3. 事实核查记录写到 scratchpad 的 `factcheck/NN.md`：每条关于 Strata 的事实一行，写明来源文件、行号和原文要点。
+4. 自检命令（必须全部通过）：
+   - `node scripts/check-chapter.cjs NN <scratchpad>/meta/NN.json`
+   - `node --test tests/viz-NN.test.cjs`
+   - `node scripts/check-links.cjs NN`
+5. 不运行 `git commit`，不启动浏览器。浏览器检查由主任务统一做。
