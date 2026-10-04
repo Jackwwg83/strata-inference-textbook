@@ -55,3 +55,12 @@ test('public edition states author, licenses, draft status and errata channel',(
  for(const html of [index,full]){assert.ok(html.includes(p.issues));assert.ok(html.includes('CC BY-SA 4.0'));}
  assert.ok(full.includes('AI 辅助编写')&&full.includes('Jackwwg83'));
 });
+test('header links to the repository and footer links the author profile',()=>{
+ const p=load('provenance');
+ assert.equal(p.repoUrl,'https://github.com/Jackwwg83/strata-inference-textbook');
+ assert.equal(p.authorUrl,'https://github.com/Jackwwg83');
+ const index=fs.readFileSync(path.join(root,'dist/index.html'),'utf8');
+ assert.match(index,/<a[^>]+class="icon-button github-link"[^>]+href="https:\/\/github\.com\/Jackwwg83\/strata-inference-textbook"/);
+ const app=fs.readFileSync(path.join(root,'src/app.js'),'utf8');
+ assert.ok(app.includes('Book.provenance.authorUrl'),'footer must link the author profile');
+});
