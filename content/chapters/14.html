@@ -1,18 +1,180 @@
-<h2 id="sec-1">14.1 为什么要锁页？</h2>
-<p>DMA 允许设备在约定的映射下搬运数据，不要求 CPU 逐字节复制。若源页在传输中被移动或回收，设备不能随意继续按旧物理位置读取。因此可直接异步访问的主机缓冲通常需要相应注册和稳定性条件。</p>
-<p>Strata 的专家来源接口把 <code>pinned()</code> 与 <code>device_alias()</code> 分开暴露：前者说明页锁定 / 注册属性，后者说明设备可使用的地址别名。[S06] 它们并不意味着数据已经在显存；GPU 通过映射读主机内存，仍受相应互连和主存成本限制。</p>
-<h2 id="sec-2">14.2 一个最小生产者—消费者协议</h2>
-<p>生产者先填入字节，再发布 ready；消费者观察到 ready 后读取；读完后发布 done；生产者观察到 done 才覆盖缓冲。关键不只是时间上的“好像先后”，还要有正确内存可见性与同步原语。</p>
-<p>教学状态机为 <code>FREE → FILLING → READY → READING → FREE</code>。不能从 READY 直接返回 FREE，也不能仅靠普通变量或 <code>volatile</code> 代替跨设备所需的顺序保证。具体 fence、事件与 stream 语义必须遵守目标平台规则。[R01]</p>
-<h2 id="sec-3">14.3 例题：双缓冲能隐藏多少时间？</h2>
-<p>假设每块传输 3 ms、计算 5 ms，传输与计算可以在独立资源上重叠。单块串行是 8 ms；N 块理想双缓冲时间约为 <code>3 + (N−1)×max(3,5) + 5 = 5N+3 ms</code>。N=4 时为 23 ms，而非 32 ms。</p>
-<p>如果传输与计算共享限制资源，或者计算尚未结束就覆盖下一轮的缓冲，这个公式不成立。性能公式的前提是正确性协议和实际并行资源，不是“分配两块内存”本身。</p>
-<h2 id="sec-4">14.4 stream 顺序只在它保证的范围内成立</h2>
-<p>同一 stream 中有序提交的操作可以形成依赖，但不同 stream、主机读取和默认流规则之间不能随意推定关系。<code>ExpertCache</code> 接口保留了启动填充与读回校验跨流导致字节不一致的历史案例，因此有专门阻塞填充与同步接口。[S05]</p>
-<p>同样，<code>Verifier::commit</code> 可以异步返回；其他 stream 或主机将读取 session 时，要先 <code>wait_commit</code>。[S08] 这与数据库事务提交后读者可见的边界相似，但这里还涉及设备工作队列和缓冲生命周期。</p>
-<h2 id="sec-5">14.5 锁页不是免费的容量扩展</h2>
-<p>大量锁页减少了操作系统可回收的空间，可能让其他进程甚至系统本身面临压力。主机还有服务进程、文件缓存、页表、输入缓冲和可恢复状态，不应把全部物理内存分给专家。[R02]</p>
-<p>一个稳健预算要区分 reserved、committed、resident、locked 与 GPU duplicate。将这些数字简单相加也可能重复计算；先说明它们是否指向同一批物理页，再做总量核算。</p>
-<h2 id="sec-6">14.6 实验：把竞态变得必现</h2>
-<p>用两个数组模拟双缓冲，在消费者读取前故意让生产者覆盖当前数组，测试应该失败。然后加入 done 许可。再把“完成事件”延迟若干步，验证系统是等待而不是悄悄消费半更新数据。</p>
-<p>验收包括完整 payload 校验、每轮递增 generation、超时后不可继续复用的状态。不要只测试顺利路径；一种特别重要的失败是消费者永远不返回，生产者是否会错误绕回覆盖。</p>
+<div class="hook"><span class="eyebrow">你可能遇到过</span>
+<p>第一次启动 Strata，电脑会卡上一两分钟，鼠标都不太跟手。README 提前打了招呼：模型启动时，要把 35–55 GB 读进内存，并且把其中一部分“锁住”给显卡用；这期间电脑变慢甚至没有响应，是正常的，等着就好。<span class="ev ev-report">上游报告</span>[S01]</p>
+<p>内存为什么要“锁”？锁了之后显卡能干什么、不锁又会出什么事？这一章从操作系统最基本的把戏讲起：你的程序看到的内存地址，其实是“假”的。</p></div>
+<p class="tldr"><strong>一句话：</strong>操作系统会随时挪动内存页，而显卡的 DMA 引擎只认开工时拿到的物理地址，所以要搬的内存必须先锁页；搬运是异步的，函数返回不等于数据已到，要靠完成信号；用两块缓冲区轮流“一边搬、一边算”，就能把搬运时间藏起来，前提是每次覆盖前都等到“用完”的信号。</p>
+
+<h2 id="sec-1">14.1 你看到的内存地址是“假”的</h2>
+<p>程序里的一个指针，比如 <code>0x7f3a_0000_1000</code>，并不是内存条上的真实位置。它是一个<dfn>虚拟地址</dfn>。操作系统和 CPU 一起，把虚拟地址翻译成<dfn>物理地址</dfn>，才真正去读内存条。这层翻译让每个程序都以为自己独占一大片连续内存，也让操作系统可以在背后随意调度。</p>
+<aside class="primer" id="c14-virtual-memory">
+<h3>虚拟内存与分页</h3>
+<p>操作系统把内存切成固定大小的块，叫<dfn>页</dfn>，最常见的是 4 KiB。程序的虚拟地址空间按页切，物理内存也按同样大小切成<dfn>页框</dfn>。每个程序有一张<dfn>页表</dfn>，记录“虚拟页 → 物理页框”。CPU 每次访问内存，都要先查这张表，见图 14-1。</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="图 14-1：程序的四个虚拟页经页表映射到散落的物理页框，其中一页暂时被换出到硬盘">
+<text class="f-text" fill="#182f2b" x="70" y="20" font-size="15" font-weight="600" text-anchor="middle">虚拟页</text>
+<text class="f-text" fill="#182f2b" x="320" y="20" font-size="15" font-weight="600" text-anchor="middle">物理页框</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="32" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="54" font-size="14" text-anchor="middle">页 0</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="72" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="94" font-size="14" text-anchor="middle">页 1</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="112" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="134" font-size="14" text-anchor="middle">页 2</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="152" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="174" font-size="14" text-anchor="middle">页 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="32" width="100" height="22"/><text class="f-muted" fill="#5c6d66" x="320" y="48" font-size="14" text-anchor="middle">框 0</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="56" width="100" height="22"/><text class="f-on" fill="#ffffff" x="320" y="72" font-size="14" text-anchor="middle">框 1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="80" width="100" height="22"/><text class="f-muted" fill="#5c6d66" x="320" y="96" font-size="14" text-anchor="middle">框 2</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="104" width="100" height="22"/><text class="f-on" fill="#ffffff" x="320" y="120" font-size="14" text-anchor="middle">框 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="128" width="100" height="22"/><text class="f-muted" fill="#5c6d66" x="320" y="144" font-size="14" text-anchor="middle">框 4</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="152" width="100" height="22"/><text class="f-on" fill="#ffffff" x="320" y="168" font-size="14" text-anchor="middle">框 5</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M120 49L268 115M120 89L268 67M120 169L268 163M120 129L200 214"/>
+<rect class="f-warn" fill="#9e5d24" x="160" y="214" width="110" height="30" rx="5"/>
+<text class="f-on" fill="#ffffff" x="215" y="234" font-size="14" text-anchor="middle">硬盘（换出）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="272" font-size="14">程序看到连续的 4 页，真实位置是散的；</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="292" font-size="14">页 2 暂时不在内存，用到时才读回来</text>
+</svg><figcaption>图 14-1　页表把虚拟页翻译成物理页框。操作系统可以随时改这张表：把页挪到别的页框，或者换出到硬盘。</figcaption></figure>
+<p>这带来三个好处：程序之间互相隔离；内存不够时，不常用的页可以<dfn>换出</dfn>到硬盘，用到时再读回；物理内存可以零零碎碎地分配，程序却看到连续的地址。代价是：同一个虚拟页，此刻在哪个页框，操作系统说了算，而且随时会变。</p>
+<p>每次访问都查页表太慢，所以 CPU 里有一个专门缓存翻译结果的小部件，叫 <dfn>TLB</dfn>（快表）。它只装得下几千条。Strata 的源码算过一笔账：33.97 GB 的专家权重按 4 KB 一页切，是 830 万页，任何 TLB 都装不下，读每个专家都会不停地查表；换成 2 MB 的大页，只要一万六千多页。<span class="ev ev-code">代码事实</span>（<code>include/strata/core/pinned.hpp</code>）可惜在 Windows 上，普通用户账户默认没有使用大页的权限，所以普通页是常见情况，引擎会在启动时报告它拿到的是哪一种。<span class="ev ev-code">代码事实</span>（<code>pinned.hpp</code>）</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/虚拟内存" target="_blank" rel="noopener noreferrer">维基百科：虚拟内存</a> · <a href="https://zh.wikipedia.org/zh-cn/分頁" target="_blank" rel="noopener noreferrer">维基百科：分页</a> · <a href="https://zh.wikipedia.org/zh-cn/轉譯後備緩衝區" target="_blank" rel="noopener noreferrer">维基百科：转译后备缓冲器（TLB）</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-paging.pdf" target="_blank" rel="noopener noreferrer">OSTEP 第 18 章：分页</a></p>
+</aside>
+<p class="bridge"><strong>学过操作系统的同学：</strong>这就是“页表 ＋ TLB ＋ 缺页中断”那一套。本章关心的是它的一个副作用：页表能随时改，而外部设备并不知道。</p>
+
+<h2 id="sec-2">14.2 让显卡自己来搬：DMA 与锁页</h2>
+<p>数据从内存送到显卡，不需要 CPU 一个字节一个字节地搬。显卡上有专门的<dfn>拷贝引擎</dfn>，CPU 只要告诉它“从哪里、搬多少、搬到哪里”，它自己沿着 PCIe 总线把数据拉过去。这种“设备直接读写内存”的方式叫 <dfn>DMA</dfn>（直接内存访问）。</p>
+<aside class="primer" id="c14-dma">
+<h3>DMA：设备直接访问内存</h3>
+<p>没有 DMA 时，CPU 要亲自把每个字节从内存读出来，再写给设备，自己什么别的也干不了。有了 DMA，CPU 只发一个“搬运单”，设备的 DMA 引擎照单执行，搬完再通知 CPU。硬盘、网卡、显卡都靠它工作。</p>
+<p>关键在于：DMA 引擎不经过 CPU 的页表，它只认<strong>物理地址</strong>。驱动在开工前把虚拟地址翻译好，交给它一串物理页框号。如果搬到一半，操作系统把某一页挪走了，DMA 引擎浑然不知，照旧去读原来的页框，而那里此刻可能装着别的程序的数据。</p>
+<p>所以给 DMA 用的内存，必须先<dfn>锁页</dfn>（也叫“页锁定”或“固定”）：告诉操作系统，这些页在解锁之前不许挪、不许换出。CUDA 里，可以直接申请锁页内存，也可以把一块已有的内存“注册”成锁页内存。对普通的（可分页）内存做拷贝时，驱动通常要先把数据复制到一块自己的锁页中转区，再让 DMA 去搬，多了一次复制。[R01]</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/直接記憶體存取" target="_blank" rel="noopener noreferrer">维基百科：直接存储器访问</a> · <a href="https://en.wikipedia.org/wiki/Direct_memory_access" target="_blank" rel="noopener noreferrer">Wikipedia: Direct memory access</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA CUDA Programming Guide</a> · <a href="https://man7.org/linux/man-pages/man2/mlock.2.html" target="_blank" rel="noopener noreferrer">Linux 手册：mlock</a></p>
+</aside>
+<p>光看文字，“页被挪走”有点抽象。下面的模拟器把一次搬运放慢了，你可以亲手制造一次“搬到一半内存紧张”：</p>
+<div class="viz" data-viz="pin-dma"><figure class="fig"><svg viewBox="0 0 400 268" role="img" aria-label="图 14-2：没有锁页时，DMA 开工后操作系统把页 2 从页框 3 挪到页框 6，DMA 仍按旧号码读页框 3，读到了别的程序的数据">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="8" width="380" height="60" rx="8"/>
+<text class="f-text" fill="#182f2b" x="24" y="32" font-size="15" font-weight="600">① 开工：页 2 在页框 3</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="56" font-size="14">DMA 记下页框号 2、5、3、7</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="78" width="380" height="60" rx="8"/>
+<text class="f-text" fill="#182f2b" x="24" y="102" font-size="15" font-weight="600">② 搬到一半，内存紧张</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="126" font-size="14">系统把页 2 挪到页框 6，页框 3 给了别人</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="148" width="380" height="60" rx="8"/>
+<text class="f-on" fill="#ffffff" x="24" y="172" font-size="15" font-weight="600">③ DMA 照旧读页框 3</text>
+<text class="f-on" fill="#ffffff" x="24" y="196" font-size="14">读到的是别的程序的数据，且不报错</text>
+<text class="f-text" fill="#182f2b" x="10" y="236" font-size="14">锁页之后：系统保证搬完之前不挪这些页，</text>
+<text class="f-text" fill="#182f2b" x="10" y="258" font-size="14">DMA 照着开工时的号码读写才安全。</text>
+</svg><figcaption>图 14-2　DMA 不看页表。被它使用的内存一旦被操作系统挪动，它读到的就是别人的数据。</figcaption></figure></div>
+<p>Strata 的专家权重全部放在锁页内存里。<span class="ev ev-report">上游报告</span>[S02] 源码的说法更直白：这块“专家区”才是引擎真正的工作集，必须锁页，拷贝引擎才能跑满带宽。<span class="ev ev-code">代码事实</span>（<code>pinned.hpp</code>）具体做法是：先保留一大块内存，在碰它任何一页之前，就把整块注册成 CUDA 的锁页内存，并且映射到显卡的地址空间；整块注册失败时，就一段一段地注册，剩下的部分改用操作系统的“常驻”锁定，至少保证它不被换出。<span class="ev ev-code">代码事实</span>（<code>src/core/pinned.cu</code>）上游的排错表也写着：在 Windows 上，日志里出现整块注册“内存不足”是正常的，引擎会改为按层分段锁定。</p>
+<p>锁页之后，数据有三条路可以上显卡，见图 14-3。</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="图 14-3：三条上显卡的路。普通内存要先由 CPU 拷进中转区再 DMA；锁页内存可直接 DMA；映射到显卡地址空间的锁页内存可以被 GPU 内核经 PCIe 直接读">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">① 普通内存</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="34" width="90" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="65" y="56" font-size="14" text-anchor="middle">原数据</text>
+<rect class="f-soft" fill="#e5f1df" x="150" y="34" width="90" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="195" y="56" font-size="14" text-anchor="middle">中转区</text>
+<rect class="f-accent" fill="#136d5a" x="290" y="34" width="90" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="335" y="56" font-size="14" text-anchor="middle">显存</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M110 51H146M240 51H286"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="90" font-size="14">CPU 先复制一遍，再 DMA</text>
+<text class="f-text" fill="#182f2b" x="20" y="126" font-size="15" font-weight="600">② 锁页内存</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="138" width="90" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="65" y="160" font-size="14" text-anchor="middle">锁页区</text>
+<rect class="f-accent" fill="#136d5a" x="290" y="138" width="90" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="335" y="160" font-size="14" text-anchor="middle">显存</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M110 155H286"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="194" font-size="14">拷贝引擎直接搬，CPU 不参与</text>
+<text class="f-text" fill="#182f2b" x="20" y="230" font-size="15" font-weight="600">③ 映射的锁页内存</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="242" width="90" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="65" y="264" font-size="14" text-anchor="middle">锁页区</text>
+<rect class="f-accent" fill="#136d5a" x="290" y="242" width="90" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="335" y="264" font-size="14" text-anchor="middle">GPU 内核</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="5 4" d="M110 259H286"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="296" font-size="14">GPU 计算时经 PCIe 直接读，不先拷进显存</text>
+</svg><figcaption>图 14-3　锁页让第 ② 条路成为可能；映射之后还有第 ③ 条路。第 ③ 条路省掉了拷贝，但每次读都要走 PCIe。</figcaption></figure>
+<p>Strata 的专家来源接口把后两条路都摆在了明面上：<code>pinned()</code> 回答“这个专家是不是在锁页、已注册的内存里，可以直接 DMA，不用 CPU 先复制一遍”；<code>device_alias()</code> 给出这个专家在显卡地址空间里的地址，GPU 可以经 PCIe 直接读。<span class="ev ev-code">代码事实</span>[S06] 注意，“GPU 能读到”不等于“已经在显存里”：走第 ③ 条路，每次读都要过 PCIe，仍然受总线带宽限制。</p>
+<p>没能锁上的专家怎么办？读长提示词时，引擎有几个辅助线程，提前把它们复制进一组锁页缓冲区，再交给拷贝引擎。<span class="ev ev-report">上游报告</span>[S03] 源码注释说，以前由发起拷贝的线程顺手复制，每次约 2 MB 的复制期间 GPU 没有排队的活可干；在 IQ3_S 上读 32K 提示词，这样白白浪费了约 15 秒。<span class="ev ev-report">上游报告</span>（<code>src/prefill/prefill.cpp</code> 注释）</p>
+
+<h2 id="sec-3">14.3 “已提交”不等于“已完成”</h2>
+<p>让拷贝引擎去搬，CPU 要不要站在旁边等它搬完？可以等，也可以不等。这是两种调用方式。</p>
+<aside class="primer" id="c14-async">
+<h3>同步与异步</h3>
+<p><dfn>同步</dfn>调用：函数返回时，事情已经做完了。像去柜台办业务，站在那里等办完。<dfn>异步</dfn>调用：函数只是把事情“提交”出去，马上返回，事情在后台进行。像在网上下单，下完单你就去干别的了，快递到了会通知你。</p>
+<p>异步的好处是不用干等，见图 14-4。代价是：函数返回时，你不能假设事情已经做完。想用结果，必须等一个明确的<dfn>完成信号</dfn>。在 CUDA 里，同一条<dfn>流</dfn>（stream）上提交的工作按顺序执行；跨流、或者主机要读结果时，要靠<dfn>事件</dfn>（event）：在流上记一个事件，事件“完成”了，它之前提交的工作就都做完了。[R01]</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="图 14-4：同步调用要等拷贝完成才返回；异步调用立刻返回，拷贝在后台进行，用结果前要等完成事件">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">同步</text>
+<text class="f-text" fill="#182f2b" x="20" y="54" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="70" y="38" width="160" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="150" y="55" font-size="14" text-anchor="middle">干等搬运</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="38" width="150" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="305" y="55" font-size="14" text-anchor="middle">干别的</text>
+<text class="f-text" fill="#182f2b" x="20" y="108" font-size="15" font-weight="600">异步</text>
+<text class="f-text" fill="#182f2b" x="20" y="140" font-size="14">CPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="124" width="200" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="170" y="141" font-size="14" text-anchor="middle">提交后马上干别的</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="14">拷贝</text>
+<rect class="f-soft" fill="#e5f1df" x="70" y="160" width="160" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="150" y="177" font-size="14" text-anchor="middle">后台搬运</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M230 156V196"/>
+<text class="f-muted" fill="#5c6d66" x="236" y="214" font-size="14">完成事件：此后才能用</text>
+</svg><figcaption>图 14-4　异步调用把等待藏到了后台，但“返回”和“完成”是两回事。</figcaption></figure>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/異步I/O" target="_blank" rel="noopener noreferrer">维基百科：异步 I/O</a> · <a href="https://zh.wikipedia.org/zh-cn/生产者消费者问题" target="_blank" rel="noopener noreferrer">维基百科：生产者消费者问题</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/threads-cv.pdf" target="_blank" rel="noopener noreferrer">OSTEP 第 30 章：条件变量（生产者与消费者）</a></p>
+</aside>
+<p>Strata 的源码里，到处是“返回不等于完成”的提醒：</p>
+<ul>
+<li><strong>专家缓存的填充</strong>平时是异步的，因为拷贝和随后读它的计算排在同一条流上，顺序天然成立。开机按名单填缓存时没有这种保证，第一版用了异步填充，逐字节校验立刻报错“槽位 0 第 0 字节就不一样”。于是有了专门的阻塞版本。<span class="ev ev-code">代码事实</span>[S05]</li>
+<li><strong>验证窗口的提交</strong>可以不等计算图跑完就返回，让下一步的草稿生成同时进行；但任何从别的流或主机去读写会话状态的代码（新请求、存档、快照等），都必须先调用 <code>wait_commit()</code>。<span class="ev ev-code">代码事实</span>[S08]</li>
+<li><strong>每层的主循环</strong>不调用“等整条流做完”的函数，而是查询一个事件。源码注释还记下一个坑：每个 token 释放一次锁页缓冲区，而释放锁页内存会隐式地让整个设备同步，于是每个 token 结尾都多了一次全设备等待。修法是在会话开始时一次分配好、反复使用。<span class="ev ev-code">代码事实</span>（<code>include/strata/core/session.hpp</code>）</li>
+</ul>
+<p>第 11 章的硬盘读取也是同一个思路：token 一确定就提交 16 个读请求，到第 1 层要用之前才取结果。</p>
+
+<h2 id="sec-4">14.4 双缓冲：一边搬，一边算</h2>
+<p>异步搬运最常见的用法，是让搬运和计算重叠。假设要处理一串数据块：每块先搬上显卡（3 毫秒），再计算（5 毫秒）。只有一块缓冲区时，只能“搬完再算、算完再搬”；有两块，就能一块在算、另一块同时在搬下一份。这叫<dfn>双缓冲</dfn>。</p>
+<p>算一笔账：4 块数据，串行要 4 × (3 ＋ 5) = 32 毫秒；双缓冲时，第一块的搬运和最后一块的计算无法重叠，中间每一步都按慢的那一段算：3 ＋ (4 − 1) × max(3, 5) ＋ 5 = 23 毫秒。这个公式成立的前提是，拷贝引擎和计算单元真的是两套独立的资源。</p>
+<div class="viz" data-viz="double-buffer"><figure class="fig"><svg viewBox="0 0 400 242" role="img" aria-label="图 14-5：4 块数据，拷贝 3 毫秒、计算 5 毫秒。一块缓冲区串行要 32 毫秒，两块缓冲区重叠后 23 毫秒">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">1 块缓冲区：32 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="54" font-size="14">拷贝</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="38" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="144" y="38" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="224" y="38" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="304" y="38" width="30" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="88" font-size="14">计算</text>
+<rect class="f-accent" fill="#136d5a" x="94" y="72" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="174" y="72" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="254" y="72" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="334" y="72" width="50" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="134" font-size="15" font-weight="600">2 块缓冲区：23 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="166" font-size="14">拷贝</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="150" width="30" height="24"/><rect class="f-warn" fill="#9e5d24" x="94" y="150" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="144" y="150" width="30" height="24"/><rect class="f-warn" fill="#9e5d24" x="194" y="150" width="30" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="200" font-size="14">计算</text>
+<rect class="f-accent" fill="#136d5a" x="94" y="184" width="50" height="24"/><rect class="f-warn" fill="#9e5d24" x="144" y="184" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="194" y="184" width="50" height="24"/><rect class="f-warn" fill="#9e5d24" x="244" y="184" width="50" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="234" font-size="14">两种填色＝两块缓冲区，轮流使用</text>
+</svg><figcaption>图 14-5　双缓冲把搬运藏到了计算后面。注意第 3 块要等第 1 块算完、腾出缓冲区，才能开始搬。</figcaption></figure></div>
+<p>模拟器最想让你看到的是“不等信号就覆盖”那一下。双缓冲的正确性，不来自“分配了两块内存”，而来自两个信号：<strong>拷完了才能读</strong>，<strong>用完了才能写</strong>。每块缓冲区就是一个小状态机，见图 14-6。</p>
+<figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="图 14-6：缓冲区的生命周期。空闲时可以写；拷贝完成事件后才能读；计算用完事件后才能回到空闲">
+<rect class="f-soft" fill="#e5f1df" x="130" y="8" width="140" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="33" font-size="15" font-weight="600" text-anchor="middle">空闲</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="260" y="104" width="130" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="325" y="129" font-size="15" font-weight="600" text-anchor="middle">正在拷入</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="196" width="140" height="40" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="221" font-size="15" font-weight="600" text-anchor="middle">正在计算</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="104" width="130" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="75" y="129" font-size="15" font-weight="600" text-anchor="middle">等待回收</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M270 36Q330 50 326 100M326 146Q320 196 274 214M128 214Q80 196 76 148M76 102Q80 50 128 36"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="70" font-size="14">提交拷贝</text>
+<text class="f-warn" fill="#9e5d24" x="300" y="186" font-size="14">“拷完”事件</text>
+<text class="f-warn" fill="#9e5d24" x="18" y="186" font-size="14">“用完”事件</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="70" font-size="14">可以复用</text>
+<text class="f-text" fill="#182f2b" x="200" y="264" font-size="14" text-anchor="middle">没有“用完”事件，就不能回到空闲</text>
+</svg><figcaption>图 14-6　一块缓冲区的一生。两个事件把四个状态串起来；少了任何一个，就可能读到没搬完的数据，或者覆盖还没用完的数据。</figcaption></figure>
+<p>Strata 读长提示词时，就用了这样的环形缓冲区：不在显存里的专家，经一组锁页的环形槽位、在单独的拷贝流上送上显卡。<span class="ev ev-code">代码事实</span>[S12] 每个槽位配两个事件，一个表示“拷完了”，一个表示“用完了”。<span class="ev ev-code">代码事实</span>（<code>prefill.cpp</code>）前面提到的辅助复制线程也是同一套规矩：第 j 个任务写进第 j mod 16 块锁页缓冲区（默认 16 块），而且要先等第 j − 16 个任务从这块缓冲区发出的 DMA 完成，才能往里写。<span class="ev ev-code">代码事实</span>（<code>prefill.cpp</code>）</p>
+<p>环有多大也有讲究。源码注释记录了一次测量（Q2_0，每块 8192 个 token）：环形槽位从 96 个加到 384 个，读提示词从每秒 1,153 个 token 提高到 1,294 个，因为下一层的专家能在本层注意力计算期间就送到。而当大量专家要靠主机复制时，大环反而更慢，因为瓶颈是主机复制，多出来的槽位只是占了缓存的位置。<span class="ev ev-report">上游报告</span>（<code>prefill.cpp</code> 注释）多 GPU 分层时，每一级还有两块锁页的交接缓冲区：下一级读第 c 块时，这一级已经在处理第 c ＋ 1 块。<span class="ev ev-code">代码事实</span>[S12] 这就是双缓冲。</p>
+
+<h2 id="sec-5">14.5 锁页不是免费的</h2>
+<p>既然锁页这么好，把内存全锁上行不行？不行。锁住的页，操作系统就不能再挪、不能换出，也不能在内存紧张时收回。锁得越多，留给系统、其他程序和文件缓存的弹性就越小。[R02]</p>
+<p>Strata 在这件事上很小心。低内存的“驻留”模式会给系统留出 4 GB 空闲内存。<span class="ev ev-report">上游报告</span>[S03] 在 Windows 上，显卡映射的锁页内存还要计入一块“共享显存”预算：源码记录过一台 63 GB 的电脑，一段段锁到驱动拒绝为止，锁了 28 GiB，结果那块预算被占满，之后每一次显存分配都报“内存不足”。为此引擎提供了可选的上限设置；但它不是默认值，因为一台 64 GB 的电脑实测多锁了也没事，而设上限会让读提示词慢约 20%。<span class="ev ev-code">代码事实</span>（<code>pinned.cu</code>）这种取舍没有放之四海而皆准的答案，只能按机器量。</p>
+<p>还有一个有趣的对照：长上下文的 KV 页缓存（第 12 章提过），完整的 KV 数据放在锁页、并映射给显卡的内存里，显存里只放一部分页，再用一张“页号 → 显存槽位”的表记录谁在显存。<span class="ev ev-code">代码事实</span>（<code>include/strata/kernels/kv_stream.hpp</code>）这几乎就是一套迷你的虚拟内存：页表、缺页、替换，全由 GPU 自己完成。</p>
+
+<h2 id="sec-6">14.6 动手：把竞态变成必现</h2>
+<p>本章没有单独的交互实验，两个模拟器就是你的实验台。在「双缓冲」里，先用 1 块、2 块、3 块缓冲区各播放一次，记下总用时；再回到 2 块，打开“不等信号就覆盖”，看哪几块被标成 ✗。然后把拷贝调慢、计算调快，再试一次：为什么这次“碰巧”没出错？这种“有时对、有时错”的错误，最难查。</p>
+<p>在「DMA 与锁页」里，分别关、开“锁页”走一遍，对照第 4、5 步的页表和 DMA 手里的页框号。</p>
+<p>最后做一个纸上实验：用两个数组模拟双缓冲，写一个测试，故意让生产者在消费者读完前覆盖数组，确认测试会失败；再加上“用完”信号，确认它通过；最后把“完成事件”人为延迟几步，确认系统是在等待，而不是悄悄读了半新半旧的数据。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>程序的地址是虚拟的，操作系统随时能挪页；DMA 只认物理地址，所以给它用的内存必须锁页。Strata 的专家区全部锁页并映射给显卡。</li>
+<li>异步调用的“返回”不等于“完成”。要用结果，等完成事件；要复用缓冲区，等“用完”事件。</li>
+<li>双缓冲能把搬运藏到计算后面：总时间 ≈ 首块搬运 ＋ (块数 − 1) × 慢的一段 ＋ 末块计算。锁页有代价，要给系统留余量。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“异步拷贝函数返回了，数据就到了，源缓冲区也可以马上改。”</strong></p>
+<p>函数返回只说明工作已经提交，拷贝可能还没开始。此时改写源缓冲区，显卡收到的可能是新旧混合的数据；释放它，更可能让拷贝读到已被别人占用的内存。能不能复用，只看完成信号。在中间加一句“等 0.1 秒”也不是修复：慢一点的机器上照样出错，快的机器上又白白变慢。</p></div>
+
+<details class="deep"><summary>深入一层：生产者消费者协议、流的顺序边界与内存预算</summary>
+<h3>一个最小的生产者—消费者协议</h3>
+<p>生产者先填好字节，再发布“就绪”；消费者看到“就绪”后读取，读完发布“用完”；生产者看到“用完”才能覆盖。教学用的状态机是：空闲 → 填写中 → 就绪 → 读取中 → 空闲。不能从“就绪”直接回到“空闲”，也不能用普通变量或 <code>volatile</code> 代替跨设备所需的顺序保证。具体用哪种栅栏、事件和流语义，要遵守目标平台的规则。[R01]</p>
+<h3>流的顺序只在它保证的范围内成立</h3>
+<p>同一条流上按顺序提交的操作，天然有先后关系；不同的流之间、主机读取和默认流之间，不能随意假设顺序。专家缓存的开机填充就栽在这里：数据在非阻塞流上拷，校验在传统流上读，两者没有顺序，校验读到了还没拷完的槽位。<span class="ev ev-code">代码事实</span>[S05] 验证窗口的异步提交也一样：调用方可以跳过等待，前提是后续工作在同一条流上、草稿生成不读它写的东西；一旦有别的流或主机要读会话状态，就得先等。<span class="ev ev-code">代码事实</span>[S08]</p>
+<h3>同一个并发教训，用了两次</h3>
+<p>辅助复制线程领任务时，用的是“批次号 | 任务数 | 序号”打包的原子变量，只有批次对得上才能领到任务，迟到的线程领不到下一批的任务。源码注释说，这是 CPU 专家池那次卡死（issue #29）的教训。<span class="ev ev-code">代码事实</span>（<code>prefill.cpp</code>）第 13 章讲了那次卡死的来龙去脉。</p>
+<h3>内存预算别重复计算</h3>
+<p>一份稳健的内存预算，要分清几种量：保留的（地址占了，还没真正分配）、已提交的（系统承诺能给）、常驻的（此刻在物理内存里）、锁定的（不许换出）、在显卡上另有一份副本的。这几种量可能指向同一批物理页，简单相加会重复计算。先弄清它们是否重叠，再算总账。[R02] 主机上还有服务进程、文件缓存、页表、输入缓冲和可恢复的会话状态，不能把全部物理内存都分给专家。</p>
+<h3>验收：把罕见的错误变成必现</h3>
+<p>测试不能只走顺利的路径。要专门构造：消费者迟迟不回“用完”，生产者会不会绕一圈回来覆盖；完成事件被人为延迟，系统是等待还是读了半成品；每轮的数据带一个递增的代数，消费者读到的代数必须和它期待的一致；超时之后，这块缓冲区不能再被复用。第 11 章的硬盘读取器就内置了“人为延迟每次读取”的故障注入，正是为了这类验收。</p>
+</details>
