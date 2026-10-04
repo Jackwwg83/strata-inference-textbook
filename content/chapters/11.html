@@ -1,18 +1,260 @@
-<h2 id="sec-1">11.1 三种查找，不能画成一个框</h2>
-<p><strong>PLE / n-gram 表查询</strong>属于模型的数值计算，依赖序列历史并读取学习得到的表行；<strong>prompt lookup 草稿</strong>从已出现文本中猜测未来 token，仍需目标验证；<strong>专家缓存</strong>决定某个专家权重是否已在显存。名字都带查找或缓存，但正确性条件完全不同。[S02][S11][S13]</p>
-<p>在当前 session 接口里，PLE 保留前两个 token，顺序为最旧在前，初始用 −1 占位；还存在卷积式历史缓冲。[S13] 因而它是序列状态的一部分，不是随手可丢的日志。</p>
-<h2 id="sec-2">11.2 大表不必每步完整读取</h2>
-<p>上游说明把大 n-gram 表放在 SSD，按需要读取少量行。[S02] 总表很大，只决定存储容量；单步读取多少、是否命中 OS / 行缓存、随机访问延迟如何，决定运行成本。</p>
-<p>这与数据库中的按键查询相似：即使表很大，一次查询也未必扫描整表。但“只读几行”也不自动保证快，因为随机 I/O、页跨越和冷启动会带来固定开销。</p>
-<h2 id="sec-3">11.3 八路组相联，且不是 LRU</h2>
-<p><code>ple_reader.cpp</code> 的 <code>RowCache</code> 明确使用 8 路组相联。一个 row ID 经过 mix，模 sets 选择一个组；组内扫描 8 个键。插入时用该组的 next 指针轮换，而不是根据最近使用时间淘汰。[S11]</p>
-<p>教学例子：缓存总共 16 行，有 2 组、每组 8 路。假设 9 个不同 row 都映射到同一组，循环访问它们时就会不断冲突，即便另一组完全空着，也不能随意占用。相联度约束解释了为什么“总容量足够”不一定意味着高命中。</p>
-<h2 id="sec-4">11.4 行跨页如何放大读取？</h2>
-<p>假设页大小为 4096 字节，一行从页内偏移 4000 开始，长度 200 字节。它覆盖到下一页的第 104 字节；若底层必须整页读取，就需要覆盖两页，总计 8192 字节，远大于有效数据的 200 字节。</p>
-<p>源码的 <code>Job</code> 用对齐 offset、PAGE 或 2×PAGE 长度，并允许一个 I/O 对应多个行使用者。[S11] 多个需求共用同一页时，合并读取可以减少工作；这是空间局部性与批处理思想，而不只是“SSD 要更快”。</p>
-<h2 id="sec-5">11.5 I/O 线程为什么有价值？</h2>
-<p>在读到的实现窗口里，默认 I/O worker 负责提交和收割 DirectFile 完成事件，调用方主要构造 job 并唤醒 worker；mutex 与条件变量保护队列和状态。[S11] 好处是把系统调用和等待从主循环中移开，但线程本身不是速度保证。</p>
-<p>必须确认主线程在等待的同时是否有独立工作可做。若模型马上就依赖这行数据，I/O 仍处在关键路径；若提前查询能覆盖延迟，才产生真正收益。测量“提交函数变短”不等于请求变快。</p>
-<h2 id="sec-6">11.6 实验与验收</h2>
-<p>在缓存实验里切换“八路组相联 / 轮换”模式，构造同组冲突 trace，与 LRU 教学策略对照。注意该实验采用可读的整数模映射来制造冲突，<strong>不是复制上游的 mix 哈希</strong>。</p>
-<p>扩展实验：记录行命中率、页读取数、有效字节 / 实际读取字节的比例，以及请求 p50 / p95 延迟。只有顺序读取带宽的报告无法解释稀疏随机查表性能。</p>
+<div class="hook"><span class="eyebrow">你可能注意到过</span>
+<p>手机输入法很会“接话”：你打出“今天天气”，它马上提示“很好”“怎么样”。它并不懂天气，只是记住了哪些词经常挨着出现。</p>
+<p>Strata 运行的模型里也有一本这样的“词组记忆”，而且大得吓人：一张 28.8 GB 的表，放在固态硬盘上。<span class="ev ev-report">上游报告</span>[S02] 模型每生成一个 token，都要从里面取 16 行。这一章回答三个问题：行号怎么算出来，怎样从硬盘上又快又省地取，取过的行怎样留着下次再用。</p></div>
+<p class="tldr"><strong>一句话：</strong>模型拿最近 2 个和最近 3 个 token 做哈希，算出 16 个行号；每行只有 90 字节，却要按 4 KiB 一页从硬盘读；读过的行放进一个 8 路组相联的行缓存，组满了就按轮换指针替换。</p>
+
+<h2 id="sec-1">11.1 模型里的“词组记忆”</h2>
+<p>先说这张表存的是什么。它按 <dfn>n-gram</dfn>（n 元组，就是“连续出现的 n 个 token”）来索引：最近 2 个 token 叫二元组，最近 3 个叫三元组。比如上下文是“我 喜欢 猫”，二元组是“喜欢 猫”，三元组是“我 喜欢 猫”。</p>
+<p>Strata 源码里，用这张表的模块叫 PLE，它在模型的第 1 层（从 0 数起）工作。<span class="ev ev-code">代码事实</span>[S13] 每个 token 的流程见图 11-1：二元组和三元组各有 8 个“头”，每个头算出一个行号，一共 16 个；每行存 160 个数，16 行拼起来正好是 2560 个数，也就是模型的主宽度。<span class="ev ev-code">代码事实</span>（<code>include/strata/kernels/ngram.hpp</code>）</p>
+<figure class="fig"><svg viewBox="0 0 400 378" role="img" aria-label="图 11-1：最近三个 token 拆成二元组和三元组，各用 8 个头算出 8 个行号，共 16 行，每行 160 个数，拼成 2560 个数交给第 1 层">
+<rect class="f-soft" fill="#e5f1df" x="40" y="6" width="320" height="52" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="28" font-size="15" font-weight="600" text-anchor="middle">最近三个 token：我 喜欢 猫</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="49" font-size="14" text-anchor="middle">从旧到新排列</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 58V68H102V80M200 68H298V80"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="82" width="185" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="102" y="104" font-size="15" font-weight="600" text-anchor="middle">二元组：喜欢 猫</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="125" font-size="14" text-anchor="middle">8 个头 → 8 个行号</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="82" width="185" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="298" y="104" font-size="15" font-weight="600" text-anchor="middle">三元组：我 喜欢 猫</text>
+<text class="f-muted" fill="#5c6d66" x="298" y="125" font-size="14" text-anchor="middle">8 个头 → 8 个行号</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M102 136V148H298V136M200 148V160"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="162" width="360" height="54" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="185" font-size="15" font-weight="600" text-anchor="middle">16 个行号 → 固态硬盘上的大表</text>
+<text class="f-on" fill="#ffffff" x="200" y="206" font-size="14" text-anchor="middle">320,001,536 行，每行 90 字节，共 28.8 GB</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 216V240"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="242" width="320" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="265" font-size="15" font-weight="600" text-anchor="middle">取回 16 行，每行 160 个数</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="286" font-size="14" text-anchor="middle">拼起来：16 × 160 ＝ 2560 个数</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 296V320"/>
+<rect class="f-soft" fill="#e5f1df" x="40" y="322" width="320" height="48" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="351" font-size="15" font-weight="600" text-anchor="middle">交给第 1 层的 PLE 模块，混进主干</text>
+</svg><figcaption>图 11-1　每个 token 的查表流程。三个 token 拆成两种 n-gram，各算 8 个行号；取回的 16 行拼成一个和模型一样宽的向量。</figcaption></figure>
+<p>这张表本身就是模型的一部分参数，名字叫 <code>per_layer_token_embd</code>，一共 320,001,536 行。按每行 90 字节算，整张表 28.8 GB（合 26.8 GiB）。<span class="ev ev-code">代码事实</span>（<code>ple_reader.hpp</code>）它比 12 GB 显存大得多，也不放进内存，就待在硬盘上。</p>
+<aside class="primer" id="c11-ngram">
+<h3>n-gram 语言模型</h3>
+<p>猜下一个词，最朴素的办法是“看前面几个词”。如果语料里“我 喜欢”后面 30% 是“猫”、20% 是“你”，那就按这个比例猜。只看前 n−1 个词来猜第 n 个词，就是 <dfn>n-gram 语言模型</dfn>。n = 2 叫二元模型，n = 3 叫三元模型。</p>
+<p>它的麻烦是组合太多。词表有 V 个 token，三元组就有 V³ 种。V 取 10 万，三元组就是 10¹⁵ 种，绝大多数一辈子也碰不到一次，不可能每种都存一份。</p>
+<p>Strata 的模型借用了 n-gram 的思路，但做法不同：它不存“下一个词的概率”，而是给每个 n-gram 存一小段训练好的数字，交给神经网络去用。它也不给每种组合单独一行，而是用哈希把天文数字般的组合压进 3.2 亿行里（下一节）。所以这张表更像一本“词组笔记”，不是一个完整的语言模型。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/N元语法" target="_blank" rel="noopener noreferrer">维基百科：N 元语法</a> · <a href="https://en.wikipedia.org/wiki/N-gram" target="_blank" rel="noopener noreferrer">Wikipedia: N-gram</a></p>
+</aside>
+
+<h2 id="sec-2">11.2 三个 token 怎样变成 16 个行号</h2>
+<p>表里没有“我 喜欢 猫”这几个字，只有行号。从 token 到行号，靠的是<dfn>哈希</dfn>：把任意的输入搅成一个看起来杂乱、但每次都一样的数。Strata 的哈希分三步：<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>、<code>src/kernels/ngram.cpp</code>）</p>
+<ol>
+<li><strong>相乘</strong>：每个 token 编号乘一个很大的固定常数，三个位置各用一个常数。</li>
+<li><strong>异或</strong>：把这些乘积按二进制逐位“异或”（相同得 0，不同得 1），得到一个<dfn>混合值</dfn>。二元组混两个数，三元组混三个数。</li>
+<li><strong>取余</strong>：每个头用混合值除以自己的模数，取余数，再加上这个头在大表里的起点。每个头的模数都在 2000 万左右，都不是 2 的幂，比如 20000003、20000023、20000033。</li>
+</ol>
+<p>两个细节值得记住。第一，开头没有前文的位置记作 −1；遇到“对话结束”符，它之前的历史全部截断。这两个 token 的历史属于序列状态，按“旧的在前”存放。<span class="ev ev-code">代码事实</span>[S13] 第二，这个哈希在 CPU 上算。它要用 64 位整数的乘法和异或，源码注释引用参考实现的说法：GPU 计算框架 ggml 没有这两样运算。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>）</p>
+<p>下面的模拟器用小号数字重现这三步：乘数换成 31、17、7，模数换成 11 到 37，每种 n-gram 只用 4 个头。规则和 Strata 一样，数字小到能手算。</p>
+<div class="viz" data-viz="ngram-hash"><figure class="fig"><svg viewBox="0 0 400 322" role="img" aria-label="图 11-2：玩具哈希。我、喜欢、猫三个 token 先算出二元组混合值 626 和三元组混合值 593，再对 8 个模数取余，得到 8 个行号">
+<text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="14" text-anchor="middle">上下文（旧 → 新），括号里是玩具编号</text>
+<rect class="f-soft" fill="#e5f1df" x="30" y="28" width="100" height="36" rx="7"/><text class="f-text" fill="#182f2b" x="80" y="51" font-size="14" text-anchor="middle">我（5）</text>
+<rect class="f-soft" fill="#e5f1df" x="150" y="28" width="100" height="36" rx="7"/><text class="f-text" fill="#182f2b" x="200" y="51" font-size="14" text-anchor="middle">喜欢（11）</text>
+<rect class="f-soft" fill="#e5f1df" x="270" y="28" width="100" height="36" rx="7"/><text class="f-text" fill="#182f2b" x="320" y="51" font-size="14" text-anchor="middle">猫（23）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="78" width="380" height="36" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="101" font-size="14" text-anchor="middle">二元组：23×31 ⊕ 11×17 ＝ 713 ⊕ 187 ＝ 626</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="122" width="380" height="36" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="145" font-size="14" text-anchor="middle">三元组：713 ⊕ 187 ⊕ 5×7 ＝ 593</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="182" font-size="14">玩具大表：8 个头首尾相接，共 180 行</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="192" width="26" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="192" width="34" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="192" width="38" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="118" y="192" width="46" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="164" y="192" width="22" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="186" y="192" width="58" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="192" width="62" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="306" y="192" width="74" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="24" y="192" width="3" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="74" y="192" width="3" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="116" y="192" width="3" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="128" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="184" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="212" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="252" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="308" y="192" width="3" height="40"/>
+<text class="f-text" fill="#182f2b" x="33" y="252" font-size="14" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="63" y="252" font-size="14" text-anchor="middle">27</text>
+<text class="f-text" fill="#182f2b" x="99" y="252" font-size="14" text-anchor="middle">48</text>
+<text class="f-text" fill="#182f2b" x="141" y="252" font-size="14" text-anchor="middle">54</text>
+<text class="f-text" fill="#182f2b" x="175" y="252" font-size="14" text-anchor="middle">82</text>
+<text class="f-text" fill="#182f2b" x="215" y="252" font-size="14" text-anchor="middle">96</text>
+<text class="f-text" fill="#182f2b" x="275" y="252" font-size="14" text-anchor="middle">116</text>
+<text class="f-text" fill="#182f2b" x="343" y="252" font-size="14" text-anchor="middle">144</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="282" font-size="14">左 4 个头用二元组的 626，右 4 个头用 593</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="306" font-size="14">例：626 除以 13 余 2，头 0 起点是 0 → 行 2</text>
+</svg><figcaption>图 11-2　玩具哈希：相乘、异或、取余。同样的上下文永远落到同样的行；行号里看不出原来是哪几个词。</figcaption></figure></div>
+<p>哈希有一个躲不开的后果：<dfn>撞车</dfn>（冲突），也就是两个不同的 n-gram 算出同一个行号。算一笔账：这个模型的 token 编号至少排到 248,046（对话结束符就用到了这个编号）<span class="ev ev-code">代码事实</span>（<code>src/program/generate.cpp</code>），二元组就有超过 248,046² ≈ 615 亿种可能，而一个头只有约 2000 万行。平均每行要“认领”三千多种二元组。<span class="ev ev-est">教学推演</span> 撞车是设计里就接受了的。</p>
+<p>那为什么还能用？一种合理的理解是：各个头的模数不同，两个 n-gram 在某一个头上撞车，在别的头上多半各走各的，模型拿到的 16 行不会全都一样。<span class="ev ev-est">教学推演</span> 模拟器里多算几组上下文，你能亲眼看到这一点。</p>
+<aside class="primer" id="c11-hash">
+<h3>哈希表与哈希函数</h3>
+<p>图书馆有一百万本书。按书名一本本找太慢。换个办法：准备一万个书架，把书名“搅一搅”变成 0 到 9999 之间的一个数，这本书就放在那个书架上。找书时同样搅一搅，直接走到那个书架。这个“搅一搅”的规则叫<dfn>哈希函数</dfn>，按它分格存放的结构叫<dfn>哈希表</dfn>，每个格子叫一个<dfn>桶</dfn>。</p>
+<p>好的哈希函数有两个要求：同样的输入永远得到同样的桶；不同的输入尽量均匀地撒开。最常见的写法是“搅拌后取余”：<code>桶号 = h(键) mod 桶数</code>。桶数取质数，余数会受到键的每一位影响；桶数取 2 的幂，取余就只看最低几位，高位的差别全被扔掉。</p>
+<p>格子比键少，就一定会有两个键落进同一个桶，这叫<dfn>哈希冲突</dfn>（鸽巢原理：10 只鸽子进 9 个笼子，必有一笼不止一只）。普通哈希表会把键也存下来，冲突时逐个比对或换个位置放，保证查得准。Strata 这张 n-gram 表不存键，冲突就让它冲突，靠多个头互相弥补。这种“只存值、不存键、用多个哈希函数”的思路，和数据结构里的 count-min sketch 很像。</p>
+<p>还有一个小坑：混合时为什么用异或、不用加法？源码注释点破了：两个相等的乘积，异或得 0，相加得两倍，结果完全不同，而两种写法都能算出“看起来合法”的行号。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>）</p>
+<p class="further">延伸阅读：<a href="https://oi-wiki.org/ds/hash/" target="_blank" rel="noopener noreferrer">OI Wiki：哈希表</a> · <a href="https://zh.wikipedia.org/zh-cn/哈希表" target="_blank" rel="noopener noreferrer">维基百科：哈希表</a> · <a href="https://zh.wikipedia.org/zh-cn/散列函數" target="_blank" rel="noopener noreferrer">维基百科：散列函数</a> · <a href="https://zh.wikipedia.org/zh-cn/鴿巢原理" target="_blank" rel="noopener noreferrer">维基百科：鸽巢原理</a></p>
+</aside>
+
+<h2 id="sec-3">11.3 一行 90 字节，为什么要读 4 KiB</h2>
+<p>行号有了，接下来去硬盘上取。问题来了：硬盘不按字节读，按<dfn>页</dfn>读。Strata 读这张表用的是“绕过操作系统缓存”的直接读取，每次读取的起点、长度和内存地址都必须是 4096 字节的整数倍。<span class="ev ev-code">代码事实</span>（<code>include/strata/platform/direct_file.hpp</code>）想要一行 90 字节，就得把它所在的整整一页 4096 字节读进来。见图 11-3。</p>
+<figure class="fig"><svg viewBox="0 0 400 316" role="img" aria-label="图 11-3：一行整个落在一页里时读 1 页，跨过页边界时读 2 页；一个 token 取 16 行，有用的只有 1440 字节，却要读 64 KiB">
+<text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="14" text-anchor="middle">文件按 4 KiB 分页（示意，行画宽了）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="30" width="180" height="44"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="30" width="180" height="44"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="36" width="30" height="32"/>
+<text class="f-on" fill="#ffffff" x="85" y="57" font-size="14" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="186" y="36" width="30" height="32"/>
+<text class="f-on" fill="#ffffff" x="201" y="57" font-size="14" text-anchor="middle">B</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M200 24V82"/>
+<text class="f-muted" fill="#5c6d66" x="110" y="96" font-size="14" text-anchor="middle">第 k 页（4096 B）</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="96" font-size="14" text-anchor="middle">第 k+1 页（4096 B）</text>
+<text class="f-text" fill="#182f2b" x="20" y="124" font-size="14">行 A：整行落在一页里 → 读 1 页</text>
+<text class="f-text" fill="#182f2b" x="20" y="148" font-size="14">行 B：跨过页边界 → 读 2 页</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="172" font-size="14">从页内最后 89 字节开始的行会跨页，约 2.2%</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="186" width="380" height="122" rx="9"/>
+<text class="f-text" fill="#182f2b" x="24" y="211" font-size="14" font-weight="600">一个 token 的 16 行全没缓存时：</text>
+<text class="f-text" fill="#182f2b" x="24" y="236" font-size="14">有用的字节：16 × 90 ＝ 1,440</text>
+<text class="f-text" fill="#182f2b" x="24" y="261" font-size="14">实际读取：16 页 × 4,096 ＝ 65,536</text>
+<text class="f-warn" fill="#9e5d24" x="24" y="290" font-size="15" font-weight="600">读放大：65,536 ÷ 1,440 ≈ 45 倍</text>
+</svg><figcaption>图 11-3　按页读取的代价。一行只有 90 字节，却至少要读一整页；跨页的行要读两页。</figcaption></figure>
+<p>源码里每个读请求的长度只有两种：一页，或者两页（行跨过了页边界）。<span class="ev ev-code">代码事实</span>[S11] 跨页的比例可以手算：4096 = 45 × 90 + 46，一行只要从某页的最后 89 个字节里开始，就会伸进下一页。行的起点在页内大致均匀分布，所以约 89 ÷ 4096 ≈ 2.2% 的行要读两页。<span class="ev ev-est">教学推演</span></p>
+<p>一个 token 的 16 行落在 16 个不同的页上。<span class="ev ev-code">代码事实</span>（<code>ple_reader.hpp</code>）没有缓存时，要读 16 × 4 KiB = 64 KiB，而真正有用的只有 1,440 字节，读放大约 45 倍。<span class="ev ev-est">教学推演</span> 读一长段提示词时，很多行可能挤在同一页上，Strata 会把同一页的请求合并成一次，并按文件位置排好序再读，让硬盘接近顺序读。<span class="ev ev-code">代码事实</span>（<code>src/ngram/ple_reader.cpp</code>）</p>
+<p>64 KiB 听起来不多。真正的麻烦是<dfn>延迟</dfn>：16 次随机的小读，每次都要等硬盘响应。源码注释记录过一组开发期的测量（注释没写硬件）：早期用内存映射的办法，16 行变成 16 次“缺页”，一次接一次地等，每个 token 要 2.10–2.61 毫秒；换成直接读取、16 个请求一起发出去后，约 311 微秒。<span class="ev ev-report">上游报告</span>（<code>ngram.hpp</code> 注释）同一段注释还警告：如果进程里别处还映射着这个文件，直接读会被拖到每个 token 1,575 微秒。</p>
+
+<h2 id="sec-4">11.4 读过的行留一份：8 路组相联的行缓存</h2>
+<p>同一行常常会被反复用到。“我 喜欢”这样的组合，一段对话里可能出现好多次。上游在一组固定语料上测过：如果缓存 100 万行（注释写约 95 MB），最多能省掉约 82% 的读取；一段长提示词内部，也有 20%–34% 的行会重复出现。<span class="ev ev-report">上游报告</span>（<code>ple_reader.hpp</code> 注释）</p>
+<p>所以 Strata 在内存里放了一个<dfn>行缓存</dfn>，默认 1,048,576 行，按每行 90 字节算约 94 MB。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>）它的结构是 <dfn>8 路组相联</dfn>：<span class="ev ev-code">代码事实</span>[S11]</p>
+<ul>
+<li>缓存分成很多<strong>组</strong>，每组 8 个位置（8 <strong>路</strong>）。默认大小下有 1,048,576 ÷ 8 = 131,072 组。</li>
+<li>一个行号先经过一次搅拌（乘一个固定的大奇数，再做一次移位异或），然后对组数取余，决定它属于哪一组。它只能住在这一组的 8 个位置里。</li>
+<li>查找时，只需比对这一组的 8 个位置。</li>
+<li>没找到，就从硬盘读，读回来后写进这一组的<dfn>替换指针</dfn>所指的位置，指针再往后挪一格，转到第 8 格后回到第 1 格。</li>
+</ul>
+<p>这个“轮换指针”很省事：每组只要一个小计数器，不用记谁最近被用过。代价是它不看谁更常用，指针转到谁就换谁。什么时候这会吃亏？下面的模拟器给了一个最坏的例子。</p>
+<div class="viz" data-viz="row-cache"><figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="图 11-4：2 组 8 路的行缓存。9 个奇数行号全挤进第 1 组，轮换指针每次都换掉马上要用的行，命中率为 0；同样 16 格的全相联 LRU 命中率为 75%">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="14">2 组 × 8 路；组号 ＝ 行号 mod 2（示意）</text>
+<text class="f-text" fill="#182f2b" x="12" y="44" font-size="14">第 0 组：空着</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="59" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="106" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="153" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="247" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="294" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="341" y="52" width="44" height="30" rx="3"/>
+<text class="f-text" fill="#182f2b" x="12" y="108" font-size="14">第 1 组：9 个奇数行挤在这里</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="34" y="136" font-size="14" text-anchor="middle">#11</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="59" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="81" y="136" font-size="14" text-anchor="middle">#13</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="106" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="128" y="136" font-size="14" text-anchor="middle">#15</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="153" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="175" y="136" font-size="14" text-anchor="middle">#17</text>
+<rect class="f-accent" fill="#136d5a" x="200" y="116" width="44" height="30" rx="3"/><text class="f-on" fill="#ffffff" x="222" y="136" font-size="14" text-anchor="middle">#03</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="247" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="269" y="136" font-size="14" text-anchor="middle">#05</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="294" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="316" y="136" font-size="14" text-anchor="middle">#07</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="341" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="363" y="136" font-size="14" text-anchor="middle">#09</text>
+<path class="f-warn" fill="#9e5d24" d="M222 150l6 9h-12z"/>
+<text class="f-warn" fill="#9e5d24" x="222" y="176" font-size="14" text-anchor="middle">替换指针</text>
+<text class="f-text" fill="#182f2b" x="12" y="204" font-size="14">访问：#01 #03 … #17，重复 4 遍</text>
+<text class="f-text" fill="#182f2b" x="12" y="228" font-size="14">下一个 #01 不在组里 → 换掉指针下的 #03，</text>
+<text class="f-text" fill="#182f2b" x="12" y="250" font-size="14">而 #03 恰好是再下一个要用的。</text>
+<text class="f-warn" fill="#9e5d24" x="12" y="278" font-size="14" font-weight="600">轮换 0 次命中；全相联 LRU 27 次（75%）</text>
+</svg><figcaption>图 11-4　冲突未命中。总共 16 格装得下 9 行，可它们都被分进同一组，这一组只有 8 格。</figcaption></figure></div>
+<p>这个例子是故意构造的。真实的行号先经过搅拌再分组，很难这样整齐地扎堆在一组里。模拟器里的“热点”访问也说明：访问集中在少数几行时，轮换和 LRU 的命中率差不多。用最简单的策略，换来每次查找只看 8 格、内存占用固定不涨，这是一笔划算的买卖。<span class="ev ev-est">教学推演</span></p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这就是《计算机组成原理》里 CPU 缓存的组相联结构，“行号 → 组号”对应地址里的组索引位，比对 8 个位置对应比较 8 个标记（tag）。区别在于：这里是软件实现，缓存的是硬盘上的表行，一格存 90 字节。</p>
+<aside class="primer" id="c11-set-assoc">
+<h3>直接映射、组相联、全相联</h3>
+<p>缓存的格子比要缓存的东西少得多，所以要先定一条规矩：一个东西可以放在哪些格子里？有三种答案，见图 11-5。</p>
+<ul>
+<li><dfn>直接映射</dfn>：每个东西只有一个固定的格子。查得最快，只看一格；但两个常用的东西抢同一格时，会你踢我、我踢你。</li>
+<li><dfn>全相联</dfn>：放在哪一格都行。最灵活，但每次查找都要把所有格子比一遍，格子一多就太慢。</li>
+<li><dfn>组相联</dfn>：折中。先按规则分到一组，组内几格随便放。W 格一组，就叫 W 路组相联。</li>
+</ul>
+<p>三种结构对应三种未命中：第一次见到的东西必然不在，叫<strong>强制未命中</strong>；缓存总共就那么大、装不下，叫<strong>容量未命中</strong>；总量装得下，只是一组里挤不下，叫<strong>冲突未命中</strong>。图 11-4 的例子就是纯粹的冲突未命中。</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="图 11-5：同样 8 个格子的三种组织方式。直接映射只有一个位置，2 路组相联有一组 2 个位置，全相联 8 个位置任选">
+<text class="f-text" fill="#182f2b" x="66" y="18" font-size="15" font-weight="600" text-anchor="middle">直接映射</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="15" font-weight="600" text-anchor="middle">2 路组相联</text>
+<text class="f-text" fill="#182f2b" x="334" y="18" font-size="15" font-weight="600" text-anchor="middle">全相联</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="30" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="47" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="64" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="81" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="98" width="40" height="15"/>
+<rect class="f-accent" fill="#136d5a" x="46" y="115" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="132" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="149" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="176" y="30" width="23" height="32"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="30" width="23" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="176" y="64" width="23" height="32"/><rect class="f-accent" fill="#136d5a" x="201" y="64" width="23" height="32"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="176" y="98" width="23" height="32"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="98" width="23" height="32"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="176" y="132" width="23" height="32"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="132" width="23" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="30" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="30" width="42" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="64" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="64" width="42" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="98" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="98" width="42" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="132" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="132" width="42" height="32"/>
+<text class="f-muted" fill="#5c6d66" x="66" y="190" font-size="14" text-anchor="middle">13 mod 8 ＝ 5</text>
+<text class="f-muted" fill="#5c6d66" x="66" y="214" font-size="14" text-anchor="middle">只有第 5 格</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="190" font-size="14" text-anchor="middle">13 mod 4 ＝ 1</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="214" font-size="14" text-anchor="middle">第 1 组 2 格</text>
+<text class="f-muted" fill="#5c6d66" x="334" y="190" font-size="14" text-anchor="middle">不用算</text>
+<text class="f-muted" fill="#5c6d66" x="334" y="214" font-size="14" text-anchor="middle">8 格任选</text>
+</svg><figcaption>图 11-5　同样 8 格，三种放法。高亮的是行号 13 可以住的位置。Strata 的行缓存是 131,072 组 × 8 路。</figcaption></figure>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/CPU缓存" target="_blank" rel="noopener noreferrer">维基百科：CPU 缓存</a> · <a href="https://en.wikipedia.org/wiki/CPU_cache" target="_blank" rel="noopener noreferrer">Wikipedia: CPU cache</a> · <a href="https://csapp.cs.cmu.edu/" target="_blank" rel="noopener noreferrer">《深入理解计算机系统》（CS:APP）第 6 章</a></p>
+</aside>
+
+<h2 id="sec-5">11.5 别让模型干等：早点发请求，另一个线程去收</h2>
+<p>还剩一个问题：就算只要 311 微秒，模型也不想停下来等。好在 16 个行号只取决于 token 本身，token 一确定，行号就能算出来；而这 16 行要到第 1 层才用。中间隔着两段活：把 token 换成向量（嵌入），以及第 0 层的计算。这就是能用来“藏住”读盘时间的窗口。<span class="ev ev-code">代码事实</span>（<code>ple_reader.hpp</code>）</p>
+<p>所以读取接口被拆成两半：token 一出来就调用 <code>issue</code>（发请求），马上返回；到第 1 层要用之前，再调用 <code>collect</code>（取结果），这时才可能需要等。见图 11-6。</p>
+<figure class="fig"><svg viewBox="0 0 400 274" role="img" aria-label="图 11-6：token 一确定就发出 16 个读请求，嵌入和第 0 层照常计算，第 1 层之前取结果。读得够快就不用等，读得慢就要等差额">
+<text class="f-muted" fill="#5c6d66" x="8" y="18" font-size="14">时间 →（示意，不按比例）</text>
+<text class="f-text" fill="#182f2b" x="8" y="52" font-size="14">计算</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="56" y="32" width="70" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="91" y="52" font-size="14" text-anchor="middle">嵌入</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="126" y="32" width="110" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="181" y="52" font-size="14" text-anchor="middle">第 0 层</text>
+<rect class="f-accent" fill="#136d5a" x="236" y="32" width="156" height="30" rx="4"/>
+<text class="f-on" fill="#ffffff" x="314" y="52" font-size="14" text-anchor="middle">第 1 层：用 16 行</text>
+<text class="f-text" fill="#182f2b" x="8" y="102" font-size="14">读盘</text>
+<rect class="f-soft" fill="#e5f1df" x="56" y="82" width="164" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="138" y="102" font-size="14" text-anchor="middle">16 个读请求在路上</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M56 26V120M236 26V120"/>
+<text class="f-muted" fill="#5c6d66" x="56" y="138" font-size="14" text-anchor="middle">issue</text>
+<text class="f-muted" fill="#5c6d66" x="236" y="138" font-size="14" text-anchor="middle">collect</text>
+<text class="f-text" fill="#182f2b" x="8" y="170" font-size="14" font-weight="600">读得慢的时候：</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="56" y="182" width="70" height="26" rx="4"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="126" y="182" width="110" height="26" rx="4"/>
+<rect class="f-warn" fill="#9e5d24" x="236" y="182" width="56" height="26" rx="4"/>
+<text class="f-on" fill="#ffffff" x="264" y="200" font-size="14" text-anchor="middle">等</text>
+<rect class="f-accent" fill="#136d5a" x="292" y="182" width="100" height="26" rx="4"/>
+<rect class="f-soft" fill="#e5f1df" x="56" y="214" width="236" height="26" rx="4"/>
+<text class="f-text" fill="#182f2b" x="174" y="232" font-size="14" text-anchor="middle">读盘慢过“嵌入 ＋ 第 0 层”</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="264" font-size="14">只有超出窗口的那一截，才变成等待</text>
+</svg><figcaption>图 11-6　先发请求、后取结果。读盘和计算同时进行，读盘时间被“藏”在嵌入和第 0 层后面；读得比窗口还慢时，只等差额。</figcaption></figure>
+<p>谁去跟硬盘打交道？默认有一个专门的 I/O 线程。它负责提交读请求、收取“读完了”的通知；调用 <code>issue</code> 的那一方只是把请求排进队列，再把它叫醒。源码注释说，这样每次读文件约 11 微秒的系统调用开销，就不再落在主循环上。队列和状态由一把互斥锁保护。<span class="ev ev-code">代码事实</span>[S11] 同时在路上的读请求默认最多 256 个：生成时每个 token 只要 16 个，读一大块提示词时才用得满。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>）</p>
+<p>还有一个让人会心一笑的细节。有些固态硬盘闲置约 250 毫秒就进入省电状态，下一次读要多等 50–150 毫秒。生成时如果连着几轮都在行缓存里命中，硬盘就可能“睡着”。所以读取器有一个“保持清醒”的功能：一段时间没有读请求，就随便读一页表，让硬盘别睡着。生成程序默认会打开它。<span class="ev ev-code">代码事实</span>（<code>ple_reader.hpp</code>）这种“先发出去、过会儿再收”的异步思路，第 14 章会系统地讲。</p>
+
+<h2 id="sec-6">11.6 动手：亲手制造一次冲突</h2>
+<p>本章两个模拟器分工不同。「n-gram 哈希」让你看清行号怎么来、撞车怎么发生；「行缓存」让你看清组相联和替换指针怎样工作。建议先在「行缓存」里跑一遍“冲突”，记下两个命中率，再换“热点”对比。</p>
+<p>然后打开本章的交互实验「缓存轨迹与冲突」。用 16 个槽位、9 个落在同一组的奇数键，对比“全相联 LRU”和“八路轮换”。你还可以自己编访问记录：先猜命中率，再运行验证。注意，实验和模拟器都用“行号取余”来分组，好让冲突容易被制造出来；Strata 实际先搅拌行号再分组，不会这么容易扎堆。</p>
+<p>做完后想一个问题：如果把 8 路改成 1 路（直接映射），同样的“热点”访问，命中率会怎样变？</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>每个 token 用最近 2 个和 3 个 token 做哈希（相乘、异或、取余），算出 16 个行号，从 28.8 GB 的表里取 16 行，拼成 2560 个数。表里不存键，撞车是允许的。</li>
+<li>硬盘按 4 KiB 一页读：一行 90 字节也要读一整页，跨页的行读两页。真正的难点是 16 次随机读的延迟，不是带宽。</li>
+<li>读过的行进 8 路组相联的行缓存，组满了按轮换指针替换。总容量够，也可能因为挤在一组里而冲突未命中。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“28.8 GB 的表放在硬盘上，硬盘带宽一定是瓶颈。”</strong></p>
+<p>每个 token 只用 1,440 字节。就算 16 行全都没缓存、每行读一整页，每秒生成 90 个 token 也只读 64 KiB × 90 ≈ 5.9 MB，离常见固态硬盘每秒几 GB 的顺序读还差三个数量级。<span class="ev ev-est">教学推演</span> 真正要对付的是延迟：16 次小读要等多久、能不能和计算重叠。源码注释说得直白：这是延迟问题，不是带宽问题。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>）</p></div>
+
+<details class="deep"><summary>深入一层：三种“查找”、文档与代码的出入、哈希的陷阱和验收指标</summary>
+<h3>三种查找，不能画成一个框</h3>
+<p>Strata 里至少有三样东西带着“查找”或“缓存”的名字，正确性条件完全不同。<strong>n-gram 表查询</strong>是模型数值计算的一部分：它依赖序列历史，读的是训练好的表行，取错一行就是算错。<strong>prompt lookup 草稿</strong>从前文里已经出现过的文字猜接下来的几个 token（最多 5 个），猜得对不对，最后还要大模型验证。<span class="ev ev-report">上游报告</span>[S02] <strong>专家缓存</strong>只决定某个专家的权重此刻在不在显存，不改变算什么（第 12 章）。三者名字相近，坏了的后果完全不同：第一种坏了输出变错，第二种坏了只是变慢，第三种坏了可能“看起来对、其实错”。</p>
+<p>PLE 用到的两个历史 token 是序列状态的一部分，还有一段卷积式的历史缓冲。<span class="ev ev-code">代码事实</span>[S13] 它们要随对话保存和恢复，不是随手可丢的日志。</p>
+<h3>注释、文档和代码对不上的地方</h3>
+<p><code>ple_reader.hpp</code> 开头的注释说行缓存用“clock 淘汰”，而 <code>ple_reader.cpp</code> 里写的是每组一个轮换指针，没有 clock 算法需要的“最近用过”标记位。<span class="ev ev-code">代码事实</span>[S11] 没有标记位的 clock 退化成按顺序轮换，所以两者效果一样，但读代码时要以实现为准。</p>
+<p>另一处：上游文档说这张表“通过操作系统缓存读取”。<span class="ev ev-report">上游报告</span>[S02] 而当前代码的默认模式是直接读取，注释明确要求这张表不占用内存，包括操作系统的文件缓存；内存映射只作为对照组保留，另有一个把整张表锁进内存的选项。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>、<code>direct_file.hpp</code>）文档往往落后于代码，遇到这种出入，要追到默认配置和调用路径上去确认。</p>
+<h3>哈希里每个错误都“看起来对”</h3>
+<p><code>ngram.hpp</code> 的注释列出了一串陷阱：用加法代替异或；用“与上 2 的幂减 1”代替取余（模数不是 2 的幂，两者是不同的函数）；“对话结束”符的截断要向更早的位置传播；缺失的前文是 −1，而编号 0 是一个真实的 token；当前 token 自己是结束符时，不截断它自己的上下文；前文数组是“旧的在前”，读反了方向依然能算出合法行号。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>、<code>src/kernels/ngram.cpp</code>）每一种写错，算出的行号都在合法范围内，范围检查抓不住，只能拿独立实现的“标准答案”逐项比对。</p>
+<p>还有一个偏移量陷阱：表的数据不是从文件第 0 字节开始的，前面有文件头。从 0 开始读，会读到“头部 ＋ 错位的行”，解码出来依然是看似合理的数字。所以读取器从真正解析过的文件头里取偏移，并检查这张表恰好填满文件的剩余部分。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>）</p>
+<h3>开线程不等于变快</h3>
+<p>把系统调用挪到 I/O 线程，主循环里的“提交时间”会变短，但请求本身不一定变快。如果模型马上就要用这行数据，等待只是换了个地方。要看三件事的时间线：什么时候提交、什么时候完成、什么时候被消费。只有在提交和消费之间有独立的活可干，才有真正的收益。</p>
+<h3>验收看哪些数</h3>
+<p>读取器的统计里有：请求的行数、行缓存命中数、同页合并掉的行数、发出的读请求数、读取的字节数、<code>collect</code> 阻塞的时间、每次读的延迟（保留最近 65,536 次，用来算分位数）。<span class="ev ev-code">代码事实</span>（<code>ple_reader.hpp</code>）评估一次改动，至少要报告：行命中率、读取页数、有效字节与实际读取字节之比，以及每个 token 等待时间的 p50 和 p95。只报顺序读带宽，解释不了稀疏随机查表的性能。读取器还支持“故意延迟每次读”的故障注入，用来验证慢盘下系统是等待，而不是悄悄用了没读完的数据。</p>
+</details>
