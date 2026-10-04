@@ -7,7 +7,11 @@
   const registry = Object.create(null);
   const NS = 'http://www.w3.org/2000/svg';
   // Shared widget chrome strings.
-  const UI = { zh: { tryTitle: '试试看', verdict: '结论' }, en: { tryTitle: 'Try it', verdict: 'Takeaway' } };
+  const UI = {
+    zh: { tryTitle: '试试看', verdict: '结论' }, en: { tryTitle: 'Try it', verdict: 'Takeaway' },
+    ja: { tryTitle: '試してみよう', verdict: '結論' }, ko: { tryTitle: '해 보세요', verdict: '결론' },
+    es: { tryTitle: 'Pruébalo', verdict: 'Conclusión' }, ar: { tryTitle: 'جرّبها', verdict: 'الخلاصة' },
+  };
   const reduced = () => !!(root.matchMedia && root.matchMedia('(prefers-reduced-motion: reduce)').matches);
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -67,8 +71,7 @@
       registry[name] = def;
     },
     has(name) { return name in registry; },
-    // Inner HTML of the first <figcaption> in an HTML string, or ''.
-    captionOf(html) { const m = /<figcaption>([\s\S]*?)<\/figcaption>/.exec(html || ''); return m ? m[1] : ''; },
+    ui(lang) { return UI[lang]; },
     names() { return Object.keys(registry).sort(); },
     // Mounts every widget in container. Returns a function that disposes all of them.
     mountAll(container) {
@@ -77,20 +80,21 @@
         const def = registry[el.dataset.viz];
         if (!def) return;
         const ctx = context(el);
-        // The static fallback carries the numbered caption ("图 1-1 …") that the prose refers to.
-        const fallback = el.innerHTML, caption = Viz.captionOf(fallback);
+        // The prose refers to the static figure ("图 1-1 里那条虚线"), so it stays on the page.
+        // It moves out in front of the block, and the widget fills the block below it.
+        const figure = el.querySelector('figure');
+        if (figure && el.parentNode) el.parentNode.insertBefore(figure, el);
         try {
           el.innerHTML = '';
           el.classList.add('viz-live');
           const cleanup = def.mount(el, ctx);
           if (typeof cleanup === 'function') ctx.cleanup = cleanup;
-          if (caption) el.insertAdjacentHTML('beforeend', '<p class="viz-caption">' + caption + '</p>');
           fitWide(el);
           ctxs.push(ctx);
         } catch (err) {
           ctx.dispose();
           el.classList.remove('viz-live');
-          el.innerHTML = fallback;
+          el.innerHTML = '';
           if (root.console) console.error('viz ' + el.dataset.viz, err);
         }
       });
