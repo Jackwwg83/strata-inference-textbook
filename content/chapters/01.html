@@ -1,24 +1,119 @@
-<h2 id="sec-1">1.1 先回答：我们到底在研究什么？</h2>
-<p>模型可以理解为一组经过训练的数值参数与计算规则。推理引擎负责在给定硬件上执行这些规则；聊天界面负责组织输入、呈现输出。三者不是同一件东西。把引擎运行得更快，不等于重新训练出了更聪明的模型；支持一种 API，也不等于支持该 API 的全部语义。</p>
-<p>Strata 是本书的<strong>系统案例</strong>。它的仓库以 Qwen3.8-Flash-Next 为主要目标，围绕消费级设备设计 CPU、GPU 与存储的协同路径。模型名称及支持范围以固定版本的仓库声明为准，本书没有另行复核所有模型权重。不要把其他同名 Strata 项目或相邻型号的结构搬进来。[S01][S02]</p>
-<h2 id="sec-2">1.2 一次请求的六次转换</h2>
-<p>用户写下文本；服务层把消息和工具定义套入聊天模板；分词器把文本变成整数 ID；引擎把 ID 变成向量并逐层计算；采样器从下一 token 的分布中选择 ID；输出解析器把 ID 对应的字节流组织成内容或工具调用。服务端的真实边界是 <code>Engine.generate(ids, max_new, sampling, cancel)</code>，而不是“HTTP 直接调用显卡”。[S15]</p>
-<p>把这个路径写成图：</p>
-<pre><code class="language-text">消息 → 模板 / token IDs → prefill → 状态
-                                      ↓
-呈现 ← 协议事件 ← 解码 / 采样 ← decode 循环
-                                      ↕
-                             GPU · RAM / CPU · SSD
-</code></pre>
-<p>每条箭头都可能出错：模板不一致，数学相同但输入已不同；状态串用，单个算子再正确也无济于事；网络分片丢失，模型实际上生成了正确答案但用户没看到。</p>
-<h2 id="sec-3">1.3 不同层次的“缓存”不能混为一谈</h2>
-<p>CPU 硬件缓存保存近期访问的内存行。Strata 的专家缓存把部分权重放入显存；KV 缓存保存序列历史的中间结果；会话缓存保存可恢复的序列状态；PLE 行缓存保存查询得到的模型表行。它们复用的对象、生命周期、失效条件完全不同。“加缓存”只有说明<strong>缓存什么、如何确认还是同一个对象、何时失效</strong>才有意义。</p>
-<p>从大学课程看，这是一条连接线：计算机组成原理解释容量与带宽，操作系统解释页和并发，算法课解释查找与替换，数据库课程解释身份与一致性。后续每章都沿这条线展开，而不是只学习命令行参数。</p>
-<h2 id="sec-4">1.4 例题：24,576 与 10 应该怎样读？</h2>
-<p>固定源码的几何定义为 48 层、每层 512 个路由专家；序列状态中 <code>k=10</code>。[S04][S13] 因此模型共有 48 × 512 = <strong>24,576 个“层—专家”实体</strong>。一个 token 经过所有层，会发生 48 × 10 = <strong>480 次路由专家选择</strong>，另有共享专家等计算。并不是从整台模型的 24,576 个专家里只选 10 个就结束。</p>
-<p>这种错误看似只是措辞问题，却会让内存流量估计少 48 倍。教授式的阅读不是重复宣传图，而是回到循环的层次、计数器的单位与真正的执行范围。</p>
-<h2 id="sec-5">1.5 四种证据，四种表述</h2>
-<p><strong>基础原理</strong>是一般性的数学或计算机规律；<strong>代码事实</strong>是固定版本的字段、函数与控制流；<strong>上游报告</strong>是作者给出的实验和说明；<strong>教学推演</strong>是我们用简化模型解释取舍。交互实验都属于最后一类，不是硬件跑分。</p>
-<p>本书的代码导读是对列出的关键文件窗口的审阅，<strong>不是逐行审计整个仓库</strong>。某个函数存在，不足以证明所有入口都调用了它；一个注释描述“曾经没有缓存”，也不足以证明今天仍然没有。读者应把“已读到的实现”与“尚待追踪的调用链”分开记录。</p>
-<h2 id="sec-6">1.6 课堂活动：为一个 token 画责任边界</h2>
-<p>用纸画出服务层、序列状态、权重存储、计算内核、硬件五个框。为每个框写一个输入、一个输出、一个不变量。例如“序列状态只能属于它对应的历史”。然后把“答案正确但慢”“答案随机变化”“后半段文字乱码”分别放到多个可能的框中。目标不是立刻猜中，而是学会设计能区分假设的实验。</p>
+<div class="hook"><span class="eyebrow">先从一件怪事说起</span>
+<p>Strata 的 README 开头写着：在你自己的游戏电脑上，运行一个 1250 亿参数的 AI 模型。它对显卡的要求是 12 GB 显存起步。<span class="ev ev-report">上游报告</span>[S01]</p>
+<p>按常识算一下：1250 亿个参数，就算每个只占 1 字节，也要 125 GB。一张 12 GB 的显卡，怎么装得下？这本书要回答的就是这类问题：一个 AI 模型在你的电脑里，到底是怎样跑起来的。</p></div>
+<p class="tldr"><strong>一句话：</strong>聊天 AI 每次只生成一个 token。生成这一个 token，要动用显卡、内存、处理器和硬盘。Strata 的本事，是把这四样东西安排得刚好够用。</p>
+
+<h2 id="sec-1">1.1 你按下回车之后，发生了什么</h2>
+<p>你在聊天框里输入一句话，按下回车。几秒后，回答一个字一个字地冒出来。这中间，你的话经历了六次转换，见图 1-1。</p>
+<figure class="fig"><svg viewBox="0 0 400 486" role="img" aria-label="图 1-1：一句话从输入到输出的六次转换，第 4 到第 6 步每生成一个 token 重复一次">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="30" font-size="14" font-weight="600" text-anchor="middle">① 你的消息</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="48" font-size="12" text-anchor="middle">“帮我解释一下 MoE 是什么”</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="80" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="102" font-size="14" font-weight="600" text-anchor="middle">② 聊天模板</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="120" font-size="12" text-anchor="middle">加上角色标记、系统提示、工具说明</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="152" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="174" font-size="14" font-weight="600" text-anchor="middle">③ 分词器</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="192" font-size="12" text-anchor="middle">文字 → 一串 token 编号（整数）</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="224" width="300" height="50" rx="10"/>
+<text class="f-on" fill="#ffffff" x="190" y="246" font-size="14" font-weight="600" text-anchor="middle">④ 推理引擎：逐层计算</text>
+<text class="f-on" fill="#ffffff" x="190" y="264" font-size="12" text-anchor="middle">48 层算完 → 下一个 token 的概率</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="296" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="318" font-size="14" font-weight="600" text-anchor="middle">⑤ 采样</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="336" font-size="12" text-anchor="middle">按概率挑出一个 token</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="368" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="390" font-size="14" font-weight="600" text-anchor="middle">⑥ 解码与推送</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="408" font-size="12" text-anchor="middle">编号 → 文字，推到你的屏幕上</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M190 58V78M190 130V150M190 202V222M190 274V294M190 346V366"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M340 393H372V249H346"/>
+<path class="f-muted" fill="#5c6d66" d="M346 249l8-5v10z"/>
+<text class="f-muted" fill="#5c6d66" x="190" y="446" font-size="12" text-anchor="middle">虚线：回答没写完，就把新 token 接到末尾，</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="464" font-size="12" text-anchor="middle">回到第 ④ 步再来一轮。一轮只产出一个 token。</text>
+</svg><figcaption>图 1-1　一句话的六次转换。第 ④–⑥ 步每生成一个 token 就重复一次。</figcaption></figure>
+<p>图里有三个新词，先用大白话解释：</p>
+<ul>
+<li><dfn>token</dfn>：模型读写文字的最小单位。它可能是一个汉字、半个英文单词，或者一个标点。模型不直接认字，只认 token 的编号。</li>
+<li><dfn>分词器</dfn>：把文字切成 token、再换成编号的程序。</li>
+<li><dfn>采样</dfn>：模型不会直接“说出”下一个词。它给出每个候选 token 的概率，采样就是按这些概率挑一个。第 2 章细讲。</li>
+</ul>
+<p>注意图里那条虚线。模型每一轮只生成一个 token。要写一段 300 个 token 的回答，第 ④ 到第 ⑥ 步就要重复 300 次。所以“生成速度”通常用每秒多少个 token 来衡量，写作 token/s。</p>
+
+<h2 id="sec-2">1.2 模型、引擎、应用：三个常被混为一谈的角色</h2>
+<p>用一家餐厅来比喻。Strata 自己的文档也用了厨房的比喻。[S02]</p>
+<ul>
+<li><strong>模型是配方。</strong>它是训练好的一大堆数字（叫“参数”或“权重”），加上一套固定的计算规则。Qwen3.8-Flash-Next 就是一个模型。</li>
+<li><strong>推理引擎是厨房和厨师。</strong>它负责在你的硬件上，按配方把计算做出来。Strata 就是一个推理引擎；llama.cpp、vLLM 也是。</li>
+<li><strong>应用是前台。</strong>它接待你，把你的话整理好交给厨房，再把做好的菜端给你。Strata 自带的网页聊天界面、以及通过 API 接入的编程工具，都在这一层。[S01]</li>
+</ul>
+<p>分清这三层，排查问题时就不会找错地方。引擎做得再快，模型也不会变聪明：配方不变，换个厨房，菜的味道应该一样。反过来，如果回答质量变差，原因可能在配方（换了模型或压缩得太狠），可能在厨房（引擎有 bug，算错了），也可能在前台（模板或协议把你的话传错了）。</p>
+
+<h2 id="sec-3">1.3 一台电脑里的三层“仓库”</h2>
+<p>厨房快不快，很大程度取决于东西放在哪。电脑也一样。和推理有关的存储有三层，见图 1-2。</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="图 1-2：显存、内存、硬盘三层存储，越往上越快越小，以及 Strata 在每一层放了什么">
+<rect class="f-accent" fill="#136d5a" x="90" y="10" width="220" height="92" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="34" font-size="14" font-weight="600" text-anchor="middle">显卡显存（VRAM）12–24 GB</text>
+<text class="f-on" fill="#ffffff" x="200" y="54" font-size="12" text-anchor="middle">台面：伸手就拿</text>
+<text class="f-on" fill="#ffffff" x="200" y="74" font-size="11" text-anchor="middle">每个 token 都要用的部分</text>
+<text class="f-on" fill="#ffffff" x="200" y="91" font-size="11" text-anchor="middle">＋ 最常用的几千个专家 ＋ 对话历史</text>
+<rect class="f-soft" fill="#e5f1df" x="50" y="118" width="300" height="92" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="142" font-size="14" font-weight="600" text-anchor="middle">内存（RAM）32–64 GB</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="162" font-size="12" text-anchor="middle">储藏室：走几步才能拿到</text>
+<text class="f-text" fill="#182f2b" x="200" y="182" font-size="11" text-anchor="middle">全部 24,576 个专家</text>
+<text class="f-text" fill="#182f2b" x="200" y="199" font-size="11" text-anchor="middle">显卡上没有的专家，由处理器（CPU）就地计算</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="226" width="380" height="80" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="250" font-size="14" font-weight="600" text-anchor="middle">固态硬盘（SSD）</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="270" font-size="12" text-anchor="middle">地下仓库：最大，也最慢</text>
+<text class="f-text" fill="#182f2b" x="200" y="290" font-size="11" text-anchor="middle">一张 28.8 GB 的查找表，每个 token 只读其中几行</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="334" font-size="12" text-anchor="middle">越往上：越快、越小、越贵</text>
+</svg><figcaption>图 1-2　Strata 怎样使用三层存储。容量是 README 给出的硬件要求，分工来自上游文档。[S01][S02]</figcaption></figure>
+<p>显卡（GPU）算得最快，但显存最小，常见的游戏卡只有 12–24 GB。内存（RAM）大得多，但它离显卡远，数据要经过一条叫 PCIe 的总线才能送过去。硬盘（SSD）最大，也最慢。</p>
+<p>Strata 的分工是这样的 <span class="ev ev-report">上游报告</span>[S02]：</p>
+<ol>
+<li>每个 token 都要用的部分，加上最常被用到的几千个“专家”，放在显存里。</li>
+<li>全部专家放在内存里。显卡上没有的那些，由处理器在内存里就地计算，和显卡同时干活。</li>
+<li>硬盘上放一张 28.8 GB 的查找表，每个 token 只读其中几行。</li>
+</ol>
+<p>“专家”是什么，第 10 章专门讲。现在只需要知道：它是 Strata 能在小显卡上跑大模型的关键。</p>
+
+<h2 id="sec-4">1.4 算一笔账：24,576 和 480</h2>
+<p>README 说，这个模型由 24,576 个“专家”组成，每写一个词只需要其中 10 个。[S01] 为了好懂，这句话做了简化。我们去源码里核对一下。</p>
+<p>源码定义的模型结构是 48 层、每层 512 个专家 <span class="ev ev-code">代码事实</span>[S04]；每个 token 在<strong>每一层</strong>选 10 个专家 <span class="ev ev-code">代码事实</span>[S13]。所以：</p>
+<ul>
+<li>48 × 512 = <strong>24,576</strong>，这是专家的总数。</li>
+<li>一个 token 要走完 48 层，每层选 10 个，一共 48 × 10 = <strong>480</strong> 次专家选择。</li>
+</ul>
+<p>“10 个”说的是每一层，不是整个模型。如果理解成整个模型只用 10 个专家，你估算的计算量和数据搬运量会少 48 倍。这是本书反复强调的习惯：<strong>一个数字要带着它的单位和范围</strong>。</p>
+
+<h2 id="sec-5">1.5 读这本书的方法：每个数字都有出处</h2>
+<p>本书的每个结论，都会标明它属于哪一类证据：</p>
+<ul>
+<li><span class="ev ev-code">代码事实</span>从固定版本的源码里直接读到的。例如“48 层”。</li>
+<li><span class="ev ev-report">上游报告</span>Strata 作者在文档里写的说明或测得的数据，本书没有自己复测。例如“RTX 5070 上每秒生成 94 个 token”。[S01]</li>
+<li><span class="ev ev-est">教学推演</span>本书用简化模型推算的结果，用来帮你建立直觉，不是实测。浏览器里的交互实验都属于这一类。</li>
+<li>基础原理：数学或计算机的通用规律，不依赖 Strata，不另加标签。</li>
+</ul>
+<p>为什么要这么讲究？因为 AI 圈里的数字特别容易被搬错地方。别人显卡上的速度、某个配置下的显存占用、一张宣传图里的简化说法，一旦脱离了条件，就可能误导人。学会问“这个数字是在什么条件下得到的”，比记住任何一个数字都有用。</p>
+<p>本书的源码阅读固定在 2026-10-03 的一个提交上，页脚有它的编号。Strata 还在快速迭代，新版本里的数字可能已经不同。</p>
+
+<h2 id="sec-6">1.6 动手：跟着一个 token 走一遍</h2>
+<p>打开本章的交互实验「一个 token 的旅程」。它把图 1-1 的路径拆成可以逐步检查的环节，让你看清每一步的输入是什么、输出是什么。试着为其中一条箭头想一个“出错会怎样”的例子：比如模板换了，或者分词器和模型不配套。实验里的数字都是教学推演，不是你电脑上的实测。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>模型是配方，推理引擎是厨房，应用是前台。三者各管一段。</li>
+<li>模型每轮只生成一个 token；回答越长，这一轮就重复越多次。</li>
+<li>每个数字都要问：它是代码事实、上游报告，还是推算？它的单位和范围是什么？</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“模型文件多大，就要多大显存。”</strong></p>
+<p>不一定。文件大小只说明权重在硬盘上占多少字节。运行时，一部分权重可以留在内存里，由 CPU 计算或按需送到显卡；显存里还要放对话历史和临时数据。Strata 要下载约 70 GB 的模型，却能在 12 GB 显卡上运行。[S01]</p></div>
+
+<details class="deep"><summary>深入一层：给想读源码的人</summary>
+<h3>服务层和引擎的真实边界</h3>
+<p>在 Strata 的服务代码里，应用层交给引擎的不是 HTTP 请求，也不是原始 JSON，而是一串 token 编号：接口是 <code>Engine.generate(ids, max_new, sampling, cancel)</code>，返回一个逐个产出 token 编号的迭代器。<span class="ev ev-code">代码事实</span>[S15] 模板渲染、分词、协议解析都在这条边界之外。所以排查问题时，第一步是判断错误发生在边界的哪一侧。</p>
+<p>同一个文件还说明：服务一次只处理一个序列，请求按先来先服务（FIFO）排队。[S15] “支持 OpenAI 兼容 API”不等于“支持多人同时使用”，第 25 章会讨论把它扩展到多用户需要什么。</p>
+<h3>不同层次的“缓存”不能混为一谈</h3>
+<p>CPU 的硬件缓存保存最近访问过的内存行；Strata 的专家缓存把部分权重放进显存；KV 缓存保存对话历史的中间结果；会话缓存保存可以恢复的整段序列状态；查找表的行缓存保存从硬盘读到的表行。它们缓存的对象、生命周期和失效条件完全不同。“加个缓存”只有说清<strong>缓存什么、怎样确认还是同一个对象、何时失效</strong>，才有意义。</p>
+<h3>注释不等于事实</h3>
+<p>源码注释可能停留在旧的开发阶段。例如 <code>expert_source.hpp</code> 开头写着“Phase 2 没有缓存（命中率 h = 0）”，并说明 Phase 3 会用显存缓存替换这个对象。[S06] 而当前版本的引擎确实有专家缓存。[S02][S05] 遇到这种矛盾，不能只凭一句注释下结论，要追踪当前的调用链、默认配置和测试。本书的源码导读审阅的是列出的关键文件窗口，<strong>不是逐行审计整个仓库</strong>。</p>
+<h3>课堂活动：为一个 token 画责任边界</h3>
+<p>在纸上画五个框：服务层、序列状态、权重存储、计算内核、硬件。为每个框写一个输入、一个输出、一个必须一直成立的条件，例如“序列状态只属于它自己的那段对话”。然后把三种故障分别放进可能的框里：“答案正确但很慢”“答案每次随机变化”“后半段文字乱码”。目标不是立刻猜中，而是学会设计能区分这些假设的实验。</p>
+</details>
