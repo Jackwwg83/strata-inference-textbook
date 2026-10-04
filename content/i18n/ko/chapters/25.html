@@ -1,0 +1,255 @@
+<div class="hook"><span class="eyebrow">먼저 상황을 하나 떠올려 보세요</span>
+<p>집 컴퓨터에서 Strata를 돌리는데 룸메이트와 친구들도 쓰고 싶어 해요. 다섯 사람이 동시에 웹페이지를 열고 질문해요. Strata의 README는 아주 솔직하게 적어 놨어요. 한 번에 요청 하나만 답한다고요. <span class="ev ev-report">업스트림 보고</span>[S01] 그러면 다섯 번째 사람은 얼마나 기다려야 할까요? 그중 한 사람이 긴 글을 써 달라고 하면 나머지 네 명은 멍하니 기다려야 할까요?</p>
+<p>이 장은 <strong>설계 수업</strong>이에요. 업스트림 Strata는 선입선출 대기열 뒤에서 시퀀스 하나만 처리해요. 다중 사용자 스케줄링은 Strata의 기능이 아니라 우리가 직접 설계해 볼 확장이에요. 먼저 스케줄링 알고리즘과 대기행렬 이론으로 「얼마나 기다리나」를 계산하고, 단일 시퀀스를 다중 시퀀스로 바꾸려면 정확히 무엇을 건드려야 하는지 살펴봐요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 누가 먼저 올라가나, 얼마나 기다리나, 함께 계산할 수 있나는 서로 다른 세 질문이에요. 각각 스케줄링 전략, 대기행렬 이론, 배치 처리가 답해요. 그리고 손대기 전에 먼저 시퀀스마다 상태를 깨끗이 분리해야 해요.</p>
+
+<h2 id="sec-1">25.1 현재 상태: 락 하나, 대기열 하나</h2>
+<p><code>serve/server.py</code>의 첫머리에는 「한 번에 시퀀스 하나, FIFO 뒤에서」라고 적혀 있어요. <span class="ev ev-code">코드 사실</span>[S15] 구현은 단순해요. 서비스 계층에 락 <code>self.fifo = threading.Lock()</code>이 하나 있고, 락을 얻은 요청이 엔진을 독점해요. 나머지 요청은 락 바깥에서 줄을 서고, 상태 페이지의 「대기 수」가 하나 올라가요. <span class="ev ev-code">코드 사실</span></p>
+<p>한편 HTTP 서버는 Python의 <code>ThreadingHTTPServer</code>를 써서 연결마다 스레드가 하나씩 생겨요. 그래서 다섯 사람이 동시에 <strong>연결</strong>할 수 있어요. 연결됐다고 서비스를 받는 건 아니에요. 그림 25-1을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 286" role="img" aria-label="그림 25-1: 연결 다섯 개가 동시에 도착해 FIFO 락 앞에서 줄을 서고, 엔진은 한 번에 시퀀스 하나만 처리한다. 연결 수, 대기 수, 활성 시퀀스 수는 서로 다른 세 숫자다">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="44" y="31" font-size="13" text-anchor="middle">사용자 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="88" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="122" y="31" font-size="13" text-anchor="middle">사용자 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="166" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">사용자 3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="278" y="31" font-size="13" text-anchor="middle">사용자 4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="322" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="356" y="31" font-size="13" text-anchor="middle">사용자 5</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M44 42L150 74M122 42L170 74M200 42V74M278 42L230 74M356 42L250 74"/>
+<rect class="f-soft" fill="#e5f1df" x="50" y="76" width="300" height="40" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="101" font-size="13" text-anchor="middle">FIFO 락: 먼저 온 쪽이 얻고, 나머지는 대기</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 116V138"/>
+<rect class="f-accent" fill="#136d5a" x="50" y="140" width="300" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="165" font-size="13" text-anchor="middle">엔진: 지금은 시퀀스 1개만 처리</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="198" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="221" font-size="12">HTTP 연결 수: 5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="198" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="215" y="221" font-size="12">대기 중인 요청: 4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="242" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="265" font-size="12">생성 중인 시퀀스: 1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="242" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="215" y="265" font-size="12">한 번의 계산 속 시퀀스: 1</text>
+</svg><figcaption>그림 25-1　업스트림 Strata의 현재 모습. 다섯 명 모두 연결할 수 있지만, 같은 순간에 생성되는 시퀀스는 한 사람 것뿐이에요. 아래 네 숫자는 따로 세야 하고, 완전히 다를 수 있어요.</figcaption></figure>
+<p>업스트림에는 「다중 세션」과 조금 관련된 기능도 있어요. 용량이 제한된 세션 주차장을 켤 수 있고, 메모리에 대화 몇 개의 상태까지 세워 두어서 번갈아 도착하는 요청이 매번 처음부터 문제를 읽지 않게 해 줘요. 하지만 문서는 이것이 <strong>요청을 동시에 실행하지 않는다</strong>고 분명히 밝혀요. <span class="ev ev-report">업스트림 보고</span> 이렇게 세워 둔 세션을 관리하는 코드가 재사용하는 조건도 엄격해요. 토큰이 완전히 같고, 이미지 신원이 같고, 가이드 모드가 같아야 하고, 셋 중 하나라도 빠지면 안 돼요. <span class="ev ev-code">코드 사실</span>[S10]</p>
+<p>그래서 이 장의 이후 내용은 모두, 스케줄링 전략 비교와 다중 시퀀스 상태 분리를 포함해서, <strong>설계 연습</strong>이에요. 업스트림에 이미 있는 능력이 아니에요.</p>
+
+<h2 id="sec-2">25.2 누가 먼저 올라갈까: FIFO, SJF, 라운드 로빈</h2>
+<aside class="primer" id="c25-scheduling">
+<h3>스케줄링 알고리즘: FIFO, SJF, 라운드 로빈</h3>
+<p>종업원은 한 명인데 손님이 한 무리일 때 「누구를 먼저 모시나」가 <dfn>스케줄링</dfn> 문제예요. 운영체제가 프로세스에 CPU를 나눠 주는 것, 프린터가 인쇄 작업을 줄 세우는 것, 추론 서비스가 요청을 줄 세우는 것이 모두 같은 문제예요. 가장 고전적인 전략이 세 가지 있어요.</p>
+<ul>
+<li><dfn>FIFO</dfn>(선입선출, FCFS 선착순이라고도 해요): 도착한 순서대로 하나를 끝내고 다음으로 가요. 단순하고 공평하지만, 긴 작업 하나가 뒤의 모든 짧은 작업을 막아요. 이것을 <dfn>호위 효과(convoy effect)</dfn>라고 해요.</li>
+<li><dfn>SJF</dfn>(짧은 작업 우선): 매번 가장 짧은 것부터 처리해요. 모든 작업이 동시에 도착할 때 평균 대기 시간이 가장 짧다는 것이 증명돼 있어요. 대가는 두 가지예요. 작업마다 길이를 미리 알아야 하고, 짧은 작업이 끊임없이 오면 긴 작업이 계속 뒤로 밀려요. 이것을 <dfn>기아 상태(starvation)</dfn>라고 해요.</li>
+<li><dfn>라운드 로빈</dfn>(Round-Robin): 모두가 돌아가며 조금씩 처리해요. 그 한 토막을 <dfn>타임 슬라이스</dfn>라고 하고, 못 끝내면 줄의 맨 뒤로 가요. 모두가 빨리 시작할 수 있지만, 오가며 전환하는 비용이 들고 평균 완료 시간이 더 짧아지는 것도 아니에요.</li>
+</ul>
+<p>좋고 나쁨을 재는 지표도 하나가 아니에요. <strong>대기 시간</strong>(완료 시각 − 도착 시각 − 자기 길이), <strong>첫 응답</strong>(서비스를 받기 시작하기까지의 시간. 채팅에서는 첫 글자를 보기까지의 시간이에요), <strong>처리량</strong>(단위 시간에 몇 개를 끝내는가)이에요. 전략마다 지표에 따라 이기기도 지기도 해요.</p>
+<p class="further">더 읽을거리: <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-sched.pdf" target="_blank" rel="noopener noreferrer">OSTEP: 스케줄링 입문 (영문)</a> · <a href="https://ko.wikipedia.org/wiki/스케줄링_(컴퓨팅)" target="_blank" rel="noopener noreferrer">위키백과: 스케줄링 (컴퓨팅)</a> · <a href="https://ko.wikipedia.org/wiki/기아_상태" target="_blank" rel="noopener noreferrer">위키백과: 기아 상태</a> · <a href="https://ko.wikipedia.org/wiki/라운드_로빈_스케줄링" target="_blank" rel="noopener noreferrer">위키백과: 라운드 로빈 스케줄링</a></p>
+</aside>
+<p>가장 작은 예부터 볼게요. 요청 세 개가 동시에 도착하고, 답변 길이가 각각 토큰 8개, 3개, 5개예요. 토큰 하나를 만드는 데 시간 단위 1이 걸리고 전환에는 시간이 안 든다고 가정해요. <span class="ev ev-est">교육용 추정</span></p>
+<div class="viz" data-viz="sched-race"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="그림 25-2: 동시에 도착한 요청 세 개, 길이 8, 3, 5. FIFO에서는 첫 글자 시각이 1, 9, 12이고, 타임 슬라이스 1인 라운드 로빈에서는 1, 2, 3이지만 평균 대기는 6.33에서 7로 늘어난다">
+<text class="f-text" fill="#182f2b" x="20" y="30" font-size="13" font-weight="600">FIFO: 첫 글자 1, 9, 12 · 평균 대기 6.33</text>
+<rect class="f-accent" fill="#136d5a" x="20.0" y="40" width="179.0" height="28"/>
+<text class="f-on" fill="#ffffff" x="110.0" y="59" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="200.0" y="40" width="66.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="233.8" y="59" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="267.5" y="40" width="111.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="323.8" y="59" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<text class="f-text" fill="#182f2b" x="20" y="114" font-size="13" font-weight="600">라운드 로빈(슬라이스 1): 첫 글자 1, 2, 3 · 평균 대기 7</text>
+<rect class="f-accent" fill="#136d5a" x="20.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="31.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="42.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="53.8" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="65.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="76.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="87.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="98.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="110.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="121.3" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="132.5" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="143.8" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="155.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="166.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="177.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="188.8" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="200.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="211.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="222.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="233.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-soft" fill="#e5f1df" x="245.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="256.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="267.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="278.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-soft" fill="#e5f1df" x="290.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="301.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="312.5" y="124" width="66.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="346.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 168H380"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="186" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="186" font-size="12" text-anchor="middle">8</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="186" font-size="12" text-anchor="middle">16</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="210" font-size="12" text-anchor="middle">두 타임라인의 길이가 같아요. 총 작업량은 그대로, 순서만 달라요</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="228" font-size="12" text-anchor="middle">인터랙티브: 전략 세 가지, 요청 세 묶음, 슬라이스는 직접 조절</text>
+</svg><figcaption>그림 25-2　같은 요청 세 개인데, 라운드 로빈은 모두가 세 번째 시간 단위 전에 첫 글자를 보게 해 줘요. 하지만 평균 대기는 오히려 6.33에서 7로 늘어요. 공평함과 효율 사이에 공짜 점심은 없어요. <span class="ev ev-est">교육용 추정</span></figcaption></figure></div>
+<p>FIFO를 계산해 볼게요. A는 8에, B는 11에, C는 16에 끝나요. 대기 시간은 각각 0, 8, 11이고 평균은 약 6.33이에요. SJF는 B(3)를 먼저, 그다음 C(5), 마지막으로 A(8)를 처리해요. 대기는 8, 0, 3이고 평균은 약 3.67로 가장 짧아요. 라운드 로빈은 모두가 돌아가며 1단위씩 처리해서 첫 글자 시각이 1, 2, 3이에요. 모두가 금방 반응을 받아요. 하지만 세 사람 모두 아주 늦게야 끝나서 평균 대기가 7로 오히려 가장 길어요.</p>
+<p>전환할 때마다 시퀀스 상태를 큼직하게 저장하고 복원해야 한다면(예를 들어 9장의 GDN 순환 상태), 타임 슬라이스가 너무 작을 때 전환 비용이 시간을 크게 잡아먹어요. 공평함은 공짜가 아니에요. 첫 글자 시간, 완료 시간, 처리량, 상태 이동량을 함께 봐야 해요.</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 《운영체제》의 CPU 스케줄링 장과 같은 내용이에요. 「프로세스」가 「생성 요청」으로, 「CPU 타임 슬라이스」가 「토큰 단계」로 바뀌었을 뿐이에요. 결정적인 차이가 하나 있어요. 운영체제가 프로세스를 전환할 때는 레지스터 같은 적은 문맥만 저장하면 돼요. 추론 엔진이 시퀀스를 전환할 때는 그 뒤에 KV 캐시와 순환 상태 같은 큰 데이터가 있어요.</p>
+
+<h2 id="sec-3">25.3 대기행렬 이론 입문: 8할이 바쁘면 막히기 시작해요</h2>
+<p>스케줄링은 누가 먼저 올라갈지를 정하지만, 더 근본적인 문제가 있어요. 요청이 얼마나 빽빽하게 오는가예요. 스케줄링 전략이 아무리 영리해도 오는 속도가 처리 속도보다 빠르면 줄은 끝없이 길어져요.</p>
+<aside class="primer" id="c25-queueing">
+<h3>대기행렬 이론 입문: 리틀의 법칙과 M/M/1</h3>
+<p><dfn>대기행렬 이론</dfn>은 「도착, 대기, 서비스」로 이루어진 시스템을 연구해요. 시스템을 양 몇 가지로 설명해요. 도착률 λ(단위 시간에 몇 명이 오나), 서비스율 μ(단위 시간에 몇 명을 처리할 수 있나), <dfn>이용률</dfn> ρ = λ ÷ μ(종업원이 얼마나 많은 시간 동안 바쁜가)예요.</p>
+<p>가장 쓸모 있는 결론이 <dfn>리틀의 법칙</dfn>이에요. L = λ × W예요. 시스템 안의 평균 손님 수 L은 도착률에 한 사람의 평균 체류 시간 W를 곱한 값이라는 뜻이에요. 거의 아무 가정에도 기대지 않아서 버블티 가게, 고속도로, 추론 서비스에 모두 적용돼요. 예를 들어 분당 요청이 3개 오고 평균 20초(1/3분)씩 머무르면, 시스템 안에는 평균 1개의 요청이 있어요.</p>
+<p>가장 단순한 대기 모델이 <dfn>M/M/1</dfn>이에요. 도착은 무작위(이웃한 두 도착의 간격이 지수 분포를 따라요)이고, 서비스 시간도 무작위이고, 종업원은 한 명이에요. 평균 체류 시간은 W = 1 ÷ (μ − λ)예요. 이 식이 직관에 어긋나는 사실을 알려 줘요. <strong>이용률이 100%에 가까워질수록 대기 시간이 급격히 길어져요.</strong> ρ = 50%일 때 W는 서비스 시간의 2배, 80%일 때 5배, 95%일 때 20배예요.</p>
+<p class="further">더 읽을거리: <a href="https://en.wikipedia.org/wiki/Little%27s_law" target="_blank" rel="noopener noreferrer">Wikipedia: Little's law (영문)</a> · <a href="https://en.wikipedia.org/wiki/M/M/1_queue" target="_blank" rel="noopener noreferrer">Wikipedia: M/M/1 queue (영문)</a> · <a href="https://ko.wikipedia.org/wiki/대기행렬이론" target="_blank" rel="noopener noreferrer">위키백과: 대기행렬이론</a></p>
+</aside>
+<p>Strata에 대 보고 계산해 볼게요. <span class="ev ev-est">교육용 추정</span> 답변 하나에 평균 10초가 걸린다고 해 볼게요(예를 들어 토큰 500개, 초당 50개). 그러면 Strata 한 대는 분당 최대 μ = 6개의 요청을 처리해요. 평균적으로 분당 3개가 오면(ρ = 50%) 평균 체류는 1 ÷ (6 − 3)분 = 20초예요. 분당 4.8개가 오면(ρ = 80%) 1 ÷ 1.2분 = 50초이고, 분당 5.7개가 오면(ρ = 95%) 200초가 돼요. 요청은 두 배도 안 늘었는데 대기는 열 배가 됐어요.</p>
+<div class="viz" data-viz="queue-load"><figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="그림 25-3: M/M/1 모델에서 이용률에 따른 평균 체류 시간의 변화. 50%에서 20초, 80%에서 50초, 95%에서 200초이고, 100%에 가까워지면 급격히 오른다">
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M56 20V206H382"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.6" stroke-dasharray="3 4" d="M56 144H382M56 82H382M56 20H382"/>
+<text class="f-muted" fill="#5c6d66" x="50" y="211" font-size="12" text-anchor="end">0</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="148" font-size="12" text-anchor="end">100</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="86" font-size="12" text-anchor="end">200</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="24" font-size="12" text-anchor="end">300</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M56.0 199.8L62.5 199.7L69.0 199.5L75.4 199.4L81.9 199.3L88.4 199.1L94.9 199.0L101.4 198.8L107.8 198.6L114.3 198.4L120.8 198.3L127.3 198.1L133.8 197.8L140.2 197.6L146.7 197.4L153.2 197.1L159.7 196.9L166.2 196.6L172.6 196.3L179.1 196.0L185.6 195.7L192.1 195.3L198.6 194.9L205.0 194.5L211.5 194.1L218.0 193.6L224.5 193.1L231.0 192.5L237.4 191.9L243.9 191.2L250.4 190.5L256.9 189.7L263.4 188.8L269.8 187.8L276.3 186.6L282.8 185.3L289.3 183.9L295.8 182.2L302.2 180.2L308.7 177.8L315.2 175.0L321.7 171.6L328.2 167.2L334.6 161.7L341.1 154.3L347.6 144.0L354.1 128.5L360.6 102.7L367.0 51.0L369.2 20.0"/>
+<circle class="f-warn" fill="#9e5d24" cx="218.0" cy="193.6" r="5"/>
+<circle class="f-warn" fill="#9e5d24" cx="315.2" cy="175.0" r="5"/>
+<circle class="f-warn" fill="#9e5d24" cx="363.8" cy="82.0" r="5"/>
+<text class="f-text" fill="#182f2b" x="218" y="180" font-size="12" text-anchor="middle">50%: 20초</text>
+<text class="f-text" fill="#182f2b" x="300" y="160" font-size="12" text-anchor="end">80%: 50초</text>
+<text class="f-text" fill="#182f2b" x="354" y="80" font-size="12" text-anchor="end">95%: 200초</text>
+<text class="f-muted" fill="#5c6d66" x="218" y="226" font-size="12" text-anchor="middle">50%</text>
+<text class="f-muted" fill="#5c6d66" x="315" y="226" font-size="12" text-anchor="middle">80%</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="226" font-size="12" text-anchor="middle">100%</text>
+<text class="f-muted" fill="#5c6d66" x="62" y="16" font-size="12">평균 체류(초)</text>
+<text class="f-muted" fill="#5c6d66" x="219" y="246" font-size="12" text-anchor="middle">이용률 ρ (답변 하나에 평균 10초 가정)</text>
+</svg><figcaption>그림 25-3　대기 시간은 이용률에 따라 급격히 올라요. 80%까지는 곡선이 그런대로 완만하지만 90%를 넘으면 거의 수직이에요. 그래서 서비스는 여유를 두어야 하고, 「딱 맞게 바쁜」 수준으로 계획하면 안 돼요. <span class="ev ev-est">교육용 추정</span></figcaption></figure></div>
+<p>M/M/1은 거친 모델이에요. 대형 언어 모델의 답변 길이는 지수 분포를 따르지 않고, 문제 읽기와 생성에 드는 시간도 크게 달라요. 하지만 이 모델이 주는 정성적 결론은 아주 튼튼해요. <strong>만부하에 가까워지면 대기가 통제 불능이 된다</strong>는 거예요. 실제 시스템에서는 기계를 늘리거나, 유량을 제한하거나(줄이 너무 길면 사용자에게 「잠시 후 다시 시도하세요」라고 바로 알려요), μ를 높일 방법을 찾아야 한다는 뜻이에요. 마지막 방법이 다음 절의 배치 처리예요.</p>
+
+<h2 id="sec-4">25.4 연속 배칭: 여러 시퀀스를 함께 보내기</h2>
+<p>앞의 두 절은 엔진이 한 번에 시퀀스 하나만 처리한다고 가정했어요. μ를 높이는 방법 하나는 여러 시퀀스가 <strong>같은 계산 안에서 함께 앞으로 나아가게</strong> 하는 거예요.</p>
+<aside class="primer" id="c25-continuous-batching">
+<h3>연속 배칭</h3>
+<p>토큰 하나를 생성할 때 엔진은 관련 가중치를 VRAM에서 한 번 읽어야 해요. 시퀀스 하나만 처리하면 가중치를 한 번 읽어 토큰 하나를 계산해요. 시퀀스 8개를 동시에 처리하면 가중치를 한 번 읽어 토큰 8개를 계산해요. 이것이 <dfn>배치 처리</dfn>의 이득이에요. 행렬-벡터 곱이 행렬 곱으로 바뀌어서, 가중치를 한 번 읽고 여러 번 써요(16장에서 자세히 다뤄요).</p>
+<p>단순한 <dfn>정적 배칭</dfn>은 시퀀스 몇 개를 한 배치로 묶어 함께 시작하고 함께 끝내요. 문제는 답변 길이가 제각각이라는 거예요. 짧은 것은 진작 다 썼는데 그 자리가 비어 있고, 가장 긴 시퀀스가 끝나야 다음 배치가 시작돼요.</p>
+<p><dfn>연속 배칭</dfn>(반복 수준 스케줄링이라고도 해요)은 스케줄링의 단위를 「요청 한 배치」에서 「생성 한 단계」로 줄여요. 토큰을 하나 생성할 때마다 다 쓴 시퀀스가 있는지 확인하고, 있으면 대기 중인 새 시퀀스를 바로 그 자리에 채워 넣어요. 이 발상은 Orca 시스템이 비교적 일찍 체계적으로 제안했고, 나중에 vLLM 같은 추론 프레임워크가 널리 채택했어요. 페이지 방식의 KV 캐시 관리와 함께 쓰여요(17장).</p>
+<p class="further">더 읽을거리: <a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener noreferrer">vLLM / PagedAttention 논문 (arXiv)</a> · <a href="https://ko.wikipedia.org/wiki/일괄_처리" target="_blank" rel="noopener noreferrer">위키백과: 일괄 처리</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="그림 25-4: 슬롯 세 개, 시퀀스 여섯 개. 정적 배칭은 배치에서 가장 긴 시퀀스가 끝나야 다음 배치로 넘어가서 11단계에 끝나고 슬롯 단계 10개가 놀며, 연속 배칭은 빈자리가 나는 대로 채워서 9단계에 끝나고 4개만 논다">
+<text class="f-text" fill="#182f2b" x="10" y="22" font-size="13" font-weight="600">정적 배칭: 배치 전체가 함께 시작하고 함께 끝남</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="51" font-size="12">슬롯 1</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="79" font-size="12">슬롯 2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="107" font-size="12">슬롯 3</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="13" font-weight="600">연속 배칭: 빈자리가 나면 바로 채움</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="181" font-size="12">슬롯 1</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="209" font-size="12">슬롯 2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="237" font-size="12">슬롯 3</text>
+<rect class="f-accent" fill="#136d5a" x="62.0" y="34" width="80.6" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="103.0" y="51" font-size="13" font-weight="600" text-anchor="middle">P</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="144.0" y="34" width="80.6" height="24" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="226.0" y="34" width="53.3" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="253.3" y="51" font-size="13" font-weight="600" text-anchor="middle">S</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="280.7" y="34" width="80.6" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="62.0" y="62" width="162.6" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="144.0" y="79" font-size="13" font-weight="600" text-anchor="middle">Q</text>
+<rect class="f-warn" fill="#9e5d24" x="226.0" y="62" width="135.3" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="294.3" y="79" font-size="13" font-weight="600" text-anchor="middle">T</text>
+<rect class="f-soft" fill="#e5f1df" x="62.0" y="90" width="107.9" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="116.7" y="107" font-size="13" font-weight="600" text-anchor="middle">R</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="171.3" y="90" width="53.3" height="24" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" x="226.0" y="90" width="80.6" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="267.0" y="107" font-size="13" font-weight="600" text-anchor="middle">U</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="308.0" y="90" width="53.3" height="24" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="62.0" y="164" width="80.6" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="103.0" y="181" font-size="13" font-weight="600" text-anchor="middle">P</text>
+<rect class="f-accent" fill="#136d5a" x="144.0" y="164" width="53.3" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="171.3" y="181" font-size="13" font-weight="600" text-anchor="middle">S</text>
+<rect class="f-soft" fill="#e5f1df" x="198.7" y="164" width="80.6" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="239.7" y="181" font-size="13" font-weight="600" text-anchor="middle">U</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="280.7" y="164" width="25.9" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="62.0" y="192" width="162.6" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="144.0" y="209" font-size="13" font-weight="600" text-anchor="middle">Q</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="226.0" y="192" width="80.6" height="24" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" x="62.0" y="220" width="107.9" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="116.7" y="237" font-size="13" font-weight="600" text-anchor="middle">R</text>
+<rect class="f-warn" fill="#9e5d24" x="171.3" y="220" width="135.3" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="239.7" y="237" font-size="13" font-weight="600" text-anchor="middle">T</text>
+<text class="f-muted" fill="#5c6d66" x="62.0" y="266" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="116.7" y="266" font-size="12" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="171.3" y="266" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="226.0" y="266" font-size="12" text-anchor="middle">6</text>
+<text class="f-muted" fill="#5c6d66" x="280.7" y="266" font-size="12" text-anchor="middle">8</text>
+<text class="f-muted" fill="#5c6d66" x="335.3" y="266" font-size="12" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="390.0" y="266" font-size="12" text-anchor="middle">12</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="12" text-anchor="middle">점선 상자는 노는 슬롯. 정적: 11단계, 10 놀음 · 연속: 9단계, 4 놀음</text>
+</svg><figcaption>그림 25-4　같은 슬롯 세 개, 길이가 제각각인 시퀀스 여섯 개. 연속 배칭은 매 단계 빈자리를 확인하니까 슬롯이 거의 놀지 않고, 전체가 더 일찍 끝나요. <span class="ev ev-est">교육용 추정</span></figcaption></figure>
+<p>Strata 같은 MoE 모델에서는 배치 처리에 특별한 점이 하나 더 있어요. 시퀀스마다 층에서 전문가 10개를 고르는데(10장), 시퀀스마다 고른 전문가가 대개 달라요. 배치에 시퀀스가 많을수록 이 층에서 써야 할 전문가의 <strong>합집합</strong>이 커져요. 그림 25-5를 보세요. <span class="ev ev-est">교육용 추정</span></p>
+<figure class="fig"><svg viewBox="0 0 400 244" role="img" aria-label="그림 25-5: 시퀀스마다 층에서 전문가 10개를 고르고, 시퀀스끼리 독립적으로 고르게 고른다면 시퀀스 1개는 10개, 4개는 약 39개, 16개는 약 139개, 32개는 약 240개를 쓴다">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">한 층에서 배치 전체가 쓰는 전문가 수(모두 512개)</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">시퀀스 1개</text><text class="f-text" fill="#182f2b" x="390" y="44" font-size="12" text-anchor="end">10개(2%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="50" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="50" width="7.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">시퀀스 4개(최대 40개)</text><text class="f-text" fill="#182f2b" x="390" y="88" font-size="12" text-anchor="end">약 38.8개(8%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="94" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="94" width="28.8" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="132" font-size="12">시퀀스 16개(최대 160개)</text><text class="f-text" fill="#182f2b" x="390" y="132" font-size="12" text-anchor="end">약 138.6개(27%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="138" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="138" width="102.9" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">시퀀스 32개(최대 320개)</text><text class="f-text" fill="#182f2b" x="390" y="176" font-size="12" text-anchor="end">약 239.6개(47%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="182" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="182" width="177.8" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">시퀀스마다 독립적으로 전문가 10개를 고르게 고른다고 가정</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="238" font-size="12">기댓값 = 512 × (1 − (1 − 10/512)^B), B는 시퀀스 수</text>
+</svg><figcaption>그림 25-5　배치가 클수록 한 층에서 깨어나는 전문가가 많아요. 전문가를 대부분 RAM에 두고 CPU가 계산하는 Strata에서는, 배치 처리가 줄여 준 「가중치 한 번 읽기」가 늘어난 전문가 읽기에 일부 상쇄돼요. <span class="ev ev-est">교육용 추정</span></figcaption></figure>
+<p>이 추정은 전문가가 고르게 선택된다고 가정해요. 실제 라우팅에는 자주 쓰이는 전문가와 드문 전문가가 있어서 합집합은 더 작아요. 하지만 방향은 분명해요. 「전문가가 RAM에 있고 CPU가 미스한 전문가를 계산하는」 구조에서는 배치 처리의 이득을 조밀한 모델의 경험 그대로 가져올 수 없고, 직접 측정해야 해요. 이 장이 배치 처리를 설계 문제로만 다루는 이유예요.</p>
+
+<h2 id="sec-5">25.5 다중 시퀀스로 바꾸기: 속도보다 상태 분리가 먼저예요</h2>
+<p>직접 손을 대서 Strata가 시퀀스 두 개를 동시에 처리하게 만들기로 했다고 해 봐요. 첫걸음은 스케줄러를 쓰는 게 아니에요. 무엇이 공유되고 무엇이 시퀀스마다 따로인지 분명히 적는 거예요.</p>
+<p>업스트림 코드가 좋은 읽을 거리를 줘요. <code>session.hpp</code>의 <code>SessionState</code>는 주석에 「가중치를 뺀, 시퀀스 하나가 필요로 하는 모든 것」이라고 적혀 있어요. 층별 상태, 청크 계산의 임시 공간, GPU와 CPU 전문가 풀 사이의 인계 영역이에요. <span class="ev ev-code">코드 사실</span>[S13] 업스트림 설계에서는 시퀀스 하나에 <code>SessionState</code> 하나가 대응한다는 뜻이에요.</p>
+<p>더 중요한 건 주석의 이 두 문장이에요. GDN 층 36개는 임시 공간을 <strong>한 벌 공유</strong>하고, 층마다 따로 있는 것은 <strong>상태</strong>예요. QSA 층 12개도 임시 공간을 한 벌 공유하고, 괄호 안에 이유가 적혀 있어요. 「이 층들은 동시에 실행되지 않는다」예요. <span class="ev ev-code">코드 사실</span>[S13] 시퀀스 하나를 층 순서대로 실행한다는 전제에서는 이 공유가 완전히 옳고 VRAM도 아껴요. 하지만 시퀀스 두 개가 동시에 돌면 「동시에 실행되지 않는다」는 전제가 깨져요. 공유하던 임시 공간을 양쪽이 동시에 쓰게 되고, 두 시퀀스의 데이터가 서로 섞여요.</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 동시성 프로그래밍에서 가장 전형적인 함정이에요. 코드가 원래 옳았던 것은 「실행자가 하나뿐」이라는 암묵적 가정 덕분이었어요. 멀티스레드로 바꿀 때는 이런 가정을 하나하나 찾아내서 상호 배제를 다시 증명하거나 사람마다 한 벌씩 두도록 고쳐야 해요. 바깥에 전역 락 하나 걸고 끝내서는 안 돼요.</p>
+<p>다음은 VRAM 예산이에요. 업스트림은 세션을 초기화할 때 최대 컨텍스트에 맞춰 모든 층의 상태를 한꺼번에 할당해요. 주석은 토큰 하나를 생성하는 경로에 <strong>할당이 0번</strong>이어야 하기 때문이라고 설명해요. 임시 <code>cudaMalloc</code> 한 번은 다른 모든 테스트를 통과하고도 이 조건 하나를 통과하지 못해요. <span class="ev ev-code">코드 사실</span>[S13] 다중 시퀀스에서도 같은 원칙이 적용돼요. 새 시퀀스를 받아들이기 전에 그 시퀀스의 모든 상태 공간을 먼저 예약해 둬야 해요. 그림 25-6이 교육용 숫자로 계산해 봐요.</p>
+<figure class="fig"><svg viewBox="0 0 400 222" role="img" aria-label="그림 25-6: 교육용 예산. 시퀀스 1개는 26 GiB, 시퀀스 5개가 가중치를 공유하면 34 GiB, 전체를 다섯 번 복사하면 130 GiB">
+<text class="f-text" fill="#182f2b" x="10" y="22" font-size="12" font-weight="600">시퀀스 1개: 20 + 2 + 2 + 2 = 26 GiB</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="30" width="55.4" height="18"/><rect class="f-warn" fill="#9e5d24" x="65.4" y="30" width="5.5" height="18"/><rect class="f-soft" fill="#e5f1df" x="70.9" y="30" width="5.5" height="18"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76.4" y="30" width="5.5" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="78" font-size="12" font-weight="600">시퀀스 5개, 가중치 공유: 20 + 5 × 2 + 2 + 2 = 34 GiB</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="86" width="55.4" height="18"/><rect class="f-warn" fill="#9e5d24" x="65.4" y="86" width="27.7" height="18"/><rect class="f-soft" fill="#e5f1df" x="93.1" y="86" width="5.5" height="18"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="98.6" y="86" width="5.5" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="12" font-weight="600">시퀀스 5개, 통째로 복사: 5 × 26 = 130 GiB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="142" width="360" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="26" y="193" font-size="12">공유 가중치와 캐시</text>
+<rect class="f-warn" fill="#9e5d24" x="150" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="166" y="193" font-size="12">시퀀스별 상태</text>
+<rect class="f-soft" fill="#e5f1df" x="276" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="292" y="193" font-size="12">임시 공간</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="202" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="26" y="213" font-size="12">예약 여유분 (막대 길이는 비례, 숫자는 교육용 가정)</text>
+</svg><figcaption>그림 25-6　가중치는 한 벌이면 되고, 상태만 시퀀스마다 한 벌씩 필요해요. 그래서 시퀀스 다섯 개는 VRAM이 5배도 필요 없고, 시퀀스 하나와 같을 수도 없어요. <span class="ev ev-est">교육용 추정</span></figcaption></figure>
+<p>이 숫자는 교육용 가정이에요. 공유 가중치와 캐시 20 GiB, 시퀀스별 상태 2 GiB, 임시 공간 2 GiB, 예약 2 GiB예요. <span class="ev ev-est">교육용 추정</span> 활성 시퀀스 다섯 개에는 20 + 5 × 2 + 2 + 2 = 34 GiB가 필요해요. 두 가지를 유의하세요. 컨텍스트 길이가 다르면 시퀀스마다 상태도 달라요. 시퀀스 다섯 개가 정말 동시에 계산한다면 임시 공간도 동시 실행 수에 맞춰 다시 계산해야 하고, 한 벌을 계속 공유할 수는 없어요.</p>
+<p>여기서 <dfn>승인 제어(admission control)</dfn>의 원칙이 나와요. 시퀀스를 「활성」으로 약속하기 전에 그 예산 전부를 원자적으로 예약해야 해요. 예산이 모자라면 대기시키거나 분명하게 거절해요. 요청을 일단 다 받아들인 뒤에 VRAM 할당자가 오류를 내지 않기를 바라면 안 돼요.</p>
+
+<h2 id="sec-6">25.6 직접 해 보기: 짧은 요청은 왜 계속 기다릴까</h2>
+<p>이 장의 인터랙티브 실험 「짧은 요청은 왜 계속 기다릴까」를 열어 보세요. FIFO와 라운드 로빈이 첫 글자 시간, 완료 시간, 전환 비용에서 어떻게 다른지 비교해요. 모든 요청은 0 시각에 준비돼 있고, 토큰 1개를 계산하는 데 1밀리초가 걸리며, 실제 그래픽 카드의 배치 처리와 문제 읽기는 시뮬레이션하지 않아요. 순서대로 해 보세요.</p>
+<ol>
+<li>기본으로 주어진 요청들로 FIFO와 라운드 로빈의 첫 글자 시간을 비교해 보세요. 라운드 로빈이 짧은 요청을 더 일찍 시작하게 해요.</li>
+<li>전환 비용을 높여 보세요. 라운드 로빈의 총 시간이 길어지고, 공평함의 대가가 눈에 보여요.</li>
+<li>타임 슬라이스를 키워서 라운드 로빈의 결과가 FIFO와 완전히 같아질 때까지 가 보세요.</li>
+</ol>
+<p>그다음 이 장의 인터랙티브 그림 두 개로 돌아가세요. 스케줄링 비교기에서 「짧은 요청이 잇따라 도착」을 골라 SJF가 긴 요청을 어떻게 굶기는지 보세요. 대기 곡선에서는 이용률을 95%까지 끌어올리고 시뮬레이션을 여러 번 눌러 보세요. 실험 속 숫자는 스케줄링의 트레이드오프를 논의하는 용도일 뿐이고, 어떤 실제 시스템의 벤치마크 점수로 봐서는 안 돼요.</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>업스트림 Strata는 한 번에 시퀀스 하나만 처리하고, 나머지 요청은 FIFO 락 앞에서 줄을 서요. 다중 사용자 스케줄링은 이 장의 설계 연습이고 업스트림 기능이 아니에요. 연결 수, 대기 수, 활성 시퀀스 수는 따로 세야 해요.</li>
+<li>FIFO는 단순하지만 긴 요청에 막히고, SJF는 평균 대기가 가장 짧지만 긴 요청을 굶기며, 라운드 로빈은 모두가 첫 글자를 더 일찍 보게 하지만 전환 비용을 치러요. 이용률이 100%에 가까워질수록 대기가 급격히 길어져요.</li>
+<li>다중 시퀀스로 바꾸려면 먼저 「실행자가 하나뿐」이라는 암묵적 가정을 모두 찾아야 해요. 공유하는 임시 공간 같은 것들이에요. 그다음 「가중치는 한 벌, 상태는 시퀀스마다 한 벌」로 예산을 계산하고, 새 시퀀스를 받기 전에 원자적으로 예약해요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: 「Strata의 HTTP 서버는 멀티스레드니까 여러 사용자를 동시에 서비스할 수 있다.」</strong></p>
+<p>멀티스레드는 여러 사람이 동시에 <strong>연결</strong>하게 해 줄 뿐이에요. 실제로 일하는 엔진 앞에는 FIFO 락이 있어서 같은 순간에는 시퀀스 하나만 생성돼요. 연결 동시성, 스레드 동시성, 시퀀스 동시성은 서로 다른 세 층위의 일이에요. <code>ThreadingHTTPServer</code>를 봤다고 엔진이 연속 배칭을 지원한다고 단정하면 안 돼요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 네 가지 카운트, 예산 세부 사항, 전환 비용, 동시성 검증</summary>
+<h3>먼저 현재 상태와 설계를 구분하기</h3>
+<p>고정된 커밋의 업스트림 서비스 파일에는 FIFO 뒤에서 한 번에 시퀀스 하나를 처리한다고 적혀 있어요. [S15] 이 책의 시작인은 자기가 동시성을 지원하도록 고친 Strata 포크가 있다고 밝혔지만, 그 포크의 소스는 이번 검토 범위에 없어요. 이 장이 제시하는 것은 <strong>다중 사용자 확장의 설계와 검증 방법</strong>이고, 그 포크를 감사했거나 구현했다고 주장하지 않아요.</p>
+<p>숫자 네 개를 따로 세야 해요. HTTP 동시 연결 수, 대기 중인 요청 수, 생성 중인 시퀀스 수, 같은 커널 계산에서 처리하는 시퀀스 수예요. 완전히 다를 수 있어요. 스레드를 더 띄운다고 KV 캐시, GDN 상태, PLE 상태, 난수, 임시 버퍼의 분리 문제가 저절로 풀리지는 않아요.</p>
+<h3>가변 상태마다 소유자를 분명히 적기</h3>
+<p>읽기 전용 가중치와 읽기 전용 캐시 내용은 적절한 동기화 아래에서 공유할 수 있어요. 시퀀스마다의 토큰 기록, KV 페이지 매핑, GDN 상태, PLE 상태, 샘플링 인자, 난수 카운터, 취소 플래그는 소유자가 분명해야 해요. 업스트림의 <code>SessionState</code>는 「가중치를 뺀 시퀀스 상태」를 읽는 좋은 입구예요 [S13]. PLE의 기록과 토큰 윈도도 주석에서 분명히 「시퀀스 상태」라고 부른다는 점에 유의하세요.</p>
+<p>공유 임시 공간이 안전한지는 스케줄링이 상호 배제를 보장할 수 있느냐에 달려 있어요. 원래 「층은 동시에 돌지 않는다」고 가정했던 임시 공간을 두 세션이 동시에 쓰면, 원래 옳았던 코드가 곧바로 틀려져요. 동시성으로 바꿀 때는 단일 시퀀스 가정을 모두 나열해야 하고, 전역 뮤텍스 하나만 찾으면 안 돼요.</p>
+<h3>예산의 세부 사항</h3>
+<p>본문의 34 GiB는 출발점일 뿐이에요. 시퀀스 다섯 개가 각자 독립된 임시 공간이 필요하다면 그 2 GiB는 실제 동시 실행 수에 맞춰 다시 계산해야 해요. 컨텍스트 길이가 다르면 시퀀스마다 상태 크기도 달라요. 승인 제어는 활성 시퀀스를 약속하기 전에 예산을 원자적으로 예약해야 해요. 세션 주차장(업스트림의 선택 기능)은 호스트 메모리를 차지하니 따로 예산에 넣어야 해요. <span class="ev ev-report">업스트림 보고</span></p>
+<h3>라운드 로빈의 실제 비용</h3>
+<p>교육용 시뮬레이션은 전환에 시간이 안 들거나 고정된 상수만 든다고 가정해요. 실제 엔진이 시퀀스를 전환할 때 한 시퀀스의 KV 캐시와 순환 상태를 VRAM 밖으로 옮기고 다른 시퀀스의 것을 들여와야 한다면, 타임 슬라이스가 너무 작을 때 이동 비용이 계산을 압도해요. 그래서 「공평함」 평가는 첫 글자 시간, 완료 시간, 처리량, 상태 이동량을 함께 봐야 해요. SJF에는 현실적인 난제도 있어요. 답변 길이는 생성이 끝나기 전에는 알 수 없고 추정만 할 수 있어요. 기아를 막으려고 흔히 쓰는 방법은 오래 기다린 요청일수록 우선순위를 높이는 거예요. 이것을 <dfn>에이징(aging)</dfn>이라고 해요.</p>
+<h3>예제: 마지막 슬롯 하나에 요청 두 개가 동시에 도착</h3>
+<p>검증 단언: 딱 하나의 요청만 유효한 예산을 얻어 활성 상태가 되고, 다른 하나는 대기하거나 분명하게 거절된다. 예산을 중복 예약하면 안 되고, 클라이언트가 재시도했다고 세션이 둘 생기면 안 된다. 완료나 취소 뒤에는 예산이 정확히 한 번만 해제된다. 옛 요청이 새 슬롯의 상태에 계속 쓰면 안 된다.</p>
+<h3>동시성 검증은 「상태 섞임」 위험을 겨냥해야 해요</h3>
+<p>언어나 작업이 다른 고정 요청 A, B를 설계하고, 먼저 각각 단독으로 실행해 참조 출력을 기록하세요. 그다음 번갈아 또는 병렬로 실행해요. 이런 경우를 덮어요. A가 취소되는 동안 B는 계속하기, A가 오래 문제를 읽는 동안 B가 생성하기, 접두사는 같은데 이미지가 다른 경우, 세션 복구, 예산이 마지막 슬롯 하나만큼일 때의 동시 선점이에요.</p>
+<p>최소 통과 조건: 상태 분리가 올바르고, 예산을 넘는 약속이 없고, 중복 종료가 없고, 옛 요청의 출력이 섞여 들어오지 않고, 긴 요청이 굶지 않아요. 총 처리량은 올랐는데 가끔 문맥이 섞이는 시스템은 합격한 동시 추론 서비스가 아니에요.</p>
+<h3>시뮬레이터의 증거 경계</h3>
+<p>이 장의 인터랙티브 그림 두 개와 인터랙티브 실험은 모두 이산적인 교육용 시뮬레이션이에요. 토큰마다 걸리는 시간이 고정돼 있고, 실제 문제 읽기, 드래프트 검증, 프리픽스 히트, GPU 커널, 캐시 경쟁이 없어요. 스케줄링의 트레이드오프를 논의하는 용도로만 쓸 수 있고, 그림 속 배율을 어떤 실제 시스템의 성능을 내세우는 데 쓰면 안 돼요.</p>
+</details>

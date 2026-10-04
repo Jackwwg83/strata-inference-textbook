@@ -1,0 +1,232 @@
+<div class="hook"><span class="eyebrow">먼저 숫자 세 개를 볼게요</span>
+<p>Strata의 README에는 RTX 5070에서 Q2_0 버전이 초당 토큰 94개를 쓴다고 적혀 있어요. <span class="ev ev-report">업스트림 보고</span>[S01] 이 숫자는 아주 확실해 보여요.</p>
+<p>이번에는 커뮤니티 회원이 올린 테스트를 볼게요. RTX 3090 한 장, Coder 모델, 32K 길이의 프롬프트로 같은 설정을 세 번 연달아 돌렸고, 앞뒤로 30초도 안 걸렸어요. 세 번의 출력 속도는 각각 초당 52.7개, 66.8개, 97.4개였어요. <span class="ev ev-report">업스트림 보고</span> 가장 빠른 것과 가장 느린 것이 거의 두 배 차이예요. 이 컴퓨터는 도대체 얼마나 빠를까요? 이 장은 속도 숫자가 추궁을 견디려면 어떻게 측정해야 하는지 설명해요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 성능 숫자는 조건, 표본 수, 통계 방법이 함께 있어야 의미가 있어요. 먼저 워밍업을 하고, 반복하고, 중앙값과 흔들림 범위를 보고하고, 첫 번째 실행은 따로 적고, 「속도」를 어떤 공식으로 계산했는지 분명히 밝혀야 해요.</p>
+
+<h2 id="sec-1">27.1 같은 컴퓨터가 30초 안에 세 가지 속도를 냈어요</h2>
+<p>먼저 세 번 실행한 원본 기록을 볼게요. Strata 저장소에 커뮤니티가 제출한 테스트 보고서에서 나온 거예요. 엔진 버전 0.1.26, RTX 3090 한 장, Coder 모델, 32K 길이 프롬프트예요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/bench/results/2026-09-29-rtx3090-epyc-milan/README.md" target="_blank" rel="noopener noreferrer">RTX 3090 테스트 보고서</a>)</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="그림 27-1: 같은 컴퓨터에서 세 번 연달아 돌렸을 때 출력 속도는 초당 토큰 52.7개, 66.8개, 97.4개이고, 중앙값은 66.8, 평균은 72.3">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="13">같은 컴퓨터, 같은 설정, 32K 프롬프트를 세 번 연달아 돌린 출력 속도</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40 110H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 106V114M137.1 106V114M234.3 106V114M331.4 106V114"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="128" font-size="13" text-anchor="middle">40</text>
+<text class="f-muted" fill="#5c6d66" x="137.1" y="128" font-size="13" text-anchor="middle">60</text>
+<text class="f-muted" fill="#5c6d66" x="234.3" y="128" font-size="13" text-anchor="middle">80</text>
+<text class="f-muted" fill="#5c6d66" x="331.4" y="128" font-size="13" text-anchor="middle">100</text>
+<circle class="f-accent" fill="#136d5a" cx="101.7" cy="92" r="6"/>
+<circle class="f-accent" fill="#136d5a" cx="170.2" cy="92" r="6"/>
+<circle class="f-accent" fill="#136d5a" cx="318.8" cy="92" r="6"/>
+<text class="f-text" fill="#182f2b" x="101.7" y="72" font-size="13" text-anchor="middle">1회 52.7</text>
+<text class="f-text" fill="#182f2b" x="170.2" y="50" font-size="13" text-anchor="middle">2회 66.8</text>
+<text class="f-text" fill="#182f2b" x="318.8" y="72" font-size="13" text-anchor="middle">3회 97.4</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M170.2 100V146"/>
+<text class="f-text" fill="#182f2b" x="165" y="146" font-size="13" text-anchor="end">중앙값 66.8</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M196.9 100V166"/>
+<text class="f-text" fill="#182f2b" x="202" y="166" font-size="13" text-anchor="start">평균 72.3</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="13">첫 토큰 지연은 세 번 거의 같아요: 12.87, 12.79, 12.80초</text>
+</svg><figcaption>그림 27-1　세 번 실행한 출력 속도(초당 토큰 수). 가장 빠른 것과 가장 느린 것이 거의 두 배 차이 나지만, 같은 묶음의 첫 토큰 지연은 놀랄 만큼 안정적이에요. 데이터는 업스트림의 RTX 3090 커뮤니티 보고서에서 왔어요.</figcaption></figure>
+<p>왜 이렇게 차이가 났을까요? 원본 기록에 단서가 있어요 <span class="ev ev-report">업스트림 보고</span>.</p>
+<ul>
+<li><strong>출력이 너무 짧아요.</strong> 세 번은 각각 토큰 48개, 26개, 45개만 생성했고, 모델이 일찍 말을 끝내고 멈췄어요. 디코드 단계는 매번 1초도 안 됐어요(911, 389, 462 밀리초). 이렇게 짧은 시간에서는 작은 흔들림도 확대돼요.</li>
+<li><strong>실행마다 쓰는 내용이 달라요.</strong> 세 번의 답변은 시작부터 각각 달랐어요. Strata는 추측 디코딩으로 속도를 높여요. 토큰 몇 개를 먼저 추측하고 한꺼번에 검증해요. 많이 맞힐수록 빨라요. 세 번은 각각 드래프트 38개 중 31개, 21개 중 12개, 37개 중 33개를 수락했어요. 두 번째가 가장 못 맞혔는데도 속도는 중간이었어요. 속도에 영향을 주는 요인이 하나만은 아니라는 뜻이에요.</li>
+<li><strong>입력도 표류해요.</strong> 이름만 모두 「32K 프롬프트」일 뿐, 실제 길이는 28,317, 31,630, 31,601 토큰이었어요. 보고서는 실제 길이를 일부러 기록했어요. 「명목상의 길이 라벨이 표류하기」 때문이에요.</li>
+</ul>
+<p>보고서 자신의 결론은 아주 절제돼 있어요. 칸마다 세 번씩 돌려서 중앙값을 보고하고, 첫 번째 값도 함께 나열하며, 결과 전체가 「예비」라고 표시했어요. 이 장이 설명하는 습관이 바로 이거예요.</p>
+<p>먼저 두 단어를 분명히 할게요. <dfn>처리량</dfn>(throughput)은 단위 시간에 얼마나 많은 일을 끝내느냐예요. 여기서는 초당 출력하는 토큰 수이고 token/s로 쓰며, 클수록 좋아요. <dfn>지연 시간</dfn>(latency)은 어떤 일이 끝나기를 얼마나 기다리느냐예요. 예를 들어 요청을 보내고 첫 글자를 볼 때까지의 시간이고, 작을수록 좋아요. 둘은 자주 섞여 쓰이지만 서로 다른 질문에 답해요.</p>
+
+<h2 id="sec-2">27.2 숫자 하나에는 그 조건이 따라붙어야 해요</h2>
+<p>README의 「94 token/s」는 Strata의 상세 문서에 출처가 온전히 있어요. 문서는 맨 앞에 조건을 쓰고 그다음 표를 줘요 <span class="ev ev-report">업스트림 보고</span>[S03]. 그림 27-2를 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="그림 27-2: Strata 측정표의 조건 목록. 그래픽 카드, CPU와 메모리, 시스템, 엔진 버전, 양자화, 입력, 출력, 설정">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="14" font-weight="600" text-anchor="middle">성능 숫자의 「신분증」</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="380" height="222" rx="10"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="58" font-size="13">그래픽 카드</text><text class="f-text" fill="#182f2b" x="130" y="58" font-size="13">RTX 5070(12 GB)</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="84" font-size="13">CPU와 메모리</text><text class="f-text" fill="#182f2b" x="130" y="84" font-size="13">Ryzen 5 7600, 64 GB DDR5-5200</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="110" font-size="13">시스템</text><text class="f-text" fill="#182f2b" x="130" y="110" font-size="13">Windows</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="136" font-size="13">엔진 버전</text><text class="f-text" fill="#182f2b" x="130" y="136" font-size="13">0.1.26(일부 칸은 더 이전 버전)</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="162" font-size="13">양자화</text><text class="f-text" fill="#182f2b" x="130" y="162" font-size="13">Q2_0, IQ2_XS 등 다섯 가지</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="188" font-size="13">입력</text><text class="f-text" fill="#182f2b" x="130" y="188" font-size="13">길이마다 코딩 도우미 프롬프트 하나</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="214" font-size="13">출력</text><text class="f-text" fill="#182f2b" x="130" y="214" font-size="13">토큰 256개 생성</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="240" font-size="13">설정</text><text class="f-text" fill="#182f2b" x="130" y="240" font-size="13">설치 프로그램의 기본값, MTP 드래프트 켬</text>
+<text class="f-warn" fill="#9e5d24" x="200" y="280" font-size="13" text-anchor="middle">하나라도 빠지면 이 숫자는 남의 결과와 나란히 비교할 수 없어요</text>
+</svg><figcaption>그림 27-2　Strata 상세 문서 측정표의 조건. 항목마다 결과를 바꿀 수 있어서, 항목마다 적어야 해요. [S03]</figcaption></figure>
+<p>이 문서에는 배울 만한 세부 사항이 더 있어요 <span class="ev ev-report">업스트림 보고</span>[S03].</p>
+<ul>
+<li><strong>버전이 섞였다는 표시.</strong> 표의 본체는 0.1.26의 결과인데, 262K 열의 몇 칸은 다시 측정하지 않고 0.1.22나 0.1.14의 숫자를 그대로 썼고, 기호로 따로 표시해 놨어요. 한 표에 섞여 있는 숫자가 같은 실험의 결과라는 법은 없어요.</li>
+<li><strong>숫자가 내용에 따라 변한다는 설명.</strong> 출력 속도는 글 자체에도 달려 있어요. 추측 디코딩은 많이 맞힐수록 빨라서, 같은 프롬프트에서 답이 달라지면 속도가 몇 퍼센트씩 달라질 수 있어요.</li>
+<li><strong>비교할 때는 연달아 실행.</strong> 문서가 0.1.14와 0.1.12를 비교할 때는 같은 4K 프롬프트로 연달아 돌려서 88.5와 85.7 token/s를 얻었어요.</li>
+</ul>
+<p>처음의 그 3090으로 돌아가 볼게요. README는 RTX 3090이 「대략 초당 토큰 100~140개까지 쓴다」고 추정해요. [S01] 커뮤니티 보고서에서 잰 숫자는 이보다 낮은데, 둘의 조건은 크게 달라요. 보고서는 가상 머신을 썼고, 테스트 머신의 그래픽 카드 두 장은 소비 전력이 모두 280 W로 수동 제한돼 있었고, 프롬프트는 테스터가 소스로 직접 생성했고, 여러 번의 요청이 일찍 끝났어요. 보고서 스스로도 업스트림의 프롬프트와 테스트 방법을 얻기 전에는 업스트림과의 모든 비교가 「참고용일 뿐」이라고 적었어요. <span class="ev ev-report">업스트림 보고</span> 두 숫자 모두 틀리지 않았어요. 다만 바로 비교할 수 없을 뿐이에요.</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 《컴퓨터 구조》에서 성능 평가를 다룰 때 가장 먼저 배우는 규칙이에요. 테스트 환경을 분명히 쓰고, 한 번에 변수 하나만 바꾼다. 과학 실험에서는 「통제 변인」이라고 해요. 조건 없는 벤치마크 점수는 단위 없는 물리량처럼 쓸 수가 없어요.</p>
+
+<h2 id="sec-3">27.3 평균은 느린 요청 하나에 끌려가요</h2>
+<p>같은 일을 여러 번 측정해서 숫자 한 줄을 얻었어요. 어떤 숫자로 그것을 대표할까요? 가장 흔한 답은 평균인데, 큰 결점이 하나 있어요. 아래 칼럼이 설명해요.</p>
+<aside class="primer" id="c27-statistics">
+<h3>평균, 분위수, 분산</h3>
+<p>먼저 요청 몇 개의 소요 시간을 볼게요. 8, 9, 10, 11, 100 밀리초예요. 앞의 네 번은 모두 정상이고, 마지막 한 번은 다른 프로그램이 자원을 빼앗았을 수 있어요.</p>
+<p><dfn>평균</dfn>은 전부 더해서 개수로 나눈 값이에요. (8 + 9 + 10 + 11 + 100) ÷ 5 = 27.6 밀리초예요. 하지만 다섯 번 중 27.6에 가까운 것은 하나도 없어요. 100에 끌려갔기 때문이에요. <dfn>중앙값</dfn>은 정렬했을 때 정중앙에 오는 수이고, 여기서는 10 밀리초예요. 100을 10000으로 바꿔도 중앙값은 움직이지 않아요. 이렇게 「개별적인 극단값을 두려워하지 않는」 성질을 강건하다고 해요.</p>
+<p><dfn>분위수</dfn>는 「대부분의 요청은 얼마나 느린가」에 답해요. p95는 요청의 95%가 이보다 느리지 않다는 뜻이에요. 사용자 경험은 느린 쪽이 정하는 일이 많아요. 요청 20번 중 가장 느린 1번을 사용자가 가장 또렷이 기억해요. p95를 계산하는 약속은 여러 가지가 있고, 이 책은 가장 단순한 「최근접 순위」법을 써요. 작은 것부터 정렬해서 ⌈0.95 × n⌉번째를 골라요. 주의하세요. 표본이 20개보다 적으면 p95는 곧 최댓값이에요. 5번만 돌리고 p95를 보고하면, 사실은 「가장 느렸던 한 번」을 보고하는 거예요.</p>
+<p><dfn>분산</dfn>과 <dfn>표준 편차</dfn>는 데이터가 얼마나 흩어져 있는지 재요. 표본 표준 편차 = √( Σ(xᵢ − 평균)² ÷ (n − 1) )이에요. 위의 데이터 묶음의 표준 편차는 약 40.5 밀리초로 전형적인 값 자체보다 커요. 데이터에 이상치가 있고 평균을 믿을 수 없다고 알려 주는 거예요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/중앙값" target="_blank" rel="noopener noreferrer">위키백과: 중앙값</a> · <a href="https://ko.wikipedia.org/wiki/백분위수" target="_blank" rel="noopener noreferrer">위키백과: 백분위수</a> · <a href="https://ko.wikipedia.org/wiki/표준_편차" target="_blank" rel="noopener noreferrer">위키백과: 표준 편차</a> · <a href="https://docs.python.org/ko/3/library/statistics.html" target="_blank" rel="noopener noreferrer">Python 문서: statistics (quantiles의 두 알고리즘 포함)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 176" role="img" aria-label="그림 27-3: 다섯 번의 소요 시간 8, 9, 10, 11, 100 밀리초. 중앙값 10, 평균 27.6, p95는 최댓값 100과 같다">
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M20 96H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 92V100M105.7 92V100M191.4 92V100M277.1 92V100M362.9 92V100"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="114" font-size="13" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="105.7" y="114" font-size="13" text-anchor="middle">25</text>
+<text class="f-muted" fill="#5c6d66" x="191.4" y="114" font-size="13" text-anchor="middle">50</text>
+<text class="f-muted" fill="#5c6d66" x="277.1" y="114" font-size="13" text-anchor="middle">75</text>
+<text class="f-muted" fill="#5c6d66" x="362.9" y="114" font-size="13" text-anchor="middle">100 ms</text>
+<circle class="f-accent" fill="#136d5a" cx="47.4" cy="80" r="4.5"/>
+<circle class="f-accent" fill="#136d5a" cx="50.9" cy="70" r="4.5"/>
+<circle class="f-accent" fill="#136d5a" cx="54.3" cy="80" r="4.5"/>
+<circle class="f-accent" fill="#136d5a" cx="57.7" cy="70" r="4.5"/>
+<circle class="f-warn" fill="#9e5d24" cx="362.9" cy="76" r="5.5"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M54.3 46V90M114.6 46V90"/>
+<text class="f-text" fill="#182f2b" x="54.3" y="38" font-size="13" text-anchor="middle">중앙값 10</text>
+<text class="f-text" fill="#182f2b" x="118" y="38" font-size="13" text-anchor="start">평균 27.6</text>
+<text class="f-text" fill="#182f2b" x="390" y="58" font-size="13" text-anchor="end">p95 = 최댓값 100</text>
+<text class="f-text" fill="#182f2b" x="10" y="146" font-size="13">100 ms 한 번이 평균을 27.6으로 끌고 가요. 중앙값은 그대로 10</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="166" font-size="13">표준 편차 약 40.5 ms는 전형적인 값보다 커요: 이상치가 있어요</text>
+</svg><figcaption>그림 27-3　표본 다섯 개, 통계량 세 개가 세 가지 이야기를 해요. 중앙값을 보고하고 느린 쪽은 p95나 최댓값으로 설명하는 편이 평균 하나만 보고하는 것보다 훨씬 정직해요.</figcaption></figure>
+<p>그림 27-1의 세 번 실행을 다시 볼게요. 중앙값 66.8, 평균 72.3, 「p95」는 가장 빠른 97.4예요(여기서는 클수록 좋으니 느린 쪽을 보려면 최솟값 52.7을 봐야 해요). 세 숫자 중 어느 하나만 꺼내서는 완전하지 않아요. 업스트림 보고서는 중앙값을 보고하고, 첫 번째 값과 원본 기록을 함께 붙이는 방식을 택했어요.</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 《확률과 통계》에서 배우는 중앙값의 「붕괴점」은 50%예요. 데이터의 절반 미만이 아무 값으로 변해도 중앙값은 무한대로 달아나지 않아요. 평균의 붕괴점은 0이라서 나쁜 데이터 하나로 끌려가요. 성능 데이터는 바로 이런 개별 극단값이 가장 잘 생겨요.</p>
+
+<h2 id="sec-4">27.4 첫 번째는 늘 유난히 느려요: 워밍업과 반복</h2>
+<p>많은 시스템은 처음 실행이 뒤의 실행보다 느려요. Strata에도 쓸수록 「데워지는」 것이 여러 가지 있어요.</p>
+<ul>
+<li><strong>전문가 캐시.</strong> VRAM에 어떤 전문가를 올려 둘지가 대화에 따라 조정돼서, 쓸수록 지금 내용에 잘 맞아요. <span class="ev ev-report">업스트림 보고</span>[S02]</li>
+<li><strong>드래프트 컨트롤러.</strong> 「드래프트가 몇 개나 맞을까」에 대한 초기 추정이 있고, 세션마다 쓰면서 배워요. <span class="ev ev-code">코드 사실</span>[S09]</li>
+<li><strong>계산 그래프.</strong> 검증 윈도의 GPU 계산 그래프는 처음 쓸 때 녹화돼요. <span class="ev ev-code">코드 사실</span>[S08]</li>
+<li><strong>운영체제의 파일 캐시.</strong> 방금 읽은 파일이 메모리에 남아서 두 번째 읽기가 훨씬 빨라요.</li>
+</ul>
+<p>반대로 뒤의 실행을 「비현실적으로 빠르게」 만드는 것도 있어요. Strata는 대화를 보관하고, 이어지는 질문에서는 새로 늘어난 부분만 읽어요. [S02] 속도를 잴 때 같은 프롬프트를 반복해서 보내면, 두 번째부터는 문제 읽기에 시간이 거의 안 들어서 「32K 프롬프트를 읽는」 속도를 재는 게 아니게 돼요. 그래서 그 3090 보고서는 요청마다 다른 ID를 써서 대화를 재사용하지 않았어요. <span class="ev ev-report">업스트림 보고</span></p>
+<p>다른 커뮤니티 보고서는 측정 방법을 더 완전하게 적어 놨어요. 그림 27-4를 보세요. RTX 5090에서 IQ2_XS 양자화 버전을 엔진 0.1.29로 측정했어요. 먼저 아주 짧은 워밍업 요청을 보내고 결과에는 넣지 않았어요. 그다음 이미 불러온 같은 엔진에서 4K, 32K, 128K 순서로 길이마다 세 번씩 연달아 돌렸어요. 요청마다 문제를 완전히 읽었고 재사용한 토큰 수는 0이었어요. 표의 칸마다 「중앙값 [최솟값~최댓값]」으로 적었어요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/bench/results/2026-09-30-community-rtx-5090/README.md" target="_blank" rel="noopener noreferrer">RTX 5090 테스트 보고서</a>)</p>
+<figure class="fig"><svg viewBox="0 0 400 238" role="img" aria-label="그림 27-4: RTX 5090 보고서의 실행 순서. 워밍업 한 번은 세지 않고, 그 뒤로 길이마다 세 번. 4K의 첫 번째가 눈에 띄게 느렸고 보고서는 그것을 남겨 뒀다">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="13">커뮤니티 테스트: RTX 5090, 엔진 0.1.29, IQ2_XS</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="10" y="32" width="56" height="34" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="38" y="54" font-size="13" text-anchor="middle">워밍업</text>
+<rect class="f-warn" fill="#9e5d24" x="72" y="32" width="32" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="88" y="54" font-size="13" text-anchor="middle">1</text>
+<rect class="f-accent" fill="#136d5a" x="107" y="32" width="32" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="123" y="54" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="142" y="32" width="32" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="158" y="54" font-size="13" text-anchor="middle">3</text>
+<rect class="f-soft" fill="#e5f1df" x="177" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="193" y="54" font-size="13" text-anchor="middle">1</text>
+<rect class="f-soft" fill="#e5f1df" x="212" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="228" y="54" font-size="13" text-anchor="middle">2</text>
+<rect class="f-soft" fill="#e5f1df" x="247" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="263" y="54" font-size="13" text-anchor="middle">3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="282" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="298" y="54" font-size="13" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="317" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="333" y="54" font-size="13" text-anchor="middle">2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="352" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="368" y="54" font-size="13" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="38" y="84" font-size="13" text-anchor="middle">미포함</text>
+<text class="f-text" fill="#182f2b" x="123" y="84" font-size="13" text-anchor="middle">4K</text>
+<text class="f-text" fill="#182f2b" x="228" y="84" font-size="13" text-anchor="middle">32K</text>
+<text class="f-text" fill="#182f2b" x="333" y="84" font-size="13" text-anchor="middle">128K</text>
+<text class="f-text" fill="#182f2b" x="20" y="120" font-size="14" font-weight="600">4K의 세 번 실행</text>
+<text class="f-text" fill="#182f2b" x="20" y="144" font-size="13">첫 토큰 지연: 1.183 s → 0.974 s → 0.973 s</text>
+<text class="f-text" fill="#182f2b" x="20" y="166" font-size="13">디코드 속도: 161.3 → 184.8 → 179.4 token/s</text>
+<text class="f-text" fill="#182f2b" x="20" y="188" font-size="13">전문가 캐시 히트율: 97.8% → 99.3% → 98.9%</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="222" font-size="12">보고서는 더 느린 첫 번째를 남기고 「중앙값 [최소~최대]」로 보고했어요</text>
+</svg><figcaption>그림 27-4　아주 짧은 워밍업은 모든 것을 「데우지」는 못했어요. 4K의 첫 본 실행은 여전히 더 느렸어요. 보고서는 그것을 지우지 않고 범위 안에 드러냈어요.</figcaption></figure>
+<p>그 워밍업 요청에 주목하세요. 프롬프트는 토큰 19개뿐이고 출력은 2개뿐이에요. 이렇게 짧은 요청으로는 모든 것을 데우지 못해서, 4K의 첫 본 실행은 첫 토큰 지연이 약 0.2초 길었고 디코드도 약 10% 느렸어요. 보고서는 이 실행을 슬쩍 지우지 않고 「더 느린 첫 4K 실행은 범위 안에 남겨 두었다」고 적었어요. <span class="ev ev-report">업스트림 보고</span> 지우는 것보다 정직하고, 독자에게 판단할 재료도 남겨 줘요.</p>
+<aside class="primer" id="c27-benchmark-method">
+<h3>워밍업과 벤치마크 방법</h3>
+<p><dfn>벤치마크</dfn>는 통제된 조건에서 같은 작업을 반복해 돌려서 성능을 재는 일이에요. 결과를 믿을 만하게 만들려면 기본기가 몇 가지 필요해요.</p>
+<p><strong>워밍업.</strong> 본격적으로 시간을 재기 전에 몇 번 돌려서 캐시, 계산 그래프, 파일 캐시가 안정된 상태로 들어가게 해요. 이 몇 번은 결과에 넣지 않아요. 워밍업을 몇 번 할지, 무엇으로 할지는 미리 정해서 보고서에 적어야 해요. 내가 궁금한 것이 바로 콜드 스타트(예: 사용자가 처음 여는 순간)라면 콜드 스타트를 따로 재고, 데워진 상태와 섞지 마세요.</p>
+<p><strong>반복.</strong> 실행 한 번은 표본 하나일 뿐이에요. 여러 번 반복해야 흔들림이 얼마나 큰지 볼 수 있어요. 반복 횟수는 미리 정해야 하고, 「만족할 때까지」 돌리면 안 돼요.</p>
+<p><strong>번갈아 하기.</strong> A와 B를 비교할 때 A를 다 돌린 뒤 B를 돌리지 말고, A, B, A, B로 번갈아 돌려요. 그렇지 않으면 기계가 달아오르고 식는 것, 온도, 백그라운드 작업의 변화가 모두 한쪽 몫이 돼요.</p>
+<p><strong>원본 데이터 남기기.</strong> 중앙값과 범위를 보고하면서, 매 실행의 원본 기록도 함께 붙여요. 실패하거나 이상했던 몇 번도 포함해요.</p>
+<p>가장 빠른 한 번만 봐도 되는 경우가 하나 있어요. <strong>결정적인</strong> 작은 코드 조각을 잴 때예요. Python의 <code>timeit</code> 문서는 최솟값을 보라고 권해요. 느린 결과는 대개 다른 프로세스의 방해 때문이고, 최솟값이 이 기계가 이 코드를 돌리는 하한을 주기 때문이에요. 하지만 추론 서비스의 속도는 입력 내용, 드래프트가 얼마나 맞았는지, 캐시가 얼마나 히트했는지에도 달려 있어요. 이것들은 「방해」가 아니라 사용자가 실제로 마주치는 상황이에요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/벤치마크" target="_blank" rel="noopener noreferrer">위키백과: 벤치마크</a> · <a href="https://docs.python.org/ko/3/library/timeit.html" target="_blank" rel="noopener noreferrer">Python 문서: timeit</a> · <a href="https://ko.wikipedia.org/wiki/벤치마크_(컴퓨팅)" target="_blank" rel="noopener noreferrer">위키백과: 벤치마크 (컴퓨팅)</a></p>
+</aside>
+<p>워밍업, 반복, 번갈아 하기는 각각 어떤 문제를 풀어 줄까요? 아래 실험에서 직접 측정 계획을 설계해 보세요. 이 실험의 장점은 「진실을 안다」는 거예요. B가 정말 A보다 5% 빠르니까, 내 계획이 얼마나 정확히 재는지 바로 볼 수 있어요.</p>
+<div class="viz" data-viz="bench-warmup"><figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="그림 27-5: 세 가지 실행 순서. A 먼저 B 나중이면 콜드 스타트가 모두 A에 떨어지고, 번갈아 하면 양쪽에 나뉘며, 워밍업을 더하면 콜드 스타트가 버려진다">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="13">기계가 막 시작한 처음 3번의 실행은 느려져요. 누구 몫이 될까요?</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="13">A 먼저 B 나중</text>
+<rect class="f-warn" fill="#9e5d24" x="110" y="34" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="123" y="52" font-size="13" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="138" y="34" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="151" y="52" font-size="13" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="166" y="34" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="179" y="52" font-size="13" text-anchor="middle">A</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="194" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="207" y="52" font-size="13" text-anchor="middle">A</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="222" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="235" y="52" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="263" y="52" font-size="13" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="278" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="291" y="52" font-size="13" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="306" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="319" y="52" font-size="13" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="334" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="347" y="52" font-size="13" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="362" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="375" y="52" font-size="13" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="10" y="102" font-size="13">A, B 번갈아</text>
+<rect class="f-warn" fill="#9e5d24" x="110" y="84" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="123" y="102" font-size="13" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="138" y="84" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="151" y="102" font-size="13" text-anchor="middle">B</text>
+<rect class="f-warn" fill="#9e5d24" x="166" y="84" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="179" y="102" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="194" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="207" y="102" font-size="13" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="222" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="235" y="102" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="263" y="102" font-size="13" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="278" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="291" y="102" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="306" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="319" y="102" font-size="13" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="334" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="347" y="102" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="362" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="375" y="102" font-size="13" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="13">번갈아 + 워밍업</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#9e5d24" stroke-dasharray="3 3" x="110" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="123" y="152" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#9e5d24" stroke-dasharray="3 3" x="138" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="151" y="152" font-size="13" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#9e5d24" stroke-dasharray="3 3" x="166" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="179" y="152" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="194" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="207" y="152" font-size="13" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="222" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="235" y="152" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="263" y="152" font-size="13" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="278" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="291" y="152" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="306" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="319" y="152" font-size="13" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="334" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="347" y="152" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="362" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="375" y="152" font-size="13" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="10" y="196" font-size="12">경고색: 기계가 아직 안 데워진 실행. 점선 상자: 워밍업, 버려서 세지 않음</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">첫 줄에서는 콜드 스타트가 모두 A 몫이라 B가 훨씬 빨라 보여요</text>
+</svg><figcaption>그림 27-5　실행 순서가 콜드 스타트를 누구 몫으로 만들지 정해요. 번갈아 실행하면 양쪽에 나뉘고, 워밍업까지 더하면 통째로 버려져요. 아래 실험에서 진실은 B가 5% 빠르다는 거예요.</figcaption></figure></div>
+
+<h2 id="sec-5">27.5 시계부터 정의하기: TTFT와 「초당 몇 토큰」</h2>
+<p>측정 방법에 문제가 없어도 「속도」라는 단어 자체가 여러 가지 방식으로 계산될 수 있어요. 사용자가 요청을 보낸 뒤에는 시간이 여러 토막으로 나뉘어요. 대기, 문제 읽기, 첫 토큰 출현, 뒤의 토큰들이 이어서 나옴, 종료예요. 어디서 스톱워치를 켜고 어디서 멈추느냐에 따라 나오는 숫자가 완전히 달라져요. 그림 27-6을 보세요.</p>
+<div class="viz" data-viz="rate-clock"><figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="그림 27-6: 스트리밍 요청 하나의 타임라인과 세 가지 속도 공식. 엔드투엔드, 디코드 시간 기준, 간격 기준">
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="36" width="70" height="26" rx="4"/>
+<text class="f-text" fill="#182f2b" x="55" y="54" font-size="13" text-anchor="middle">대기</text>
+<rect class="f-soft" fill="#e5f1df" x="90" y="36" width="140" height="26" rx="4"/>
+<text class="f-text" fill="#182f2b" x="160" y="54" font-size="13" text-anchor="middle">문제 읽기(prefill)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" d="M230 32V66M245 32V66M260 32V66M275 32V66M290 32V66M305 32V66M320 32V66M335 32V66M350 32V66M365 32V66M380 32V66"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="84" font-size="13">요청 전송</text>
+<text class="f-muted" fill="#5c6d66" x="230" y="84" font-size="13" text-anchor="middle">첫 토큰</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="84" font-size="13" text-anchor="end">마지막 토큰</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M20 92V98H228V92M232 92V98H380V92"/>
+<text class="f-text" fill="#182f2b" x="124" y="114" font-size="13" text-anchor="middle">TTFT(첫 토큰 지연)</text>
+<text class="f-text" fill="#182f2b" x="306" y="114" font-size="13" text-anchor="middle">디코드 시간</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="12">속도 ① 엔드투엔드 = N ÷ 요청 전송부터 종료까지의 총 시간</text>
+<text class="f-text" fill="#182f2b" x="20" y="168" font-size="12">속도 ② = N ÷ 디코드 시간</text>
+<text class="f-text" fill="#182f2b" x="20" y="190" font-size="12">속도 ③ = (N − 1) ÷ 디코드 시간. N = 1이면 정의되지 않음</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="222" font-size="12">셋 다 계산이 틀린 게 아니라 서로 다른 질문에 답해요. 어느 것인지 밝혀야 해요</text>
+</svg><figcaption>그림 27-6　요청 하나, 타임라인 하나, 「속도」 세 가지. N은 출력 토큰 수예요. 애니메이션 버전에서는 대기, 출력 길이, 드래프트 수락률을 조절할 수 있어요.</figcaption></figure></div>
+<p><dfn>TTFT</dfn>(time to first token, 첫 토큰까지 걸리는 시간)는 요청을 보낸 때부터 첫 토큰이 나타날 때까지의 시간이에요. 대기와 문제 읽기를 포함하고, 사용자가 「움직임을 보기까지 얼마나 기다리나」를 정해요. RTX 5090 보고서가 정의한 것이 아주 정확해요. HTTP 요청을 보내기 직전부터 시간을 재기 시작해서 비어 있지 않은 첫 텍스트 조각을 받을 때까지이고, 비어 있는 역할 정보와 keep-alive 메시지는 무시해요. <span class="ev ev-report">업스트림 보고</span></p>
+<p>출력 속도를 계산하는 방식은 더 많아요. 위 그림의 속도 ②와 ③은 「1을 빼느냐」만 달라요. 하지만 출력이 아주 짧으면 차이가 작지 않아요. 토큰이 26개뿐일 때 둘은 26 ÷ 25 − 1 = 4% 차이가 나요. <span class="ev ev-est">교육용 추정</span> 출력이 토큰 1개뿐이면 속도 ③은 정의조차 안 돼요. 억지로 계산하면 0으로 나누는 거예요.</p>
+<p>「실시간 속도계」도 요령이 있어요. Strata 서버 소스의 주석은 화면에 표시되는 실시간 속도가 시간 윈도 안의 비율이고, 「첫 토큰부터의 평균」이 아니라고 말해요. 후자는 첫 토큰이 막 나왔을 때 약 1 ÷ 지난 시간이 돼서 모니터링 화면에 다섯 자리 수를 띄운 적이 있고, 그다음 1초 동안은 또 낮게 나와요. 코드의 윈도는 2초이고, 0.25초가 안 되면 0.25초로 계산해요. <span class="ev ev-code">코드 사실</span>[S15]</p>
+<p>여러 사용자가 동시에 쓸 때는 두 가지를 더 구분해야 해요. <dfn>시스템 총 처리량</dfn>은 모든 요청을 합쳐 초당 몇 토큰을 출력하느냐이고, <dfn>단일 스트림 속도</dfn>는 사용자마다 자기가 보는 속도예요. 사용자 다섯 명이 합계 초당 100 토큰이라고 해서 각자 초당 100 토큰인 것은 아니에요. Strata 서버는 한 번에 시퀀스 하나만 처리하고 요청은 선착순으로 줄을 서요. [S15] 그래서 Strata에게 「다섯 명이 동시에 쓴다」는 것은 뒤의 네 명이 줄을 선다는 뜻이고, 그들의 TTFT는 길어지고 디코드 속도는 그대로예요. 25장이 이런 대기의 대가를 다뤘어요.</p>
+
+<h2 id="sec-6">27.6 직접 해 보기: 측정을 검증할 수 있는 기록으로 쓰기</h2>
+<p>이 책에는 측정 프로토콜 <code>labs/benchmark_protocol.md</code>와 기록 템플릿 <code>labs/benchmark_template.csv</code>가 들어 있어요. 템플릿은 31열이고, 저장소 버전, 빌드 인자, 모델 파일의 해시부터 대기, TTFT, 디코드 시간, VRAM 최댓값, 품질 통과 여부까지 실행마다 한 줄씩 채워요. 템플릿에는 진짜 벤치마크 점수가 하나도 채워져 있지 않아요. 실제 하드웨어에서 측정하지 않은 칸은 비워 둬야 해요.</p>
+<ol>
+<li><strong>먼저 이 장의 실험 두 개를 해 보세요.</strong> 「측정 실험」에서 5%를 안정적으로 재 내는 계획을 찾아보고, 쓴 반복 횟수, 워밍업 횟수, 실행 순서를 적어 두세요. 「속도 세 가지」에서는 출력 길이를 1로 끌어내려 어떤 공식이 무너지는지 보세요.</li>
+<li><strong>그다음 인터랙티브 실험 「짧은 요청은 왜 계속 기다릴까」를 여세요.</strong> 선착순과 라운드 로빈 두 스케줄링에서 요청마다 첫 토큰 시간과 완료 시간을 비교해요. 총 처리량은 거의 그대로인데 각자의 체감은 크게 달라져요. 「단일 스트림」과 「총 처리량」을 따로 보고해야 하는 이유가 바로 이거예요.</li>
+<li><strong>마지막으로 기록을 하나 써 보세요.</strong> Strata를 돌릴 수 있는 컴퓨터가 있다면 프로토콜대로 A/B를 한 묶음 돌려 보세요. 한 번에 설정 하나만 바꾸고, A, B를 번갈아 하고, 묶음마다 워밍업 뒤에 최소 5번 반복하고, 매번의 원본 데이터를 템플릿에 채워요. 그런 컴퓨터가 없다면 업스트림의 RTX 3090 보고서로 연습하세요. 그 원본 JSON에서 실행마다의 숫자를 옮겨 적고, 중앙값을 직접 다시 계산하고, 보고서에 템플릿의 어떤 열이 빠져 있는지 나열해 보세요.</li>
+</ol>
+<p>이 장의 인터랙티브 실험 두 개 속 시간은 모두 교육용 가정이고 Strata의 실측이 아니에요. 보여 주는 것은 측정 방법이지, 어떤 그래픽 카드의 속도가 아니에요.</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>성능 숫자에는 조건이 따라붙어야 해요. 하드웨어, 모델과 양자화, 엔진 버전, 입력과 출력 길이, 캐시가 데워졌는지, 동시 실행 수예요. 조건이 다른 숫자는 바로 비교할 수 없어요.</li>
+<li>먼저 워밍업을 하고 반복하며, A/B는 번갈아 실행해요. 중앙값과 범위를 보고하고, 첫 번째 실행은 따로 적고, 원본 데이터와 실패한 실행도 남겨요.</li>
+<li>「속도」는 시계부터 정의해야 해요. TTFT, 엔드투엔드 속도, 디코드 속도는 각각 다른 질문에 답해요. 시스템 총 처리량은 사용자 각자의 속도와 달라요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: 「가장 빠르게 나온 한 번이 기계의 진짜 실력을 보여 준다.」</strong></p>
+<p>결정적인 작은 코드를 잴 때는 가장 빠른 한 번이 실제로 의미가 있어요. Python의 <code>timeit</code> 문서도 최솟값이 이 기계가 이 코드를 돌리는 속도의 하한을 준다고 말해요. 하지만 추론 서비스의 속도는 이번에 무엇을 썼는지, 드래프트가 얼마나 맞았는지, 캐시가 얼마나 히트했는지에도 달려 있어요. 그림 27-1에서 가장 빠른 97.4는 세 번 중 운이 가장 좋았던 한 번일 뿐이에요. 사용자가 매일 마주치는 것은 중앙값 근처의 속도이고, 기억하는 것은 가장 느렸던 몇 번이에요. 가장 빠른 한 번만 보고하는 것은 나에게 유리한 데이터를 고르는 거예요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 실험 단위, 대표 시나리오, 짝지은 비교, 품질 관문</summary>
+<h3>실험 단위는 조건 조합 한 벌이에요</h3>
+<p>최소한 이것들을 기록하세요. 저장소 버전(커밋 번호), 실행 파일과 빌드 인자, 모델 파일의 해시, 양자화 방식, CPU와 GPU 모델, 메모리 채널과 주파수, 드라이버 버전, 컨텍스트 길이, 입력 토큰 수, 출력 상한, KV 캐시 모드, 프리필 청크 크기, 드래프트 설정, 캐시가 데워졌는지, 동시 실행의 정의, 샘플링 인자와 랜덤 시드예요. 핵심 변수가 하나만 빠져도 두 숫자 묶음은 더 이상 비교할 수 없어요. Strata의 상세 문서는 표 하나에 서로 다른 엔진 버전의 칸을 섞어 쓰고, 새 커널의 결과는 단락을 따로 세워 보충해요. [S03] 이 문서는 「성능 표 읽기」를 연습하기에는 좋지만 모든 칸을 같은 한 번의 통일된 실험으로 봐서는 안 되고, 이 책의 실측으로 삼아서는 더더욱 안 돼요.</p>
+<h3>시계 경계를 하나하나 정의하기</h3>
+<p>엔드투엔드 TTFT: 요청을 보낸 때부터 첫 출력 토큰까지. 대기 시간: 대기열에 들어간 때부터 실행을 허락받을 때까지. 프리필 시간: 새 입력 처리를 시작한 때부터 필요한 이력 상태가 준비될 때까지. 디코드 시간: 분명한 시작점과 끝점으로 생성 과정을 집계. 완료 시간: 요청을 보낸 때부터 성공이나 실패의 종료 상태까지. 두 가지 디코드 속도 <code>N ÷ 디코드 시간</code>과 <code>(N − 1) ÷ (마지막 토큰 시간 − 첫 토큰 시간)</code>은 둘 다 보고해도 되지만 정의를 분명히 써야 하고, 시스템 사이에서 슬쩍 바꾸면 안 돼요. N = 1이면 후자는 정의되지 않으니 「정의되지 않음」이라고 보여 줘야 하고, 엄청 큰 속도를 보여 주면 안 돼요.</p>
+<h3>코딩 도우미의 대표 시나리오 셋</h3>
+<p><strong>차가운 저장소 이해</strong>: 긴 시스템 프롬프트, 도구 정의, 코드 문맥, 첫 번째 답변이에요. 주로 콜드 프리필, TTFT, 메모리 최댓값을 봐요. <strong>증분 수정</strong>: 큰 접두사를 재사용할 수 있고 오류와 코드 차이만 새로 늘어요. 캐시가 효과가 있는지, 꼬리 처리가 얼마나 빠른지 봐요. <strong>도구 루프와 분기</strong>: 짧은 생성, 도구 출력, 이어 쓰기, 별도 분기를 열기예요. 상태 복구, 취소, 프로토콜 의미를 봐요. 입력 길이는 1K, 4K, 16K, 32K, 64K, 128K와 실제로 지원되는 거의 꽉 찬 윈도로 잡을 수 있고, 출력을 위한 공간은 분명히 남겨 둬요. 「최대 컨텍스트」를 전부 프롬프트로 쓰고 추가 생성까지 요구하면 안 돼요. 구체적인 모델과 설정의 합법적인 경계는 진짜 엔진에서 확인해야 해요. Strata 서버는 「프롬프트 + 출력 상한이 컨텍스트를 넘는」 요청을 400으로 바로 거절하고 몰래 자르지 않아요. [S15]</p>
+<h3>단일 스트림과 다중 스트림은 따로 답해요</h3>
+<p>단일 스트림 테스트는 사용자 각자의 즉각적인 체감을 봐요. 다중 스트림 테스트는 활성 스트림 수, 총 처리량, 스트림당 TTFT와 토큰 간격의 p50 / p95, 실패율, 대기, 공정성도 보고해야 해요. 듬성듬성한 도착과 동기화된 피크도 달라요. 다중 스트림 확장 테스트에서는 도착 과정, 요청 길이 분포, 데워진 상태를 고정하고 요청마다 원본 타임스탬프를 남겨야 해요. 이미 계산된 속도 몇 개를 평균 내는 것은 보통 총 토큰 ÷ 총 시간과 같지 않아요.</p>
+<h3>짝짓기, 번갈아 하기, 구간</h3>
+<p>A/B 비교는 가능한 한 짝을 지어요. 같은 프롬프트를 A와 B에서 한 번씩 돌려 차이를 비교하고, 각자 다른 프롬프트로 세 번씩 돌려 중앙값을 비교하지 마세요. 그 RTX 3090 보고서는 서로 다른 레이어 분할 지점을 비교하면서 경고했어요. 실행마다의 프롬프트가 독립적으로 생성됐으니 순위는 「짝지은 비교가 아니고」, 중앙값은 조심해서 봐야 한다고요. <span class="ev ev-report">업스트림 보고</span> Strata의 문서도 A/B를 할 때 <code>--pcie-frac 0</code> 같은 스위치를 더해서 같은 프롬프트가 매번 같은 답을 내게 하라고 권해요. 그렇지 않으면 답이 다르고 속도도 따라서 달라져요. [S03] 표본이 아주 적으면 p95가 극도로 불안정하니 표본 수와 원본 기록을 함께 줘야 해요. 신뢰 구간을 주고 싶다면 부트스트랩으로 원본 표본을 다시 뽑을 수 있어요. 이상치를 지울 때는 미리 써 둔 규칙이 있어야 하고 지운 이유를 남겨야 해요. 가장 빠른 한 번을 골라서 보고하는 것은 일반화할 수 있는 통계적 의미가 없어요.</p>
+<h3>품질 관문을 먼저 통과하고, 속도는 그다음이에요</h3>
+<p>추측 디코딩, 양자화, KV 캐시 형식, 프리픽스 캐시, CPU / GPU 디스패치는 모두 실행 경로를 바꿀 수 있어요. 「20% 빨라졌다」인데 답변이 절반 짧아졌거나 실패한 요청이 집계에서 빠졌다면 성공한 최적화가 아니에요. Strata의 문서는 속도 향상을 보고할 때 그것이 FP16 참조에 얼마나 가까운지(teacher forcing에서의 KL 발산)도 함께 보고해요. [S03] 실행마다 <code>labs/benchmark_template.csv</code>로 기록하고, A/B 절차와 발행을 거부하는 조건은 <code>labs/benchmark_protocol.md</code>를 보세요. 실제 하드웨어 데이터가 없는 칸은 비워 두고, 이 책은 추측으로 채운 그래픽 카드 점수를 하나도 넣지 않았어요.</p>
+</details>

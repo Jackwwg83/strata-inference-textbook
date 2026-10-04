@@ -1,0 +1,276 @@
+<div class="hook"><span class="eyebrow">시작 경고 하나에서 출발해 볼게요</span>
+<p>Strata는 한때 시작할 때마다 경고를 한 줄 찍었어요. 대략 이런 뜻이었어요. 그래픽 카드의 전문가 계산 경로가 「올바르지 않아서」 그 경로가 내놓는 어떤 출력도 믿을 수 없다는 거예요. 그러다 issue #23이 아주 직접적인 질문을 던졌어요. 전문가 캐시를 켜면 답변이 나빠질까요? <span class="ev ev-report">업스트림 보고</span></p>
+<p>작성자는 실험을 했어요. 같은 글에 대해 캐시를 한 번 켜고 한 번 끄고, 위치마다 모델의 예측을 비교했어요. 결과는 직관에 좀 어긋나요. 2%~5%의 위치에서 양쪽이 고른 「가장 그럴듯한 다음 단어」가 달랐어요. 그런데 전체로 보면 누가 더 정확하지도 않았어요. 달랐지만 둘 다 맞았어요. 이 장은 여기서 시작해요. 「정답」조차 못 박을 수 없는 시스템은 어떻게 테스트해야 할까요?</p></div>
+<p class="tldr"><strong>한마디로:</strong> 추론 엔진은 층층이 테스트해야 해요. 작은 함수는 정확한 답과 맞춰 보고, 연산자 하나는 독립된 참조 구현과 맞춰 보고, 모델 전체는 같은 글을 먹여 위치별로 비교해요. 부동소수점의 마지막 몇 자리는 계산 순서에 따라 바뀌니까, 「같다」를 먼저 허용 오차가 있는 비교로 정의해야 해요. 그리고 좋은 테스트는 일부러 심은 버그를 정말 잡아낸다는 것을 증명해야 해요.</p>
+
+<h2 id="sec-1">26.1 「겉보기에 맞는」 것이 가장 위험한 이유</h2>
+<p>프로그램이 틀리는 모습은 두 가지예요. 하나는 죽는 거예요. 오류가 나고, 종료되고, 알 수 없는 글자가 출력돼요. 이런 오류는 찾기 쉬워요. 처음 돌리자마자 드러나요. 다른 하나가 더 골치 아파요. 프로그램이 평소처럼 돌아가고, 정상적인 수를 출력하고, 생성한 문장도 매끄러운데 내용은 이미 틀려 있어요. 그림 26-1이 두 오류를 나란히 보여 줘요.</p>
+<figure class="fig"><svg viewBox="0 0 400 242" role="img" aria-label="그림 26-1: 죽는 오류는 돌리자마자 드러나고, 겉보기에 정상인 오류는 대충 하는 점검을 속일 수 있다">
+<text class="f-text" fill="#182f2b" x="102" y="20" font-size="14" font-weight="600" text-anchor="middle">죽는 오류</text>
+<text class="f-text" fill="#182f2b" x="298" y="20" font-size="14" font-weight="600" text-anchor="middle">겉보기에 정상인 오류</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="185" height="112" rx="10"/>
+<text class="f-text" fill="#182f2b" x="102" y="64" font-size="13" text-anchor="middle">오류 발생, 종료</text>
+<text class="f-text" fill="#182f2b" x="102" y="92" font-size="13" text-anchor="middle">NaN이나 깨진 글자 출력</text>
+<text class="f-text" fill="#182f2b" x="102" y="120" font-size="13" text-anchor="middle">처음 돌리면 바로 드러남</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="32" width="185" height="112" rx="10"/>
+<text class="f-text" fill="#182f2b" x="298" y="64" font-size="13" text-anchor="middle">출력이 유한한 수</text>
+<text class="f-text" fill="#182f2b" x="298" y="92" font-size="13" text-anchor="middle">생성한 문장이 매끄러움</text>
+<text class="f-warn" fill="#9e5d24" x="298" y="120" font-size="13" font-weight="600" text-anchor="middle">하지만 내용은 이미 틀림</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="170" font-size="13" text-anchor="middle">찾기 쉬움: 테스트가 바로 빨개져요</text>
+<text class="f-muted" fill="#5c6d66" x="298" y="170" font-size="13" text-anchor="middle">찾기 어려움: 독립된 참조 답안 필요</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 188H390"/>
+<text class="f-text" fill="#182f2b" x="200" y="210" font-size="13" text-anchor="middle">Strata 소스 주석이 짚은 예는 모두 오른쪽에 속해요:</text>
+<text class="f-text" fill="#182f2b" x="200" y="232" font-size="13" text-anchor="middle">가중치 두 번 곱하기, 주소로 캐시하기, 헤드 짝짓기 규칙 오류</text>
+</svg><figcaption>그림 26-1　죽는 오류는 돌리자마자 드러나고, 겉보기에 정상인 오류는 대충 하는 점검을 속일 수 있어요. 추론 엔진이 가장 두려워하는 건 오른쪽 부류예요.</figcaption></figure>
+<p>추론 엔진은 오른쪽 부류의 오류가 특히 잘 나요. 이유는 간단해요. 모델의 출력은 확률의 나열이라서, 조금 틀려도 골라낸 단어는 여전히 「그럴듯한 단어」예요. Strata의 소스 주석에는 이런 함정이 하나하나 적혀 있어요 <span class="ev ev-code">코드 사실</span>.</p>
+<ul>
+<li><strong>주소로 캐시하기.</strong> 층마다 전문가에게 보내는 입력은 같은 메모리 블록을 쓰고, 주소는 영원히 같지만 내용은 층마다 달라요. 주소로 캐시하면 0번째 층의 데이터를 뒤의 47개 층에서 되풀이해 쓰게 돼요. 결과는 「유한하고, 그럴듯해 보이고, 완전히 틀린 토큰」이에요. [S06]</li>
+<li><strong>가중치 두 번 곱하기.</strong> 전문가 풀은 라우팅 가중치를 곱하지 않고, 합치는 단계에서 곱해요. 양쪽에서 다 곱하면 한 층만 봐서는 거의 알 수 없고, 48층을 겹치면 오차가 계속 커져요. [S06]</li>
+<li><strong>헤드 짝짓기 규칙.</strong> GDN 층에서 값 헤드 48개를 키 헤드 16개와 짝지을 때 올바른 규칙은 나머지 연산(<code>h % 16</code>)이에요. 주석은 다른 「블록별 묶기」 규칙도 형식이 멀쩡한 출력을 만들 수 있다고 일부러 적어 놓았어요. [S17]</li>
+<li><strong>활성값 형식을 잘못 고르기.</strong> 양자화 행렬에 어떤 활성값 형식을 짝지을지는 이름이 아니라 데이터 타입이 정해요. 잘못 고르면 행렬 곱의 결과가 0.6%~1.4% 어긋나요. 주석의 원문은 「망가진 벡터가 아니라, 그럴듯해 보이는 벡터」예요. [S14]</li>
+</ul>
+<p>그래서 추론 엔진을 테스트하려면 <dfn>참조 답안</dfn>이 있어야 해요. 테스트 오라클(test oracle)이라고도 하고, 「정답은 이래야 한다」를 알려 줄 수 있는 독립된 출처예요. 손으로 계산한 수일 수도, 믿을 수 있는 다른 구현일 수도, 반드시 성립해야 하는 규칙일 수도 있어요. 참조 답안이 없으면 테스트는 「프로그램이 안 죽었다」만 확인할 수 있어요.</p>
+
+<h2 id="sec-2">26.2 테스트는 몇 층일까: 산술식 한 줄에서 대화 전체까지</h2>
+<p>추론 엔진 전체를 한 번에 테스트하는 건 현실적이지 않아요. 엔지니어링에서는 층을 나눠요. 아래층 테스트는 작고 빨라서, 틀리면 어느 줄인지 정확히 짚어 줘요. 위층 테스트는 느리지만 사용자가 실제로 보는 것에 가장 가까워요. 그림 26-2는 Strata에 맞춰 정리한 「테스트 사다리」예요.</p>
+<figure class="fig"><svg viewBox="0 0 400 332" role="img" aria-label="그림 26-2: 추론 엔진의 다섯 층 테스트 사다리. 순수 함수에서 대화 전체까지">
+<rect class="f-accent" fill="#136d5a" x="80" y="10" width="240" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="31" font-size="14" font-weight="600" text-anchor="middle">대화 전체와 실제 작업</text>
+<text class="f-on" fill="#ffffff" x="200" y="49" font-size="12" text-anchor="middle">바늘 찾기 테스트, 2턴 재사용, 품질 게이트</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="64" width="280" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="85" font-size="14" font-weight="600" text-anchor="middle">모델 전체, 고정 이력으로 위치별 비교</text>
+<text class="f-on" fill="#ffffff" x="200" y="103" font-size="12" text-anchor="middle">같은 글에서 위치마다 예측을 비교</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="118" width="320" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="139" font-size="14" font-weight="600" text-anchor="middle">조합과 계약</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="157" font-size="12" text-anchor="middle">모델을 불러올 때 텐서마다 모양을 검사</text>
+<rect class="f-soft" fill="#e5f1df" x="25" y="172" width="350" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="193" font-size="14" font-weight="600" text-anchor="middle">연산자 하나, 참조 구현과 대조</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="211" font-size="12" text-anchor="middle">src/kernels/ 아래에 대조 테스트 34개</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="226" width="380" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="247" font-size="14" font-weight="600" text-anchor="middle">순수 함수</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="265" font-size="12" text-anchor="middle">예: FP32를 BF16으로 변환, 2³² 가지 입력을 전부 시도</text>
+<text class="f-text" fill="#182f2b" x="200" y="298" font-size="12" text-anchor="middle">위로 갈수록: 사용자가 보는 결과에 가깝지만 느리고 원인 찾기 어려움</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="320" font-size="12" text-anchor="middle">아래로 갈수록: 빠르고 어느 줄인지 짚지만 덮는 범위가 좁음</text>
+</svg><figcaption>그림 26-2　테스트 사다리. 층마다 잡는 오류가 달라서 서로를 대신할 수 없어요. 아래층이 모두 통과한다고 위층이 꼭 통과하는 것은 아니에요.</figcaption></figure>
+<p>Strata가 실제로 어떻게 하는지 몇 층을 살펴볼게요.</p>
+<p><strong>맨 아래는 순수 함수예요.</strong> 32비트 부동소수점 수를 16비트 BF16 형식으로 바꿀 때 입력은 2³² 가지, 약 43억 가지뿐이에요. Strata의 테스트는 아예 전부 시도해 봐요. 모든 입력을 ggml(llama.cpp 뒤의 계산 라이브러리)의 변환 규칙과 비교하고, 몇 초면 끝나요. 이 테스트는 진짜 버그를 잡은 적이 있어요. 옛 반올림 코드는 NaN(「숫자가 아님」)을 만나면 올림을 해서 NaN을 −0이나 무한대로 바꿔 버렸고, 위에서 온 NaN이 그렇게 슬그머니 가려졌어요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/bf16_bits_test.cpp#L1-L13" target="_blank" rel="noopener noreferrer">bf16_bits_test.cpp</a>)</p>
+<p><strong>두 번째는 연산자 하나예요.</strong> GPU 커널마다 대조 테스트가 하나씩 있어서, 믿을 수 있는 참조 구현과 비교해요. 빌드 스크립트의 주석이 아주 솔직해요. 참조 구현 자체를 먼저 ggml과 맞춰 보았고, 「커널을 자기 자신의 다른 복사본과 비교하는 건 아무것도 증명하지 못한다」고요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/CMakeLists.txt#L219-L221" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>)</p>
+<p><strong>세 번째는 조합과 계약이에요.</strong> <code>layout.hpp</code>는 모델을 불러올 때 텐서마다 모양이 커널의 가정에 맞는지 검사하고, 안 맞으면 텐서 이름, 실제 모양, 요구하는 모양을 알려 줘요. 주석의 원문은 이래요. 4000번째 토큰에서 행렬 곱 속의 틀린 숫자로 변하는 대신, 불러올 때 오류를 내라는 거예요. [S04] 같은 주석에는 실제 교훈도 하나 적혀 있어요. 한 개발 라운드에서 인덱서의 키 캐시 크기를 「헤드 4개」로 계산했는데 실제로는 공유 헤드가 1개뿐이라 4배 컸어요. 이 오류는 예산을 더 보수적으로 만들어서 아무도 이상하다고 느끼지 못한 채 한 라운드를 살아남았어요. [S04]</p>
+<p><strong>위의 두 층</strong>은 모델 전체를 돌려야 해요. 26.4절이 따로 다뤄요.</p>
+<p>사다리의 어느 층도 건너뛸 수 없어요. Strata에는 반면교사가 있어요. 모델에는 PLE라는 모듈(11장에서 배운 표 조회 모듈)이 있는데, 부품은 모두 만들어졌고 각각 대조 테스트도 통과했지만 모델 코드 어디에서도 실제로 호출하지 않았어요. 그 결과 모델 전체의 검수 관문 하나(코드명 C1)를 통과하지 못했어요. <span class="ev ev-code">코드 사실</span>[S13] 부품이 모두 초록불이어도 시스템은 틀릴 수 있어요.</p>
+<aside class="primer" id="c26-test-levels">
+<h3>소프트웨어 테스트의 층</h3>
+<p>큰 시스템의 테스트는 보통 몇 층으로 나뉘어요. <dfn>유닛 테스트</dfn>(단위 테스트)는 함수나 클래스 하나만 테스트해요. 입력을 주고 출력을 확인하고, 밀리초 단위로 돌아가요. <dfn>통합 테스트</dfn>는 모듈 몇 개를 이어서, 그 사이의 「인터페이스 약속」을 양쪽이 지키는지 확인해요. <dfn>시스템 테스트</dfn>(엔드투엔드 테스트라고도 해요)는 사용자의 입구로 들어가 최종 결과를 봐요. 모든 층을 관통하는 <dfn>회귀 테스트</dfn>도 있어요. 버그를 고칠 때마다 그 버그를 재현하는 테스트를 남겨서, 나중에 다시 돌아오지 못하게 해요.</p>
+<p>흔한 경험칙이 「테스트 피라미드」예요. 아래의 유닛 테스트는 많고 빠르며, 꼭대기의 엔드투엔드 테스트는 적고 느려요. 이유는 비용이에요. 엔드투엔드 테스트가 실패하면 어느 층이 문제인지 찾는 데 또 시간을 써야 해요. 유닛 테스트가 실패하면 보통 그 몇 줄을 바로 가리켜요.</p>
+<p>또 하나의 자주 쓰는 도구가 <dfn>테스트 대역</dfn>이에요. 진짜지만 비싼 부품을 대신해, 동작을 제어할 수 있는 가짜 객체를 써요. Strata의 서비스 계층에는 <code>MockEngine</code>이 들어 있어요. 대본대로 토큰을 내놓아서 모든 API 경로를 GPU 없는 머신에서도 테스트할 수 있게 해요. <span class="ev ev-code">코드 사실</span>[S15] 「HTTP 프로토콜 층을 잘못 쓰지 않았다」는 것은 증명하지만, 진짜 엔진이 맞게 계산한다는 것은 증명하지 못해요. 테스트는 층마다 자기가 덮는 층에만 책임을 져요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/소프트웨어_테스트" target="_blank" rel="noopener noreferrer">위키백과: 소프트웨어 테스트</a> · <a href="https://ko.wikipedia.org/wiki/유닛_테스트" target="_blank" rel="noopener noreferrer">위키백과: 유닛 테스트</a> · <a href="https://ko.wikipedia.org/wiki/회귀_테스트" target="_blank" rel="noopener noreferrer">위키백과: 회귀 테스트</a> · <a href="https://docs.python.org/ko/3/library/unittest.html" target="_blank" rel="noopener noreferrer">Python 문서: unittest 단위 테스트 프레임워크</a></p>
+</aside>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 《소프트웨어 공학》의 테스트 피라미드와 V 모델이 바로 이거예요. 추론 엔진의 특별한 점은 중간에 「참조 구현과 대조」하는 층이 하나 더 있다는 거예요. 대부분의 연산자는 정답을 손으로 계산할 수 없어서, 독립적이고 믿을 수 있는 구현을 찾아 비교해야 하기 때문이에요.</p>
+
+<h2 id="sec-3">26.3 부동소수점의 「같다」는 먼저 정의해야 해요</h2>
+<p>처음의 그 실험으로 돌아가 볼게요. 그래픽 카드와 CPU는 같은 양자화 전문가를 계산했고 데이터는 1바이트도 다르지 않았는데, 결과는 소수점 마지막 몇 자리에서 달랐어요. 작성자의 설명은 이래요. 양쪽이 부동소수점 연산을 하는 순서가 다르고, 둘 다 모델에 똑같이 좋은 근사라는 거예요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity 보고서</a>)</p>
+<p>순서가 왜 결과에 영향을 줄까요? 컴퓨터의 부동소수점 수는 자릿수가 한정돼서 덧셈을 한 번 할 때마다 반올림을 한 번 하기 때문이에요. 극단적인 예를 들어 볼게요. 32비트 부동소수점(FP32)에서 1억 근처에서 표현할 수 있는 이웃한 두 수는 8씩 차이가 나요. 그래서 1억 더하기 1은 여전히 1억이고, 그 1이 「먹혀」 버려요. 같은 수 네 개를 순서만 바꿔 더하면 답이 달라져요. 그림 26-3을 보세요.</p>
+<div class="viz" data-viz="tolerance-lab"><figure class="fig"><svg viewBox="0 0 400 282" role="img" aria-label="그림 26-3: 수 네 개 1억, 1, −1억, 1을 FP32에서 두 가지 순서로 더하면 각각 1과 0이 나오고, 정답은 2다">
+<text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="13" text-anchor="middle">수 네 개 [1억, 1, −1억, 1]을 FP32로 더함</text>
+<text class="f-text" fill="#182f2b" x="102" y="44" font-size="14" font-weight="600" text-anchor="middle">경로 A: 왼쪽에서 오른쪽으로</text>
+<text class="f-text" fill="#182f2b" x="298" y="44" font-size="14" font-weight="600" text-anchor="middle">경로 B: 둘씩 묶어서</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="54" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="73" font-size="13" text-anchor="middle">1억에서 시작</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="88" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="107" font-size="13" text-anchor="middle">1억 + 1 = 1억 (1이 사라짐)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="122" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="141" font-size="13" text-anchor="middle">1억 − 1억 = 0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="156" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="175" font-size="13" text-anchor="middle">0 + 1 = 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="54" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="298" y="73" font-size="13" text-anchor="middle">1억 + 1 = 1억 (1이 사라짐)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="88" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="298" y="107" font-size="13" text-anchor="middle">−1억 + 1 = −1억 (사라짐)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="122" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="298" y="141" font-size="13" text-anchor="middle">1억 + (−1억) = 0</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="206" font-size="12" text-anchor="middle">1억 근처에서 FP32의 이웃한 두 수는 8 차이: 1을 더해도 안 더한 것과 같아요</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="218" width="185" height="30" rx="6"/>
+<text class="f-on" fill="#ffffff" x="102" y="238" font-size="14" font-weight="600" text-anchor="middle">A의 결과: 1</text>
+<rect class="f-accent" fill="#136d5a" x="205" y="218" width="185" height="30" rx="6"/>
+<text class="f-on" fill="#ffffff" x="298" y="238" font-size="14" font-weight="600" text-anchor="middle">B의 결과: 0</text>
+<text class="f-text" fill="#182f2b" x="200" y="272" font-size="12" text-anchor="middle">정답은 2: 두 경로 모두 정보를 잃었고, 잃는 방식도 달라요</text>
+</svg><figcaption>그림 26-3　덧셈의 순서는 부동소수점 결과를 바꿔요. 수학의 덧셈은 결합 법칙을 만족하지만 컴퓨터의 부동소수점 덧셈은 그렇지 않아요. 아래 실험대에서 시나리오와 정밀도, 허용 오차를 바꿔 가며 직접 해 보세요.</figcaption></figure></div>
+<p>이 예는 일부러 고른 극단적인 경우예요. 실제 추론에서는 차이가 보통 마지막 한두 자리에 그치고, 이것을 <dfn>ULP</dfn>(unit in the last place, 마지막 자리의 한 단위) 한두 개 차이라고 해요. 그래도 <code>a == b</code> 같은 테스트를 실패시키기에는 충분해요.</p>
+<p>엔지니어링에서의 해법은 <dfn>허용 오차</dfn>가 있는 비교로 바꾸는 거예요. 두 수의 차이가 충분히 작으면 같다고 봐요. 「충분히 작다」를 재는 방법은 두 가지예요. <dfn>상대 허용 오차</dfn>는 수의 크기에 맞춰 깎아 주는 거예요. 예를 들어 만분의 일까지 차이를 허용해요. <dfn>절대 허용 오차</dfn>는 고정된 문턱이에요. 예를 들어 10⁻⁶ 이내의 차이는 같다고 봐요. 보통은 둘을 함께 써요. 아래 칼럼이 이유를 설명해요.</p>
+<aside class="primer" id="c26-float-tolerance">
+<h3>부동소수점 비교의 허용 오차</h3>
+<p>먼저 직관이에요. 1억과 1억 8을 비교하면 차이 8은 이미 FP32가 구별할 수 있는 가장 작은 차이니까 같다고 봐야 해요. 0.000001과 0.000009를 비교하면 차이가 0.00001도 안 되지만 한쪽이 다른 쪽의 9배니까 같다고 볼 수 없어요. 그래서 「얼마나 차이 나면 같은가」는 수 자체의 크기와 연결돼야 해요. 이것이 상대 허용 오차예요.</p>
+<p>하지만 상대 허용 오차는 0 근처에서 힘을 못 써요. 결과가 이론상 0인데 하나는 2×10⁻⁸이 나오고 다른 하나는 딱 0이 나왔다고 해 볼게요. 상대 차이는 100%이지만 실제로는 둘 사이에 차이가 없어요. 이때는 절대 허용 오차가 바닥을 받쳐 줘야 해요. Python 표준 라이브러리의 <code>math.isclose</code>가 둘을 합쳐요.</p>
+<p style="text-align:center"><code>|a − b| ≤ max(rtol × max(|a|, |b|), atol)</code></p>
+<p>기본값은 rtol = 10⁻⁹, atol = 0이에요. 문서는 특별히 경고해요. 0과 비교할 때 기본 설정은 영원히 「다르다」고 판정하니까 양수 atol을 직접 줘야 한다고요. 또 NaN은 어떤 수와도 「가깝지」 않아요. 자기 자신과도 마찬가지예요. 칼럼 아래의 그림 26-4가 이 규칙을 그려 줘요. 가로축은 수의 크기, 세로축은 허용되는 오차예요.</p>
+<p>허용 오차는 얼마로 잡아야 할까요? 모든 경우에 맞는 답은 없어요. 데이터 타입(FP32는 유효 숫자가 약 7자리, FP16은 3자리 남짓), 계산 사슬의 길이, 그리고 다음 단계가 오차에 얼마나 민감한지에 달려 있어요. 믿을 만한 방법은 이래요. 먼저 <strong>둘 다 올바른</strong> 두 구현 사이의 전형적인 차이를 재고, 허용 오차를 그보다 위, 명백히 틀린 차이보다 아래에 잡아요.</p>
+<p>자주 놓치는 점이 또 있어요. 허용 오차는 「순서가 다르다」 같은 정당한 차이만 봐줄 수 있고, 알고리즘 자체가 정보를 잃는 문제는 구해 주지 못해요. 그림 26-3에서는 두 경로가 모두 틀렸어요. 허용 오차를 둘이 「같아지도록」 넓히면 테스트는 아무것도 테스트하지 않게 돼요.</p>
+<p class="further">더 읽을거리: <a href="https://docs.python.org/ko/3/library/math.html#math.isclose" target="_blank" rel="noopener noreferrer">Python 문서: math.isclose</a> · <a href="https://developer.mozilla.org/ko/docs/Web/JavaScript/Reference/Global_Objects/Number/EPSILON" target="_blank" rel="noopener noreferrer">MDN: Number.EPSILON (기계 엡실론)</a> · <a href="https://ko.wikipedia.org/wiki/IEEE_754" target="_blank" rel="noopener noreferrer">위키백과: IEEE 754</a> · <a href="https://en.wikipedia.org/wiki/Unit_in_the_last_place" target="_blank" rel="noopener noreferrer">Wikipedia: Unit in the last place (영문)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="그림 26-4: 수의 크기에 따라 달라지는 허용 오차. 작은 수에서는 절대 허용 오차가, 큰 수에서는 상대 허용 오차가 정한다">
+<text class="f-muted" fill="#5c6d66" x="44" y="14" font-size="13">허용되는 오차 (로그 눈금)</text>
+<path class="f-soft" fill="#e5f1df" d="M40 190V119.2H210L380 34.2V190Z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40 20V190H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M40 119.2H210L380 34.2"/>
+<text class="f-text" fill="#182f2b" x="48" y="100" font-size="13">atol = 10⁻⁸: 바닥을 받쳐요</text>
+<text class="f-text" fill="#182f2b" x="380" y="26" font-size="13" text-anchor="end">상대 허용 오차: 10⁻⁵ × |b|</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="164" font-size="13">음영: |a − b|가 여기 들면 같다고 봐요</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="206" font-size="13">10⁻⁹</text>
+<text class="f-muted" fill="#5c6d66" x="125" y="206" font-size="13" text-anchor="middle">10⁻⁶</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="206" font-size="13" text-anchor="middle">10⁻³</text>
+<text class="f-muted" fill="#5c6d66" x="295" y="206" font-size="13" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="206" font-size="13" text-anchor="end">10³</text>
+<text class="f-text" fill="#182f2b" x="210" y="230" font-size="13" text-anchor="middle">비교하는 수 |b|의 크기 (로그 눈금)</text>
+</svg><figcaption>그림 26-4　허용 오차 = max(rtol × |b|, atol). 수가 크면 상대 허용 오차를, 0에 가까우면 절대 허용 오차를 봐요. 그림의 rtol = 10⁻⁵, atol = 10⁻⁸은 도식용이에요.</figcaption></figure>
+<p>그러면 언제 비트까지 같기를 고집해야 할까요? 양쪽이 <strong>완전히 똑같은 연산을 완전히 똑같은 순서로</strong> 할 때예요. 예를 들어 양자화 데이터를 한 저장 형식에서 다른 형식으로 바꾸면서 바이트만 다시 배열했다면, 디코딩한 값은 한 비트도 다르면 안 돼요. Strata의 <code>canonical_xcheck.py</code>가 바로 이렇게 요구해요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/tools/canonical_xcheck.py#L1-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>) 반대로 컴파일러의 최적화조차 순서를 바꿀 수 있어요. Strata는 AMD 그래픽 카드에서 파일 두 개의 「곱셈-덧셈 합치기」(FMA)를 일부러 꺼 두었어요. 곱셈과 덧셈을 명령 하나로 합치면 반올림이 한 번뿐이라서, 「딱 중간」일 때의 선택 결과가 달라지기 때문이에요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/CMakeLists.txt#L313-L317" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>)</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 《수치해석》에서 배웠듯이 부동소수점 덧셈은 교환 법칙은 만족하지만 결합 법칙은 만족하지 않아서 (a + b) + c와 a + (b + c)가 다를 수 있어요. GPU에서는 수천수만 개의 스레드가 리덕션을 하고, 합을 어떻게 묶을지는 스레드 배치가 정해요. 그래서 「같은 공식」이 CPU와 GPU에서 비트까지 같기를 기대하는 것 자체가 애초에 맞지 않아요.</p>
+
+<h2 id="sec-4">26.4 조금 달랐더니 단어가 바뀌었어요</h2>
+<p>수치가 조금 다르면 눈에 보이는 결과가 생길까요? 생겨요. 바로 「단어 고르기」 단계에서요. 모델은 마지막에 후보 단어마다 점수를 주는데, 이것을 로짓(logit)이라고 하고 점수가 가장 높은 단어가 뽑혀요. 1등과 2등의 점수가 거의 같다면, 아주 작은 수치 오차만으로도 둘의 자리가 바뀔 수 있어요.</p>
+<p>예를 볼게요. 기준 엔진이 후보 두 단어에 준 점수는 [1.00000, 0.99999]이고 첫 번째가 뽑혀요. 테스트 엔진이 계산한 점수는 [0.99998, 1.00001]이고 두 번째가 뽑혀요. 양쪽의 최대 차이는 0.00002뿐인데 뽑힌 단어는 바뀌었어요. 반대로 점수가 [10, 0]이라면 오차가 열 배 커져도 단어는 안 바뀌어요. 그래서 「최대 오차가 아주 작다」와 「뽑힌 단어가 같다」는 별개의 일이고, 따로 확인해야 해요.</p>
+<p>두 엔진을 비교하는 데는 또 하나의 골칫거리가 있어요. 둘이 각자 마음대로 생성하게 두면, 단어가 하나라도 다른 순간 뒤의 「앞 문맥」이 달라져서 그다음 단계는 모두 비교할 수 없게 돼요. 해결책은 <dfn>teacher forcing</dfn>(고정 이력)이에요. 엔진이 스스로 이어 쓰게 하지 않고, 양쪽에 같은 표준 글을 먹여서 위치마다 「다음 단어」에 대한 예측을 비교해요. 그림 26-5가 두 방식을 비교해요.</p>
+<figure class="fig"><svg viewBox="0 0 400 258" role="img" aria-label="그림 26-5: 자유 생성에서는 첫 번째 갈림이 뒤의 모든 위치로 번지고, teacher forcing은 양쪽에 같은 글을 먹여서 위치마다 독립적으로 비교할 수 있다">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="14" font-weight="600">자유 생성: 각자 따로 씀</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="44" font-size="12">엔진 A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="98" y="46" font-size="13" text-anchor="middle">오늘</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="124" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="146" y="46" font-size="13" text-anchor="middle">하늘</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="172" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="194" y="46" font-size="13" text-anchor="middle">이</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="220" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="242" y="46" font-size="13" text-anchor="middle">파랗</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="268" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="290" y="46" font-size="13" text-anchor="middle">고</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="316" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="338" y="46" font-size="13" text-anchor="middle">우리</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="78" font-size="12">엔진 B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76" y="62" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="98" y="80" font-size="13" text-anchor="middle">오늘</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="124" y="62" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="146" y="80" font-size="13" text-anchor="middle">하늘</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="172" y="62" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="194" y="80" font-size="13" text-anchor="middle">이</text>
+<rect class="f-warn" fill="#9e5d24" x="220" y="62" width="44" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="242" y="80" font-size="13" text-anchor="middle">맑</text>
+<text class="f-muted" fill="#5c6d66" x="274" y="80" font-size="12">뒤는 모두 달라요</text>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="14" font-weight="600">Teacher forcing: 같은 글을 먹여 위치별 비교</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="148" font-size="12">표준 글</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="76" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="98" y="150" font-size="13" text-anchor="middle">오늘</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="124" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="146" y="150" font-size="13" text-anchor="middle">하늘</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="172" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="194" y="150" font-size="13" text-anchor="middle">이</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="220" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="242" y="150" font-size="13" text-anchor="middle">파랗</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="268" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="290" y="150" font-size="13" text-anchor="middle">고</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="316" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="338" y="150" font-size="13" text-anchor="middle">우리</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="182" font-size="12">A 예측</text>
+<rect class="f-soft" fill="#e5f1df" x="76" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="98" y="184" font-size="13" text-anchor="middle">하늘</text>
+<rect class="f-soft" fill="#e5f1df" x="124" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="146" y="184" font-size="13" text-anchor="middle">이</text>
+<rect class="f-soft" fill="#e5f1df" x="172" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="194" y="184" font-size="13" text-anchor="middle">파랗</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="242" y="184" font-size="13" text-anchor="middle">고</text>
+<rect class="f-soft" fill="#e5f1df" x="268" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="290" y="184" font-size="13" text-anchor="middle">우리</text>
+<rect class="f-soft" fill="#e5f1df" x="316" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="338" y="184" font-size="13" text-anchor="middle">는</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="216" font-size="12">B 예측</text>
+<rect class="f-soft" fill="#e5f1df" x="76" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="98" y="218" font-size="13" text-anchor="middle">하늘</text>
+<rect class="f-soft" fill="#e5f1df" x="124" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="146" y="218" font-size="13" text-anchor="middle">이</text>
+<rect class="f-warn" fill="#9e5d24" x="172" y="200" width="44" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="194" y="218" font-size="13" text-anchor="middle">맑</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="242" y="218" font-size="13" text-anchor="middle">고</text>
+<rect class="f-soft" fill="#e5f1df" x="268" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="290" y="218" font-size="13" text-anchor="middle">우리</text>
+<rect class="f-soft" fill="#e5f1df" x="316" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="338" y="218" font-size="13" text-anchor="middle">는</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="248" font-size="12">앞 문맥이 모두 같아서, 3번째 위치의 갈림이 뒤로 번지지 않아요</text>
+</svg><figcaption>그림 26-5　자유 생성에서는 첫 번째 갈림 뒤로는 위치별 비교를 할 수 없어요. teacher forcing은 위치마다 같은 앞 문맥을 줘서, 갈림을 그것이 생긴 위치에 가둬요.</figcaption></figure>
+<p>Strata가 「캐시가 출력을 나쁘게 만드나」에 답할 때 쓴 방법이 바로 이거예요. 엔진에는 표준 글을 토큰 하나씩 따라 실행하며 위치마다 로짓을 모두 기록하는 스위치가 있어요. 캐시를 끄면 모든 전문가를 CPU가 계산하고, 캐시를 켜면 가장 자주 쓰이는 전문가 5,130개가 그래픽 카드에 올라가요. 실험 조건은 Q2_0 양자화, RTX 5070, 고정된 글 세 편의 앞 512개 또는 1,024개 토큰이에요. <span class="ev ev-report">업스트림 보고</span></p>
+<div class="table-wrap"><table><thead><tr><th>글</th><th>1순위 단어가 같은 위치</th><th>퍼플렉서티: 캐시 끔</th><th>퍼플렉서티: 캐시 켬</th></tr></thead><tbody>
+<tr><td>코딩 도우미(토큰 512개)</td><td>97.7%</td><td>2.672</td><td>2.630</td></tr>
+<tr><td>긴 문서(토큰 1,024개)</td><td>96.2%</td><td>29.844</td><td>29.843</td></tr>
+<tr><td>채팅(토큰 1,024개)</td><td>95.0%</td><td>18.380</td><td>18.301</td></tr>
+</tbody></table></div>
+<p>표의 <dfn>퍼플렉서티</dfn>(perplexity, 혼란도)는 모델이 이 실제 글에 얼마나 「놀라는지」를 재는 값이고, 낮을수록 예측이 정확하다는 뜻이에요. 보고서의 결론은 세 가지예요. 캐시는 2%~5%의 위치에서 「거의 동점인 후보 둘 중 누가 이기나」를 바꾸고, 뒤집힘의 대부분은 1등과 2등의 점수 차이가 0.5도 안 되는 곳에서 일어나요. 양쪽의 퍼플렉서티는 표준 오차 1개 이내로 같아서 누가 더 정확하다고 할 수 없어요. 그래픽 카드와 CPU가 같은 전문가를 서로 다른 부동소수점 순서로 계산한 것이고, 둘 다 똑같이 좋은 근사예요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity 보고서</a>)</p>
+<p>이 표는 좋은 비교가 어떻게 해야 하는지 보여 줘요. 이산적인 결정(1순위 단어가 같은가)도 보고, 연속적인 품질(퍼플렉서티)도 보고, 뒤집힘이 어디서 일어났는지도 밝혀요. 「단어의 96%가 같다」만 보고하면 독자는 4%가 틀렸다고 생각해요. 「퍼플렉서티가 같다」만 보고하면 소수의 위치에서만 틀리는 버그를 가릴 수 있어요.</p>
+
+<h2 id="sec-5">26.5 테스트를 먼저 한 번 실패시키기: 참조 답안과 반례</h2>
+<p>테스트가 통과했다면 무엇을 알 수 있을까요? 버그가 진짜 있는 프로그램에도 통과할 테스트라면, 그 「통과」는 아무 의미가 없어요. 테스트 자체를 검증하는 방법은 소박해요. 코드에 일부러 버그를 하나 심고, 테스트가 잡아내는지 보는 거예요. 이것을 <dfn>뮤테이션 테스트</dfn>(변이 테스트)라고 하고, 일부러 망가뜨린 버전을 「뮤턴트」라고 해요.</p>
+<p>아래 실험은 48층짜리 장난감 모델로 이것을 보여 줘요. 구현 버전이 4개, 테스트가 5개 있어요. 먼저 추측해 보세요. 「가중치 두 번 곱하기」 버그는 어떤 테스트가 잡을까요?</p>
+<div class="viz" data-viz="test-mutants"><figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="그림 26-6: 구현 버전 4개와 테스트 5개의 결과표. 스모크 테스트는 버그를 하나도 못 잡았고, 허용 오차가 있는 차분 테스트는 3개를 모두 잡고 오경보도 없다">
+<text class="f-muted" fill="#5c6d66" x="175" y="16" font-size="12" text-anchor="middle">스모크</text><text class="f-muted" fill="#5c6d66" x="175" y="34" font-size="12" text-anchor="middle">테스트</text>
+<text class="f-muted" fill="#5c6d66" x="225" y="16" font-size="12" text-anchor="middle">약한</text><text class="f-muted" fill="#5c6d66" x="225" y="34" font-size="12" text-anchor="middle">단위</text>
+<text class="f-muted" fill="#5c6d66" x="275" y="16" font-size="12" text-anchor="middle">강한</text><text class="f-muted" fill="#5c6d66" x="275" y="34" font-size="12" text-anchor="middle">단위</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="16" font-size="12" text-anchor="middle">차분</text><text class="f-muted" fill="#5c6d66" x="325" y="34" font-size="12" text-anchor="middle">정확</text>
+<text class="f-muted" fill="#5c6d66" x="375" y="16" font-size="12" text-anchor="middle">차분</text><text class="f-muted" fill="#5c6d66" x="375" y="34" font-size="12" text-anchor="middle">허용</text>
+<text class="f-text" fill="#182f2b" x="10" y="62" font-size="12">정상 구현(순서 변경)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="152" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="175" y="62" font-size="12" text-anchor="middle">통과</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="225" y="62" font-size="12" text-anchor="middle">통과</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="252" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="275" y="62" font-size="12" text-anchor="middle">통과</text>
+<rect class="f-warn" fill="#9e5d24" x="302" y="42" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="62" font-size="12" text-anchor="middle">오경보</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="352" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="375" y="62" font-size="12" text-anchor="middle">통과</text>
+<text class="f-text" fill="#182f2b" x="10" y="100" font-size="12">버그: 가중치 2번</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="175" y="100" font-size="12" text-anchor="middle">놓침</text>
+<rect class="f-warn" fill="#9e5d24" x="202" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="225" y="100" font-size="12" text-anchor="middle">놓침</text>
+<rect class="f-accent" fill="#136d5a" x="252" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="275" y="100" font-size="12" text-anchor="middle">잡음</text>
+<rect class="f-accent" fill="#136d5a" x="302" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="100" font-size="12" text-anchor="middle">잡음</text>
+<rect class="f-accent" fill="#136d5a" x="352" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="375" y="100" font-size="12" text-anchor="middle">잡음</text>
+<text class="f-text" fill="#182f2b" x="10" y="138" font-size="12">버그: 전문가 누락</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="175" y="138" font-size="12" text-anchor="middle">놓침</text>
+<rect class="f-accent" fill="#136d5a" x="202" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="225" y="138" font-size="12" text-anchor="middle">잡음</text>
+<rect class="f-accent" fill="#136d5a" x="252" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="275" y="138" font-size="12" text-anchor="middle">잡음</text>
+<rect class="f-accent" fill="#136d5a" x="302" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="138" font-size="12" text-anchor="middle">잡음</text>
+<rect class="f-accent" fill="#136d5a" x="352" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="375" y="138" font-size="12" text-anchor="middle">잡음</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">버그: 옛 입력</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="175" y="176" font-size="12" text-anchor="middle">놓침</text>
+<rect class="f-warn" fill="#9e5d24" x="202" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="225" y="176" font-size="12" text-anchor="middle">놓침</text>
+<rect class="f-warn" fill="#9e5d24" x="252" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="275" y="176" font-size="12" text-anchor="middle">놓침</text>
+<rect class="f-accent" fill="#136d5a" x="302" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="176" font-size="12" text-anchor="middle">잡음</text>
+<rect class="f-accent" fill="#136d5a" x="352" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="375" y="176" font-size="12" text-anchor="middle">잡음</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="212" font-size="12" text-anchor="middle">주색: 버그를 잡음 / 경고색: 버그를 놓침, 또는 정상 구현에 누명</text>
+</svg><figcaption>그림 26-6　뮤테이션 테스트의 결과표. 스모크 테스트는 버그를 하나도 못 잡았어요. 「버그는 모두 잡고 정상 구현에는 오경보를 내지 않는」 것은 허용 오차가 있는 차분 테스트뿐이에요.</figcaption></figure></div>
+<p>표에서 가장 곱씹을 만한 칸이 두 군데 있어요. 하나는 「약한 단위 테스트」가 「가중치 두 번 곱하기」를 놓친 거예요. 마침 가중치 1.0을 썼고, 1.0의 제곱도 1.0이에요. 테스트가 고른 입력이 너무 「반듯하면」 어떤 버그에는 본래 눈이 멀어요. 다른 하나는 「층마다 옛 입력」이 단위 테스트 둘을 속인 거예요. 버그는 테스트한 그 함수 안이 아니라 함수들을 이어 붙이는 루프에 있었어요. 26.2절에서 말한 「부품이 모두 초록불이어도 시스템은 틀릴 수 있다」가 바로 이거예요.</p>
+<p>표에서 버그를 가장 잘 잡은 것은 <dfn>차분 테스트</dfn>예요. 같은 입력을 테스트할 구현과 독립된 참조 구현에 각각 먹이고 출력을 비교해요. 아래 칼럼이 따로 설명해요.</p>
+<aside class="primer" id="c26-differential-testing">
+<h3>차분 테스트와 변형 테스트</h3>
+<p>많은 계산에는 손으로 구할 수 있는 정답이 없어요. 2560차원 행렬 곱을 종이 위에서 검산할 수 있는 사람은 없어요. <dfn>차분 테스트</dfn>(differential testing)의 발상은 이래요. 독립적으로 구현된 버전을 참조로 삼고, 양쪽에 같은 입력을 먹여서 출력을 비교해요. 참조는 느려도 되고 투박해도 돼요. 믿을 수만 있으면 돼요. Strata의 대조 테스트가 이런 식이에요. GPU 커널을 이미 검증된 스칼라 참조 경로와 비교하고, 이 참조 경로 자체는 먼저 ggml과 맞춰 봤어요.</p>
+<p>참조의 핵심은 <strong>독립성</strong>이에요. Strata의 <code>layer.cpp</code>에는 교훈이 하나 적혀 있어요. 어떤 양자화 데이터의 오프셋 평면을 찾는 데 두 패킹 도구가 모두 필드 이름 <code>mins</code>로 찾았는데, 이 평면의 진짜 이름은 <code>offsets</code>였어요. 두 도구가 「만장일치」로 틀려서 함께 텐서 54개의 오프셋, 합계 136 MiB를 놓쳤어요. 주석의 결론은 이래요. 두 도구의 의견이 같다는 것은 그들이 같은 잘못된 가정을 공유하지 않을 때만 증거가 된다는 거예요. <span class="ev ev-code">코드 사실</span>[S14]</p>
+<p>참조를 찾기도 어려울 때는 <dfn>변형 테스트</dfn>(metamorphic testing)를 쓸 수 있어요. 정답이 얼마인지는 모르지만 「입력을 이렇게 바꾸면 출력은 이렇게 바뀌어야 한다」는 것은 알아요. 예를 들어 Strata의 KV 캐시는 페이지 단위로 저장돼요. 테스트는 같은 데이터를 페이지당 칸 1개, 4개, 512개로 저장하고 페이지 표를 뒤섞은 뒤, 어텐션 출력이 완전히 같기를 요구해요. [S18] 또 추측 디코딩의 검증 윈도는 설계상 위치마다 고른 단어가 토큰을 하나씩 생성할 때와 비트까지 같아야 해요. [S08] 이런 「변하지 않아야 한다」는 규칙이 정답 없이도 쓸 수 있는 참조예요.</p>
+<p class="further">더 읽을거리: <a href="https://en.wikipedia.org/wiki/Differential_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Differential testing (영문)</a> · <a href="https://en.wikipedia.org/wiki/Metamorphic_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Metamorphic testing (영문)</a> · <a href="https://en.wikipedia.org/wiki/Test_oracle" target="_blank" rel="noopener noreferrer">Wikipedia: Test oracle (영문)</a> · <a href="https://en.wikipedia.org/wiki/Mutation_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Mutation testing (영문)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="그림 26-7: 차분 테스트의 흐름. 같은 입력을 테스트할 구현과 독립된 참조에 각각 넘기고, 규칙에 따라 비교한다">
+<rect class="f-soft" fill="#e5f1df" x="130" y="8" width="140" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="14" font-weight="600" text-anchor="middle">같은 입력</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V54H100V68M200 54H300V68"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="70" width="180" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="100" y="91" font-size="14" font-weight="600" text-anchor="middle">테스트할 구현</text>
+<text class="f-on" fill="#ffffff" x="100" y="109" font-size="12" text-anchor="middle">예: Strata의 GPU 커널</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="70" width="180" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="300" y="91" font-size="14" font-weight="600" text-anchor="middle">독립된 참조</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="109" font-size="12" text-anchor="middle">예: ggml의 계산 규칙</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 118V132H300V118M200 132V146"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="148" width="340" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="169" font-size="14" font-weight="600" text-anchor="middle">규칙에 따라 비교</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="187" font-size="12" text-anchor="middle">바이트 재배열: 비트까지 같게 / 연산 순서 변경: 허용 오차</text>
+<text class="f-text" fill="#182f2b" x="200" y="222" font-size="12" text-anchor="middle">참조는 독립이어야 해요: 같은 잘못된 가정을 공유하면 비교가 무의미</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="242" font-size="12" text-anchor="middle">반례: 두 도구가 모두 mins 필드를 찾아 같은 데이터를 함께 놓침</text>
+</svg><figcaption>그림 26-7　차분 테스트: 독립된 구현 둘이 같은 입력을 먹고, 결과를 미리 정한 규칙으로 비교해요. 규칙은 비트까지 같게일 수도, 허용 오차가 있을 수도 있어요.</figcaption></figure>
+<p>차분 테스트는 Strata의 진짜 버그도 잡았어요. Q2_0 양자화 형식에서는 2비트 코드 0~3을 디코딩할 때 먼저 1을 빼야 하고, 표현되는 값은 {0, d, 2d, 3d}가 아니라 {−d, 0, d, 2d}예요. 이 1 빼기를 빠뜨리면 대부분의 값이 맞아 보이지만 사실은 전부 한 칸씩 어긋나요. 그래서 변환 도구는 ggml의 디코딩 식을 글자 그대로 베끼고, 비트 단위로 대조해요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/tools/canonical_xcheck.py#L7-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>) 같은 파일에는 Q8_0 형식의 실제 실수도 기록돼 있어요. 코드가 부호 있는 수로 저장됐는데 자기 디코더와는 완전히 일치했어요. 진짜 모델로 패킹해 보고서야, 그 텐서 두 개가 디코딩하면 통째로 코드 128만큼 어긋나 있고 나머지 12가지 타입은 모두 정상이라는 걸 알았어요.</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 컴파일러를 테스트하는 고전적인 방법이 있어요. 같은 프로그램을 컴파일러 두 개에 넣고 실행 결과를 비교하는 거예요. 알고리즘 대회에서 무식한 풀이를 써서 최적화한 풀이와 맞춰 보는 스트레스 테스트도 같은 발상이에요.</p>
+
+<h2 id="sec-6">26.6 직접 해 보기: 미니 엔진에 테스트 써 보기</h2>
+<p>이 책에는 순수 Python으로 된 미니 추론 엔진 <code>labs/tiny_inference.py</code>가 들어 있어요. 4층, 8차원, 층마다 전문가 4개 중 2개를 고르고, 가중치는 고정된 난수라서 그래픽 카드가 필요 없어요. Strata와 호환되는 구현은 아니고 출력에도 언어적 의미가 없지만, 「인코딩 → 층별 계산 → 단어 고르기 → 저장과 복원」의 사슬만큼은 전부 진짜예요. 함께 들어 있는 테스트 10개는 이 책의 환경에서 모두 통과해요.</p>
+<ol>
+<li><strong>먼저 테스트를 읽어 보세요.</strong> <code>labs/test_tiny_inference.py</code>를 열어 「분할 처리가 한 번에 처리와 같다」를 찾아보세요. 정확히 같음을 써요. 여기서는 왜 정확히 같음이 맞을까요? (힌트: 두 경로가 완전히 같은 순서로 연산해요.)</li>
+<li><strong>버그를 하나 심어 보세요.</strong> <code>labs/README.md</code>의 세 번째 과제대로, 순환 층에서 「먼저 감쇠, 그다음 갱신」의 순서를 뒤바꿔 보세요. 어떤 테스트가 실패할까요? 하나도 실패하지 않는다면 실패할 테스트를 하나 보태세요.</li>
+<li><strong>비교 규칙을 고쳐 보세요.</strong> 토큰 하나씩 하던 프리필을 전체를 한꺼번에 계산하는 행렬 곱으로 바꿨다고 해 봐요. 연산 순서가 달라져요. 정확히 같음을 요구하던 테스트를 허용 오차가 있는 비교로 고치고, 허용 오차를 어떻게 정했는지 설명하세요.</li>
+</ol>
+<p>이 장의 인터랙티브 실험 두 개는 모두 브라우저에서 실제로 계산하고, 숫자는 교육용 추정이에요. 실험대의 허용 오차 공식은 Python의 <code>math.isclose</code>와 같아요. 뮤테이션 테스트는 장난감 모델을 쓰는 것이고, Strata의 커널이 아니에요.</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>추론 엔진에서 가장 위험한 오류는 「겉보기에 정상인」 오류예요. 테스트에는 독립된 참조 답안이 있어야 하고, 프로그램이 안 죽었다는 것만 확인해서는 안 돼요.</li>
+<li>부동소수점 결과는 계산 순서에 따라 달라져요. 같은 연산을 같은 순서로 했을 때만 비트까지 같기를 요구하고, 그렇지 않으면 상대 + 절대 허용 오차로 비교한 뒤, 고른 단어는 따로 확인해요.</li>
+<li>테스트 자체도 검증받아야 해요. 일부러 버그를 심어서 테스트가 실패하는지 보세요. 참조 구현은 독립이어야 하고, 테스트할 코드와 같은 잘못된 가정을 공유하면 안 돼요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: 「CPU와 그래픽 카드가 낸 수가 다르면 둘 중 하나에 버그가 있다는 뜻이다.」</strong></p>
+<p>꼭 그렇지는 않아요. 양쪽의 부동소수점 연산 순서가 다르면 마지막 몇 자리가 다른 게 당연하고, Strata의 실측에서도 둘은 똑같이 정확했어요. 하지만 거꾸로 무조건 통과시켜서도 안 돼요. 그 「그래픽 카드 경로가 올바르지 않다」는 시작 경고는 처음에 진짜 고장에서 비롯됐어요. 그때의 출력은 0번째 토큰부터 갈라지기 시작했어요. 나중에 고장을 고치고 전문가 대조 테스트로 덮은 뒤, 0.1.8 버전부터 경고가 정확한 설명 한 줄로 바뀌었어요. <span class="ev ev-report">업스트림 보고</span> 둘을 구분하려면 규칙을 보세요. 정당한 차이는 거의 동점인 위치에서만 뒤집히고 퍼플렉서티는 그대로예요. 진짜 버그는 처음부터 갈라지거나 품질 지표를 체계적으로 나쁘게 만들어요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 다섯 층의 증거, 지표의 함정, 「비트까지 같음」의 경계</summary>
+<h3>다섯 층의 증거 사다리</h3>
+<p>첫째 층은 순수 함수예요. 주소 오프셋, 용량, top-k, 기대 길이가 해당해요. 둘째 층은 연산자 하나예요. 같은 입력을 주고 출력과 오차를 비교해요. 셋째 층은 조합이에요. 정규화, 게이팅, 전문가 가중, 상태 갱신의 순서를 봐요. 넷째 층은 고정 이력에서의 모델 전체 분포예요. 다섯째 층은 실제 작업과 긴 대화의 동작이에요. 아래층이 통과한다고 위층의 통과가 따라 나오지 않아요. 「전문가 풀은 라우팅 가중치를 곱하지 않는다」, GDN의 β와 상태 축에 대한 설명은 모두 조합 오류가 각자 테스트를 통과하는 모듈들 사이에 숨을 수 있음을 보여 줘요. [S06][S17]</p>
+<h3>teacher forcing에서 기록할 지표</h3>
+<p>최대 절대 오차, 상대 오차, 평균 제곱 오차, KL 발산, 1순위 단어가 바뀌었는지, 그리고 라우팅이 고른 전문가 번호와 인덱서가 고른 위치가 바뀌었는지를 기록할 수 있어요. 지표마다 함정이 있어요. 상대 오차는 기준값이 0에 가까우면 왜곡돼요. KL 발산은 확률을 어떻게 정규화했는지, 확률 0을 어떻게 처리했는지 밝혀야 해요. 1순위 단어가 같은 비율은 「1등과 2등의 점수 차이」 분포와 함께 봐야 해요. Strata의 QSA 인덱서는 아예 고른 위치가 <strong>완전히 같아야</strong> 한다고 정해서 허용 오차를 주지 않아요. 다른 칸을 하나 고르면 어텐션의 입력이 달라지기 때문이에요. 그래서 인덱서의 키를 FP16이 아닌 FP32로 저장해요. FP16은 점수마다 약 2⁻¹¹의 상대 흔들림을 만들고, 그것이 하필 선택 경계에 떨어지기 때문이에요. 비용은 크지 않아요. 컨텍스트가 32K일 때 이 FP32 키는 모두 합쳐 약 50 MiB예요. [S18]</p>
+<h3>바로 가져다 쓸 수 있는 변형 관계</h3>
+<p>페이지 표와 데이터에 같은 치환을 함께 적용하면 논리적인 어텐션 결과는 그대로여야 해요. 같은 입력을 다른 청크로 잘라도 청크 사이의 상태 인계가 동등해야 해요. 저장했다가 복원해서 이어 가면 한 번도 떠나지 않은 것과 같아야 해요. 드래프트를 끄면 대응하는 타깃 경로와 의미가 같아야 해요. [S08][S18] 이런 관계로 강한 테스트를 많이 만들 수 있지만, 허용 오차와 수치 경로를 분명히 적어야 해요. CPU / GPU를 넘나들 때, 행렬 곱 구현을 바꿀 때, 양자화 경로를 바꿀 때는 비트까지 같음을 보장하지 않아요. 모든 차이를 그냥 통과시켜서도 안 되고, 이미 알려진 반올림 경계를 무시해서도 안 돼요.</p>
+<h3>「비트까지 같음」의 약속에는 경계가 있어요</h3>
+<p>Strata의 검증 윈도는 헤더에서 위치마다 고른 단어가 토큰을 하나씩 생성할 때와 비트까지 같다고 약속해요. [S08] 그런데 업스트림 문서는 동시에 이렇게 기록해요. IQ 계열 양자화를 쓸 때 CPU가 토큰 하나를 계산하는 경우와 여러 토큰을 계산하는 경우는 반올림이 조금 다른 커널 두 벌을 써요. 그래서 온도가 0인 같은 프롬프트라도 드래프트, 캐시 상태, 세션 복구가 다르면 똑같이 좋은 다른 답이 나올 수 있어요(issue #152). <code>STRATA_IQ_MT_MIN=1</code>로 설정하면 모든 경우가 다중 토큰 커널을 타서 답이 드래프트에 의존하지 않아요. 서비스에서 바이트 수준의 재현성까지 얻으려면 <code>--prompt-cache 0 --adapt-swaps 0 --pcie-frac 0</code>도 더해야 해요. 작성자의 실측(IQ3_XXS, 3.6K 토큰 프롬프트, 4번 반복)은 이래요. 스위치 세 개를 모두 켜면 4번에 답이 1가지만 나왔어요. <code>--pcie-frac 0</code>을 빼면 2가지가 나왔어요(첫 번째가 달랐어요). 기본값을 모두 쓰면 역시 2가지였어요. <span class="ev ev-report">업스트림 보고</span>[S03] 헤더에 적힌 것은 설계 목표이고 문서에 적힌 것은 실측의 경계예요. 둘 다 읽어야 해요.</p>
+<h3>일부러 심는 반례 목록</h3>
+<p>테스트에 일부러 이런 오류를 심어 보세요. 헤드 매핑을 나머지 연산에서 정수 나눗셈으로 바꾸기, L2 정규화 대신 RMS 정규화 쓰기, 층별 활성값 캐시를 포인터로만 판단하기, 라우팅 가중치 중복 곱하기, 위치 카운터 얼리기, 세션 복원 때 PLE 기록 빠뜨리기. 테스트는 안정적으로 실패해야 하고, 가장 먼저 어긴 계약을 짚어야 해요. 심은 뒤에도 테스트가 통과한다면 「프로세스가 안 죽었다」만 확인했을 가능성이 커요. 참조 구현은 테스트할 코드와 같은 잘못된 가정을 공유하면 안 돼요. <code>layer.cpp</code>에서 두 도구가 모두 필드 이름을 잘못 찾은 사례는 수업에서 토론하기 좋아요. [S14]</p>
+<h3>공개 저장소에서 돌릴 수 있는 테스트</h3>
+<p>Strata의 <code>CMakeLists.txt</code> 주석에는 전체 테스트 모음과 마이크로 벤치마크는 <code>tests/</code>와 <code>bench/micro/</code>에 두며 공개 소스에는 들어 있지 않아서, 테스트 빌드 스위치가 기본으로 꺼져 있다고 적혀 있어요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/CMakeLists.txt#L52-L57" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>) 마찬가지로 <code>gdn.hpp</code> 주석에 나오는 참조 구현 <code>ref/gdn.py</code>는 공개 저장소의 <code>ref/</code> 디렉터리에서도 찾을 수 없고, 거기에는 <code>load.py</code>뿐이에요. 이 장이 인용한 대조 테스트와 실측은 공개된 소스 주석, 테스트 파일, 보고서에서 온 것이고, 이 책은 그것들을 GPU에서 다시 돌려 보지는 않았어요.</p>
+<h3>이 책에 들어 있는 테스트가 증명하는 것</h3>
+<p><code>labs/tiny_inference.py</code>의 테스트는 분할 처리, 저장과 복원, 참조 재생, 제어된 드래프트 수락을 확인해요. 이것들이 증명하는 것은 이 책의 교육용 코드이고, 업스트림 Strata의 GPU 구현이 <strong>아니에요</strong>. Strata의 디스패치, 양자화, 비동기 실행, 실제 가중치는 해당하는 환경에서 따로 검증해야 해요.</p>
+</details>
