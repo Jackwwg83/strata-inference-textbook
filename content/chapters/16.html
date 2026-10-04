@@ -1,18 +1,233 @@
-<h2 id="sec-1">16.1 输入已知，调度空间不同</h2>
-<p>生成时，下一 token 要等当前条件分布和采样完成；prefill 时，prompt 的 ID 都已知，可以把多个位置的线性投影组织成 GEMM。因果掩码和递归依赖仍然存在，并不是所有位置之间都没有关系。</p>
-<p><code>Prefill</code> 接口说明：chunk 逐层处理，专家按 expert 分组，GPU 驻留专家直接读缓存，其他专家通过锁页环和 copy stream 传入。[S12] 让多个 token 共用某专家的权重，能摊薄读取与解包成本。</p>
-<h2 id="sec-2">16.2 按专家分组为什么有效？</h2>
-<p>教学例子：8 个 token，每个选 2 个专家，共 16 个路由项。如果其中 6 项都选专家 E，可以把对应输入组成小矩阵，一起计算 E，而不是读 6 次同一权重。真实缓存层级可能已经复用部分读取，因此“6 次变 1 次”是理想化解释，不是通用实测倍率。</p>
-<p>分组还引入 scatter / gather、排序或分桶以及输出恢复顺序。只有恢复到正确的 token—专家位置，后续路由权重合并才合法。吞吐提高不能以把 token 顺序打乱为代价。</p>
-<h2 id="sec-3">16.3 chunk 越大越好吗？</h2>
-<p>大 chunk 往往提高权重复用，但激活、索引、工作矩阵与 staging 空间也增大；单块运行时间变长，取消和共享服务的响应也变慢。短 prompt 为大 chunk 预留全部空间，可能无谓挤掉热专家。</p>
-<p>上游不同说明中出现 8192 的常用块示例，而固定服务源码为 watchdog 估计使用 <code>PP_CHUNK_MAX=32768</code>。[S02][S15] 这不是可随意统一的“唯一硬上限”：实际 chunk 由配置、实现与可用空间决定。教材公式一律把 chunk 记作变量 C。</p>
-<h2 id="sec-4">16.4 借用专家缓存：内存的时间复用</h2>
-<p><code>Prefill::init</code> 可以借用专家缓存尾部作为 prompt scratch；<code>relayout</code> 在请求间按实际需要调整，完成后再恢复被借走槽位的专家。[S12] 这是操作系统中生命周期分析的具体应用：两种不会同时使用的对象可以复用同一区域。</p>
-<p>必须明确借用期间哪些专家仍可视为命中；还要保证恢复完成后才重新发布对应标签。仅仅“预算上加起来没超显存”不足以证明该复用安全。</p>
-<h2 id="sec-5">16.5 状态交接不是只留下最后一个向量</h2>
-<p>chunk 结束后需要正确的 GDN 递归与卷积状态、QSA KV 和 indexer、PLE 历史，以及相关草稿状态。[S12][S13] 如果只保留最后一行 logits，而丢掉这些状态，下一步 decode 就不是同一个模型历史。</p>
-<p>一个强测试是：同一 token 序列用 C=1、C=7、C=32 等不同切法处理，比较边界状态与后续固定历史输出。浮点重排可能需要数值容差，但状态位置、因果掩码、索引 ID 的契约必须单独核验。</p>
-<h2 id="sec-6">16.6 实验与验收</h2>
-<p>教学 chunk 实验使用 <code>T≈N/r(C)+ceil(N/C)·launch</code> 的简单成本式，r(C) 为显式设定的饱和复用曲线。它能说明启动摊销与容量约束，不能预测真实 Strata 吞吐。</p>
-<p>GPU 进阶实验要对短输入、跨 chunk 边界、末块不满、取消中断和继续 decode 分别测试。每次只改 C，其余量化、KV、MTP、输入和缓存状态固定，再解释速度与质量变化。</p>
+<div class="hook"><span class="eyebrow">同一台电脑，两种速度</span>
+<p>Strata 的上游测速表里有两列数字。同一台装着 RTX 5070 的电脑，读一段 32K token 的提问，每秒能读 2,171 个 token；可写答案时，每秒只写 81.8 个。<span class="ev ev-report">上游报告</span>[S03]</p>
+<p>同一个模型、同样 48 层、同一张显卡，为什么“读”比“写”快二十多倍？秘密只有一个词：批量。这一章讲清楚为什么一起算比一个个算快，一块切多大合适，以及怎样让搬运和计算同时进行。</p></div>
+<p class="tldr"><strong>一句话：</strong>写答案时每次只能算一个 token，权重读一遍只用一次；读题时提示词全都已知，可以几千个 token 一块算，权重读一遍供整块共用。Strata 每块最多读 8,192 个 token，并让下一层的专家在当前层计算时就开始搬运。</p>
+
+<h2 id="sec-1">16.1 为什么读题比写答案快二十多倍</h2>
+<p>先看数字。图 16-1 是上游在同一台电脑上测的两种速度。</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="图 16-1：上游实测读题与写答案的速度。读题每秒 536 到 2171 个 token，写答案每秒 74 到 93 个">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">上游实测：同一台电脑，读题和写答案的速度（token/s）</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">1K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="36" width="69.1" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="135" y="46" font-size="12">536</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="52" width="11.3" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="77" y="62" font-size="12">87.3</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12">4K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="86" width="167.5" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="233" y="96" font-size="12">1,299</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="102" width="12" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="78" y="112" font-size="12">93.0</text>
+<text class="f-text" fill="#182f2b" x="10" y="148" font-size="12">32K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="136" width="280" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="346" y="146" font-size="12">2,171</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="152" width="10.6" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="77" y="162" font-size="12">81.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="198" font-size="12">128K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="186" width="271.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="338" y="196" font-size="12">2,107</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="202" width="9.5" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="76" y="212" font-size="12">73.7</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="226" width="10" height="10"/><text class="f-muted" fill="#5c6d66" x="24" y="235" font-size="12">读题</text>
+<rect class="f-warn" fill="#9e5d24" x="62" y="226" width="10" height="10"/><text class="f-muted" fill="#5c6d66" x="76" y="235" font-size="12">写答案</text>
+<text class="f-muted" fill="#5c6d66" x="128" y="235" font-size="12">RTX 5070 12 GB，Q2_0，引擎 0.1.26</text>
+</svg><figcaption>图 16-1　同一台电脑，读题比写答案快十几到二十多倍。条长按比例；写答案的条短得几乎看不见。数据来自上游文档。[S03]</figcaption></figure>
+<p>测试条件写在上游文档里：RTX 5070 12 GB 显卡，Ryzen 5 7600 处理器，64 GB DDR5-5200 内存，Windows，引擎 0.1.26，Q2_0 模型，写答案时开着投机解码。<span class="ev ev-report">上游报告</span>[S03]</p>
+<p>差别来自两个阶段的本质不同。<dfn>decode</dfn>（写答案）时，下一个 token 要等上一个 token 选出来才知道是什么，只能一个一个来。<dfn>prefill</dfn>（读题）时，提示词里的每个 token 都已经摆在那里，可以一大块一起送进模型。注意，“一起算”不等于“互相偷看”：第 5 个 token 仍然只能看到前 4 个，模型的因果规则一点没变，变的只是计算怎么组织。</p>
+
+<h2 id="sec-2">16.2 一起算为什么快：矩阵乘向量与矩阵乘矩阵</h2>
+<p>想象一位老师批改选择题。每改一份卷子，都要从柜子里取出标准答案，对完再放回去。如果一次只来一份卷子，大半时间花在取放答案上；如果一次来 50 份，取一次答案，对 50 份，再放回去，平摊下来几乎不花时间。</p>
+<p>模型里的“标准答案”就是权重。每算一层，都要把这一层的权重从显存读进计算单元。图 16-2 把两种情况画在一起。</p>
+<figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="图 16-2：矩阵乘向量时权重读一遍只用于一个 token；矩阵乘矩阵时权重读一遍供一整块 token 共用">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="12" font-weight="600" text-anchor="middle">矩阵乘向量：1 个 token</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="34" width="100" height="100" rx="4"/>
+<text class="f-text" fill="#182f2b" x="70" y="89" font-size="13" text-anchor="middle">权重 W</text>
+<text class="f-text" fill="#182f2b" x="137" y="89" font-size="14" text-anchor="middle">×</text>
+<rect class="f-accent" fill="#136d5a" x="152" y="34" width="12" height="100" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="158" y="152" font-size="12" text-anchor="middle">1 列</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="176" font-size="12" text-anchor="middle">权重读一遍，只用于 1 个 token</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="12" font-weight="600" text-anchor="middle">矩阵乘矩阵：C 个 token</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="34" width="100" height="100" rx="4"/>
+<text class="f-text" fill="#182f2b" x="270" y="89" font-size="13" text-anchor="middle">权重 W</text>
+<text class="f-text" fill="#182f2b" x="335" y="89" font-size="14" text-anchor="middle">×</text>
+<rect class="f-accent" fill="#136d5a" x="346" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="358" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="370" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="382" y="34" width="9" height="100" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="368" y="152" font-size="12" text-anchor="middle">C 列</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="176" font-size="12" text-anchor="middle">权重读一遍，供 C 个 token 共用</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 30V186"/>
+<text class="f-text" fill="#182f2b" x="200" y="212" font-size="12" text-anchor="middle">计算量随 token 数增长，权重的搬运只付一次</text>
+</svg><figcaption>图 16-2　写答案时是“矩阵乘向量”，权重读一遍只服务一个 token；读题时是“矩阵乘矩阵”，同一份权重服务一整块 token。</figcaption></figure>
+<aside class="primer" id="c16-batching">
+<h3>批处理：矩阵乘向量与矩阵乘矩阵</h3>
+<p>直觉：搬运和计算是两笔账。一个 token 一个 token 地算，每次都要把整份权重搬一遍，搬运成了大头；一批 token 一起算，搬运只付一次，计算却一点没少，于是“每搬一个字节做的计算”变多了。第 5 章讲过，这个比值叫算术强度，它决定了程序受带宽限制还是受算力限制。</p>
+<p>定义：一层的权重是一个 m × n 的矩阵 W。一个 token 的输入是长度 n 的向量 x，算 W·x 叫<dfn>矩阵向量乘</dfn>（GEMV）：读 m × n 个权重，做约 2mn 次乘加。把 C 个 token 的向量排成一个 n × C 的矩阵 X，算 W·X 叫<dfn>矩阵矩阵乘</dfn>（GEMM）：权重还是读 m × n 个，计算变成约 2mnC 次。算术强度提高到原来的约 C 倍。</p>
+<p>一个具体数字：Strata 的投机解码控制器里有一张默认表，记录“同时算 n 个 token 的稠密部分，要花单个 token 的几倍时间”：2 个 token 是 1.05 倍，4 个是 1.45 倍，8 个是 3.0 倍。<span class="ev ev-code">代码事实</span> 也就是说，8 个 token 一起算，平均每个只要单独算时的 3.0 ÷ 8 ≈ 38%。<span class="ev ev-est">教学推演</span></p>
+<p>和本章的关系：读题时 C 可以是几千，所以读题快得多。批处理也有代价：要更多临时存储放这一整块的中间结果，单块的完成时间也更长。</p>
+<p class="further">延伸阅读：<a href="https://oi-wiki.org/math/linear-algebra/matrix/" target="_blank" rel="noopener noreferrer">OI Wiki：矩阵</a> · <a href="https://zh.wikipedia.org/zh-cn/矩陣乘法" target="_blank" rel="noopener noreferrer">维基百科：矩阵乘法</a> · <a href="https://en.wikipedia.org/wiki/Basic_Linear_Algebra_Subprograms" target="_blank" rel="noopener noreferrer">Wikipedia: BLAS（GEMV 与 GEMM 的来历）</a></p>
+</aside>
+<div class="viz" data-viz="batch-reuse"><figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="图 16-3：把 n 个 token 放进一次稠密计算，2 个只多花 5%，4 个花 1.45 倍，8 个花 3 倍，远少于一个个算的 n 倍">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">n 个 token 一起算稠密部分，要花单个 token 的几倍时间</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">n = 1</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="34" width="35" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="101" y="44" font-size="12">1.0 倍</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="49" width="35" height="12" rx="2"/>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">n = 2</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="78" width="36.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="103" y="88" font-size="12">1.05 倍</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="93" width="70" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="136" y="103" font-size="12">2 倍</text>
+<text class="f-text" fill="#182f2b" x="10" y="132" font-size="12">n = 4</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="122" width="50.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="117" y="132" font-size="12">1.45 倍</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="137" width="140" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="206" y="147" font-size="12">4 倍</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">n = 8</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="166" width="105" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="171" y="176" font-size="12">3.0 倍</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="181" width="280" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="346" y="191" font-size="12">8 倍</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">主色：上游默认的实测比例　浅底：一个一个算（n 倍）</text>
+</svg><figcaption>图 16-3　一起算的稠密部分远比一个个算便宜：8 个 token 只花 3 倍时间。数字是 spec/controller.hpp 里的默认值，注释说来自上游的矩阵向量乘测量。交互版可以拖动 n 逐个看。</figcaption></figure></div>
+<p>Strata 在别处也用了同一招。投机解码的验证窗口一次送进几个 token，源码说这个窗口的代价是“稠密权重只读一次，供 T 个 token 共用”。[S08] 混合残差的融合读取也有多 token 版本，最多 8 个 token 共享权重，“权重为它们全体只读一次”。<span class="ev ev-code">代码事实</span></p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这就是《计算机组成原理》里的“访存局部性”和《数值线性代数》里 BLAS 分级的道理：BLAS-2（矩阵乘向量）受带宽限制，BLAS-3（矩阵乘矩阵）才能把算力吃满。读题把一串 BLAS-2 合成了 BLAS-3。</p>
+
+<h2 id="sec-3">16.3 专家怎么批：按专家分组</h2>
+<p>稠密部分好办，所有 token 用同一份权重。专家部分麻烦一点：每个 token 每层选 10 个专家，不同 token 选的不一样。Strata 的做法是先<strong>按专家分组</strong>：把选了同一个专家的 token 归到一起，这个专家的权重读一次，算完一组。[S12] 图 16-4 是一个缩小的示意。</p>
+<figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="图 16-4：六个 token 各选两个专家，按专家重新分组后，每个专家的权重只读一次，一起算选中它的所有 token">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12" font-weight="600">按 token 看（示意：每个 token 选 2 个专家）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="39" y="42" font-size="12" text-anchor="middle">t1</text><text class="f-muted" fill="#5c6d66" x="39" y="58" font-size="12" text-anchor="middle">E3 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="74" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="103" y="42" font-size="12" text-anchor="middle">t2</text><text class="f-muted" fill="#5c6d66" x="103" y="58" font-size="12" text-anchor="middle">E3 E5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="138" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="167" y="42" font-size="12" text-anchor="middle">t3</text><text class="f-muted" fill="#5c6d66" x="167" y="58" font-size="12" text-anchor="middle">E1 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="231" y="42" font-size="12" text-anchor="middle">t4</text><text class="f-muted" fill="#5c6d66" x="231" y="58" font-size="12" text-anchor="middle">E1 E3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="266" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="295" y="42" font-size="12" text-anchor="middle">t5</text><text class="f-muted" fill="#5c6d66" x="295" y="58" font-size="12" text-anchor="middle">E5 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="330" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="359" y="42" font-size="12" text-anchor="middle">t6</text><text class="f-muted" fill="#5c6d66" x="359" y="58" font-size="12" text-anchor="middle">E3 E7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 70V88"/>
+<text class="f-muted" fill="#5c6d66" x="210" y="84" font-size="12">按专家重新分组</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="96" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="113" font-size="12" text-anchor="middle">E1</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="96" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="113" font-size="12" text-anchor="middle">t3</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="96" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="113" font-size="12" text-anchor="middle">t4</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="113" font-size="12" text-anchor="end">读 1 次，算 2 个</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="126" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="143" font-size="12" text-anchor="middle">E3</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="143" font-size="12" text-anchor="middle">t1</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="143" font-size="12" text-anchor="middle">t2</text>
+<rect class="f-soft" fill="#e5f1df" x="164" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="186" y="143" font-size="12" text-anchor="middle">t4</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="236" y="143" font-size="12" text-anchor="middle">t6</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="143" font-size="12" text-anchor="end">读 1 次，算 4 个</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="156" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="173" font-size="12" text-anchor="middle">E5</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="156" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="173" font-size="12" text-anchor="middle">t2</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="156" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="173" font-size="12" text-anchor="middle">t5</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="173" font-size="12" text-anchor="end">读 1 次，算 2 个</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="186" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="203" font-size="12" text-anchor="middle">E7</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="203" font-size="12" text-anchor="middle">t1</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="203" font-size="12" text-anchor="middle">t3</text>
+<rect class="f-soft" fill="#e5f1df" x="164" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="186" y="203" font-size="12" text-anchor="middle">t5</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="236" y="203" font-size="12" text-anchor="middle">t6</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="203" font-size="12" text-anchor="end">读 1 次，算 4 个</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">算完把结果放回各自 token 的位置，再按路由权重相加</text>
+</svg><figcaption>图 16-4　按专家分组：12 次“专家调用”只读了 4 次专家权重。真实规模大得多，复用也多得多。</figcaption></figure>
+<p>放大到真实规模：一块 8,192 个 token，每个 token 每层选 10 个专家，一层就有 81,920 次专家调用，而每层只有 512 个专家。平均下来，每个专家被 81,920 ÷ 512 = 160 个 token 共用。<span class="ev ev-est">教学推演</span> 源码注释也说，块大到 1,024 个 token 以上时，每层 512 个专家“几乎全都会被选到”。<span class="ev ev-code">代码事实</span></p>
+<p>分组之后，专家从哪来？显存里缓存着的热门专家直接读；不在显存的，从内存里的专家区经一条锁页内存“环形队列”、用单独的拷贝流送上 GPU。[S12] 算完之后，结果要按原来的 token 顺序放回去，再按各自的路由权重相加。顺序放错一个，结果就加到了别的 token 身上。</p>
+<p>注意这和写答案时的分工不同：写答案时没命中的专家主要由 CPU 在内存里就地计算（第 10 章）；读题时专家被成百上千个 token 共用，搬上 GPU 一起算就划算了。</p>
+
+<h2 id="sec-4">16.4 一块切多大：块越大越好吗</h2>
+<p>提示词会被切成一<dfn>块</dfn>（chunk）一块地读，每块走完全部 48 层，再接下一块。[S12] 块越大，权重和专家被越多 token 共用；但块也不是越大越好。下面的教学模型把这个取舍画了出来：</p>
+<div class="viz" data-viz="prefill-chunk"><figure class="fig"><svg viewBox="0 0 400 220" role="img" aria-label="图 16-5：教学模型下，块从 1 个 token 增大到 2048 个时读题速度快速上升，之后接近上限 2500 token 每秒">
+<text class="f-muted" fill="#5c6d66" x="10" y="14" font-size="12">教学模型：32K 提示词，不同块大小 C 的读题速度（token/s）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="14" y="179" width="36" height="1"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="62" y="178.5" width="36" height="1.5"/>
+<rect class="f-accent" fill="#136d5a" x="110" y="174" width="36" height="6"/>
+<rect class="f-accent" fill="#136d5a" x="158" y="156.2" width="36" height="23.8"/>
+<rect class="f-accent" fill="#136d5a" x="206" y="85.8" width="36" height="94.2"/>
+<rect class="f-accent" fill="#136d5a" x="254" y="42.1" width="36" height="137.9"/>
+<rect class="f-accent" fill="#136d5a" x="302" y="41.1" width="36" height="138.9"/>
+<rect class="f-accent" fill="#136d5a" x="350" y="40.6" width="36" height="139.4"/>
+<text class="f-text" fill="#182f2b" x="32" y="172" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="80" y="172" font-size="12" text-anchor="middle">27</text>
+<text class="f-text" fill="#182f2b" x="128" y="168" font-size="12" text-anchor="middle">107</text>
+<text class="f-text" fill="#182f2b" x="176" y="150" font-size="12" text-anchor="middle">425</text>
+<text class="f-text" fill="#182f2b" x="224" y="80" font-size="12" text-anchor="middle">1,683</text>
+<text class="f-text" fill="#182f2b" x="272" y="37" font-size="12" text-anchor="middle">2,462</text>
+<text class="f-text" fill="#182f2b" x="320" y="36" font-size="12" text-anchor="middle">2,481</text>
+<text class="f-text" fill="#182f2b" x="368" y="36" font-size="12" text-anchor="middle">2,490</text>
+<text class="f-muted" fill="#5c6d66" x="32" y="196" font-size="12" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="196" font-size="12" text-anchor="middle">16</text>
+<text class="f-muted" fill="#5c6d66" x="128" y="196" font-size="12" text-anchor="middle">64</text>
+<text class="f-muted" fill="#5c6d66" x="176" y="196" font-size="12" text-anchor="middle">256</text>
+<text class="f-muted" fill="#5c6d66" x="224" y="196" font-size="12" text-anchor="middle">1024</text>
+<text class="f-muted" fill="#5c6d66" x="272" y="196" font-size="12" text-anchor="middle">2048</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="196" font-size="12" text-anchor="middle">4096</text>
+<text class="f-muted" fill="#5c6d66" x="368" y="196" font-size="12" text-anchor="middle">8192</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="214" font-size="12">假设 W = 600 ms，u = 0.4 ms，流水线打开</text>
+</svg><figcaption>图 16-5　块小时，每块的计算撑不起一次权重搬运，速度和块大小几乎成正比；块大过平衡点后，速度贴近算力上限。数字来自教学模型，不是 Strata 的实测。</figcaption></figure></div>
+<p>真实的 Strata 怎么选块？上游的说明是：长文本按大块读，每块最多 8,192 个 token，所以长文档能读到每秒 1,000 个 token 以上。[S02] 设置成 <code>--prefill auto</code> 时，引擎从一张候选表里挑：在不超过借用上限的前提下，选缓冲最大的那一档。默认最大 8,192，用户可以显式放开到 16,384 或 32,768。<span class="ev ev-code">代码事实</span> 服务端为了估算“读题要等多久”，也按每块最多 32,768 个 token 来算。[S15]</p>
+<p>块大的代价是临时显存。一块 8,192 个 token 的中间结果要占不少地方，Strata 的办法是向专家缓存“借”：读题期间把缓存末尾的一些槽位借给块缓冲，读完再把原来的专家填回去。每个请求只借自己的提示词需要的大小。[S12] 图 16-6 是源码注释里的一组实测。</p>
+<figure class="fig"><svg viewBox="0 0 400 198" role="img" aria-label="图 16-6：12 GB 显卡读 32K 提示词，块大小 4096、6144、8192 分别读到每秒 791、878、973 个 token">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">上游源码注释：12 GB 显卡，Q2_0，32K 提示词</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">块 4096</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="35" width="162.6" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="258" y="48" font-size="12">791 token/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">块 6144</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="75" width="180.4" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="276" y="88" font-size="12">878 token/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="128" font-size="12">块 8192</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="115" width="200" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="296" y="128" font-size="12">973 token/s</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="164" font-size="12">块 8192 时，专家缓存有 69% 的槽位借给了读题缓冲</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="186" font-size="12">块越大越快，借走的显存也越多</text>
+</svg><figcaption>图 16-6　真实引擎里，块从 4,096 加到 8,192，读题快了约 23%；代价是读题期间借走了大部分专家缓存。注释没有写明引擎版本。</figcaption></figure>
+<p>速度提升 973 ÷ 791 ≈ 1.23 倍。<span class="ev ev-est">教学推演</span> 块再大还能快一些：注释记录了一张 RTX 5090 读 32K 提示词的例子，用 8,192 的块每秒 5,624 个 token，整段一块（32,768）每秒 6,465 个。但这要显存足够大，所以默认不开。<span class="ev ev-code">代码事实</span></p>
+<p>块也不能太小。源码注释提到，块小于大约 1,000 个 token 时，引擎会换用另一套 kernel，Q2_0 的输出就会变，所以“所有专家一律搬运”的模式以 1,024 为下限。<span class="ev ev-code">代码事实</span> 另外，引擎在每块开始前检查一次“要不要停”，所以块越大，取消请求后要等的时间也越长。[S12]</p>
+
+<h2 id="sec-5">16.5 流水线：这一层在算，下一层已经在路上</h2>
+<p>块切好了，每块还要走 48 层。每一层都分两件事：把这一层要用的专家搬上 GPU，再计算。如果两件事轮流做，GPU 算的时候拷贝通道闲着，搬的时候 GPU 闲着。Strata 让它们重叠：当前层在算注意力时，下一层的专家已经在经 PCIe 搬来。[S02]</p>
+<aside class="primer" id="c16-pipeline">
+<h3>流水线：让几道工序同时开工</h3>
+<p>直觉：洗衣服分“洗”和“烘”两步。只有一台洗衣机和一台烘干机时，聪明的做法是第一筐进烘干机的同时，第二筐进洗衣机。每筐用时不变，但一堆衣服的总用时短了很多。</p>
+<p>定义：把一件工作拆成几道前后相连的工序，每道工序由不同的部件做；第 i 件工作在做第 2 道工序时，第 i+1 件已经开始第 1 道。这就是<dfn>流水线</dfn>。稳定以后，总用时由最慢的那道工序决定，而不是各道工序之和。图 16-7 是两道工序、四层的例子。</p>
+<p>流水线的前提是：两道工序用不同的部件（这里是拷贝引擎和计算单元），中间有缓冲区存放“搬来了、还没算”的东西。缓冲区太小，搬运就会停下来等。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/流水线_(计算机)" target="_blank" rel="noopener noreferrer">维基百科：流水线（计算机）</a> · <a href="https://zh.wikipedia.org/zh-cn/指令管線化" target="_blank" rel="noopener noreferrer">维基百科：指令流水线</a> · <a href="https://en.wikipedia.org/wiki/Pipeline_(computing)" target="_blank" rel="noopener noreferrer">Wikipedia: Pipeline (computing)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="图 16-7：搬运和计算轮流做要 8 格时间，重叠起来只要 5 格时间">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12" font-weight="600">不重叠：先搬后算，轮流进行</text>
+<text class="f-text" fill="#182f2b" x="390" y="16" font-size="12" text-anchor="end">8 格</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="38" font-size="12">搬运</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="58" font-size="12">计算</text>
+<rect class="f-soft" fill="#e5f1df" x="60" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="79.5" y="38" font-size="12" text-anchor="middle">1层</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="119.5" y="58" font-size="12" text-anchor="middle">1层</text>
+<rect class="f-soft" fill="#e5f1df" x="140" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="159.5" y="38" font-size="12" text-anchor="middle">2层</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="199.5" y="58" font-size="12" text-anchor="middle">2层</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="239.5" y="38" font-size="12" text-anchor="middle">3层</text>
+<rect class="f-accent" fill="#136d5a" x="260" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="279.5" y="58" font-size="12" text-anchor="middle">3层</text>
+<rect class="f-soft" fill="#e5f1df" x="300" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="319.5" y="38" font-size="12" text-anchor="middle">4层</text>
+<rect class="f-accent" fill="#136d5a" x="340" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="359.5" y="58" font-size="12" text-anchor="middle">4层</text>
+<text class="f-text" fill="#182f2b" x="10" y="96" font-size="12" font-weight="600">重叠：算第 l 层时，搬第 l+1 层</text>
+<text class="f-text" fill="#182f2b" x="390" y="96" font-size="12" text-anchor="end">5 格</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="118" font-size="12">搬运</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="138" font-size="12">计算</text>
+<rect class="f-soft" fill="#e5f1df" x="60" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="79.5" y="118" font-size="12" text-anchor="middle">1层</text>
+<rect class="f-soft" fill="#e5f1df" x="100" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="119.5" y="118" font-size="12" text-anchor="middle">2层</text>
+<rect class="f-soft" fill="#e5f1df" x="140" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="159.5" y="118" font-size="12" text-anchor="middle">3层</text>
+<rect class="f-soft" fill="#e5f1df" x="180" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="199.5" y="118" font-size="12" text-anchor="middle">4层</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="119.5" y="138" font-size="12" text-anchor="middle">1层</text>
+<rect class="f-accent" fill="#136d5a" x="140" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="159.5" y="138" font-size="12" text-anchor="middle">2层</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="199.5" y="138" font-size="12" text-anchor="middle">3层</text>
+<rect class="f-accent" fill="#136d5a" x="220" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="239.5" y="138" font-size="12" text-anchor="middle">4层</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="176" font-size="12">Strata：当前层算注意力时，下一层的专家已经在经 PCIe 搬来</text>
+</svg><figcaption>图 16-7　两道工序一样长时，重叠能把 8 格时间压到 5 格。层数越多，越接近“只付一道工序的钱”。</figcaption></figure>
+<p>Strata 的缓冲区就是那条锁页内存环形队列。源码注释记录了它的大小有多重要：用 8,192 的块读 Q2_0 时，环形队列 96 个槽位每秒读 1,153 个 token，加到 384 个槽位每秒 1,294 个，因为“下一层的专家能在本层的注意力阶段就到位”。<span class="ev ev-code">代码事实</span></p>
+<p>多张显卡时，流水线又多了一层：每张卡负责一段层，前一段把一块的中间结果交给后一段之后，马上开始读下一块。用接口注释的话说，后一段在读第 c 块时，前一段已经在读第 c+1 块。[S12]</p>
+<p>最后别忘了交接。一块读完，引擎要把会话状态留在“逐个 token 读到这里时应有的样子”：GDN 的递推状态和卷积历史、QSA 的 KV 缓存和索引器、PLE 的历史，一样不能少，写答案才能从下一个 token 无缝接上。[S12]</p>
+
+<h2 id="sec-6">16.6 动手：找出既快又放得下的块</h2>
+<ol>
+<li>先玩上面的交互图（图 16-5）。把 C 从 1 拉到 8192，看柱子在哪里由“上涨”变成“平台”。再关掉流水线，在 C = 1024 时各播放一次，比较两次的“每块用时”。</li>
+<li>打开本书的交互实验「分块与空间取舍」。它在一条显式给定的复用曲线下，同时算每块的速度和所需空间。先找绝对最快的块，再排除超出显存预算的那些，比较“可行的最优”和“绝对最优”差多少。实验里的复用曲线和每 token 空间都是人为参数，不是 Strata 的分配器。</li>
+<li>想一想：同一段提示词用 C = 1 和 C = 8192 读，最后的状态应该一样吗？读完“深入一层”再回答。</li>
+</ol>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>写答案是矩阵乘向量，权重读一遍只服务一个 token；读题是矩阵乘矩阵，权重读一遍服务一整块。同一台电脑上，读题能比写答案快二十多倍。</li>
+<li>专家部分靠按专家分组来批量：选了同一个专家的 token 归到一起，权重只读一次。块越大复用越多，但要借更多显存，取消也更慢。Strata 默认每块最多 8,192 个 token。</li>
+<li>流水线让搬运和计算重叠：当前层计算时，下一层的专家已经在路上。总用时由最慢的工序决定。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“读题时 token 都已知，所以它们可以互相看见，因果规则不用管了。”</strong></p>
+<p>不对。批量只是改变了计算怎么组织，没有改变模型的规则：第 i 个 token 仍然只能看到它前面的 token。读题阶段照样要用因果掩码，递推层照样要按顺序走完整块。输入“已知”和语义上“允许看未来”是两回事。</p></div>
+
+<details class="deep"><summary>深入一层：状态交接、舍入差异与借用显存的安全条件</summary>
+<h3>状态交接不是只留下最后一个向量</h3>
+<p>一块读完，需要交接的状态包括：GDN 的递推状态和卷积状态、QSA 的 KV 和索引器、PLE 的历史，以及与草稿层相关的状态。[S12][S13] 如果只保留最后一行 logits，丢掉这些状态，下一步写答案就不再是同一段历史。</p>
+<p>一个有力的测试：同一串 token 分别用 C = 1、C = 7、C = 32 等不同切法读完，比较块边界处的状态和之后固定历史下的输出。最容易出错的样本是：长度恰好跨过块边界、最后一块不满、提示词极短、读到一半被取消、读完马上接着写答案。</p>
+<h3>批量会改变舍入，但不能拿“浮点”当万能借口</h3>
+<p>批量计算和逐个计算可能走不同的舍入路径。上游文档举过例子：使用 IQ 系列模型时，CPU 算一个 token 的专家用 ggml 的点积，算多个 token 时用 Strata 自己的多 token kernel，两者舍入略有不同；于是温度为 0 时，同一个提示词也可能因为草稿不同而得到另一个同样合理的回答。上游为此提供了一个开关，让所有分组都用多 token kernel。[S03]</p>
+<p>所以 C = 1 和大 C 的输出不完全逐字相同，既不能立刻断定某一边有 bug，也不能一句“只是浮点”就放过。应该在同一段固定历史上比较中间张量、选中的专家和索引编号、误差从哪一层开始增长，再按事先定好的容差和质量门槛判断。状态位置、因果掩码、索引编号这些“非数值契约”必须单独精确核对。</p>
+<h3>借用显存的安全条件</h3>
+<p>块缓冲向专家缓存借槽位，带来两个问题。第一，借用期间，被借走槽位里原来的专家已经不在了，路由表不能再把它们当作“命中”；源码里，这些专家在读题期间改为从内存搬运，读完再填回去。[S12] 第二，填回必须完成之后，才能重新宣布这些槽位里是哪个专家。只算“预算加起来没超显存”，证明不了借用是安全的；要证明的是“任何时刻，标签和槽位里的字节一致”。</p>
+<h3>文档里的几个块大小</h3>
+<p>上游不同地方出现过不同的块大小：说明文档写“最多 8,192 个 token”[S02]；详情文档的旧段落还写着 2,048；服务端为了估计等待时间用 32,768 作上限[S15]；引擎的自动档默认最大 8,192，可显式放开到 32,768。<span class="ev ev-code">代码事实</span> 这些数字不矛盾，它们回答的是不同的问题（默认值、历史值、上限）。写公式时，本书一律把块大小记作变量 C。</p>
+<h3>教学成本式的边界</h3>
+<p>本章交互图和「分块与空间取舍」实验都用了简化的成本式，形如 T ≈ N ÷ r(C) ＋ ⌈N ÷ C⌉ × 每块固定开销，其中 r(C) 是显式设定的复用曲线。它能说明“固定开销被摊薄”和“空间约束”这两件事，不能预测 Strata 的真实吞吐。真实速度还取决于专家命中率、PCIe 带宽、CPU 拷贝线程、注意力随上下文变长而增加的计算等。</p>
+<p>做 GPU 进阶实验时，每次只改 C，其余设置（量化、KV 格式、草稿、输入、缓存状态）保持不变，再解释速度和质量的变化。</p>
+</details>
