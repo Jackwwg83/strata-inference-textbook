@@ -86,3 +86,22 @@ test('admin dashboard is built, self-contained and reads the stats API with a be
  assert.ok(html.includes("'strata-no-track'"),'owner can exclude this browser');
  assert.match(html,/<meta name="robots" content="noindex/);
 });
+test('rewritten chapters follow the enthusiast template and print their deep dives',()=>{
+ const rewritten=chapters.filter(c=>fs.readFileSync(path.join(root,'content/chapters',c.id+'.html'),'utf8').includes('class="hook"'));
+ assert.ok(rewritten.length>=2,'pilot chapters must use the template');
+ for(const c of rewritten){
+  const html=fs.readFileSync(path.join(root,'content/chapters',c.id+'.html'),'utf8');
+  for(const cls of ['class="tldr"','class="recap"','class="myth"','<details class="deep">'])assert.ok(html.includes(cls),c.id+' missing '+cls);
+  const svgs=[...html.matchAll(/<svg\b[^>]*>/g)].map(m=>m[0]);
+  assert.ok(svgs.length>=1,c.id+' needs a figure');
+  for(const s of svgs){assert.match(s,/role="img"/);assert.match(s,/aria-label="[^"]+"/);assert.match(s,/viewBox="/);}
+  // Every drawn shape carries a fill attribute, so the figure renders in the unstyled print book too.
+  for(const [tag] of html.matchAll(/<(rect|text|circle|path)\b[^>]*>/g))assert.match(tag,/\bfill="/,c.id+' shape without fallback fill: '+tag.slice(0,60));
+  for(const ev of html.matchAll(/class="ev ([a-z-]+)"/g))assert.ok(['ev-code','ev-report','ev-est'].includes(ev[1]),ev[1]);
+ }
+ const full=fs.readFileSync(path.join(root,'dist/fullbook.html'),'utf8');
+ assert.ok(!full.includes('<details class="deep">'),'print book must open deep dives');
+ assert.ok(full.includes('<details class="deep" open>'));
+ const app=fs.readFileSync(path.join(root,'src/app.js'),'utf8');
+ assert.ok(app.includes('<details class="deep" open>'),'exported book must open deep dives too');
+});
