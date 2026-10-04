@@ -1,0 +1,265 @@
+<div class="hook"><span class="eyebrow">눈치챘을 수도 있어요</span>
+<p>채팅 웹페이지에는 「중지」 버튼이 있어요. 누르면 글자가 바로 멈춰요. 그런데 그래픽 카드도 정말 멈췄을까요?</p>
+<p>Strata 소스에는 꽤 솔직한 주석이 하나 있어요(이슈 번호 #430, #431). 예전에는 클라이언트가 연결을 끊어도 그 요청이 엔진을 계속 붙잡고 있었어요. 답이 다 써질 때까지, 또는 질문 전체를 다 읽을 때까지요. 화면에서는 진작 멈췄는데, 그래픽 카드는 이미 떠난 사람을 위해 계속 일하고 있었던 거예요. 이 장은 세 가지를 다뤄요. 요청이 어떻게 태어나고 어떻게 끝나는지, 「멈춰」라는 말이 어떻게 층층이 그래픽 카드까지 전해지는지, 그리고 누가 내 그래픽 카드를 일 시킬 자격이 있는지예요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 요청 하나는 브라우저, HTTP 연결, 서비스 프로세스, 엔진 프로세스의 네 층을 지나가요. 「중지」는 층마다 전달하고 층마다 확인해야 하는 신호예요. 「인증」은 누가 요청을 들여보낼 수 있는지를 정해요.</p>
+
+<h2 id="sec-1">24.1 「중지」를 누르면 정확히 무엇이 멈출까</h2>
+<p>버튼을 누른 순간부터 그래픽 카드가 이 요청을 위한 계산을 멈추기까지는 여러 층이 있어요. 층마다 「멈췄다」의 뜻이 달라요. 그림 24-1을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 320" role="img" aria-label="그림 24-1: 요청은 다섯 층을 지나가고, 층마다 「멈췄다」의 뜻이 다르다. 위 층이 멈췄다고 아래 층도 멈춘 것은 아니다">
+<text class="f-muted" fill="#5c6d66" x="75" y="18" font-size="12" text-anchor="middle">층</text>
+<text class="f-muted" fill="#5c6d66" x="152" y="18" font-size="12">이 층이 「멈췄다」는 건 어떤 상태일까</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="28" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="55" font-size="13" font-weight="600" text-anchor="middle">브라우저</text>
+<text class="f-text" fill="#182f2b" x="152" y="55" font-size="12">새 글자를 더 표시하지 않음</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="84" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="111" font-size="13" font-weight="600" text-anchor="middle">HTTP 연결</text>
+<text class="f-text" fill="#182f2b" x="152" y="111" font-size="12">연결이 닫혀 서버가 더 쓰지 않음</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="140" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="167" font-size="13" font-weight="600" text-anchor="middle">서비스 프로세스</text>
+<text class="f-text" fill="#182f2b" x="152" y="167" font-size="12">이 요청에 「취소됨」 표시</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="196" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="223" font-size="13" font-weight="600" text-anchor="middle">엔진 프로세스</text>
+<text class="f-text" fill="#182f2b" x="152" y="223" font-size="12">STOP을 받고 이 요청의 DONE을 씀</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="252" width="130" height="44" rx="8"/>
+<text class="f-on" fill="#ffffff" x="75" y="279" font-size="13" font-weight="600" text-anchor="middle">그래픽 카드</text>
+<text class="f-text" fill="#182f2b" x="152" y="279" font-size="12">하던 계산은 끝내고 새로 시작 안 함</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="314" font-size="12" text-anchor="middle">중지 신호는 위에서 아래로 전해져요. 위 층이 멈춰도 아래 층은 아닐 수 있어요</text>
+</svg><figcaption>그림 24-1　「중지」는 층마다 뜻이 달라요. 브라우저 층이 가장 먼저 멈추고 그래픽 카드 층이 가장 나중에 멈춰요. 중간의 모든 층에서 누군가 신호를 아래로 전해 줘야 해요.</figcaption></figure>
+<p>이 이야기를 분명히 하려고 먼저 요청의 <dfn>상태 기계</dfn>를 그려 볼게요. 요청은 어느 순간이든 어떤 상태 하나에 있고, 특정한 이벤트만 그것을 다른 상태로 바꿀 수 있어요. 아래는 이 책의 교육용 버전이에요.</p>
+<ul>
+<li><strong>대기</strong>: 요청이 도착했지만 엔진이 다른 요청을 처리하는 중이에요. Strata는 한 번에 시퀀스 하나만 처리하고, 뒤에 온 요청은 모두 FIFO(선입선출) 대기열에서 기다려요. [S15]</li>
+<li><strong>문제 읽기</strong>: 엔진이 질문을 한 청크씩 읽어요(1장에서 배운 프리필).</li>
+<li><strong>생성</strong>: 토큰을 하나씩 써서 답을 만들어요.</li>
+<li><strong>완료 / 취소됨 / 실패</strong>: 종료 상태가 셋이에요. 모든 요청은 결국 이 중 하나로 끝나야 하고, 매달려 있으면 안 돼요.</li>
+<li><strong>취소 중</strong>: 이미 「멈춰」라고 외쳤지만 엔진이 멈췄다는 확인은 아직 없는 상태예요. 이 중간 상태를 가장 놓치기 쉬워요.</li>
+</ul>
+<p>이 상태 이름은 이 책의 추상화이고, 업스트림 코드의 enum이 아니에요. Strata가 실제로 기록하는 것은 요청이 「대기 중」인지 「생성 중」인지, 그리고 「질문을 읽는 중」, 「답하는 중」 같은 단계 설명 한 줄이에요. <span class="ev ev-code">코드 사실</span> 아래 시뮬레이터는 이 과정을 천천히 보여 줘요.</p>
+<div class="viz" data-viz="request-lifecycle"><figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="그림 24-2: 요청의 교육용 상태 기계. 대기, 문제 읽기, 생성, 완료가 정상 경로이고, 취소 중은 문제 읽기와 생성이 취소된 뒤의 중간 상태이며 확인된 뒤에야 취소됨이 된다. 엔진 응답이 끊기면 실패로 간다">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="16" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="64" y="39" font-size="14" text-anchor="middle">대기</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="152" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="200" y="39" font-size="14" text-anchor="middle">문제 읽기</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="288" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="39" font-size="14" text-anchor="middle">생성</text>
+<rect class="f-accent" fill="#136d5a" x="152" y="104" width="96" height="36" rx="8"/><text class="f-on" fill="#ffffff" x="200" y="127" font-size="14" font-weight="600" text-anchor="middle">취소 중</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="288" y="104" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="127" font-size="14" text-anchor="middle">완료</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="152" y="192" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="200" y="215" font-size="14" text-anchor="middle">취소됨</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="288" y="192" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="215" font-size="14" text-anchor="middle">실패</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M112 34H150M248 34H286M336 52V102M200 52V102M296 52L240 104M200 140V190M64 52V210H150"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M248 130L300 192"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="248" font-size="12" text-anchor="middle">점선: 엔진 응답 끊김, 워치독 개입. 인터랙티브에서는 어느 상태에서든 「취소」를 눌러요</text>
+</svg><figcaption>그림 24-2　요청의 교육용 상태 기계. 문제 읽기와 생성이 취소되면 먼저 「취소 중」에 들어가고, 엔진이 멈췄다고 확인해야 「취소됨」이 돼요. 종료 상태는 완료, 취소됨, 실패 셋뿐이에요.</figcaption></figure></div>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 《운영체제》 수업의 프로세스 상태도(준비, 실행, 대기, 종료)도 이렇게 그려요. 상태 기계로 그리면 하나하나 점검할 수 있어요. 상태마다 이벤트마다 어디로 가야 하는지, 끝까지 가지 못하는 상태가 있는지 확인할 수 있어요.</p>
+
+<h2 id="sec-2">24.2 프로세스와 스레드: 일은 누가 하고 있을까</h2>
+<p>「멈춰」를 누구에게 전해야 하는지 알려면, 먼저 일을 누가 하고 있는지 알아야 해요.</p>
+<aside class="primer" id="c24-process-thread">
+<h3>프로세스와 스레드의 생명주기</h3>
+<p><dfn>프로세스</dfn>는 실행 중인 프로그램이에요. 운영체제는 프로세스에 독립된 메모리와, 열린 파일, 네트워크 연결 같은 자원을 줘요. 두 프로세스는 기본적으로 서로의 메모리를 볼 수 없고, <dfn>파이프</dfn>나 네트워크 같은 통로로만 메시지를 주고받아요. 프로세스가 끝나면 운영체제가 그 프로세스가 차지한 메모리와 VRAM을 한꺼번에 회수해요.</p>
+<p><dfn>스레드</dfn>는 프로세스 안의 실행 흐름 하나예요. 한 프로세스에 스레드가 여러 개 있을 수 있고, 같은 메모리를 공유해요. 그래서 데이터를 주고받기는 편하지만 서로 발을 밟기도 쉬워요.</p>
+<p>둘 다 생명주기가 있어요. 생성, 실행, 대기(예: 네트워크 데이터 기다리기), 종료예요. 끝나는 방식은 두 가지예요. <strong>스스로 끝까지 가거나</strong>, <strong>다른 쪽이 끝내거나</strong>요. 유닉스 계열 시스템에서는 프로세스가 다른 프로세스에 신호를 보낼 수 있어요. SIGTERM은 「종료해 주세요」라서 상대가 먼저 정리할 기회가 있어요. SIGKILL은 「즉시 종료」라서 상대에게 정리할 기회가 전혀 없어요.</p>
+<p>Strata와의 관계: 서버와 엔진은 <strong>서로 다른 프로세스</strong>이고, 파이프로 텍스트를 한 줄씩 주고받아요. 서버 안에서는 또 여러 스레드가 일을 나눠 맡아요. 그림 24-3을 보세요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/프로세스" target="_blank" rel="noopener noreferrer">위키백과: 프로세스</a> · <a href="https://ko.wikipedia.org/wiki/스레드" target="_blank" rel="noopener noreferrer">위키백과: 스레드</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-intro.pdf" target="_blank" rel="noopener noreferrer">OSTEP: 프로세스 (영문)</a> · <a href="https://docs.python.org/ko/3/library/subprocess.html" target="_blank" rel="noopener noreferrer">Python 문서: subprocess</a> · <a href="https://man7.org/linux/man-pages/man7/signal.7.html" target="_blank" rel="noopener noreferrer">man 7 signal</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="그림 24-3: Strata의 서비스 프로세스에는 요청 스레드, 감시 스레드, 읽기 스레드가 있고 FIFO 락으로 엔진을 돌아가며 쓴다. 엔진은 다른 프로세스이고 양쪽은 표준 입출력으로 텍스트 줄을 주고받는다">
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="10" width="380" height="170" rx="10"/>
+<text class="f-text" fill="#182f2b" x="20" y="31" font-size="13" font-weight="600">Python 서비스 프로세스: serve/server.py</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="76" y="67" font-size="13" font-weight="600" text-anchor="middle">요청 스레드</text>
+<text class="f-muted" fill="#5c6d66" x="76" y="88" font-size="12" text-anchor="middle">연결마다 하나</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="144" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="67" font-size="13" font-weight="600" text-anchor="middle">감시 스레드</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="88" font-size="12" text-anchor="middle">0.5초마다 연결 확인</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="268" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="324" y="67" font-size="13" font-weight="600" text-anchor="middle">읽기 스레드</text>
+<text class="f-muted" fill="#5c6d66" x="324" y="88" font-size="12" text-anchor="middle">엔진 출력을 큐에 담음</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="116" width="360" height="48" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="145" font-size="13" text-anchor="middle">FIFO 락: 한 순간에 요청 하나만 엔진을 써요</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 180V228M250 228V180"/>
+<path class="f-muted" fill="#5c6d66" d="M100 232l-5-8h10z"/>
+<path class="f-muted" fill="#5c6d66" d="M250 176l-5 8h10z"/>
+<text class="f-muted" fill="#5c6d66" x="108" y="200" font-size="12">stdin: GEN, STOP, QUIT</text>
+<text class="f-muted" fill="#5c6d66" x="258" y="222" font-size="12">stdout: T, PP, DONE</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="234" width="380" height="56" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="257" font-size="13" font-weight="600" text-anchor="middle">엔진 프로세스: strata --serve</text>
+<text class="f-on" fill="#ffffff" x="200" y="278" font-size="12" text-anchor="middle">가중치, 전문가 캐시, VRAM은 모두 엔진이 관리</text>
+</svg><figcaption>그림 24-3　서버와 엔진은 서로 다른 프로세스이고, 파이프로 텍스트를 한 줄씩 주고받아요. 서버 안의 스레드는 각자 맡은 일이 있고, FIFO 락이 한 순간에 요청 하나만 엔진을 쓰도록 보장해요.</figcaption></figure>
+<p>서버는 Python의 <code>subprocess.Popen</code>으로 <code>strata --serve</code>를 띄우고, 엔진의 표준 입력과 표준 출력을 모두 파이프로 이어요. <span class="ev ev-code">코드 사실</span> 엔진은 가중치를 불러온 뒤 먼저 <code>INFO</code> 줄을 몇 개 쓰고, 이어서 <code>READY</code>와 컨텍스트 길이가 든 한 줄을 써요. 이 줄에 <code>stop</code>도 붙어 있으면 이 엔진 버전이 도중 중지를 지원한다는 뜻이에요. 서버는 <code>READY</code>를 읽어야 엔진이 「살아 있다」고 봐요. 그 뒤 서버가 <code>GEN</code> 명령 한 줄을 써서 요청을 제출하면, 엔진은 <code>T</code>(토큰 하나), <code>PP</code>(문제 읽기 진행 상황), <code>DONE</code>(끝), <code>ERR</code>(오류) 중 하나로 답해요.</p>
+<p>전용 읽기 스레드도 하나 있어서, 엔진이 쓴 모든 줄을 큐에 넣어요. 덕분에 요청을 처리하는 스레드는 다음 줄을 「시간 제한을 두고」 기다릴 수 있어요. 안 오면 먼저 하트비트를 보내고 취소 플래그를 확인할 수 있고, 마냥 멍하니 기다리지 않아요. <span class="ev ev-code">코드 사실</span></p>
+<p>엔진 프로세스가 뜻밖에 끝나기도 해요. 코드에는 <code>EngineDied</code> 예외가 따로 있고, 주석에는 가장 흔한 원인이 적혀 있어요. Linux에서 메모리가 모자라 OOM killer에게 종료당한 경우예요. [S15] 이때 지금 요청은 오류로 끝나고, 다음 요청이 오면 서버가 같은 명령으로 엔진을 다시 시작해요.</p>
+<p>엔진을 정상적으로 닫는 데도 요령이 있어요. 서버는 세 단계로 가고, 단계마다 최대 20초를 기다려요. 그림 24-4를 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="그림 24-4: 엔진 프로세스를 닫는 세 단계. 먼저 QUIT를 써서 스스로 종료하게 하고, 안 되면 terminate, 그래도 안 되면 kill. 세 단계 뒤에도 안 끝나면 오류를 보고한다">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">엔진 프로세스 닫기: 정중한 방법부터</text>
+<rect class="f-soft" fill="#e5f1df" x="8" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="51" y="54" font-size="13" font-weight="600" text-anchor="middle">QUIT</text>
+<text class="f-text" fill="#182f2b" x="51" y="76" font-size="12" text-anchor="middle">엔진이 직접</text>
+<text class="f-text" fill="#182f2b" x="51" y="94" font-size="12" text-anchor="middle">메모리 해제</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="106" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="149" y="54" font-size="13" font-weight="600" text-anchor="middle">terminate</text>
+<text class="f-text" fill="#182f2b" x="149" y="76" font-size="12" text-anchor="middle">종료 신호</text>
+<text class="f-text" fill="#182f2b" x="149" y="94" font-size="12" text-anchor="middle">(SIGTERM)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="204" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="247" y="54" font-size="13" font-weight="600" text-anchor="middle">kill</text>
+<text class="f-text" fill="#182f2b" x="247" y="76" font-size="12" text-anchor="middle">강제 종료</text>
+<text class="f-text" fill="#182f2b" x="247" y="94" font-size="12" text-anchor="middle">정리 기회 없음</text>
+<rect class="f-warn" fill="#9e5d24" x="302" y="32" width="90" height="76" rx="8"/>
+<text class="f-on" fill="#ffffff" x="347" y="54" font-size="13" font-weight="600" text-anchor="middle">안 끝남</text>
+<text class="f-on" fill="#ffffff" x="347" y="76" font-size="12" text-anchor="middle">오류 보고,</text>
+<text class="f-on" fill="#ffffff" x="347" y="94" font-size="12" text-anchor="middle">해제된 척 안 함</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M94 70H104M192 70H202M290 70H300"/>
+<text class="f-muted" fill="#5c6d66" x="51" y="128" font-size="12" text-anchor="middle">20초 대기</text>
+<text class="f-muted" fill="#5c6d66" x="149" y="128" font-size="12" text-anchor="middle">20초 대기</text>
+<text class="f-muted" fill="#5c6d66" x="247" y="128" font-size="12" text-anchor="middle">20초 대기</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">정중한 방법부터 하는 이유: 엔진이 수십 GB 메모리를</text>
+<text class="f-text" fill="#182f2b" x="10" y="184" font-size="12">잡고 있어서, 스스로 차례로 풀어 주는 편이 안전해요.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">Windows에서는 엔진을 「작업 개체」에 넣어요. 서버가</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">어떻게 끝나든 운영체제가 엔진도 함께 끝내요.</text>
+</svg><figcaption>그림 24-4　엔진을 닫는 세 계단. 계단마다 20초를 주고, 셋 다 실패하면 VRAM과 RAM이 반환된 척하지 않고 「엔진이 아직 안 끝났어요」라고 솔직하게 보고해요.</figcaption></figure>
+<p>주석은 첫 단계가 왜 <code>QUIT</code>인지 설명해요. 엔진이 스스로 메모리를 해제하는데, 수십 GB 고정(pinned) 메모리의 잠금을 푸는 데는 시간이 좀 걸려요. <span class="ev ev-code">코드 사실</span> 세 단계가 모두 실패하면 서버는 <code>EngineStuck</code>을 던지고, 이 프로세스의 기록을 <strong>계속 남겨 두어서</strong> 그 VRAM과 RAM이 반환됐다고 주장하지 않아요. 또 Windows에서는 서버가 엔진을 「닫히면 종료」가 설정된 작업 개체에 넣어요. 그래서 콘솔 창을 그냥 닫아도 엔진이 함께 끝나고, 주인 없는 고아 프로세스가 되지 않아요. <span class="ev ev-code">코드 사실</span></p>
+
+<h2 id="sec-3">24.3 취소: 「멈춰」를 층층이 전하기</h2>
+<aside class="primer" id="c24-cancel">
+<h3>취소: 왜 「멈춰 주세요」밖에 못 할까</h3>
+<p>가장 직접적인 취소 방법은 일하는 스레드를 바깥에서 뚝 끊는 거예요. 하지만 위험해요. 그 스레드는 락을 쥐고 있을 수도 있고, 쓰던 자료 구조가 반쯤 바뀐 상태일 수도 있고, VRAM 한 조각을 빌려 쓰는 중일 수도 있어요. 끊기고 나면 락은 아무도 풀어 주지 않고, 데이터는 반쯤 새것 반쯤 옛것이라서 뒤따르는 모두가 오류를 겪어요.</p>
+<p>그래서 실제 시스템은 대부분 <dfn>협력적 취소</dfn>를 써요. 바깥에서는 <dfn>취소 플래그</dfn>만 세우고, 일하는 쪽이 약속된 <dfn>체크포인트</dfn>에서 플래그를 한 번 보고, 보이면 스스로 깔끔하게 정리하고 나가요. Python의 <code>threading.Event</code>, Go의 <code>context</code>, C#의 <code>CancellationToken</code>이 모두 이 발상이에요.</p>
+<p>여기서 두 가지 규칙이 나와요. 첫째, 취소는 순식간에 끝나지 않아요. 최악의 경우 다음 체크포인트까지 기다려야 해요. 둘째, 체크포인트가 멀수록 취소가 느려요. 그래서 「멈춰라」고 외친 것과 「정말 멈춘 것」은 별개이고, 그 사이가 그림 24-2의 「취소 중」이에요.</p>
+<p class="further">더 읽을거리: <a href="https://docs.python.org/ko/3/library/threading.html" target="_blank" rel="noopener noreferrer">Python 문서: threading (Event 객체)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/threads-intro.pdf" target="_blank" rel="noopener noreferrer">OSTEP: 동시성과 스레드 (영문)</a> · <a href="https://ko.wikipedia.org/wiki/멀티스레딩" target="_blank" rel="noopener noreferrer">위키백과: 멀티스레딩</a></p>
+</aside>
+<p>Strata의 취소는 협력적이에요. 요청이 시작될 때마다 서버는 취소 플래그로 <code>threading.Event</code>를 만들어요. 이 플래그를 세우는 길은 두 가지예요.</p>
+<ul>
+<li><strong>쓰기 실패</strong>: 서버가 연결에 SSE 이벤트를 쓰다가 오류가 나면 클라이언트가 떠났다는 뜻이라서 바로 플래그를 세워요. 주석에는 「클라이언트가 떠났음: 엔진을 멈춘다」라고 적혀 있어요. <span class="ev ev-code">코드 사실</span></li>
+<li><strong>감시 스레드</strong>: 쓰기 오류만으로는 부족해요. 긴 질문을 읽는 동안에는 서버가 keep-alive 주석을 아주 가끔 쓰고, 연결이 끊긴 뒤 첫 쓰기는 대개 「성공」하기까지 해요. 그래서 요청마다 감시 스레드를 따로 띄워서 0.5초마다 연결을 확인해요. 연결이 「읽을 수 있음」인데 읽히는 데이터가 하나도 없으면 상대가 닫은 것이니 플래그를 세워요. <span class="ev ev-code">코드 사실</span> 첫머리에서 말한 #430, #431의 수정이 바로 이거예요.</li>
+</ul>
+<p>플래그를 세운 뒤에는 체크포인트가 효력을 내야 해요. 그림 24-5를 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="그림 24-5: 클라이언트가 끊은 뒤 FIFO를 해제하기까지의 여섯 단계. 끊김 감지, 취소 플래그 설정, 생성 루프가 STOP 쓰기, 엔진이 체크포인트에서 멈춤, 이 요청의 DONE 읽기, FIFO 해제">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="8" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">① 클라이언트가 끊음(「중지」를 눌렀어요)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="56" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="79" font-size="13" text-anchor="middle">② 감시 스레드가 끊김을 알아챔(최대 0.5초)</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="104" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="127" font-size="13" text-anchor="middle">③ 취소 플래그 cancel 설정</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="152" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="175" font-size="13" text-anchor="middle">④ 엔진 출력을 기다리는 루프가 플래그를 보고 STOP 쓰기</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="200" width="320" height="36" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="223" font-size="13" text-anchor="middle">⑤ 엔진이 다음 체크포인트에서 멈춤</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="248" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="271" font-size="13" text-anchor="middle">⑥ 이 요청의 DONE을 읽고 FIFO 해제</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V54M200 92V102M200 140V150M200 188V198M200 236V246"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="310" font-size="12" text-anchor="middle">생성 중: 다음 토큰이 곧 체크포인트라서 빨라요</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="330" font-size="12" text-anchor="middle">문제 읽기 중: 읽던 청크를 끝내야 해서 십수 초 걸릴 수 있어요</text>
+</svg><figcaption>그림 24-5　취소의 여섯 단계. 앞의 세 단계는 1초도 안 걸려요. ⑤단계는 엔진이 체크포인트에 닿을 때까지 기다려야 해서, 어느 단계에서 취소하느냐가 대기 시간을 정해요.</figcaption></figure>
+<p>⑤단계의 체크포인트는 어디에 있을까요? 생성할 때는 토큰 하나를 내놓을 때마다 루프가 플래그를 한 번 봐요. 문제를 읽을 때 엔진은 청크 단위로 읽어요. <code>prefill.hpp</code>의 <code>should_stop</code>이 <strong>청크가 시작되기 전마다</strong> 한 번 확인하고, 참이면 일찍 끝내며 오류 메시지는 "cancelled"예요. <span class="ev ev-code">코드 사실</span>[S12] 서버 주석도 분명히 적어 두었어요. 문제 읽기 중에 보낸 STOP은 지금 청크를 다 읽어야 비로소 보여요. 청크 하나에는 최대 32768 토큰이 들어갈 수 있어요. [S15] 인터랙티브 그림의 「최악의 경우 얼마나 기다리나」가 이 값으로 계산한 거예요.</p>
+<p>⑥단계도 똑같이 중요해요. STOP을 보낸 뒤 서버는 엔진의 출력을 계속 읽어서 <strong>이 요청 자신의</strong> <code>DONE</code>이 올 때까지 가야 하고, 그동안 내내 FIFO 락을 쥐고 있어요. 주석이 이유를 설명해요. 일찍 손을 놓으면 엔진 큐에 이전 요청의 <code>DONE</code>이 남아 있고, 다음 요청이 그것을 자기 종료 신호로 착각해요. <span class="ev ev-code">코드 사실</span> 이 단계에도 시간 제한이 있어요. STOP의 응답을 무한정 기다리는 일은 절대 없어요. 기다리는 동안 FIFO가 계속 점유돼서 뒤의 모든 요청이 줄 서 있기 때문이에요.</p>
+<p>테스트에 쓰는 <code>MockEngine</code>도 이 약속을 지켜요. 토큰을 하나 내놓기 전에 먼저 취소 플래그를 한 번 봐요. [S15] 그래서 취소 로직을 그래픽 카드 없는 머신에서도 테스트할 수 있어요.</p>
+
+<h2 id="sec-4">24.4 멈춰 버리면 어떻게 할까: 워치독</h2>
+<p>취소는 엔진이 「협조」해야 성립해요. 엔진이 멈춰 버려서 아무 말도 하지 않으면 어떨까요? 서버에게는 <dfn>워치독</dfn>이 필요해요. 한동안 아무 기척이 없으면 문제가 생겼다고 판정하는 장치예요.</p>
+<p>어려운 점은 「얼마나 오래면 너무 오래인가」예요. 엔진이 생성할 때는 토큰마다 한 줄씩 써서 아주 시끌벅적해요. 그런데 아주 긴 질문을 읽을 때는 몇 분 동안 아무 소리도 안 낼 수 있어요. 워치독이 일률적이면, 열심히 문제를 읽는 엔진을 오해해서 죽이거나, 정말 멈춘 엔진을 한참 기다리게 돼요. Strata는 단계별로 다른 시간 제한을 둬요 [S15].</p>
+<ul>
+<li>기본 제한 300초: 요청이 진행 중인데 엔진이 이만큼 오래 아무 출력이 없으면 응답이 끊긴 것으로 판정해요. 설정에서 바꿀 수 있고, 0이면 영원히 기다려요.</li>
+<li>문제 읽기의 첫 청크: 300초에 더해, 「가장 느린 컴퓨터가 초당 50토큰만 읽는다」고 보고 이 청크를 읽는 시간을 더해요.</li>
+<li>청크 하나를 다 읽은 뒤: 다음 청크는 앞 청크가 실제로 걸린 시간의 최대 3배까지 쓸 수 있고, 300초보다 적지는 않아요.</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="그림 24-6: 워치독의 시간 제한. 생성 중 300초, 문제 읽기 첫 청크 약 955초, 빠른 컴퓨터는 청크 하나를 읽은 뒤에도 300초, 느린 컴퓨터는 약 983초">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">엔진이 조용해도 되는 시간(초, 막대 길이는 비례)</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">생성 중: 토큰마다 시간을 다시 재요</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="50" width="90" height="14"/>
+<text class="f-text" fill="#182f2b" x="106" y="62" font-size="12">300</text>
+<text class="f-text" fill="#182f2b" x="10" y="92" font-size="12">문제 읽기 첫 청크: 300 + 32768 ÷ 50</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="98" width="286.6" height="14"/>
+<text class="f-text" fill="#182f2b" x="302" y="110" font-size="12">≈ 955</text>
+<text class="f-text" fill="#182f2b" x="10" y="140" font-size="12">이후 청크, 빠른 컴퓨터: max(300, 3 × 15.1)</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="146" width="90" height="14"/>
+<text class="f-text" fill="#182f2b" x="106" y="158" font-size="12">300</text>
+<text class="f-text" fill="#182f2b" x="10" y="188" font-size="12">이후 청크, 느린 컴퓨터: max(300, 3 × 327.7)</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="194" width="294.9" height="14"/>
+<text class="f-text" fill="#182f2b" x="310" y="206" font-size="12">≈ 983</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">청크 하나는 32768 토큰, 빠른 쪽은 초당 2171, 느린 쪽은 100</text>
+</svg><figcaption>그림 24-6　워치독의 시간 제한은 작업 단계에 따라 달라져요. 느린 컴퓨터가 큰 질문 청크를 읽을 때는 제한이 십수 분까지 저절로 넓어져서, 일하는 엔진을 오해해 죽이는 일이 없어요. <span class="ev ev-est">교육용 추정</span></figcaption></figure>
+<p>그림 속 숫자는 코드 상수를 넣어서 계산한 거예요. <span class="ev ev-est">교육용 추정</span> 첫 청크: 300 + 32768 ÷ 50 ≈ 955초. 빠른 컴퓨터는 업스트림 실측값인 초당 2171 토큰으로 32768 토큰 청크 하나를 읽는 데 약 15.1초가 걸리고, 3배는 45.3초로 300초에 못 미쳐서 제한은 그대로 300초예요. 느린 컴퓨터는 초당 100 토큰이라 청크 하나에 327.7초가 걸리고, 3배는 약 983초예요.</p>
+<p>시간이 지나면 어떻게 될까요? 주석은 이것을 「양쪽이 어긋남」이라고 불러요. 엔진의 메인 스레드는 다음 명령을 기다리는데, 서버는 이 요청의 종료를 기다리고 있는 상태예요. 서버는 엔진 프로세스를 끝내고, 이 요청은 오류로 마무리돼요. 다음 요청이 오면 엔진을 다시 시작해요. [S15] 프로세스를 끝내는 건 거칠지만, VRAM과 RAM이 프로세스와 함께 반드시 반환된다는 장점이 있어요.</p>
+<p>더 아래 층에도 같은 발상이 있어요. 초안 토큰을 검증하는 <code>Verifier</code>에는 <code>release_gpu_waits</code>가 있어요. 그래픽 카드의 계산 묶음 하나가 멈춰서 정상적으로 끝나지 못할 때, 그래픽 카드에서 기다리는 모든 플래그를 강제로 풀어서 그 묶음이 빠져나가게 해요. 하지만 그 뒤로 이 Verifier는 새 계산 윈도를 실행하기를 <strong>거부해요</strong>. 그 묶음이 믿을 수 없는 조건에서 끝났기 때문이에요. <span class="ev ev-code">코드 사실</span>[S08] 강제로 비운 것은 정상 완료가 아니에요. 아무 일 없었던 척하고 다음 요청을 계속 서비스하면 안 돼요.</p>
+
+<h2 id="sec-5">24.5 누가 내 그래픽 카드를 쓸 수 있나: 인증과 API Key</h2>
+<p>앞에서는 「어떻게 멈추나」를 다뤘어요. 이 절은 「누가 시작할 수 있나」를 다뤄요. 아무나 내 Strata에 마음대로 요청을 보낼 수 있다면 내 그래픽 카드는 공용 자원이 돼요.</p>
+<aside class="primer" id="c24-auth">
+<h3>인증과 API Key</h3>
+<p><dfn>인증</dfn>은 「당신은 누구인가」에 답하고, <dfn>인가</dfn>는 「당신은 무엇을 할 수 있는가」에 답해요. 가장 단순한 인증 방식이 <dfn>API Key</dfn>예요. 서버와 클라이언트가 미리 아주 긴 무작위 문자열을 공유하고, 클라이언트가 요청할 때마다 HTTP 헤더에 담아 보내요. 흔한 형태는 <code>Authorization: Bearer 키</code>예요. 서버가 비교해서 같으면 통과시키고, 다르면 401을 돌려줘요.</p>
+<p>API Key는 모두가 함께 쓰는 열쇠와 같아요. 가진 사람은 누구든 문을 열 수 있으니까 비밀로 해야 해요. 웹페이지 소스에 쓰면 안 되고, 공개 저장소에 올려도 안 돼요. 네트워크로 보낼 때는 HTTPS를 쓰는 게 좋아요. 아니면 길목의 누군가가 볼 수 있어요.</p>
+<p>비교 자체에도 요령이 있어요. 보통의 문자열 비교는 다른 문자를 만나면 바로 돌아와요. 앞부분을 많이 맞힐수록 비교에 걸리는 시간이 길어져요. 공격자가 시간을 재면 키를 한 자리씩 추측해 낼 수 있어요. 이처럼 소요 시간이나 전력 같은 「부산물」로 정보를 새게 하는 공격이 <dfn>부채널 공격</dfn>이고, 이 경우는 <dfn>타이밍 공격</dfn>이에요. 막는 방법은 <dfn>상수 시간 비교</dfn>예요. 어느 자리에서 달라지든 문자열 전체를 다 비교하고 나서 돌아와요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/API_키" target="_blank" rel="noopener noreferrer">위키백과: API 키</a> · <a href="https://ko.wikipedia.org/wiki/부채널_공격" target="_blank" rel="noopener noreferrer">위키백과: 부채널 공격</a> · <a href="https://developer.mozilla.org/ko/docs/Web/HTTP/Reference/Headers/Authorization" target="_blank" rel="noopener noreferrer">MDN: Authorization 헤더</a> · <a href="https://docs.python.org/ko/3/library/hmac.html" target="_blank" rel="noopener noreferrer">Python 문서: hmac.compare_digest</a> · <a href="https://www.rfc-editor.org/rfc/rfc6750" target="_blank" rel="noopener noreferrer">RFC 6750: Bearer 토큰</a></p>
+</aside>
+<p>Strata의 첫 번째 방어선은 <strong>기본적으로 이 컴퓨터만 듣는 것</strong>이에요. 서버는 기본으로 <code>127.0.0.1</code>에서 대기하니까 다른 기기는 아예 연결할 수 없어요. <span class="ev ev-code">코드 사실</span> 이때 README는 앱에 API Key를 아무거나 넣어도 된다고 알려 줘요. [S01] 휴대폰이나 다른 컴퓨터에서 접속하려면 <code>0.0.0.0</code>에서 대기하도록 바꿔야 하고, README의 원문은 「반드시 키를 함께 쓰세요」예요. [S01] 대기 주소를 바꿨는데 키를 설정하지 않으면 서버는 시작할 때 경고를 한 줄 찍어요. API Key가 없으니 네트워크의 누구든 이 모델을 쓸 수 있다는 내용이에요. <span class="ev ev-code">코드 사실</span></p>
+<p>키를 설정하면 <code>/v1/*</code>에 접근하는 요청은 반드시 키를 갖고 와야 해요. <code>Authorization: Bearer …</code>로 쓰거나 <code>x-api-key</code> 헤더에 써요(Anthropic 스타일 클라이언트는 이쪽을 써요). 비교에는 <code>hmac.compare_digest</code>를 쓰고, 코드 주석에는 「상수 시간」이라고 적혀 있어요. 비교가 실패하면 401을 돌려주고 종류는 <code>authentication_error</code>예요. <span class="ev ev-code">코드 사실</span> 전체 판단 과정은 그림 24-7이에요.</p>
+<figure class="fig"><svg viewBox="0 0 400 310" role="img" aria-label="그림 24-7: Strata의 API Key 검사 흐름. 키를 설정하지 않았으면 바로 통과시키고, 설정했으면 클라이언트가 보낸 키를 꺼내 상수 시간으로 비교한다. 같으면 처리하고 다르면 401을 돌려준다">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="8" width="200" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">요청이 /v1/… 에 도착</text>
+<rect class="f-soft" fill="#e5f1df" x="100" y="62" width="200" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="84" font-size="13" text-anchor="middle">설정에 API Key가 있나요?</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="316" y="62" width="76" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="354" y="84" font-size="13" text-anchor="middle">통과</text>
+<text class="f-muted" fill="#5c6d66" x="308" y="56" font-size="12" text-anchor="middle">없음</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="122" width="280" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="144" font-size="13" text-anchor="middle">Bearer 헤더 또는 x-api-key 헤더 꺼내기</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="114" font-size="12">있음</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="176" width="240" height="34" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="198" font-size="13" text-anchor="middle">hmac.compare_digest로 비교</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="236" width="160" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="258" font-size="13" text-anchor="middle">같음: 요청 처리</text>
+<rect class="f-warn" fill="#9e5d24" x="220" y="236" width="160" height="34" rx="8"/>
+<text class="f-on" fill="#ffffff" x="300" y="258" font-size="13" text-anchor="middle">다름: 401 반환</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V60M300 79H314M200 96V120M200 156V174M160 210V222H100V234M240 210V222H300V234"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="300" font-size="12" text-anchor="middle">더 앞에 한 겹 더: 기본은 127.0.0.1만 듣고, 다른 기기는 연결 불가</text>
+</svg><figcaption>그림 24-7　Strata의 API Key 검사. 기본이 이 컴퓨터만 듣는 것이라서 키가 없어도 안전해요. 바깥에 열면 키가 유일한 자물쇠가 되고, 비교는 반드시 상수 시간이어야 해요.</figcaption></figure>
+<p>왜 꼭 상수 시간이어야 할까요? 아래 시뮬레이터에서 직접 공격자가 되어 보세요.</p>
+<div class="viz" data-viz="key-compare-timing"><figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="그림 24-8: 키의 첫 자리를 추측할 때, 문자별 비교에서는 맞힌 후보가 문자를 하나 더 비교해서 막대가 눈에 띄게 높고, 상수 시간 비교에서는 후보 16개의 소요 시간이 완전히 같다">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="13" font-weight="600" text-anchor="middle">문자별 비교: 틀리면 중단</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="13" font-weight="600" text-anchor="middle">상수 시간 비교</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="12" text-anchor="middle">맞힌 후보가 1자 더 비교</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="38" font-size="12" text-anchor="middle">뭘 넣어도 4자를 다 비교</text>
+<rect class="f-accent" fill="#136d5a" x="16" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="27" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="38" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="49" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="60" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="71" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="82" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="93" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="104" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="115" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="126" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="137" y="126" width="8" height="24"/><rect class="f-warn" fill="#9e5d24" x="148" y="102" width="8" height="48"/><rect class="f-accent" fill="#136d5a" x="159" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="170" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="181" y="126" width="8" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="216" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="227" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="238" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="249" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="260" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="271" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="282" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="293" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="304" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="315" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="326" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="337" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="348" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="359" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="370" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="381" y="54" width="8" height="96"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 150H194M210 150H394"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="12" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="152" y="168" font-size="12" text-anchor="middle">c</text>
+<text class="f-muted" fill="#5c6d66" x="185" y="168" font-size="12" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="168" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="385" y="168" font-size="12" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="194" font-size="12" text-anchor="middle">첫 자리의 후보 16개 (진짜 키는 c로 시작)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="214" font-size="12" text-anchor="middle">인터랙티브: 한 자리씩 추측해 몇 번 시도해야 하는지 보세요</text>
+</svg><figcaption>그림 24-8　문자별 비교는 「몇 자리를 맞혔는지」가 소요 시간에 그대로 적혀 버려서, 공격자는 자리마다 16번만 시도하면 돼요. 상수 시간 비교는 모든 후보가 똑같아 보이게 만들어요. <span class="ev ev-est">교육용 추정</span></figcaption></figure></div>
+<p>현실에서는 비교 한 번에 몇 나노초밖에 차이가 안 나고 네트워크 흔들림은 몇 밀리초나 돼요. 그래서 진짜 공격은 같은 추측을 수천수만 번 반복해서 재고, 통계 기법으로 차이를 캐내야 해요. 어렵지만 불가능하지는 않아요. <code>hmac.compare_digest</code>를 쓰는 건 코드 한 줄이면 되니까, 이런 위험을 감수할 이유가 없어요.</p>
+<p>Strata는 더 은밀한 공격도 막아요. <dfn>DNS 리바인딩</dfn>이에요. 내가 연 악성 웹페이지가 자기 도메인을 잠깐 <code>127.0.0.1</code>로 돌려 놓고, 「자기 사이트」인 척 내 컴퓨터의 서비스에 접근할 수 있어요. 그래서 키가 없을 때 서버는 <code>Host</code> 헤더가 자기가 아는 이름인 요청에만 응답해요. 예를 들면 <code>localhost</code>와 IP 주소예요. 낯선 웹페이지 출처가 붙은 <code>POST</code> 요청도 거부해요. 키를 설정하면 키가 결정권을 가져요. 남의 웹페이지는 내 키를 얻을 수 없으니까요. <span class="ev ev-report">업스트림 보고</span></p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 이 절은 《컴퓨터 네트워크》와 《정보 보안》의 기본 개념 몇 가지에 대응해요. 인증과 인가의 차이, 최소 노출면(기본은 루프백 주소만 대기), 부채널 공격이에요. 보안 조치는 층층이 쌓아야 하고, 층마다 막아야 할 것만 막아요.</p>
+
+<h2 id="sec-6">24.6 직접 해 보기: 취소를 한 번 해 보기</h2>
+<p>이 장에는 따로 떼어 놓은 실험 페이지가 없고, 인터랙티브 그림 두 개가 곧 실험이에요. 순서대로 세 가지를 해 보세요.</p>
+<ol>
+<li>생명주기 시뮬레이터에서 <strong>대기, 문제 읽기, 생성</strong> 세 상태에서 각각 「취소」를 누르고, 「최악의 경우 얼마나 기다리나」를 기록해 보세요. 문제 읽기 단계는 약 15.6초, 생성 단계는 약 0.51초를 기다려요. 내가 설계한다면 문제 읽기 단계도 더 빨리 멈추게 하려면 어떻게 할지 생각해 보세요. 대가는 무엇일까요?</li>
+<li>취소를 누른 뒤 「취소 중」에서 「엔진 응답 끊김」을 눌러 보세요. 서버가 어떻게 수습하는지, STOP의 응답을 기다리는 데도 왜 시간 제한이 꼭 있어야 하는지 보세요.</li>
+<li>타이밍 공격 시뮬레이터에서 비교 방식 두 가지로 각각 키를 풀어 보고, 몇 번씩 시도해야 했는지 세어 보세요.</li>
+</ol>
+<p>Python을 쓸 줄 안다면, Strata에 들어 있는 <code>MockEngine</code>(<code>python -m serve.server --engine mock</code>)으로 그래픽 카드 없는 머신에서 서비스를 하나 띄우고, <code>curl</code>로 스트리밍 요청을 보낸 뒤 도중에 Ctrl+C로 끊어 보세요. 그다음 서버 창에서 이 요청의 결말을 확인해요. [S15]</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>요청 하나는 브라우저, HTTP 연결, 서비스 프로세스, 엔진 프로세스, 그래픽 카드를 지나가요. 층마다 「멈췄다」의 뜻이 달라서, 취소 신호는 층층이 아래로 전해지고 확인돼야 해요.</li>
+<li>Strata의 취소는 협력적이에요. 감시 스레드가 0.5초마다 연결을 확인해 취소 플래그를 세우고, 엔진이 체크포인트에서 멈추며, 서버가 이 요청 자신의 DONE을 읽어야 FIFO를 해제해요. 문제 읽기 중에는 체크포인트가 멀어서 취소가 느려요.</li>
+<li>Strata는 기본으로 이 컴퓨터만 들어요. 바깥에 열 때는 반드시 API Key를 설정해야 하고, 비교는 상수 시간인 <code>hmac.compare_digest</code>로 해서 타이밍 공격을 막아요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: 「웹페이지를 닫으면 그래픽 카드도 멈춘다.」</strong></p>
+<p>웹페이지를 닫으면 맨 위 층만 멈춰요. 서버가 먼저 연결이 끊겼음을 알아채고 엔진에 알려야 하고, 엔진은 다음 체크포인트까지 가야 멈춰요. Strata도 #430, #431을 고치기 전에는 클라이언트가 진작 떠났는데 엔진이 계속 계산하는 일이 있었어요. 「멈췄다」는 층마다 따로 확인해야 해요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 취소의 선형화 지점, 늦게 도착한 옛 응답, 신뢰 경계</summary>
+<h3>취소는 언제부터 「효력이 생겼다」고 할까</h3>
+<p>취소를 이렇게 정의할 수 있어요. 어떤 확인된 경계부터는 사용자에게 새 토큰을 더 제출하지 않고, 관련 자원도 결국 쓰이지 않는다. 이 경계가 취소의 <dfn>선형화 지점</dfn>이에요. 플래그만 세워 놓았고 아직 문제 읽기의 청크 루프나 생성 루프가 보지 못했다면 취소는 끝난 게 아니에요.</p>
+<p>이 책이 <code>serve/server.py</code>를 읽은 바로는, 아직 대기 중인 요청은 FIFO 락을 얻고 <code>GEN</code> 명령을 엔진에 보낸 뒤에야 엔진 출력을 기다리는 루프에서 취소 플래그를 확인해요. 첫 토큰 줄이나 문제 읽기 진행 줄을 받았을 때, 또는 10초 동안 출력이 없을 때예요. <span class="ev ev-code">코드 사실</span> 이미 연결을 끊은 대기 요청이 있어도 엔진이 그 질문을 읽기 시작하고, 그 뒤에야 STOP을 받는다는 뜻이에요. 해 볼 만한 확장 과제가 있어요. 락을 얻은 뒤, 명령을 보내기 전에 플래그를 한 번 확인하게 해 보세요.</p>
+<h3>예제: 시간 초과 뒤에 도착한 옛 응답</h3>
+<p>요청 A가 시간 초과되고 서비스가 요청 B를 처리하기 시작했어요. A의 늦은 결과가 여전히 공유 출력 큐에 쓰이면, B가 A의 토큰을 받거나 A의 <code>DONE</code>을 자기 종료로 착각할 수 있어요. 해결 방향은 출력에 소유자 검증을 붙이고, 옛 실행이 끝났다고 확인되기 전에는 같은 가변 상태를 재사용하지 않는 거예요.</p>
+<p>Strata가 바로 후자를 택했어요. STOP을 보낸 뒤 이 요청 자신의 <code>DONE</code>이 올 때까지 읽고, 그동안 FIFO 락을 계속 쥐어요. 사용량을 집계할 때도 이 요청이 진행되는 동안 도착한 <code>DONE</code>만 인정해요. 그렇지 않으면 오류가 났거나 끊긴 요청이 이전 요청의 디코드 숫자를 자기 것으로 기록하게 돼요. <span class="ev ev-code">코드 사실</span> 이 책은 업스트림의 모든 출력 소유 경로를 감사하지는 않았어요. 수업에서는 일부러 지연시킨 mock 엔진으로 이런 위험을 만들어 보고, 수정이 먹히는지 검증할 수 있어요.</p>
+<h3>워치독은 작업 단계를 이해해야 해요</h3>
+<p>「잠깐 글자 출력이 없다」를 무조건 교착으로 보면, 긴 질문을 읽는 멀쩡한 요청을 오해해 죽여요. 영원히 기다리면 FIFO 전체가 막혀요. 합리적인 진단은 이런 경우를 구분할 수 있어야 해요. 대기, 정당한 긴 계산, 느린 I/O, 자식 프로세스 응답 끊김, 프로토콜 어긋남이에요. 그리고 모호한 「시간 초과」 하나가 아니라 상태와 마지막 진행 상황을 보고해야 해요. Strata가 문제 읽기 청크에 맞춰 시간 제한을 조정하고 응답이 끊긴 이유를 오류 메시지에 적는 것이 이 발상이에요. [S15]</p>
+<p>마찬가지로 「명시적 모델 제어」(로드, 언로드)는 실행 중이거나 대기 중인 요청을 끊으면 안 돼요. 코드에는 이를 위한 <code>ModelBusy</code>가 따로 정의돼 있어요. [S15] 업스트림 문서에 따르면 이때 제어 API는 409를 돌려줘요. <span class="ev ev-report">업스트림 보고</span></p>
+<h3>도구, 이미지 URL, 로컬 파일은 모두 신뢰 경계예요</h3>
+<p>모델 출력은 신뢰할 수 없는 입력이에요. 도구 인자는 구조 검증과 권한 검사를 거쳐야 해요. 원격 URL을 가져오는 일은 외부 접근과 자원 제한이 걸려 있어요. 로컬 경로를 읽는 일은 파일 권한과 경로 범위가 걸려 있어요. Strata의 이미지 입력은 base64 데이터, http(s) URL, 로컬 파일 경로 세 가지 출처를 지원해요. [S15] SSRF나 경로 순회 같은 문제를 막았는지는 입구마다 감사해야 해요. 어딘가에서 안전한 라이브러리를 썼다고 해서 전체가 안전하다고 단정하면 안 돼요.</p>
+<p><code>frontend.py</code>는 샌드박스화된 Jinja 환경으로 템플릿을 렌더링해요. [S16] 이것은 템플릿 층의 구체적인 선택이고, 도구 실행, URL 가져오기, 파일 접근까지 안전하다고 저절로 증명해 주지는 않아요. 자원마다 별도의 위협 모델이 필요해요.</p>
+<h3>「취소 완료」 검증 체크리스트</h3>
+<p>mock 엔진에 이런 상황을 주입해 보세요. 문제 읽기 중 취소, 출력 중단, 중복 취소, 엔진 무응답, 옛 결과의 지각 도착, 복구 뒤 재요청이에요. 검증 조건은 이래요. 사용자에게 보이는 새 토큰이 더 제출되지 않는다. 읽고 쓰는 관련 버퍼를 건드리는 작업이 모두 멈추거나 끝났다. 큐와 상태를 다음 요청이 잘못 쓰지 않는다. 늦게 온 옛 출력을 알아보고 버릴 수 있다. 자원은 딱 한 번만 해제된다. 클라이언트는 「성공」이 아니라 분명한 「취소됨」 또는 「실패」를 받는다.</p>
+<p>마지막으로 한 가지 당부해요. 이 교재는 정적 웹사이트이고 진짜 추론 API Key를 포함하지 않으며, 브라우저에서 직접 내 모델 서버에 접근하지도 않아요. 나중에 진짜 실험 플랫폼을 붙일 때는 인증, 할당량, 작업 격리, 서버 측 프록시를 따로 둬야 하고, 키를 강의 페이지에 써 넣으면 안 돼요.</p>
+</details>

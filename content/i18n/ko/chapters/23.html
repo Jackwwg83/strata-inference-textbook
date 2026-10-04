@@ -1,0 +1,245 @@
+<div class="hook"><span class="eyebrow">눈치챘을 수도 있어요</span>
+<p>채팅 웹페이지에서는 답변이 한 글자씩 톡톡 떠올라요. 그런데 웹페이지를 건너뛰고 명령줄로 내 컴퓨터의 Strata API를 직접 호출하면 전혀 다른 장면이 보여요. <code>data: {…}</code> 줄이 줄줄이 이어지고, 줄 사이마다 빈 줄이 하나씩 끼어 있고, 마지막 줄은 <code>data: [DONE]</code>이에요.</p>
+<p>이 줄들을 <dfn>SSE</dfn>(Server-Sent Events, 서버 전송 이벤트)라고 불러요. 서버를 떠날 때는 <strong>바이트</strong> 한 줄기인데, 내 손에 닿기 전에 네트워크가 크기가 제각각인 덩어리로 마구 잘라 버려요. 한자 한 글자가 반으로 잘릴 수도 있고, 메시지 하나가 두 번에 나눠 도착할 수도 있어요. 이 장은 이 조각들을 다시 온전하고 깨지지 않는 한 문장으로 맞추는 방법을 설명해요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 모델이 내놓은 토큰이 내 화면의 글자가 되기까지 문이 세 개 있어요. 바이트를 글자로 잇기(UTF-8), 글자를 이벤트로 자르기(SSE의 빈 줄), 이벤트를 구조로 해석하기(JSON)예요. 문마다 먼저 다 모은 뒤에 처리해요.</p>
+
+<h2 id="sec-1">23.1 모델과 내 앱 사이에는 서비스 계층이 있어요</h2>
+<p>추론 엔진은 토큰 번호만 알아요. 번호 한 줄을 주면 새 번호를 하나씩 내놓아요. 그런데 내 앱이 쓰는 말은 달라요. 앱은 JSON 형식의 채팅 메시지를 보내고, 글이 조각조각 돌아오기를 기대해요. 그 사이에서 통역을 맡는 것이 <dfn>서비스 계층</dfn>이에요. 그림 23-1이 Strata의 서비스 계층이에요.</p>
+<figure class="fig"><svg viewBox="0 0 400 400" role="img" aria-label="그림 23-1: Strata의 서비스 계층은 HTTP 서버, 텍스트 프런트엔드, 엔진 경계의 세 층으로 나뉘고, 맨 아래에 상주하는 엔진 프로세스가 있다">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="8" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="14" font-weight="600" text-anchor="middle">내 앱</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="48" font-size="12" text-anchor="middle">채팅 웹페이지, 코딩 도우미, OpenAI SDK...</text>
+<rect class="f-soft" fill="#e5f1df" x="50" y="84" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="106" font-size="14" font-weight="600" text-anchor="middle">HTTP 서버: serve/server.py</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="124" font-size="12" text-anchor="middle">경로 구분, API Key 확인, 대기열, SSE 쓰기</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="160" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="182" font-size="14" font-weight="600" text-anchor="middle">텍스트 프런트엔드: serve/frontend.py</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="200" font-size="12" text-anchor="middle">채팅 템플릿 · 출력을 생각/본문/도구로 분리</text>
+<rect class="f-accent" fill="#136d5a" x="50" y="236" width="300" height="50" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="258" font-size="14" font-weight="600" text-anchor="middle">엔진 경계: Engine.generate</text>
+<text class="f-on" fill="#ffffff" x="200" y="276" font-size="12" text-anchor="middle">토큰 번호를 넣으면 토큰 번호를 하나씩 내놓음</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="312" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="334" font-size="14" font-weight="600" text-anchor="middle">strata --serve 상주 프로세스</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="352" font-size="12" text-anchor="middle">가중치 1회 로드 · stdin/stdout으로 줄 송수신</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 58V82M200 134V158M200 210V234M200 286V310"/>
+<text class="f-muted" fill="#5c6d66" x="208" y="75" font-size="12">HTTP + JSON</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="151" font-size="12">메시지 목록</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="227" font-size="12">토큰 번호</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="303" font-size="12">한 줄에 명령 또는 결과 하나</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="388" font-size="12" text-anchor="middle">위 세 층은 글자만 다뤄요. GPU는 맨 아래 층만 써요</text>
+</svg><figcaption>그림 23-1　Strata의 서비스 계층. HTTP 서버와 텍스트 프런트엔드는 글자만 다루니까 그래픽 카드 없이도 테스트할 수 있어요. 진짜 계산은 맨 아래 상주 프로세스 안에서 일어나요.</figcaption></figure>
+<p><code>serve/server.py</code>는 맨 앞에 자기 역할을 밝혀 놓았어요. 「토큰 번호를 토큰으로 대응시키는 모든 엔진」 위에서 OpenAI 스타일과 Anthropic 스타일 두 가지 API를 제공한다는 거예요. 엔드포인트에는 <code>POST /v1/chat/completions</code>(OpenAI 스타일, 스트리밍과 비스트리밍 지원), <code>POST /v1/messages</code>(Anthropic 스타일), <code>GET /v1/models</code>, <code>GET /health</code> 등이 있어요. <span class="ev ev-code">코드 사실</span>[S15]</p>
+<p>이 서버와 엔진 사이의 약속은 함수 하나뿐이에요. <code>Engine.generate(prompt_ids, max_new, sampling, cancel)</code>이고, 토큰 번호를 하나씩 내놓는 이터레이터를 돌려줘요. 진짜 <code>StrataEngine</code>은 <code>strata --serve</code> 프로세스를 계속 띄워 두고 표준 입출력으로 대화해요. <code>MockEngine</code>은 대본대로 토큰을 내놓아서, 그래픽 카드가 없는 머신에서도 모든 API 경로를 테스트할 수 있게 해 줘요. [S15]</p>
+<p><code>serve/frontend.py</code>는 첫 문장이 이래요. 「여기 있는 모든 것은 텍스트예요. 모델도 GPU도 없어요.」 이 파일이 하는 일은 세 가지예요. OpenAI와 Anthropic 두 요청 형식을 채팅 템플릿이 요구하는 메시지 목록 하나로 통일해요. 모델이 가져온 Jinja 템플릿으로 프롬프트를 렌더링하고, 예제 10개로 Hugging Face의 결과와 같은지 확인해 두었어요. 스트리밍 출력을 점진적으로 생각, 본문, 도구 호출로 쪼개되 <strong>태그를 반쪽만 내보내는 일이 없어요</strong>. <span class="ev ev-code">코드 사실</span>[S16]</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 《컴퓨터 네트워크》에서 배운 계층 구조의 작은 버전이에요. 각 층은 위아래 두 층하고만 이야기하고, 인터페이스만 약속해 두면 층 안의 구현은 마음대로 바꿀 수 있어요. <code>MockEngine</code>이 진짜 엔진을 대신할 수 있는 것은 경계가 <code>generate</code> 함수 하나뿐이기 때문이에요.</p>
+
+<h2 id="sec-2">23.2 답변을 쓰는 중에 보낼 수 있는 이유</h2>
+<p>보통의 웹 요청은 한 번 묻고 한 번 답해요. 브라우저가 요청을 보내면 서버는 답변 <strong>전체</strong>를 준비해서 한 번에 돌려줘요. 대형 언어 모델에서는 첫 글자를 보기까지 수십 초를 기다려야 한다는 뜻이에요. <dfn>스트리밍 응답</dfn>은 방식을 바꿔요. 같은 답변을 여러 작은 조각으로 나눠서, 한 조각이 써지는 대로 보내요. 그림 23-2가 두 방식을 비교해요.</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="그림 23-2: 일반 응답은 답변 전체가 다 써질 때까지 기다렸다가 보내고, 스트리밍 응답은 한 조각이 써지는 대로 보내서 첫 글자가 훨씬 일찍 나타난다">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">일반 응답: 다 쓴 뒤 한 번에 전송</text>
+<text class="f-muted" fill="#5c6d66" x="175" y="42" font-size="12" text-anchor="middle">기다림... (모델이 생성하는 중)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 60H390"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="44" width="8" height="16"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="32" y="48" width="286" height="8"/>
+<rect class="f-accent" fill="#136d5a" x="322" y="44" width="66" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="30" y="78" font-size="12" text-anchor="middle">요청 전송</text>
+<text class="f-muted" fill="#5c6d66" x="355" y="78" font-size="12" text-anchor="middle">답변 전체</text>
+<text class="f-text" fill="#182f2b" x="10" y="120" font-size="13" font-weight="600">스트리밍 응답(SSE): 한 조각 쓰면 한 조각 전송</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 160H390"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="144" width="8" height="16"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="92" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="114" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="136" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="158" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="180" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="202" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="224" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="246" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="268" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="290" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="312" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="334" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="356" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="378" y="144" width="12" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="30" y="178" font-size="12" text-anchor="middle">요청 전송</text>
+<text class="f-muted" fill="#5c6d66" x="92" y="178" font-size="12" text-anchor="middle">첫 글자</text>
+<text class="f-muted" fill="#5c6d66" x="358" y="178" font-size="12" text-anchor="middle">마지막 글자</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">도식, 비례 아님. 총 시간은 비슷하고 첫 글자가 나타나는 때가 달라요.</text>
+</svg><figcaption>그림 23-2　스트리밍 응답이 모델의 계산을 더 빠르게 해 주지는 않아요. 하지만 첫 글자를 더 일찍 보게 해 줘요. 수백 토큰을 써야 하는 답변이라면 체감 차이가 아주 커요.</figcaption></figure>
+<aside class="primer" id="c23-http-sse">
+<h3>HTTP와 스트리밍 전송(SSE)</h3>
+<p><dfn>HTTP</dfn>는 브라우저와 서버가 대화하는 규칙이에요. 대화 한 번은 두 반쪽으로 나뉘어요. 클라이언트가 <strong>요청</strong>을 보내고(어느 경로에 접근할지, 어떤 데이터를 실을지), 서버가 <strong>응답</strong>을 돌려줘요(상태 코드 하나, 예를 들어 200은 성공, 400은 요청에 문제가 있음, 401은 인증 실패. 거기에 헤더와 본문이 붙어요). 헤더의 <code>Content-Type</code>은 본문이 어떤 형식인지 상대에게 알려 줘요.</p>
+<p>보통의 응답은 본문을 한 번에 다 써요. <dfn>SSE</dfn>는 응답의 <code>Content-Type</code>을 <code>text/event-stream</code>으로 두고, 연결을 닫지 않은 채 서버가 생각날 때마다 한 조각씩 써요. 조각 하나를 <dfn>이벤트</dfn>라고 해요. 형식은 아주 소박해요.</p>
+<ul>
+<li>이벤트 하나는 여러 줄로 이루어지고, <code>data:</code>로 시작하는 줄에 데이터를 담아요.</li>
+<li><strong>빈 줄</strong> 하나가 이벤트의 끝을 뜻해요.</li>
+<li>콜론으로 시작하는 줄은 주석이고, 클라이언트는 그냥 무시해요.</li>
+<li>선택 사항인 <code>event:</code> 줄로 이벤트에 이름을 붙일 수 있어요.</li>
+</ul>
+<p>예를 들어 서버가 <code>data: 你好</code>, 줄바꿈, 빈 줄 하나를 쓰면, 클라이언트는 내용이 <code>你好</code>(「안녕하세요」)인 이벤트 하나를 받아요. 규격은 이런 것도 요구해요. 이벤트 스트림은 반드시 UTF-8로 인코딩해야 해요. 줄바꿈은 LF, CR, CRLF 중 아무거나 될 수 있어요. 같은 이벤트 안의 여러 <code>data</code> 줄은 줄바꿈으로 이어 붙여요. 스트림이 이벤트 중간에서 끊기면 그 반쪽 이벤트는 버려야 하고, 완전한 것처럼 내보내면 안 돼요. [R05]</p>
+<p>Strata와의 관계: <code>/v1/chat/completions</code>에 <code>"stream": true</code>를 붙이면 답변이 SSE 형태로 돌아와요. 안 붙이면 생성이 끝날 때까지 기다렸다가 JSON 하나로 한 번에 돌아와요.</p>
+<p class="further">더 읽을거리: <a href="https://developer.mozilla.org/ko/docs/Web/HTTP/Guides/Overview" target="_blank" rel="noopener noreferrer">MDN: HTTP 개요</a> · <a href="https://developer.mozilla.org/ko/docs/Web/API/Server-sent_events/Using_server-sent_events" target="_blank" rel="noopener noreferrer">MDN: 서버 전송 이벤트 사용하기</a> · <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html" target="_blank" rel="noopener noreferrer">HTML 표준: Server-sent events</a> · <a href="https://ko.wikipedia.org/wiki/HTTP" target="_blank" rel="noopener noreferrer">위키백과: HTTP</a></p>
+</aside>
+<p>Strata가 SSE를 쓰는 코드는 아주 짧아요. 먼저 상태 코드 200과 함께 <code>Content-Type: text/event-stream</code>, <code>Cache-Control: no-cache</code> 헤더를 보내고, <code>X-Accel-Buffering: no</code>도 더해요. nginx 같은 리버스 프록시에게 모아 두지 말고 이벤트가 오는 대로 바로 전달해 달라고 부탁하는 헤더예요. <span class="ev ev-code">코드 사실</span> 그다음 답변 한 조각마다 <code>data: </code> 뒤에 JSON 한 조각, 그리고 빈 줄 하나를 써요. 모든 게 끝나면 <code>data: [DONE]</code>을 써요. 그림 23-3이 이 바이트 줄기를 풀어서 보여 줘요.</p>
+<figure class="fig"><svg viewBox="0 0 400 312" role="img" aria-label="그림 23-3: Strata가 쓰는 SSE 바이트 스트림. 이벤트마다 data, JSON 한 조각, 빈 줄로 이루어지고, 콜론으로 시작하는 keep-alive 주석은 클라이언트가 무시하며, data: [DONE]으로 끝난다">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">↵는 줄바꿈 하나. ↵가 두 개 이어지면 「빈 줄」이에요</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="44" font-size="12" font-family="monospace">data: {…"delta":{"role":"assistant",…}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="68" font-size="12">첫 이벤트: 「어시스턴트가 말을 시작해요」만 알리고 글자는 없음</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="82" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="100" font-size="12" font-family="monospace">data: {…"delta":{"content":"<tspan lang="zh">你好</tspan>"}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="124" font-size="12">이벤트 하나 = data: + JSON 한 조각 + 빈 줄</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="138" width="380" height="26" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="18" y="156" font-size="12" font-family="monospace">: keep-alive↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="180" font-size="12">콜론 줄은 주석: 무시해도 되고, 연결이 살아 있다는 증거일 뿐</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="194" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="212" font-size="12" font-family="monospace">data: {…"delta":{"content":"<tspan lang="zh">，世界</tspan>"}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="236" font-size="12">또 한 조각의 글. 생각은 reasoning_content 필드에 담겨요</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="250" width="380" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="18" y="268" font-size="12" font-family="monospace">data: [DONE]↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="294" font-size="12">종료 신호. OpenAI API의 약속이고 SSE 규격 자체는 아니에요</text>
+</svg><figcaption>그림 23-3　Strata가 쓰는 SSE 바이트 스트림의 한 부분(JSON 안의 id, model 같은 필드는 「…」로 줄였어요). 클라이언트는 빈 줄을 보고 이벤트가 언제 완성되는지 판단해요.</figcaption></figure>
+<p>가운데 있는 <code>: keep-alive</code>에 주목하세요. 아주 긴 질문을 읽는 동안에는 엔진이 몇 분 동안 토큰을 하나도 내놓지 않을 수 있어요. 그동안 Strata는 10초마다 「하트비트」를 만들고, HTTP 계층이 이것을 SSE 주석으로 써요. <span class="ev ev-code">코드 사실</span> 클라이언트는 주석을 무시하지만 바이트가 들어오는 것을 보고 연결이 끊겼다고 생각하지 않아요. 서버도 쓰는 김에 상대가 이미 떠났는지 알 수 있어요(24장에서 자세히 다뤄요).</p>
+
+<h2 id="sec-3">23.3 한자 한 글자, 바이트 세 개</h2>
+<p>네트워크는 바이트만 알고 글자는 몰라요. 단순화한 이벤트 <code>data: {"delta":"你好"}</code>를 예로 들어 볼게요. 끝의 빈 줄까지 합치면 선 위에서 26바이트이고, 그중 <code>你</code>와 <code>好</code>가 각각 3바이트예요. 문제는 이거예요. TCP 연결이 프로그램에 한 번에 넘겨주는 「한 덩어리」가 얼마나 큰지는 네트워크와 운영체제가 정하고, 글자의 경계와는 아무 상관이 없어요. 한자 한 글자의 3바이트 중 앞 1바이트는 이번 덩어리에, 뒤 2바이트는 다음 덩어리에 들어갈 수 있어요.</p>
+<aside class="primer" id="c23-utf8">
+<h3>UTF-8: 글자 하나가 몇 바이트일까</h3>
+<p>컴퓨터 안의 모든 문자에는 번호가 있어요. 이것을 <dfn>코드 포인트</dfn>라고 해요. 예를 들어 한자 <code>中</code>은 U+4E2D예요. <dfn>UTF-8</dfn>은 코드 포인트를 바이트로 쓰는 규칙이에요. 영문자처럼 흔한 문자는 1바이트로 옛날 ASCII와 똑같고, 대부분의 한자와 한글은 3바이트, 이모지는 4바이트예요.</p>
+<p>영리한 점은 모든 바이트가 「자기 신분」을 갖고 있다는 거예요. 그림 23-4를 보세요. 첫 바이트의 앞부분에 1이 몇 개 있는지가 그 문자의 바이트 수예요. 뒤따르는 바이트는 모두 <code>10</code>으로 시작하고, <dfn>연속 바이트</dfn>라고 해요. 그래서 디코더가 <code>E4</code>(이진수 1110 0100)를 읽으면 뒤에 연속 바이트 2개가 와야 한다는 것을 알아요. 이때 덩어리가 이미 끝났다면, 올바른 처리는 <strong>E4를 일단 붙잡아 두고</strong> 다음 덩어리가 오면 이어 붙이는 거예요.</p>
+<p>Python의 <code>codecs.getincrementaldecoder</code>, 브라우저의 <code>TextDecoder</code>(<code>stream: true</code> 옵션 포함)가 모두 이런 <dfn>점진적 디코더</dfn>예요. 반대로 덩어리마다 따로 디코딩하면 반쪽짜리 글자는 대체 문자 �가 되고, 다시는 이어 붙일 수 없어요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/UTF-8" target="_blank" rel="noopener noreferrer">위키백과: UTF-8</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/API/TextDecoder" target="_blank" rel="noopener noreferrer">MDN: TextDecoder (영문)</a> · <a href="https://docs.python.org/ko/3/library/codecs.html" target="_blank" rel="noopener noreferrer">Python 문서: codecs</a> · <a href="https://www.rfc-editor.org/rfc/rfc3629" target="_blank" rel="noopener noreferrer">RFC 3629: UTF-8</a></p>
+<figure class="fig"><svg viewBox="0 0 400 254" role="img" aria-label="그림 23-4: 한자 한 글자의 코드 포인트 U+4E2D가 세 바이트 E4 B8 AD로 나뉘고, 각 바이트 앞의 표시 비트가 글자 안에서의 위치를 알려 준다">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle"><tspan lang="zh">中</tspan> = U+4E2D = 0100 111000 101101 (16비트)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="36" width="110" height="40" rx="6"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="36" width="110" height="40" rx="6"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="270" y="36" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">1110</tspan> 0100</text>
+<text class="f-text" fill="#182f2b" x="200" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">10</tspan>111000</text>
+<text class="f-text" fill="#182f2b" x="325" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">10</tspan>101101</text>
+<text class="f-text" fill="#182f2b" x="75" y="96" font-size="13" font-weight="600" text-anchor="middle">E4</text>
+<text class="f-text" fill="#182f2b" x="200" y="96" font-size="13" font-weight="600" text-anchor="middle">B8</text>
+<text class="f-text" fill="#182f2b" x="325" y="96" font-size="13" font-weight="600" text-anchor="middle">AD</text>
+<text class="f-muted" fill="#5c6d66" x="75" y="114" font-size="12" text-anchor="middle">첫 바이트: 모두 3바이트</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="114" font-size="12" text-anchor="middle">연속 바이트</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="114" font-size="12" text-anchor="middle">연속 바이트</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="128" width="380" height="96" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="148" font-size="12" font-family="monospace">0xxxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="148" font-size="12">1바이트: 영문, 숫자</text>
+<text class="f-text" fill="#182f2b" x="20" y="170" font-size="12" font-family="monospace">110xxxxx 10xxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="170" font-size="12">2바이트: 예) é</text>
+<text class="f-text" fill="#182f2b" x="20" y="192" font-size="12" font-family="monospace">1110xxxx 10xxxxxx 10xxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="192" font-size="12">3바이트: 대부분의 한자</text>
+<text class="f-text" fill="#182f2b" x="20" y="214" font-size="12" font-family="monospace">11110xxx 10xxxxxx ×3</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="214" font-size="12">4바이트: 예) 이모지</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="244" font-size="12" text-anchor="middle">강조한 비트는 신분 표시, 나머지 비트가 코드 포인트를 이뤄요</text>
+</svg><figcaption>그림 23-4　UTF-8은 <code>中</code>을 E4 B8 AD 세 바이트로 쪼개요. 첫 바이트만 봐도 이 글자가 모두 몇 바이트인지 알 수 있어서, 디코더는 「이 덩어리의 끝이 반쪽짜리 글자인가」를 판단할 수 있어요.</figcaption></figure>
+</aside>
+<p>Strata는 이 문제를 더 앞단에서 이미 처리해야 해요. 모델의 토큰 하나가 온전한 글자라는 보장이 없기 때문이에요. <code>serve/server.py</code>의 <code>Detokenizer</code>는 토큰마다 바이트를 점진적 UTF-8 디코더에 넣어요. 온전한 글자는 바로 내보내고, 토큰에 걸쳐 잘린 반쪽 글자는 붙잡아 두었다가 뒤의 토큰이 채워 주면 내보내요. <span class="ev ev-code">코드 사실</span> 코드 주석에는 계산도 적혀 있어요. 옛 방식은 토큰이 하나 올 때마다 지금까지 생성된 <strong>모든</strong> 번호를 처음부터 다시 디코딩했어요. 그래서 답변이 8K 토큰에 이르면 토큰마다 2밀리초, 16K에서는 4밀리초가 더 들었어요. 점진적 디코딩은 토큰당 비용이 일정해요.</p>
+<p>서버가 바이트를 내보낸 뒤에는 클라이언트가 같은 문제를 다시 풀어야 해요. 게다가 한 겹이 더 있어요. 이벤트도 잘려요. 아래 슬라이서는 126바이트짜리 SSE 스트림을 무작위로 잘라서 클라이언트 두 개가 동시에 받게 해요.</p>
+<div class="viz" data-viz="sse-chunk-split"><figure class="fig"><svg viewBox="0 0 400 248" role="img" aria-label="그림 23-5: 한자 한 글자의 세 바이트가 두 덩어리 사이에서 잘린다. 부주의한 클라이언트는 덩어리마다 따로 디코딩해서 깨진 글자를 얻고, 올바른 클라이언트는 E4를 붙잡아 두었다가 다 모인 뒤에야 그 글자를 해독한다">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">한자 「<tspan lang="zh">你</tspan>」 한 글자가 두 덩어리 사이에서 잘려요</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="70" y="34" width="38" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="89" y="54" font-size="13" text-anchor="middle">"</text>
+<rect class="f-warn" fill="#9e5d24" x="112" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="54" font-size="13" text-anchor="middle">E4</text>
+<rect class="f-accent" fill="#136d5a" x="168" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="187" y="54" font-size="13" text-anchor="middle">BD</text>
+<rect class="f-accent" fill="#136d5a" x="210" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="229" y="54" font-size="13" text-anchor="middle">A0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="252" y="34" width="38" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="54" font-size="13" text-anchor="middle">…</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="3 3" d="M159 28V72"/>
+<text class="f-muted" fill="#5c6d66" x="100" y="86" font-size="12" text-anchor="middle">3번째 덩어리의 끝</text>
+<text class="f-muted" fill="#5c6d66" x="249" y="86" font-size="12" text-anchor="middle">4번째 덩어리의 시작</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="6" y="100" width="194" height="112" rx="8"/>
+<text class="f-text" fill="#182f2b" x="14" y="122" font-size="13" font-weight="600">부주의한 클라이언트</text>
+<text class="f-text" fill="#182f2b" x="14" y="146" font-size="12">3번째만 디코딩: E4 → �</text>
+<text class="f-text" fill="#182f2b" x="14" y="168" font-size="12">4번째만 디코딩: BD A0 → ��</text>
+<text class="f-warn" fill="#9e5d24" x="14" y="194" font-size="12">「<tspan lang="zh">你</tspan>」를 영영 잃어요</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="100" width="189" height="112" rx="8"/>
+<text class="f-text" fill="#182f2b" x="213" y="122" font-size="13" font-weight="600">올바른 클라이언트</text>
+<text class="f-text" fill="#182f2b" x="213" y="146" font-size="12">3번째: E4를 일단 붙잡아 둠</text>
+<text class="f-text" fill="#182f2b" x="213" y="164" font-size="12">4번째: E4 BD A0가 모임</text>
+<text class="f-text" fill="#182f2b" x="213" y="180" font-size="12">→ <tspan lang="zh">你</tspan></text>
+<text class="f-text" fill="#182f2b" x="213" y="198" font-size="12">빈 줄이 오면 JSON 파싱</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="236" font-size="12" text-anchor="middle">인터랙티브: 「한 단계」로 126바이트를 받아 비교해요</text>
+</svg><figcaption>그림 23-5　덩어리의 경계는 글자의 경계를 봐주지 않아요. 덩어리마다 따로 디코딩하면 반쪽 글자가 깨진 글자가 되어 다시는 이을 수 없어요. 점진적 디코딩은 불완전한 바이트를 붙잡아 두고, 다 모이면 그때 글자를 내놓아요.</figcaption></figure></div>
+<p>몇 번 해 보면 알게 돼요. 부주의한 클라이언트는 글자만 잃는 게 아니에요. 잘린 이벤트를 나쁜 데이터로 보고 버리기도 해요. 틀리는 모양이 매번 다르고, 이렇게 있다 없다 하는 버그가 가장 찾기 어려워요.</p>
+
+<h2 id="sec-4">23.4 JSON: 이벤트에 담기는 것은 구조예요</h2>
+<p>SSE는 이벤트를 잘라 내는 일만 해요. 이벤트 안에 무엇이 담기는지는 상관하지 않아요. Strata는 <code>data:</code> 뒤에 JSON 한 조각을 넣어요.</p>
+<aside class="primer" id="c23-json">
+<h3>JSON: 사람도 프로그램도 읽을 수 있는 데이터 형식</h3>
+<p><dfn>JSON</dfn>은 아주 적은 규칙으로 구조화된 데이터를 나타내요. 중괄호 <code>{}</code>는 「이름: 값」 묶음, 대괄호 <code>[]</code>는 목록이에요. 값은 문자열, 숫자, <code>true</code>/<code>false</code>, <code>null</code>이거나 다시 한 겹 중첩될 수 있어요. 예를 들어 <code>{"delta":{"content":"你好"}}</code>는 delta 안의 content가 <code>你好</code>라는 뜻이에요.</p>
+<p>JSON을 파싱하려면 꼭 지켜야 할 조건이 하나 있어요. <strong>텍스트가 완전해야 해요.</strong> 닫는 괄호 하나, 따옴표 반쪽만 빠져도 파서는 오류를 내요. 먼저 빈 줄로 완전한 이벤트를 잘라 낸 뒤에 파싱해야 하는 이유가 이거예요.</p>
+<p>JSON 문자열 안의 비ASCII 문자는 쓰는 방법이 두 가지예요. UTF-8 바이트로 그대로 쓰거나, <code>\u4e2d</code> 같은 이스케이프로 쓰는 거예요. 두 방법의 뜻은 같고 바이트 수가 달라요. 그림 23-6을 보세요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/JSON" target="_blank" rel="noopener noreferrer">위키백과: JSON</a> · <a href="https://developer.mozilla.org/ko/docs/Web/JavaScript/Reference/Global_Objects/JSON" target="_blank" rel="noopener noreferrer">MDN: JSON</a> · <a href="https://docs.python.org/ko/3/library/json.html" target="_blank" rel="noopener noreferrer">Python 문서: json (ensure_ascii 포함)</a> · <a href="https://www.rfc-editor.org/rfc/rfc8259" target="_blank" rel="noopener noreferrer">RFC 8259</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="그림 23-6: 같은 한자 두 글자를 UTF-8로 그대로 쓰면 18바이트, \u 이스케이프로 쓰면 24바이트이다. 한자 100자는 각각 300바이트와 600바이트이다">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">같은 JSON을 쓰는 두 가지 방법</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="32" width="380" height="28" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="51" font-size="12" font-family="monospace" lang="zh">{"delta":"中文"}</text>
+<text class="f-text" fill="#182f2b" x="380" y="51" font-size="12" text-anchor="end">18바이트</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="68" width="380" height="28" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="87" font-size="12" font-family="monospace">{"delta":"\u4e2d\u6587"}</text>
+<text class="f-text" fill="#182f2b" x="380" y="87" font-size="12" text-anchor="end">24바이트</text>
+<text class="f-text" fill="#182f2b" x="10" y="124" font-size="12" font-weight="600">한자 100자짜리 답변, 글자 부분만:</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="134" width="125" height="16"/>
+<text class="f-text" fill="#182f2b" x="143" y="147" font-size="12">UTF-8 그대로: 300바이트</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="160" width="250" height="16"/>
+<text class="f-text" fill="#182f2b" x="268" y="173" font-size="12">이스케이프: 600바이트</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="202" font-size="12">글자당: UTF-8은 3바이트, \u 이스케이프는 ASCII 문자 6개</text>
+</svg><figcaption>그림 23-6　Strata의 스트리밍 이벤트는 <code>ensure_ascii=False</code>로 UTF-8을 그대로 써요. 그래서 중국어의 바이트 수가 이스케이프 방식의 절반이에요. 대가로 한자 한 글자의 바이트가 네트워크에서 잘릴 수 있어서, 클라이언트는 반드시 점진적으로 디코딩해야 해요. (<code>中文</code>은 「중국어」라는 뜻이에요.)</figcaption></figure>
+<p>Strata는 스트리밍 이벤트를 쓸 때 <code>json.dumps(c, ensure_ascii=False)</code>를 불러서 중국어를 UTF-8 그대로 내보내요. <span class="ev ev-code">코드 사실</span> 이스케이프 방식으로 바꾸면 선 위에는 ASCII 바이트만 흐르니까 「반쪽 한자」는 더 생기지 않아요. 하지만 중국어의 바이트 수가 두 배가 되고, SSE 규격은 원래 UTF-8 디코딩을 요구하며, 이벤트가 잘리는 문제도 그대로 남아요. 그래서 올바른 방향은 이스케이프로 피하는 게 아니라, 클라이언트가 성실하게 점진적 디코딩을 하는 거예요.</p>
+<p>세 문을 이어 놓으면 순서가 바뀌면 안 돼요.</p>
+<ol>
+<li><strong>바이트 → 글자</strong>: 점진적 UTF-8 디코딩. 불완전한 바이트는 붙잡아 둬요.</li>
+<li><strong>글자 → 이벤트</strong>: 버퍼에 모으고, 빈 줄을 만나야 완전한 이벤트 하나를 잘라 내요. 주석은 버려요.</li>
+<li><strong>이벤트 → 구조</strong>: 완전한 <code>data</code>를 JSON으로 파싱해서 글자를 꺼내요.</li>
+</ol>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 《컴파일러》에서 배운 「문자 스트림 → 어휘 분석 → 구문 분석」 파이프라인과 같은 발상이에요. 각 층은 앞 층이 <strong>완전한 단위</strong>를 내놓은 뒤에야 일하고, TCP는 바이트의 순서만 보장할 뿐 그보다 높은 층의 어떤 단위도 완전하다고 보장하지 않아요.</p>
+
+<h2 id="sec-5">23.5 모델의 출력도 「다 모은 뒤 보내야」 해요</h2>
+<p>같은 골칫거리가 서버 안에서 한 번 더 나타나요. 이 모델은 먼저 「생각」하고 나서 답해요. 생각은 <code>&lt;think&gt;</code>와 <code>&lt;/think&gt;</code> 사이에 쓰여요. 도구를 호출해야 할 때는 <code>&lt;tool_call&gt;&lt;function=이름&gt;&lt;parameter=인자&gt;값&lt;/parameter&gt;…</code> 같은 태그를 써요. 이 태그들은 프로그램이 보라고 있는 거라서 내 화면에 나타나면 안 돼요.</p>
+<p>문제는 태그도 잘릴 수 있다는 거예요. 이번 단계에서 <code>&lt;/th</code>가 나오고, 다음 단계에서야 <code>ink&gt;</code>가 나와요. <code>frontend.py</code>의 <code>OutputParser</code>가 바로 이 일을 맡아요. 잘린 태그는 붙잡아 두었다가 완성되면 처리해요. 그래서 클라이언트는 <code>&lt;tool_</code>이나 <code>&lt;/thi</code> 같은 반쪽 태그를 절대 보지 않아요. <span class="ev ev-code">코드 사실</span>[S16]</p>
+<div class="viz" data-viz="think-tag-holdback"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="그림 23-7: 모델 출력의 두 조각이 생각 종료 태그를 반으로 자른다. 파서는 앞 반쪽을 붙잡아 두고, 다음 조각이 도착하면 완전한 태그를 알아본 뒤 그 뒤의 글을 본문으로 분류한다">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">모델이 연달아 내놓은 두 조각</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="180" height="30" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="46" font-size="13">생각 중. <tspan class="f-warn" fill="#9e5d24">&lt;/th</tspan></text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="26" width="180" height="30" rx="5"/>
+<text class="f-text" fill="#182f2b" x="220" y="46" font-size="13"><tspan class="f-warn" fill="#9e5d24">ink&gt;</tspan>좋아요, </text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 60V78"/>
+<rect class="f-soft" fill="#e5f1df" x="30" y="80" width="340" height="30" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="100" font-size="13" font-weight="600" text-anchor="middle">파서: 태그의 시작일 수도 있는 꼬리를 붙잡아요</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 110V126"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="128" width="120" height="58" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="70" y="148" font-size="12" text-anchor="middle">생각</text>
+<text class="f-text" fill="#182f2b" x="70" y="172" font-size="13" text-anchor="middle">생각 중.</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="128" width="120" height="58" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="148" font-size="12" text-anchor="middle">보류 중</text>
+<text class="f-warn" fill="#9e5d24" x="200" y="172" font-size="13" text-anchor="middle">&lt;/th</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="128" width="120" height="58" rx="6"/>
+<text class="f-on" fill="#ffffff" x="330" y="148" font-size="12" text-anchor="middle">본문</text>
+<text class="f-on" fill="#ffffff" x="330" y="172" font-size="13" text-anchor="middle">좋아요,</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="210" font-size="12" text-anchor="middle">이으면 완전한 &lt;/think&gt;: 생각 끝, 뒤의 글은 본문</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="228" font-size="12" text-anchor="middle">인터랙티브: 조각 6개를 하나씩 넣어 보세요</text>
+</svg><figcaption>그림 23-7　파서는 「태그의 시작일 수도 있는」 몇 글자만 붙잡아 두고, 나머지 글은 바로 내보내요. 이렇게 하면 반쪽 태그도 새지 않고 화면도 느려지지 않아요.</figcaption></figure></div>
+<p>실제 <code>OutputParser</code>는 이 컴포넌트보다 두 가지를 더 해요. 첫째, 도구 호출의 진행 상황을 쓰는 도중에 알려 줘요. 도구 이름이 나오자마자 시작 이벤트를 보내고, 인자도 조각조각 알려 줘서 모델이 큰 파일을 쓰는 몇 분 동안 클라이언트가 멍하니 기다리지 않게 해요. <span class="ev ev-code">코드 사실</span> 둘째, 태그 앞뒤의 줄바꿈도 조심해서 처리해서, 스트리밍 출력과 한 번에 내는 출력의 결과가 완전히 같도록 해요.</p>
+<p>도구 호출에는 보안 문제도 걸려 있어요. 모델이 함수 이름을 썼다고 해서 시스템이 그것을 실행해도 된다는 뜻은 아니에요. 모델의 출력은 <strong>신뢰할 수 없는 입력</strong>이라서, 실행 전에 인자와 권한을 검사해야 해요. Strata는 명시적으로 요구한 요청(<code>"strata_mcp": true</code>를 붙인 것)에만 MCP 도구를 제공하고, 다른 클라이언트가 보는 API는 예전과 똑같아요. [S15] 24장에서 「누가 모델에게 무엇을 시킬 권한이 있는가」를 이어서 다뤄요.</p>
+
+<h2 id="sec-6">23.6 직접 해 보기: 같은 스트림을 아무 크기로나 잘라 보기</h2>
+<p>이 장의 인터랙티브 실험 「바이트 조각은 이벤트가 아니에요」를 열어 보세요. 중국어가 든 SSE 스트림을 1~32바이트의 고정 크기로 잘라서, 올바른 세 문으로 복원해요. 이 순서로 세 가지를 해 보세요.</p>
+<ol>
+<li>1바이트부터 32바이트까지 차례로 해 보세요. 어떻게 자르든 복원된 글자는 한 글자도 다르지 않아야 해요. 하나라도 다르면 파서에 버그가 있다는 뜻이에요.</li>
+<li>CRLF 줄바꿈을 켜 보세요. SSE는 줄바꿈 세 가지를 허용하고, 파서는 전부 알아봐야 해요.</li>
+<li>「미완성」 버퍼를 눈여겨보세요. 스트림이 이벤트 중간에서 끊기면 그 반쪽 이벤트는 그대로 두거나 오류로 처리해야 해요. 이미 완성된 척하면 안 돼요.</li>
+</ol>
+<p>그다음 이 장의 인터랙티브 그림 두 개로 돌아가서, 조각 크기를 1바이트와 64바이트로 맞춰 각각 돌려 보세요. 덩어리가 작을수록 부주의한 방식의 오류가 뚜렷하고, 클수록 오류가 깊이 숨는다는 것이 더 직관적으로 보일 거예요.</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>Strata의 서비스 계층은 앱의 JSON 요청을 토큰 번호로 번역하고, 엔진이 내놓은 토큰을 다시 글자로 바꿔 SSE 이벤트 스트림으로 돌려보내요. 이 계층과 엔진 사이의 인터페이스는 <code>Engine.generate</code> 하나뿐이에요.</li>
+<li>바이트에서 글자까지 문이 세 개 있어요. 점진적 UTF-8 디코딩, 빈 줄로 이벤트 자르기, 완전한 JSON 파싱이에요. 네트워크 덩어리의 경계는 이 세 경계와 상관이 없으니, 문마다 먼저 다 모아야 해요.</li>
+<li>모델 출력 속의 태그도 잘려요. Strata의 <code>OutputParser</code>는 태그의 시작일 수도 있는 꼬리를 붙잡아 두어 반쪽 태그를 절대 내보내지 않고, 완성된 도구 호출은 끝까지 다 쓴 뒤에야 인정해요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: 「SSE 이벤트 개수를 세면 모델이 토큰을 몇 개 생성했는지 알 수 있다.」</strong></p>
+<p>둘 사이에는 고정된 관계가 없어요. Strata의 첫 이벤트는 「어시스턴트가 말을 시작해요」만 알리고 토큰이 하나도 없어요. 긴 질문을 읽는 동안에는 keep-alive 주석이 끼어들어요. 토큰 하나가 한자의 반쪽만 가져오면 그 단계에서는 보낼 글자가 없어요. 태그가 붙잡혀 있을 때도 잠시 아무것도 안 보낼 수 있어요. 반대로 이벤트 하나 속의 글이 여러 토큰에서 올 수도 있어요. 토큰 수를 세려면 이벤트가 아니라 응답 끝의 <code>usage</code> 필드를 보세요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 세 경계의 엄격한 요구, 「호환」의 범위, 검증 방법</summary>
+<h3>세 경계를 규격대로 분명히 하기</h3>
+<p>SSE 규격이 파서에 요구하는 것은 몇 가지로 정리돼요 [R05]. 이벤트 스트림은 UTF-8로 디코딩해요. 줄 끝은 CRLF, 단독 LF, 단독 CR 모두 가능해요. 빈 줄이 이벤트 전달을 한 번 촉발해요. 같은 이벤트의 여러 <code>data</code> 줄은 LF로 이어 붙여요. 콜론으로 시작하는 줄은 주석이에요. 스트림이 끝날 때 빈 줄로 끝나지 않은 반쪽 이벤트는 그냥 버려요.</p>
+<p>여기서 구현 순서가 나와요. <strong>점진적 바이트 디코딩 → 텍스트를 쌓고 이벤트 경계로 프레임 나누기 → data 페이로드 파싱</strong>이에요. 덩어리 하나를 읽을 때마다 <code>JSON.parse</code>를 하면 글자가 잘리는 문제와 이벤트가 잘리는 문제에 한꺼번에 걸려요. 이 책의 인터랙티브 실험은 data만 있는 부분 집합만 구현했고, LF와 CRLF를 지원해요. EventSource의 자동 재연결, <code>id</code>와 <code>retry</code> 필드는 구현하지 않았으니 완전한 SSE 클라이언트로 쓰면 안 돼요.</p>
+<h3>예제: 한자 한 글자가 세 덩어리에 걸릴 때</h3>
+<p><code>中</code>의 세 바이트 E4 B8 AD가 네트워크 덩어리 세 개에 나뉘어 들어가요. 덩어리마다 완전한 텍스트로 보고 디코딩하면 대체 문자 세 개가 나와요. 점진적 디코더는 E4를 읽으면 2바이트가 더 필요하다는 걸 알고 붙잡아 둬요. B8을 읽으면 1바이트가 더 필요하고, AD를 읽고서야 <code>中</code>을 내놓아요. 마찬가지로 <code>data: {"delta":"中"}</code> 뒤의 줄바꿈 두 개도 콜론, 따옴표, 줄바꿈 두 개 사이 어디서든 잘릴 수 있어요. 네트워크 덩어리 수와 토큰 수 사이에는 고정된 관계가 없어요.</p>
+<h3>「OpenAI 호환」은 인터페이스의 부분 집합을 뜻해요</h3>
+<p>「호환」은 어떤 엔드포인트, 어떤 필드, 어떤 의미를 구현했는지로 이해해야 해요. 경로가 <code>/v1/...</code>처럼 생겼다는 것만으로 전부 호환된다고 판단하면 안 돼요. 이 책은 <code>serve/server.py</code> 맨 앞에 나열된 엔드포인트와 경계만 설명하고 [S15], 모든 프로토콜 필드를 하나하나 감사하지는 않았어요. 소스를 읽어서 확인할 수 있는 세부 사항이 몇 가지 있어요. 첫 이벤트의 delta는 <code>{"role":"assistant","content":""}</code>예요. 생각은 <code>reasoning_content</code> 필드에 담겨요. 취소로 끝난 경우 클라이언트에게는 <code>stop</code>으로 보고해요.</p>
+<h3>스트림이 이미 시작된 뒤에 오류를 발견하면</h3>
+<p>HTTP 상태 코드는 응답 헤더에 있고, 응답 헤더는 한 번 나가면 바꿀 수 없어요. 그래서 Strata는 미리 알 수 있는 오류를 스트림이 시작되기 전에 처리해요. 질문 길이에 최대 출력 길이를 더한 값이 컨텍스트를 넘으면 곧바로 400으로 거부하고, 몰래 자르는 일은 절대 없어요. [S15] 스트림이 시작된 뒤에야 엔진이 오류를 내면(예를 들어 엔진 프로세스가 갑자기 종료되면) 상태 코드는 이미 200이에요. 이때 Strata는 스트림 안에 <code>error</code> 필드가 든 이벤트를 쓰고, 이어서 <code>data: [DONE]</code>으로 정상적으로 마무리해요. Anthropic 스타일 API는 <code>event: error</code> 이벤트를 써요. <span class="ev ev-code">코드 사실</span> 클라이언트는 상태 코드만 보지 말고 이벤트 내용도 검사해야 해요.</p>
+<h3>템플릿 샌드박스는 템플릿 층만 지켜요</h3>
+<p><code>frontend.py</code>는 Jinja의 <code>ImmutableSandboxedEnvironment</code>로 채팅 템플릿을 렌더링해요. [S16] 템플릿 코드가 할 수 있는 일을 제한하는, 템플릿 층의 구체적인 방어예요. 도구 실행, 이미지 URL 가져오기, 로컬 파일 읽기까지 저절로 안전하다는 것을 증명해 주지는 않아요. 자원 접근마다 별도의 위협 모델이 필요해요. Strata는 MCP 도구에 대해 검사를 하나 더 둬요. Strata 자체 웹 페이지(또는 설정에서 명시적으로 신뢰한 출처)이면서 JSON 형식으로 보낸 요청만 모델이 이 도구들을 쓰게 해 줘요. 도구는 이 컴퓨터에서 내 권한으로 실행되기 때문이에요. <span class="ev ev-code">코드 사실</span></p>
+<h3>검증 방법과 증거의 경계</h3>
+<p>SSE 파싱 검증은 이래요. 중국어가 든 JSON 이벤트 두 개를 1~32바이트로 잘라서, 어떻게 자르든 복원 결과가 완전히 같을 것을 요구해요. CRLF, 여러 줄 data, 끝이 잘린 이벤트를 테스트에 넣어요. 잘린 이벤트는 미완성 상태로 두거나 오류를 내야 하고, 성공한 것처럼 꾸미면 안 돼요.</p>
+<p><code>MockEngine</code>으로는 스트리밍과 비스트리밍 응답, 취소, 도구 인자, 오류가 났을 때의 마무리 이벤트를 검증할 수 있어요. 하지만 GPU 추론의 품질이나 실제 성능은 증명하지 못해요. [S15] 이것이 바로 계층별 테스트의 장점이면서 증거의 경계예요.</p>
+</details>
