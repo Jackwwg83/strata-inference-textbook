@@ -1,0 +1,262 @@
+[
+  {
+    "id": "10",
+    "title": "MoE: why huge models run on small graphics cards",
+    "deck": "Having many parameters does not mean using many parameters at every step.",
+    "part": "II · Model and state",
+    "courses": [
+      "Algorithm Design",
+      "Probability",
+      "Linear Algebra"
+    ],
+    "prereq": "Chapter 1. Knowing what a token and VRAM are is enough; Chapters 3 and 4 help with the \"Go deeper\" section.",
+    "goals": [
+      "Explain what an expert is and how the router picks experts",
+      "Estimate how many parameters one token really uses",
+      "Explain how Strata splits the experts between the GPU and RAM"
+    ],
+    "quiz": [
+      {
+        "text": "Each layer has 512 experts and picks only 10 each time. Can we just delete the experts that were not picked?",
+        "choices": [
+          "Yes, they were not used this time anyway",
+          "No, the next token may need them",
+          "Only if the router is accurate enough"
+        ],
+        "correct": 1,
+        "why": "Sparse computation is not permanent pruning. Deleting experts changes the model itself; the upstream Coder version dropped half of the experts and got clearly weaker at Chinese."
+      },
+      {
+        "text": "If more experts are cached on the GPU, what usually happens to generation speed?",
+        "choices": [
+          "It goes up: the CPU has fewer missed experts to compute",
+          "No change: speed depends only on GPU compute",
+          "It goes down: VRAM is fuller"
+        ],
+        "correct": 0,
+        "why": "In upstream measurements, raising the experts on the GPU from 1,589 to 3,872 lifted the speed from 50.9 to 62.6 tokens per second."
+      },
+      {
+        "text": "The 10th and 11th experts differ in score by only 0.0001. What can a tiny numerical error in the computation do?",
+        "choices": [
+          "Nothing, the error is too small",
+          "It can swap out a whole expert",
+          "The output will also differ by only 0.0001"
+        ],
+        "correct": 1,
+        "why": "Top-k is a discontinuous boundary: however small the score gap, once the ranking flips, a different expert takes part in the computation."
+      }
+    ],
+    "problem": "You have a 12 GB graphics card and plan to switch to a 24 GB one. Using \"each extra 1 GB of VRAM holds about 700 more experts\", how many more experts can you cache? Will speed necessarily rise in proportion? List at least two factors that could make the estimate wrong.",
+    "answer": "The extra 12 GB holds about 12 × 700 = 8,400 more experts. But speed will not rise in proportion: (1) VRAM must also hold the chat history (KV), the weights used at every step such as attention, and scratch buffers, and a long context eats more VRAM; (2) the gain depends on the hit rate: when the hot experts are already on the GPU, the new ones are mostly cold, so returns diminish; (3) the bottleneck may move to the CPU, RAM bandwidth or the GPU's own compute; (4) experts differ in size across quantization formats, so the count per GB differs too. The only way to know the real gain is to measure with a fixed model, context length and workload.",
+    "level": "Core"
+  },
+  {
+    "id": "19",
+    "title": "How many drafts to guess: expected value, cost and learning on the fly",
+    "deck": "A correctly guessed token is free, but verification takes time. How many guesses pay off best, and what if the acceptance rate changes?",
+    "part": "IV · Reuse and speculation",
+    "courses": [
+      "Probability",
+      "Optimization",
+      "Statistics"
+    ],
+    "prereq": "Chapter 18 (speculative decoding and commit). Chapter 10's expert cache helps but is not required.",
+    "goals": [
+      "Use conditional acceptance rates to compute the expected tokens committed per round, and explain why extra guesses give diminishing returns",
+      "Explain why you compare \"expected tokens committed per millisecond\" rather than the acceptance rate or the window length",
+      "Estimate a changing acceptance rate with an exponential moving average, and handle draft positions that were never compared correctly"
+    ],
+    "quiz": [
+      {
+        "text": "Three drafts have conditional acceptance rates 0.8, 0.6 and 0.5. How many tokens does one round commit on average?",
+        "choices": [
+          "2.52",
+          "2.9",
+          "3.0"
+        ],
+        "correct": 0,
+        "why": "E = 1 + 0.8 + 0.8×0.6 + 0.8×0.6×0.5 = 1 + 0.8 + 0.48 + 0.24 = 2.52. The leading 1 is the big model's own token; draft i is useful only if the first i are all accepted."
+      },
+      {
+        "text": "A round guessed 3 and the 1st was rejected right away. How should the estimate for position 3 be updated?",
+        "choices": [
+          "Record a failure",
+          "Do not update: it was never compared this round",
+          "Record a success"
+        ],
+        "correct": 1,
+        "why": "Once the 1st draft is rejected, later positions are not compared; the outcome is \"not seen\". Recording a failure drags the deep positions' estimates down, and the controller wrongly concludes long windows do not pay. Strata's observe updates only the accepted positions and the first rejected one."
+      },
+      {
+        "text": "When the controller picks a window length, which number does it really want to maximize?",
+        "choices": [
+          "The number of drafts",
+          "The drafts' acceptance rate",
+          "Expected tokens committed ÷ time per round"
+        ],
+        "correct": 2,
+        "why": "The goal is more tokens per millisecond. As the window grows, the expected token count grows more and more slowly while the round time keeps rising, so speed has a peak. A high acceptance rate with more expensive rounds can still be slower overall."
+      }
+    ],
+    "problem": "Strata's controller updates acceptance rates with an exponential moving average using α = 0.05. What would happen with α = 0.5 instead? Explain in terms of reaction speed and noise, and compute the half-life for both values of α.",
+    "answer": "Half-life = ln 0.5 ÷ ln(1 − α). That is about 13.5 rounds for α = 0.05 and exactly 1 round for α = 0.5. With α = 0.5 the estimate catches up almost immediately after a topic change, but every acceptance or rejection makes it jump a lot (the steady-state standard deviation is about √(α ÷ (2 − α) × p(1 − p)), which at p = 0.86 rises from about 0.056 to about 0.20). The controller would change windows constantly, and a few chance rejections could even push the estimate below the threshold and stop drafting. Looking only at Controller's two functions, once drafting stops there are no new observations, so the estimate can never recover. α is a trade-off between \"react fast\" and \"do not get fooled by noise\".",
+    "level": "Core"
+  },
+  {
+    "id": "20",
+    "title": "Prefix reuse, snapshots and copy-on-write",
+    "deck": "Why does a follow-up answer almost instantly? The engine saved the prefix it already read. But \"the same question\" is not \"the same state\", and saving the KV is not saving the whole conversation.",
+    "part": "IV · Reuse and speculation",
+    "courses": [
+      "Database Systems",
+      "Operating Systems",
+      "Software Engineering"
+    ],
+    "prereq": "Chapters 9, 17 and 18. Knowing what the KV cache and recurrent state are is enough.",
+    "goals": [
+      "Name the four conditions prefix reuse must meet: steering mode, length, tokens and image identity",
+      "Explain why the KV cache can roll back by \"ignoring the later rows\" while the recurrent state can only roll back through checkpoints",
+      "Use copy-on-write to count how many pages two branches sharing a prefix must copy, and state what Strata actually does"
+    ],
+    "quiz": [
+      {
+        "text": "Two requests have exactly the same token IDs; only the image attached to the second one is different. Will Strata reuse the first one's checkpoint?",
+        "choices": [
+          "Yes, the tokens are the same",
+          "No, the image's position and hash must also match",
+          "Yes, as long as both images have the same size"
+        ],
+        "correct": 1,
+        "why": "In the token sequence an image is just a run of placeholders, and identical placeholders can stand for completely different pictures. The engine records each image's start position and content hash separately; a different hash means no reuse."
+      },
+      {
+        "text": "You want to take a conversation back to its state at token 4. Which kind of memory can roll back by simply \"ignoring what comes after\", and which cannot?",
+        "choices": [
+          "The KV cache can, the GDN recurrent state cannot",
+          "Both can",
+          "The GDN recurrent state can, the KV cache cannot"
+        ],
+        "correct": 0,
+        "why": "The KV cache appends one row per position, and the later rows will be overwritten later, so ignoring them works. The GDN recurrent state is rewritten whole and in place for every token, so its old form is gone; only a checkpoint saved in advance can bring it back."
+      },
+      {
+        "text": "The prefix has 17 tokens at 4 per page, and after the fork both A and B keep writing. With copy-on-write, how many KV pages must at least be copied after the fork?",
+        "choices": [
+          "0 pages",
+          "1 page",
+          "5 pages"
+        ],
+        "correct": 1,
+        "why": "The first 4 pages are full and only read, never written, so they can be shared. Page 5 holds only 1 prefix token and both sides will write into it, so whoever writes first must copy it. Only a full copy would need 5 pages."
+      }
+    ],
+    "problem": "Design a minimal experiment that needs no GPU to check whether \"session A saves a snapshot, switches to run B, then restores A\" leaks state between the sessions.",
+    "answer": "Use a deterministic toy recurrence (for example s ← 0.5s + t). Give A and B the same prefix, then different suffixes, and advance them in turns: run A a few steps and save a snapshot, switch to B, then restore A and continue. At every step compare A's and B's states bit for bit with the result of \"replaying each one independently from the start\"; they must be exactly equal. Then add some failures: A is cancelled midway and B continues, a snapshot is truncated, a snapshot has the wrong format, the budget is too small. The correct response is to refuse clearly and keep the original state, not to carry on computing with half a state.",
+    "level": "Core"
+  },
+  {
+    "id": "21",
+    "title": "Two graphics cards: layer split, pipelining and handoff",
+    "deck": "Two graphics cards first solve \"it does not fit\", not \"it is too slow\": a token still queues layer by layer, and the pipeline only starts turning while reading the prompt.",
+    "part": "V · Serving and scaling",
+    "courses": [
+      "Parallel Computing",
+      "Distributed Systems",
+      "Performance Modeling"
+    ],
+    "prereq": "Chapters 1, 5, 10 and 16; having read Chapter 18's \"verify window\" helps.",
+    "goals": [
+      "Tell apart what a layer split, tensor parallelism and request parallelism each save and each cost",
+      "Use a + b + (N − 1) × max(a, b) to compute a pipeline's total time and its bubbles",
+      "Estimate the cost of a handoff from the bytes, the number of crossings and the bandwidth"
+    ],
+    "quiz": [
+      {
+        "text": "The first card needs 4 ms for its layers and the second 5 ms, ignoring transfers. Generating just one token, what is the fastest it can take?",
+        "choices": [
+          "5 ms",
+          "9 ms",
+          "4.5 ms"
+        ],
+        "correct": 1,
+        "why": "The same token must finish the first card's layers before it can enter the second card, so the two parts can only run one after the other: 4 + 5 = 9 ms. The two cards cannot work on the same token at once."
+      },
+      {
+        "text": "Still 4 ms and 5 ms, the prompt is cut into 8 chunks, and the two cards read staggered. About how long does it take?",
+        "choices": [
+          "44 ms",
+          "72 ms",
+          "40 ms"
+        ],
+        "correct": 0,
+        "why": "The slower card sets the beat: total = 4 + 5 + (8 − 1) × 5 = 44 ms. 72 ms is chunk after chunk in sequence; 40 ms ignores the fill bubble at the start."
+      },
+      {
+        "text": "Why does Strata's two-card mode not need NVLink?",
+        "choices": [
+          "It crosses cards only once per verify window, with only a few hundred KB of data",
+          "It splits every layer's matrices across both cards and computes them at the same time",
+          "Each card serves different users and they never talk"
+        ],
+        "correct": 0,
+        "why": "Strata uses a layer split: a token crosses cards once per verify window, 51,216 bytes per token, relayed through RAM, and PCIe is enough. Syncing at every layer is what tensor parallelism does, and that is what needs a fast interconnect."
+      }
+    ],
+    "problem": "A friend says: \"I added a second graphics card and prompt reading got 20% faster, which shows the layer-split pipeline is very efficient.\" What is loose about this reasoning? How would you measure it?",
+    "answer": "The extra VRAM can cache more experts and cut CPU work, which by itself speeds things up and has nothing to do with the pipeline. Measure separately: each card's expert hit rate, the CPU pool's workload, the handoff time, and each stage's time per chunk. Then use a + b + (N − 1) × max(a, b) to estimate the pure pipeline's theoretical gain and compare it with the measurement. You can also compare with \"no split when one card is enough\" (upstream's split_skip_if_fits switch) to see how much comes from capacity and how much from the pipeline.",
+    "level": "Core"
+  },
+  {
+    "id": "22",
+    "title": "Portability: one source tree, different machines",
+    "deck": "A chip understands only its own instructions. One source tree must be compiled once for each kind of machine, and \"it compiles\" is still several levels of evidence away from \"it is supported\".",
+    "part": "V · Serving and scaling",
+    "courses": [
+      "Computer Organization",
+      "Compilers",
+      "Software Engineering"
+    ],
+    "prereq": "Chapters 10 and 13. Knowing that the GPU and the CPU split the expert computation is enough; Chapter 4's floating-point rounding helps with Section 22.4.",
+    "goals": [
+      "Explain what the compiler, the instruction set and conditional compilation each do, and read a block of #if branches",
+      "Explain how Strata picks AVX-512 / AVX2 kernels at run time on the CPU, and how it builds CUDA-style source into a HIP engine",
+      "Tell apart four levels of evidence (compiles, tests pass, runs on a real card, maintainer verified) and write a support statement that does not overclaim"
+    ],
+    "quiz": [
+      {
+        "text": "Strata adds the AVX-512 compile switch only to a few kernel source files, not to the whole program. What is the main reason?",
+        "choices": [
+          "To make compiling faster",
+          "So the CPU probe and the fallback code can run safely on CPUs without AVX-512",
+          "Because AVX-512 instructions may appear in only one file"
+        ],
+        "correct": 1,
+        "why": "Once a file is compiled with the AVX-512 switch, the compiler may insert AVX-512 instructions anywhere in it. Keeping the probe and the fallback in files without the switch lets an old CPU safely \"ask first\" and then decide which path to take."
+      },
+      {
+        "text": "How does Strata's HIP build get CUDA-style source to compile for AMD cards?",
+        "choices": [
+          "A tool permanently rewrites every source file into HIP",
+          "At compile time it force-includes a shim header whose macros rename cuda-prefixed names to hip names, and it hand-writes a few built-in functions HIP lacks",
+          "AMD cards can run NVIDIA machine code directly"
+        ],
+        "correct": 1,
+        "why": "The build script uses -include to push hip_compat/cuda_runtime.h into every source file; it holds 82 lines of #define renaming, and built-ins such as __dp4a and warp shuffles are implemented separately per GPU architecture in intrinsics.hpp. The source itself is not changed."
+      },
+      {
+        "text": "gfx1102 compiles and passes Strata's built-in tests. By this chapter's evidence levels, which statement is most accurate?",
+        "choices": [
+          "It is fully supported",
+          "It has two levels of evidence, compiling and tests, but no report of a complete model run yet, so it still counts as unverified",
+          "It cannot be used because it is on no list"
+        ],
+        "correct": 1,
+        "why": "The build script lists gfx1102 as unverified: it compiles, and configuring prints a warning. Passing tests shows the kernels do not crash and compute correctly, but a real model running on a real card, reproduced by someone, is a higher level of evidence."
+      }
+    ],
+    "problem": "You added a new GPU backend to Strata and ran one decode successfully on one card with one model pack. Write a support statement that does not overclaim, listing at least the build conditions to record, the scope that was verified, and the parts explicitly not tested.",
+    "answer": "Build conditions: the source commit, the compiler and its version, the list of target architectures, every compile switch, the dependency library versions (such as the pinned ggml commit), and the runtime environment variables. Verified scope: the device model and driver, the model pack and quantization format, the KV format, whether only decode or also prefill was tested, the context length and how many tokens were run; label the evidence level clearly as \"compiles\", \"built-in tests pass\", \"tensor-level error against a reference implementation\" or \"end-to-end quality\". Untested parts: list other architectures, other model packs, long contexts, multiple GPUs, another operating system and so on, one by one, as \"untested\". Do not write \"fully supported\", and do not promise bit-identical results with other backends.",
+    "level": "Core"
+  }
+]
