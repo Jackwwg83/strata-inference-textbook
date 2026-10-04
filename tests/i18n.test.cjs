@@ -49,6 +49,9 @@ test('lab page string tables match the Chinese keys', () => {
   }
 });
 
+// Widget keys whose values are Chinese teaching samples in every language (UTF-8 splitting in chapter 23).
+const CJK_SAMPLES = new Set(['wireDeltas']);
+
 test('widget string tables keep the Chinese keys and arities in every language', () => {
   const fs2 = require('node:fs'), path2 = require('node:path');
   const dir = path2.resolve(__dirname, '../src/viz');
@@ -66,7 +69,7 @@ test('widget string tables keep the Chinese keys and arities in every language',
         if (typeof zh[k] === 'function') assert.equal(t[k].length, zh[k].length, `widget ${lang}.${k} arity`);
         if (Array.isArray(zh[k])) assert.equal(t[k].length, zh[k].length, `widget ${lang}.${k} length`);
         const text = typeof t[k] === 'function' ? String(t[k]) : JSON.stringify(t[k]);
-        assert.ok(!/[一-鿿]/.test(text), `widget ${lang}.${k} contains Chinese`);
+        if (!CJK_SAMPLES.has(k)) assert.ok(!/[一-鿿]/.test(text), `widget ${lang}.${k} contains Chinese`);
       }
     }
   }

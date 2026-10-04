@@ -27,7 +27,8 @@ if (lang !== 'zh') {
     const a = list(zh, re), b = list(html, re);
     need(a === b, `${what} differ from the Chinese master: zh=[${a.slice(0, 120)}] ${lang}=[${b.slice(0, 120)}]`);
   }
-  const cjk = html.replace(/<code>[\s\S]*?<\/code>/g, '').match(/[\u4e00-\u9fff]/g);
+  // Chinese teaching samples are allowed inside <code> or inside an element marked lang="zh".
+  const cjk = html.replace(/<code>[\s\S]*?<\/code>/g, '').replace(/<(text|tspan|code|span)\b[^>]*\blang="zh"[^>]*>[\s\S]*?<\/\1>/g, '').match(/[\u4e00-\u9fff]/g);
   need(!cjk, `contains ${cjk ? cjk.length : 0} Chinese characters`);
 }
 
