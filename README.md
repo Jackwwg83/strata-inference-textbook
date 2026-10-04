@@ -2,6 +2,8 @@
 
 **一颗 token 的计算机科学之旅 · 独立 Web 教材 1.0.0 · 2026-10-04**
 
+在线阅读：https://strata-inference-textbook.vercel.app · 勘误：https://github.com/Jackwwg83/strata-inference-textbook/issues
+
 这不是课程目录或网站模板，而是已经写入正文、习题、实验与授课手册的静态教材。以 Niko1221/Strata 为案例，连接线性代数、概率论、计算机组成、操作系统、并行计算、数据库、网络与软件工程。
 
 ## 交付内容
@@ -76,7 +78,7 @@ Vercel 原始配置说明：
 - https://vercel.com/docs/builds/configure-a-build
 - https://vercel.com/docs/project-configuration/vercel-json
 
-**本交付没有替你执行线上部署。** Vercel 在这里托管教材与浏览器计算，不运行 C++/CUDA 推理引擎；以后接入真实 GPU 实验应另建有认证、配额、隔离与审计的后端。
+**线上版本**：https://strata-inference-textbook.vercel.app 。仓库已接入 Vercel，push 到 `main` 会自动重新部署。 Vercel 在这里托管教材与浏览器计算，不运行 C++/CUDA 推理引擎；以后接入真实 GPU 实验应另建有认证、配额、隔离与审计的后端。
 
 ## 教材的阅读顺序
 

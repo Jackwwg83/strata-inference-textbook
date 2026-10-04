@@ -37,3 +37,21 @@
 ## 发布前的最小人工验收
 
 在自己的 Vercel 预览域名上打开首页、章节与实验深链接并刷新；保存笔记后关闭并重新打开页面；导出 JSON 并在另一浏览器导入；确认本机下载得到全文 HTML、实验文件；用实际 iPad 或手机调整控件并阅读长表。记录浏览器版本与域名后，再将此项标记为生产发布验收。
+
+## 线上发布验收（2026-10-04）
+
+对象：https://strata-inference-textbook.vercel.app ，由 GitHub `main` 推送自动部署。浏览器为 Playwright Chromium，经正常 HTTPS origin 访问，使用原生 localStorage，不用测试替身。
+
+| 检查 | 结果 |
+| --- | --- |
+| 静态资源 | `/`、`fullbook.html`、`labs/tiny_inference.py`、`licenses/Strata-MIT.txt` 返回 200；不存在的路径返回 404 |
+| 安全响应头 | `nosniff`、`Referrer-Policy`、`X-Frame-Options: SAMEORIGIN` 生效 |
+| 深链接与刷新 | `#chapter/17`、`#lab/spec` 直接打开并整页刷新后，路由与标题正确 |
+| 持久化 | 第 17 章写入笔记，整页刷新后仍在原生 localStorage 中 |
+| 导出与导入 | 导出 JSON，清空本机记录，再通过文件输入导入；笔记完整恢复 |
+| 实验计算 | spec 实验默认值手算复核：p=0.8、k=2 时 E=2.44、成本 14 ms、174.29 token/s，与页面一致 |
+| 手机视口 375px | KV 实验调节控件后输出更新；首页、两章、教师手册、来源、术语页均无横向溢出 |
+| 初版标注 | 每个路由显示“初版 · AI 辅助编写 · 未经同行审阅”与勘误链接；页脚含作者与许可 |
+| 控制台 | 零 error、零 warning |
+
+仍未验证：Safari、Firefox、iPad 真机；系统下载目录实际收到文件；屏幕阅读器。
