@@ -1,18 +1,217 @@
-<h2 id="sec-1">20.1 为什么多轮不必每次从头算？</h2>
-<p>若新输入严格包含已经处理过的相同前缀，就可以从对应状态继续处理新增尾部。省掉的是重复计算，不是省略输入含义。关键在于<strong>前缀的内容与执行配置相容</strong>，而不是文本“看起来差不多”。</p>
-<p><code>conversation_prefix</code> 检查 ID 序列及前缀范围内的图像身份；缓存匹配还考虑 steering 模式。其匹配条件要求 checkpoint 长度小于 prompt 长度，因为最后一个 prompt token 要启动后续验证窗口。[S10]</p>
-<h2 id="sec-2">20.2 多模态身份为何不能只靠 token？</h2>
-<p>两个请求可以含相同的 image_pad 标记，却对应不同图片。如果只用 token IDs 命中缓存，图像语义就被错换。当前 <code>ConversationImageKey</code> 包含 start 和 hash，强调图像身份进入匹配条件。[S10]</p>
-<p>同理，一个生产系统扩展还需考虑模型权重版本、tokenizer / 模板、RoPE、量化、设备数值模式与授权域。这些是本教材提出的扩展检查清单。源码的 geometry 数组自己说明只是运行时兼容性，不是模型权重身份或磁盘 schema，不能用它替代全部身份键。[S10]</p>
-<h2 id="sec-3">20.3 一份快照要包含什么？</h2>
-<p>读到的 checkpoint 包含 IDs、图像、GDN、PLE、tail、block position 等；KV 部分又有格式、页信息、量化 scale 和 pooled indexer；草稿层状态也可能参与。[S10] 这解释了为什么把 KV 文件保存一下并不足以声明“任意对话可无损恢复”。</p>
-<p>不同设备分层还会有 stage_parts；固定接口说明普通分层 checkpoint 与整会话 parking 的支持边界不同。[S10] 不能从“支持多 GPU”推导“每种缓存与恢复组合都支持多 GPU”。</p>
-<h2 id="sec-4">20.4 例题：同前缀分叉需要写时隔离</h2>
-<p>会话 A、B 共享前 1000 个 token。随后 A 写入 token a，B 写入 b。只读共享前缀可以节省复制，但第 1001 个位置及可变递归状态必须独立。若两个 session 直接指向同一可写状态，一次请求就会污染另一次。</p>
-<p>教学设计可以采用 immutable prefix pages + reference count + copy-on-write；GDN 则按所需边界复制完整递归状态。这是扩展设计，不是声称上游已经具备完整多租户 COW 系统。</p>
-<h2 id="sec-5">20.5 数据库思维：原子可见与预算</h2>
-<p>恢复时先校验身份和完整性，再获得目标容量，再安装完整状态，最后发布可用。任何阶段失败，不应暴露半份新状态。对磁盘快照可以用临时文件完成后原子发布，再加校验和与版本；实际持久性语义还要按文件系统确定。[R02]</p>
-<p>当前会话缓存的容量核算包括 vector capacity 和 retained reuse 缓冲，并使用避免减法下溢的条件检查。[S10] 容量算法若漏算保留的物理缓冲，逻辑上只停了两条会话也可能用尽 RAM。</p>
-<h2 id="sec-6">20.6 实验与验收</h2>
-<p>为相同 token、不同图片；相同前缀、不同 steering；不同模型版本；恰好等长 prompt 等案例写出应命中 / 应拒绝的矩阵。注意“上游已检查”和“扩展要求”分列。</p>
-<p>恢复测试采用 A→保存→B→恢复 A→继续，与 A 从未离开的参考结果比较。再注入截断快照、错误格式、预算不足及未完成 commit。安全的失败结果是明确拒绝而保留原状态，不是继续生成貌似合理的文字。</p>
+<div class="hook"><span class="eyebrow">你可能注意到过</span>
+<p>把一份长文档丢给聊天 AI，第一个问题要等好一会儿才开始回答。接着追问，回答几乎马上就冒出来。Strata 的文档也这么写：第一条消息之后，它会留住这段对话，只读新加的部分，所以追问几秒钟就能开始。<span class="ev ev-report">上游报告</span>[S02]</p>
+<p>引擎“留住”的到底是什么？两次请求差一个字、换一张图，它还敢不敢复用？两个对话开头相同、后面分岔，能不能共用一份？这一章讲前缀复用、快照和写时复制。</p></div>
+<p class="tldr"><strong>一句话：</strong>Strata 把读过的前缀存成检查点（一种快照），新请求的 token、图片和 steering 模式与检查点一字不差时，就从检查点接着读新增的尾巴。快照必须装下全部运行状态，只存 KV 缓存不够。</p>
+
+<h2 id="sec-1">20.1 追问为什么快：不重读已经读过的</h2>
+<p>多轮对话有个特点：每次请求都把整段历史再发一遍。第 5 轮的请求，开头就是第 1 到第 4 轮的全部内容，最后才是你的新问题。新内容往往只占一小截，前面一大段是<dfn>前缀</dfn>，也就是和上一次请求开头完全相同的那部分。</p>
+<p>如果每次都从第一个 token 读起，长对话会越聊越慢。聪明的做法像读书夹书签：上次读到哪，这次从哪接着读。这种做法叫<dfn>前缀复用</dfn>，在引擎里也常叫 prompt cache（提示缓存）。</p>
+<p>省下多少？Strata 读长文本的速度是每秒 1,000 个 token 以上。<span class="ev ev-report">上游报告</span>[S02] 源码注释里也算过一笔账：一段 3 万 token 的系统提示，按每秒约 1,000 个读，要约 30 秒。<span class="ev ev-report">上游报告</span> 图 20-1 把两种做法放在一起比。</p>
+<figure class="fig"><svg viewBox="0 0 400 196" role="img" aria-label="图 20-1：前缀 3 万 token、新问题 500 token。从头读约 30.5 秒，复用检查点只读新增部分约 0.5 秒">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="11">读完整个请求要多久（条长按比例，教学推演）</text>
+<text class="f-text" fill="#182f2b" x="20" y="46" font-size="12" font-weight="600">不复用：从第一个 token 读起</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="54" width="354" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="374" y="54" width="6" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="90" font-size="11">30,000 个前缀 token ＋ 500 个新 token，约 30.5 秒</text>
+<text class="f-text" fill="#182f2b" x="20" y="124" font-size="12" font-weight="600">复用检查点：只读新增部分</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="20" y="132" width="354" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="374" y="132" width="6" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="11">前缀从检查点直接接上，只读 500 个新 token，约 0.5 秒</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="188" font-size="11">按每秒约 1,000 个 token 计：时间 = token 数 ÷ 1,000</text>
+</svg><figcaption>图 20-1　前缀越长，复用越值钱。不复用时 30,000 ÷ 1,000 = 30 秒花在重读上；复用时只读 500 个新 token，约 0.5 秒。<span class="ev ev-est">教学推演</span></figcaption></figure>
+<p>接上检查点本身也有成本：检查点存在内存里，要搬回显卡。一个检查点约 118 MB（下一节解释为什么），按第 10 章用过的 PCIe 5.0 理论带宽约 63 GB/s 算，118 ÷ 63 ≈ 2 毫秒。<span class="ev ev-est">教学推演</span> 和 30 秒比，可以忽略。</p>
+<p>上游文档还提醒了一个副作用：提示缓存会让重复的请求只读尾巴，走的计算路径和从头读不同，回答可能和从头读时不完全一样。想要逐字节相同的输出，要用 <code>--prompt-cache 0</code> 等参数关掉它。<span class="ev ev-report">上游报告</span>[S03]</p>
+
+<h2 id="sec-2">20.2 什么才算“同一个前缀”</h2>
+<p>复用的前提是：检查点代表的历史，和新请求的开头<strong>完全相同</strong>。“看起来差不多”不行。差一个 token，后面每个位置的计算结果都会跟着变。</p>
+<p>Strata 用一个叫 <code>conversation_prefix</code> 的函数做这个判断，再加上会话缓存挑选时的一项检查。<span class="ev ev-code">代码事实</span>[S10] 合起来是四条规则：</p>
+<ol>
+<li><strong>steering 模式相同。</strong><dfn>steering</dfn> 是一种可选的“控制向量”，开启后会改动模型许多层的中间结果。两边模式不同，检查点里的状态是按另一种方式算出来的，直接跳过。</li>
+<li><strong>检查点比请求短。</strong>请求的最后一个 token 必须真的读一遍，用它启动下一轮验证。所以和请求一样长的检查点反而不能用。</li>
+<li><strong>前缀里的 token 编号逐个相同。</strong></li>
+<li><strong>前缀里的图片身份相同。</strong>图片在 token 序列里只是一串占位符，同样的占位符可以对应完全不同的图。所以引擎为每张图另记一个身份：起始位置加内容哈希。<span class="ev ev-code">代码事实</span>[S10]</li>
+</ol>
+<div class="viz" data-viz="prefix-match"><figure class="fig"><svg viewBox="0 0 400 362" role="img" aria-label="图 20-2：检查点能否复用要过四道检查：steering 模式、长度、token、图片，全部通过才复用">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="31" font-size="13" font-weight="600" text-anchor="middle">新请求到达</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="64" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="87" font-size="13" text-anchor="middle">① steering 模式相同？</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="120" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="143" font-size="13" text-anchor="middle">② 检查点比请求短？</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="176" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="199" font-size="13" text-anchor="middle">③ 前缀 token 逐个相同？</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="232" width="220" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="255" font-size="13" text-anchor="middle">④ 前缀里的图片哈希相同？</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="292" width="220" height="38" rx="8"/>
+<text class="f-on" fill="#ffffff" x="150" y="316" font-size="13" font-weight="600" text-anchor="middle">全部通过：只读新增的尾巴</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M150 44V62M150 100V118M150 156V174M150 212V230M150 268V290"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M260 82H284M260 138H284M260 194H284M260 250H284"/>
+<text class="f-warn" fill="#9e5d24" x="290" y="86" font-size="12">否：跳过</text>
+<text class="f-warn" fill="#9e5d24" x="290" y="142" font-size="12">否：不能用</text>
+<text class="f-warn" fill="#9e5d24" x="290" y="198" font-size="12">否：作废</text>
+<text class="f-warn" fill="#9e5d24" x="290" y="254" font-size="12">否：作废</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="354" font-size="11">规则取自 conversation_cache.hpp</text>
+</svg><figcaption>图 20-2　四道检查有一道不过，这个检查点就不能用，引擎会试别的检查点，或者从头读。</figcaption></figure></div>
+<p class="bridge"><strong>学过数据结构的同学：</strong>判断“检查点是不是请求的前缀”就是字符串前缀比较；在一堆检查点里找最长的那个前缀，正是字典树（trie）和基数树擅长的事。Strata 的源码注释直接拿基数树作比，见 20.4 节。</p>
+
+<h2 id="sec-3">20.3 快照里要装什么：笔记本能翻回去，白板不能</h2>
+<p>检查点是一种<dfn>快照</dfn>：把某一时刻的全部状态拍下来，以后可以回到那一刻，像游戏存档。要存什么，取决于模型“记住”历史的方式。Strata 用的模型 48 层里有两种层，记历史的方式完全不同。<span class="ev ev-code">代码事实</span>[S04]</p>
+<ul>
+<li><strong>12 个注意力层（QSA）用 KV 缓存。</strong>每读一个 token，就按位置往后记一行，像<strong>笔记本</strong>。想退回某个前缀，后面几行不用管：验证器的说明写得很直白，被拒绝的位置以后重新处理时会被直接覆盖，在任何查询读到它们之前。<span class="ev ev-code">代码事实</span>[S08]</li>
+<li><strong>36 个 GDN 层用递推状态。</strong>每读一个 token，就把一块固定大小的状态<strong>原地</strong>整块改写，像<strong>白板</strong>。<span class="ev ev-code">代码事实</span>[S17] 读完第 5 个 token，第 4 个 token 时的样子就擦掉了，再也算不回来。</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="图 20-3：KV 缓存像笔记本，按位置逐行追加，退回前缀只需忽略后面几行；递推状态像白板，每个 token 整块改写，想退回只能事先拍照">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">KV 缓存：笔记本</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="11" text-anchor="middle">每个 token 记一行，只往后追加</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="50" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="64" font-size="11">第 1 个 token</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="74" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="88" font-size="11">第 2 个 token</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="98" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="112" font-size="11">第 3 个 token</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="122" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="136" font-size="11">第 4 个 token</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="30" y="146" width="140" height="20" rx="3"/><text class="f-muted" fill="#5c6d66" x="40" y="160" font-size="11">第 5 个（旧分支）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="30" y="170" width="140" height="20" rx="3"/><text class="f-muted" fill="#5c6d66" x="40" y="184" font-size="11">第 6 个（旧分支）</text>
+<text class="f-text" fill="#182f2b" x="100" y="214" font-size="11" text-anchor="middle">退回前 4 个：后两行不管它，</text>
+<text class="f-text" fill="#182f2b" x="100" y="232" font-size="11" text-anchor="middle">下次写到那里直接覆盖</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 10V250"/>
+<text class="f-text" fill="#182f2b" x="300" y="20" font-size="13" font-weight="600" text-anchor="middle">递推状态：白板</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="38" font-size="11" text-anchor="middle">每个 token 都把整块原地改写</text>
+<rect class="f-soft" fill="#e5f1df" x="225" y="50" width="150" height="100" rx="6"/>
+<text class="f-text" fill="#182f2b" x="300" y="94" font-size="12" text-anchor="middle">读完第 6 个 token</text>
+<text class="f-text" fill="#182f2b" x="300" y="114" font-size="12" text-anchor="middle">之后的样子</text>
+<text class="f-warn" fill="#9e5d24" x="300" y="176" font-size="11" text-anchor="middle">想退回第 4 个 token？</text>
+<text class="f-warn" fill="#9e5d24" x="300" y="194" font-size="11" text-anchor="middle">已经擦掉了，算不回来</text>
+<text class="f-text" fill="#182f2b" x="300" y="222" font-size="11" text-anchor="middle">只能事先拍照：</text>
+<text class="f-text" fill="#182f2b" x="300" y="240" font-size="11" text-anchor="middle">这张照片就是检查点</text>
+</svg><figcaption>图 20-3　两种记忆，两种回退方式。笔记本只要“假装没写后面几行”就能回退；白板只能靠事先拍下的照片。</figcaption></figure>
+<p>白板有多大？每个 GDN 层的状态是 128 × 48 × 128 个 32 位浮点数，36 层合计 36 × 128 × 48 × 128 × 4 字节 ≈ 113 MB。<span class="ev ev-est">教学推演</span>[S04][S17] 不管对话多长，这块白板的大小都不变。KV 笔记本则越写越厚：如果按每个数 2 字节存，12 层每个 token 要 12 × 2 × 2 × 256 × 2 字节 ≈ 24.6 KB，3 万 token 约 737 MB。<span class="ev ev-est">教学推演</span></p>
+<p>所以 Strata 的检查点主要存白板：GDN 递推状态，加上 PLE（每层嵌入）的历史、注意力索引器的尾部等几块小状态，再记下这段前缀的 token 编号和图片身份。<span class="ev ev-code">代码事实</span>[S10] 上游文档说一个检查点约 118 MB，<span class="ev ev-report">上游报告</span> 和白板的 113 MB 对得上：大头就是它。</p>
+
+<h2 id="sec-4">20.4 一条检查点链：根钉住，其余轮换</h2>
+<p>引擎什么时候拍照？上游文档写的是：每个新的助手回合开始时拍一张，长提示每读 16K 个 token 再拍一张；内存里最多留 6 张。<span class="ev ev-report">上游报告</span></p>
+<p>这些检查点有个特别的形状。显卡上的 KV 缓存只有一块区域，一次只能装一条历史分支。所以留下来的检查点都必须是当前历史的前缀，按长度排好，每一个都是下一个的前缀，连成一条<dfn>链</dfn>。源码注释把它比作基数树：一棵树压扁到会话能装下的那一条分支上。<span class="ev ev-code">代码事实</span></p>
+<figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="图 20-4：检查点链。每个检查点都是下一个的前缀，根在系统提示末尾并被钉住；新请求从最长的匹配检查点接着读">
+<text class="f-muted" fill="#5c6d66" x="20" y="16" font-size="11">一条对话的检查点（条长 = 前缀长度，示意）</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="28" width="90" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="30" y="45" font-size="12">根 · 钉住</text>
+<text class="f-muted" fill="#5c6d66" x="118" y="45" font-size="11">系统提示的末尾</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="60" width="170" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="77" font-size="12">第 2 轮开始</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="92" width="250" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="109" font-size="12">第 3 轮开始</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="124" width="320" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="141" font-size="12">第 4 轮开始（最长的检查点）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M340 118V188"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="160" width="320" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="340" y="160" width="40" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="177" font-size="12">新请求：前缀与第 4 轮检查点一致</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="208" font-size="11">新请求从最长的匹配检查点接着读，只读末尾那一截</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="228" font-size="11">最多 6 个，每个约 118 MB；满了就淘汰最久没用的，根除外</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="248" font-size="11">新开一个聊天：从根接着读，省掉整段系统提示</text>
+</svg><figcaption>图 20-4　检查点连成一条链，每个都是下一个的前缀。根被钉住，所以连新开的聊天也能跳过系统提示。</figcaption></figure>
+<p>链满了，淘汰谁？早期的做法是先进先出，最早的检查点最先被扔。可最早的那个往往是系统提示的末尾，也就是同一个客户端每次新开聊天都会经过的地方。扔掉它，每个新聊天都要把系统提示从头再读一遍。<span class="ev ev-code">代码事实</span></p>
+<p>现在的规则是：<strong>根钉住，其余按最近最少使用（LRU）轮换</strong>。源码里的淘汰函数只有几行：容量不足 2 个时关掉钉住，扔最老的；否则跳过第 0 个，在剩下的里面挑最久没被用过的。<span class="ev ev-code">代码事实</span> 上游文档还补了一条：从头读的提示，如果系统提示有 2,048 个 token 或更多，也会在系统提示末尾拍一张，好让根存在（引擎 0.1.20 起）。<span class="ev ev-report">上游报告</span> 第 12 章会细讲 LRU 这类缓存替换策略。</p>
+
+<h2 id="sec-5">20.5 两个对话共用一个开头：写时复制</h2>
+<p>再看一个更难的场景：对话 A 和 B 开头完全相同（比如同一段系统提示加同一份文档），然后各问各的。能不能让它们共用前缀，只为不同的部分花钱？操作系统和数据库早就有一个经典答案。</p>
+<aside class="primer" id="c20-copy-on-write">
+<h3>快照与写时复制</h3>
+<p>想给一份数据拍<dfn>快照</dfn>，最笨的办法是整份复制。数据有 1 GB，就复制 1 GB，慢，还占双倍空间。可大多数时候，快照和原件之后只改了很少几处。</p>
+<p><dfn>写时复制</dfn>（copy-on-write，简称 COW）换了个思路：先不复制，两边共用同一份数据，给每块数据记一个<dfn>引用计数</dfn>，也就是“有几个人在用”。谁要往一块共用的数据里写，谁才把<strong>这一块</strong>复制一份，改自己的副本。没人改的块，永远只有一份。图 20-5 是一个三页的例子。</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="图 20-5：写时复制。刚分叉时 A、B 共用三页；B 要改第 2 页时，只复制这一页，其余两页继续共用">
+<text class="f-text" fill="#182f2b" x="100" y="16" font-size="12" font-weight="600" text-anchor="middle">① 刚分叉：全部共用</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="19" y="28" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102" y="44" font-size="12" text-anchor="middle">A 的页表</text>
+<rect class="f-soft" fill="#e5f1df" x="19" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="44" y="90" font-size="12" text-anchor="middle">页1 ×2</text>
+<rect class="f-soft" fill="#e5f1df" x="77" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="102" y="90" font-size="12" text-anchor="middle">页2 ×2</text>
+<rect class="f-soft" fill="#e5f1df" x="135" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="160" y="90" font-size="12" text-anchor="middle">页3 ×2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="19" y="166" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102" y="182" font-size="12" text-anchor="middle">B 的页表</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 50V70M102 50V70M160 50V70M44 100V166M102 100V166M160 100V166"/>
+<text class="f-muted" fill="#5c6d66" x="102" y="214" font-size="11" text-anchor="middle">复制了 0 页</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 8V222"/>
+<text class="f-text" fill="#182f2b" x="302" y="16" font-size="12" font-weight="600" text-anchor="middle">② B 改第 2 页：只复制它</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="214" y="28" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297" y="44" font-size="12" text-anchor="middle">A 的页表</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="239" y="90" font-size="12" text-anchor="middle">页1 ×2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="272" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="297" y="90" font-size="12" text-anchor="middle">页2 ×1</text>
+<rect class="f-soft" fill="#e5f1df" x="330" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="355" y="90" font-size="12" text-anchor="middle">页3 ×2</text>
+<rect class="f-accent" fill="#136d5a" x="272" y="118" width="50" height="30" rx="3"/><text class="f-on" fill="#ffffff" x="297" y="138" font-size="12" text-anchor="middle">页2′</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="214" y="166" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297" y="182" font-size="12" text-anchor="middle">B 的页表</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M239 50V70M297 50V70M355 50V70M239 100V166M297 148V166M355 100V166"/>
+<text class="f-muted" fill="#5c6d66" x="297" y="214" font-size="11" text-anchor="middle">只复制了被改的 1 页</text>
+</svg><figcaption>图 20-5　写时复制：先共用，谁写谁复制，而且只复制被写的那一页。“×2”是引用计数。</figcaption></figure>
+<p>最有名的例子是 Linux 的 <code>fork()</code>：创建子进程时只复制页表，父子进程共用全部物理内存页，并把它们标成只读。谁先写某一页，就触发一次缺页异常，内核这时才复制那一页。所以 fork 一个占几 GB 内存的进程，也几乎是瞬间完成。文件系统的快照、数据库的多版本并发控制（MVCC），用的都是同一个思路。</p>
+<p>回到本章：两段对话的共同前缀，就是“没人改的页”。只要前缀里的 KV 页只读不写，就可以放心共用。下面的模拟器让你亲手试。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/写入时复制" target="_blank" rel="noopener noreferrer">维基百科：写入时复制</a> · <a href="https://man7.org/linux/man-pages/man2/fork.2.html" target="_blank" rel="noopener noreferrer">Linux 手册：fork(2)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/" target="_blank" rel="noopener noreferrer">OSTEP（公开操作系统教材，虚拟内存各章）</a> · <a href="https://zh.wikipedia.org/zh-cn/多版本并发控制" target="_blank" rel="noopener noreferrer">维基百科：多版本并发控制</a></p>
+</aside>
+<div class="viz" data-viz="prefix-cow"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 20-6：前缀 17 个 token、每页 4 个，A、B 各写 3 个。前 4 页两边共用，第 5 页由 A 复制、B 原地写，共占 6 页，整份复制要 10 页">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="11">前缀 17 个 token，每页 4 个；A、B 分叉后各写 3 个</text>
+<text class="f-text" fill="#182f2b" x="20" y="68" font-size="13" font-weight="600">A</text>
+<text class="f-text" fill="#182f2b" x="20" y="148" font-size="13" font-weight="600">B</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="60" y="34" width="46" height="130" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="114" y="34" width="46" height="130" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="168" y="34" width="46" height="130" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="222" y="34" width="46" height="130" rx="3"/>
+<g>
+<rect class="f-accent" fill="#136d5a" x="64" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="74" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="84" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="94" y="95" width="7" height="7"/>
+<rect class="f-accent" fill="#136d5a" x="118" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="128" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="138" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="148" y="95" width="7" height="7"/>
+<rect class="f-accent" fill="#136d5a" x="172" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="182" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="192" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="202" y="95" width="7" height="7"/>
+<rect class="f-accent" fill="#136d5a" x="226" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="236" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="246" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="256" y="95" width="7" height="7"/>
+</g>
+<text class="f-muted" fill="#5c6d66" x="83" y="156" font-size="11" text-anchor="middle">×2</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="156" font-size="11" text-anchor="middle">×2</text>
+<text class="f-muted" fill="#5c6d66" x="191" y="156" font-size="11" text-anchor="middle">×2</text>
+<text class="f-muted" fill="#5c6d66" x="245" y="156" font-size="11" text-anchor="middle">×2</text>
+<rect class="f-box" fill="#ffffff" stroke="#9e5d24" stroke-width="2" stroke-dasharray="4 3" x="276" y="34" width="56" height="50" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="281" y="46" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="292" y="46" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="303" y="46" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="314" y="46" width="7" height="7"/>
+<text class="f-warn" fill="#9e5d24" x="304" y="76" font-size="11" text-anchor="middle">复制</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="276" y="114" width="56" height="50" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="281" y="126" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="292" y="126" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="303" y="126" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="314" y="126" width="7" height="7"/>
+<text class="f-muted" fill="#5c6d66" x="304" y="156" font-size="11" text-anchor="middle">原地写</text>
+<text class="f-text" fill="#182f2b" x="10" y="190" font-size="12">写时复制共占 6 页，只复制 1 页；整份复制要 10 页</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="11">第 5 页只装了 1 个前缀 token，A 先写，所以 A 复制它</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="11">递推状态没法共用：B 另外复制一整块（约 113 MB）</text>
+</svg><figcaption>图 20-6　前缀填满的 4 页两边共用；半满的第 5 页两边都要写，先写的 A 复制一份，B 原地写。主色小方块是前缀 token，另一种颜色是分叉后新写的 token。</figcaption></figure></div>
+<p>模拟器揭示了两件事。第一，KV 页可以共用，但前缀没填满的最后一页会被两边写，必须复制。第二，递推状态（白板）怎么都没法共用：它每个 token 都整块改写，分叉时只能整份复制。</p>
+<p>那 Strata 自己怎么做？它<strong>没有</strong>在两个对话之间共用页。源码在存放快照数据的缓冲区上写明：快照和它保留下来的缓冲区只有一个主人，所以不需要共享，也不需要写时复制。<span class="ev ev-code">代码事实</span> 前面说过，显卡上的 KV 区域一次只装一条历史分支，一条链就够用了。写时复制在这里是我们的教学扩展，不是 Strata 的实现。</p>
+<p>不过 Strata 有一个相近的省钱技巧。它可以把几个对话“停”在内存里（这个功能默认关闭，要手动打开），每个停着的对话存一整份快照，包括运行状态、检查点、用过的 KV 页和草稿层的 KV。<span class="ev ev-report">上游报告</span> 一个对话被恢复后，没改过的 KV 页可以留着，下次再停车时直接用，不必重新拷贝；对话变长时只在后面追加，不搬动已有的页；被回退改写过的页才重新拷贝。<span class="ev ev-report">上游报告</span> 这和写时复制的精神一样：没变的东西不复制。</p>
+
+<h2 id="sec-6">20.6 动手：存、切、恢复，再对一遍</h2>
+<p>快照恢复有一条铁律：<strong>要么完整装回，要么明确拒绝</strong>。装回一半的状态最危险，模型会照样生成看起来通顺、其实全错的文字。Strata 的做法是先校验所有层、所有检查点，全部合格才开始写入；校验不过的快照在任何显卡操作之前就被拒绝。如果搬运途中出错，接口要求调用方<strong>不得</strong>继续用这个会话推理。<span class="ev ev-code">代码事实</span></p>
+<p class="bridge"><strong>学过数据库的同学：</strong>这就是事务的原子性：要么全部生效，要么像没发生过。第 18 章讲过投机解码里的“只提交接受的前缀”，这里是同一个思想用在会话恢复上。</p>
+<p>打开本章的交互实验「只提交接受前缀」。它用一个玩具递推 s ← 0.5s + t 演示：候选状态和已提交状态为什么不同，只把计数器往回拨为什么会留下错误的状态。把第二份草稿设成被拒绝，找出那个“计数器回退了、状态没回退”的位置。这正是白板不能靠“假装没写”来回退的原因。</p>
+<p>想更进一步，可以自己设计一个不用显卡的测试：用同一个玩具递推跑对话 A，存快照；切去跑对话 B；再恢复 A 继续。最后和“A 从来没离开过”的结果逐位比较，两者必须完全相同。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>前缀复用只认“一字不差”：token 编号、图片身份、steering 模式全都相同，检查点还要比请求短，才能接着读。</li>
+<li>KV 缓存像笔记本，回退时忽略后面几行即可；递推状态像白板，每个 token 整块改写，只能靠事先拍下的检查点回退。Strata 的检查点大头就是约 113 MB 的 GDN 状态。</li>
+<li>写时复制让多个分支共用没人改的页，只复制被写的那一页。Strata 用一条“根钉住、其余 LRU 轮换”的检查点链，停车的对话各自独占缓冲区，没有用写时复制。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“把 KV 缓存存下来，就等于存下了整段对话。”</strong></p>
+<p>对 Strata 用的模型来说远远不够。48 层里有 36 层靠递推状态记历史，它不在 KV 缓存里。此外还有 PLE 的历史、注意力索引器的尾部、草稿层的 KV，以及这段前缀的 token 编号和图片身份。<span class="ev ev-code">代码事实</span>[S10] 少存任何一样，恢复出来的对话都会悄悄算错。</p></div>
+
+<details class="deep"><summary>深入一层：匹配规则、快照清单、容量核算与恢复契约</summary>
+<h3>匹配规则的源码细节</h3>
+<p><code>conversation_prefix</code> 先要求检查点非空、长度严格小于请求长度、前 n 个 token 编号逐个相等，否则返回 0。然后遍历请求里的图片：起始位置不在前缀内的跳过；在前缀内的，必须与检查点记录的图片依次相等（起始位置和哈希都相等）；最后检查点记录的图片也必须恰好用完。多一张、少一张、换一张，都返回 0。<span class="ev ev-code">代码事实</span>[S10]</p>
+<p>会话缓存挑检查点时，从最近停放的条目往前找，steering 模式不同的条目直接跳过；每个条目既考虑它的当前状态，也考虑它的每个检查点，取匹配最长的那个。长度相同时，优先选最近停放的分支；调用方在同样长度下还会优先用自己手上正在用的状态。<span class="ev ev-code">代码事实</span>[S10]</p>
+<h3>身份清单：上游已检查的，和本书建议的</h3>
+<p>上游检查的是 token、图片身份和 steering 模式。快照里还有一个 18 个整数的 <code>geometry</code> 数组，源码注释明确说它只用于运行时兼容性检查，<strong>不是</strong>模型权重的身份，也不是磁盘格式。<span class="ev ev-code">代码事实</span>[S10] 两个模型形状相同、权重完全不同，geometry 也一样。</p>
+<p>如果把这套机制推广到生产环境（快照落盘、跨进程共享、多用户），本书建议身份键至少再加上：模型权重版本、分词器与聊天模板、RoPE 设置、量化格式、设备数值模式、以及授权范围（谁的对话只能给谁用）。这是教学扩展清单，不是上游已有的检查。</p>
+<h3>一份快照的完整清单</h3>
+<p>检查点（<code>ConversationCheckpoint</code>）包含：token 编号、图片身份、GDN 状态、PLE 历史、索引器尾部（tails）、dead、block_pos 等字节块，以及分层运行时每个设备的子检查点 <code>stage_parts</code>。KV 部分（<code>ConversationKv</code>）有格式编号、单元数、头数、头维度、页大小、索引器行数，以及 K、V、各自的量化缩放系数和 pooled 索引行。整段对话的快照（<code>SavedConversation</code>）再加上 geometry、层范围 <code>layer_lo / layer_hi</code>、当前状态、检查点列表、主层加草稿层的 KV，以及 steering 标志。<span class="ev ev-code">代码事实</span>[S10]</p>
+<p>注意多 GPU 的边界：源码注释说，普通的分层检查点保留每个设备的运行状态，但整段会话停车目前只支持单 GPU，会拒绝这些子检查点。<span class="ev ev-code">代码事实</span>[S10] 上游文档也说，打开停车再加 <code>--layer-split</code> 会在加载模型前被拒绝。<span class="ev ev-report">上游报告</span> 不能从“支持多 GPU”推出“每种缓存与恢复组合都支持多 GPU”。</p>
+<h3>容量核算：按容量算，防下溢</h3>
+<p>快照的字节数按各个 vector 的 <code>capacity()</code> 累加，而不是 <code>size()</code>：已经申请但还没用满的空间也算在内。<span class="ev ev-code">代码事实</span>[S10] 能否放下新快照的判断写成 <code>held &lt;= budget_ &amp;&amp; incoming &lt;= budget_ - held &amp;&amp; …</code>，每次减法之前先确认不会减成负数。无符号整数减出负数会绕回一个巨大的正数，预算检查就形同虚设。保留下来复用的 KV 也计入同一个预算。<span class="ev ev-code">代码事实</span>[S10]</p>
+<p>腾空间时，先扔掉保留复用的 KV，再按停放先后淘汰最老的条目。<span class="ev ev-code">代码事实</span> 上游文档还要求物理内存至少留出 <code>--conversation-cache-min-free-mib</code>（默认 2560）的余量，分配前查一次、拍完再查一次；查不到内存数据就不停车。<span class="ev ev-report">上游报告</span> 对应的判断函数把“查不到”和“查到 0”明确区分开：没有数据时直接拒绝。<span class="ev ev-code">代码事实</span> 默认预算是 0，也就是不启用；文档举的例子是 8 GiB、4 个槽位，并说明这是上限，不是推荐值。<span class="ev ev-report">上游报告</span></p>
+<h3>恢复契约与持久化</h3>
+<p>快照接口把恢复结果分成三种：成功、快照无效、搬运失败。无效的快照在任何 CUDA 调用和写入之前就被拒绝；搬运失败可能留下半份状态，调用方<strong>不得</strong>继续用这个会话推理。<span class="ev ev-code">代码事实</span> 上游文档说，搬运或同步失败按致命错误处理，快照也不会在重启后保留。<span class="ev ev-report">上游报告</span></p>
+<p>如果要把快照存到磁盘，常见的稳妥做法是：先写临时文件，写完、刷盘、校验和通过后，再用一次原子的重命名“发布”出去，并在文件里记录格式版本。具体的持久性保证还取决于文件系统。[R02] 这是教学扩展，Strata 目前不持久化快照。</p>
+<h3>KV 页复用的边界</h3>
+<p>快照接口有一句容易被忽略的注释：token 编号相同，<strong>不能</strong>证明 KV 字节没变。“未改变的 token 数”只对真正从快照恢复进本会话、并且之后每次改写都已扣减过的存储有效。<span class="ev ev-code">代码事实</span> 会话缓存里对应的函数每遇到一次改写，就把“未改变的长度”收缩到第一个被弄脏的位置，缩到 0 就整块丢弃。<span class="ev ev-code">代码事实</span>[S10]</p>
+<p>存放快照数据的缓冲区由 16 MiB 的段组成，追加时不搬动已有的数据，只有很小的段目录可能移动。<span class="ev ev-code">代码事实</span> 这就是“变长只追加、不拷贝已有页”的底层支撑。</p>
+<h3>例题：同前缀分叉为什么需要写时隔离</h3>
+<p>会话 A、B 共享前 1000 个 token。随后 A 写入 token a，B 写入 b。只读的共享前缀可以不复制，但第 1001 个位置以及可变的递推状态必须各自独立。如果两个会话直接指向同一份可写状态，一次请求就会悄悄污染另一次。教学设计可以用“不可变前缀页 + 引用计数 + 写时复制”；GDN 递推状态则要在分叉点整份复制。</p>
+<h3>测试矩阵与验收</h3>
+<p>为下面几类情况分别写出“应命中 / 应拒绝”：token 相同但图片不同；前缀相同但 steering 不同；模型版本不同；请求与检查点恰好等长。表格里把“上游已检查”和“扩展要求”分成两列。</p>
+<p>恢复测试用“A → 存 → B → 恢复 A → 继续”，结果要和 A 从未离开时逐位比较。再故意注入截断的快照、错误的格式、预算不足和未完成的提交。安全的失败只有一种：明确拒绝并保留原状态，而不是继续生成看似合理的文字。</p>
+</details>
