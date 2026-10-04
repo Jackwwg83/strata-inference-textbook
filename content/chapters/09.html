@@ -1,17 +1,211 @@
-<h2 id="sec-1">9.1 从保存每条历史到更新一个状态</h2>
-<p>普通注意力保留历史 K/V，供未来按需查询。递归模块则把历史逐步写入一个固定形状的状态。它更像持续更新的一张统计表，不是每次重新翻阅所有记录。固定大小不意味着“无损记住所有历史”，也不意味着整个混合模型没有上下文长度成本。</p>
-<p>Strata 的当前几何是 36 个 GDN 层与 12 个 QSA 层。[S04] GDN 头文件开头有“48 GDN 加 12 QSA”的旧说明，与当前几何不一致；本教材以可执行几何及 session 状态分配为依据，而不是把旧注释当作模型事实。[S13][S17]</p>
-<h2 id="sec-2">9.2 递推公式逐项读</h2>
-<p>对单个值头，把状态 S 写成键维×值维矩阵。先衰减 <code>S̄=αS</code>，再计算当前键在状态中的预测 <code>v̂=S̄ᵀk</code>，残差 <code>δ=β(v−v̂)</code>，更新 <code>S′=S̄+kδᵀ</code>，输出 <code>o=S′ᵀq</code>。这是与接口中的列循环相对应的数学记法。[S17]</p>
-<p>α=exp(gate)，β 在外部经过 sigmoid。秩一更新 <code>kδᵀ</code> 是一个外积：不用重新构造整张历史表，也能按当前键方向修正状态。“先衰减再修正”与“先修正再衰减”一般不相同，因为后一种会把刚写入的信息也乘上 α。</p>
-<h2 id="sec-3">9.3 一维手算：顺序真的重要</h2>
-<p>把矩阵缩成一个数，取旧 S=2、α=0.5、k=1、v=3、β=0.25、q=1。先衰减得到 1；预测为 1；δ=0.25×(3−1)=0.5；新状态为 1.5；输出为 1.5。</p>
-<p>如果错误地先根据旧状态修正再衰减，就得到 <code>(2+0.25×(3−2))×0.5=1.125</code>。二者都合理、有限、没有越界，但只一个符合契约。浏览器的 GDN 实验把这个顺序差异直接画出来。</p>
-<h2 id="sec-4">9.4 固定状态多大？</h2>
-<p>按 S=128、值头 48、FP32，每层主递归状态需 <code>128×128×48×4=3,145,728字节=3MiB</code>；36 层为 <strong>108 MiB</strong>。[S04][S17] 这是主递归状态的教学核算，<strong>不包含卷积历史、scratch、PLE、QSA、MTP 和对齐</strong>。不能把 108 MiB 当作完整模型状态预算。</p>
-<p>上下文增加时，这部分主状态不按 token 数增长，但混合模型的 QSA KV 仍会增长；若保存很多历史 checkpoint，每份递归快照也会额外占空间。固定状态与可自由回滚是两个不同问题。</p>
-<h2 id="sec-5">9.5 为什么每列可以并行？</h2>
-<p>内核说明中，每一个 <code>(值头 h, 值维 j)</code> 列在一次更新中独立；沿键维 i 做归约，不必读取其他值列的新状态。因此不同线程可以拥有不同列。[S17] 时间 t 与 t+1 仍有依赖，不能直接推导“所有 token 都可以同时无依赖计算”。</p>
-<p>头映射也有严格要求：GDN 使用 <code>h % h_k</code>，而前章 GQA 使用整数除法分组。这是两个模块不同的模型契约。把一个通用“多头映射函数”到处复用，反而可能引入错误。</p>
-<h2 id="sec-6">9.6 实验与验收</h2>
-<p>构造 α=0、β=0、k=0 等边界，分别检验遗忘、无写入和无键更新。再处理一段固定序列，保存第 t 步状态，继续两步后恢复，再重放，要求恢复后的结果与从头计算一致。不要尝试把最终状态任意倒推成较早状态；没有保存必要信息时通常做不到。</p>
+<div class="hook"><span class="eyebrow">先打个比方</span>
+<p>开会记笔记有两种办法。一种是速记员：每句话都记下来，本子越写越厚，要找什么就翻回去看。另一种是白板：只有一块固定大小的板，新内容进来，就擦掉一点旧的、改写一点，板子永远那么大。</p>
+<p>第 8 章的注意力是速记员。这一章讲白板：Strata 的模型 48 层里有 36 层用的是 <dfn>GDN</dfn>（门控 DeltaNet），每层每个头只有一块 128 × 128 的“白板”，不管对话多长，它都不变大。我们用几个能手算的小例子，看清这块白板怎样擦、怎样写、怎样读。</p></div>
+<p class="tldr"><strong>一句话：</strong>GDN 把历史压进一个固定大小的状态矩阵。每来一个 token：先整体衰减，再用当前的键读出旧值，只把“目标值减旧值”的差额，用一次外积写回去。状态不随上下文变长，但它是有损的，而且顺序错一步，结果就悄悄变了。</p>
+
+<h2 id="sec-1">9.1 两种记忆：翻笔记，还是擦写白板</h2>
+<p>注意力为每个历史位置保留一份键和值，需要时回头查。好处是什么都没丢；代价是上下文越长，存得越多、查得越慢（第 8 章）。GDN 走另一条路：它不保留逐条记录，而是维护一个固定大小的<strong>状态</strong>，每个 token 来了就更新一次，见图 9-1。</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 9-1：注意力的 KV 缓存随上下文线性增长，262K 时约 6 GiB；GDN 状态始终约 112 MiB">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">记忆要占多少字节（随上下文长度）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M50 190H380M50 190V36"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M50 190L380 40"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" stroke-dasharray="7 4" d="M50 187.3H380"/>
+<text class="f-text" fill="#182f2b" x="96" y="80" font-size="12">注意力的 KV 缓存：</text>
+<text class="f-text" fill="#182f2b" x="96" y="98" font-size="12">每多一个 token 多 24 KiB</text>
+<text class="f-text" fill="#182f2b" x="200" y="176" font-size="12">GDN 状态：一直约 112 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="46" y="44" font-size="12" text-anchor="end">6 GiB</text>
+<text class="f-muted" fill="#5c6d66" x="46" y="194" font-size="12" text-anchor="end">0</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="208" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="208" font-size="12" text-anchor="middle">128K</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="208" font-size="12" text-anchor="end">262K</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="230" font-size="12">KV 按 FP16、12 个 QSA 层估算；GDN 含 36 层的卷积历史</text>
+</svg><figcaption>图 9-1　KV 缓存随上下文一路上涨；GDN 的状态从第一个 token 起就是那么大。代价是：固定大小的白板装不下无限的细节。</figcaption></figure>
+<aside class="primer" id="c09-rnn-state">
+<h3>循环神经网络与“状态”</h3>
+<p>直觉：数羊的时候，你脑子里只记一个数，“现在数到第几只”。每看到一只羊，就把这个数加一。你不需要记住每一只羊长什么样，也能随时报出总数。这个“脑子里记着的东西”就是<dfn>状态</dfn>。</p>
+<p>定义：一个系统每一步都按“旧状态 + 新输入 → 新状态”更新，写成 hₜ = f(hₜ₋₁, xₜ)。数字电路里的计数器、编译原理里的<dfn>有限状态机</dfn>，都是这个形状。把 f 换成一个可以训练的神经网络，就是<dfn>循环神经网络</dfn>（RNN）。</p>
+<p>两个关键性质。第一，状态大小固定，所以每一步的工作量和已经走了多少步无关，是 O(1)；读完一段 n 个词的文本是 O(n)，比注意力的 O(n²) 便宜。第二，固定大小意味着<strong>有损</strong>：“数羊的人”能告诉你总数，却说不出第 17 只羊是什么颜色。旧式 RNN 的难题正是“记不住久远的事”。GDN 这类新模型用更大的矩阵状态和更聪明的写入规则来缓解它，但有损这一点没有改变。</p>
+<p>还有一个工程上的后果：状态只能往前走。拿到第 t 步的状态，一般<strong>倒推不回</strong>第 t − 2 步，因为写入时已经把一部分旧信息擦掉了。想回退，就得事先存一份快照，或者从头重放。</p>
+<p>和本章的关系：Strata 的 36 个 GDN 层，每层都有自己的一份状态，一个 token 接一个 token 地往前推。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/循环神经网络" target="_blank" rel="noopener noreferrer">维基百科：循环神经网络</a> · <a href="https://zh.wikipedia.org/zh-cn/有限状态机" target="_blank" rel="noopener noreferrer">维基百科：有限状态机</a> · <a href="https://en.wikipedia.org/wiki/Recurrent_neural_network" target="_blank" rel="noopener noreferrer">Wikipedia: Recurrent neural network</a></p>
+</aside>
+<p>在 Strata 里，48 层中 36 层是 GDN。<span class="ev ev-code">代码事实</span>[S04] 会话状态为每个 GDN 层单独保存一份递归状态和卷积历史；中间计算用的临时缓冲区 36 层共用一套，状态却必须一层一份，因为“递归”就是全部意义所在。[S13]（<code>session.cpp</code> 第 38–44 行）一段新对话开始时，所有状态清零。[S13] GDN 层甚至没有“位置”这个参数：它每个 token 的输入只有那串数，在 token 之间往前推进的，就是这块状态（<code>layer.hpp</code> 第 513–515 行）。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>把一个 GDN 层看成一台状态机：状态是 48 个 128 × 128 的浮点矩阵，输入是当前 token 的向量，转移函数就是本章的递推公式。它和《数字逻辑》里的时序电路是同一个抽象：组合逻辑算下一状态，寄存器保存当前状态。</p>
+
+<h2 id="sec-2">9.2 外积：一次改写整张表</h2>
+<p>白板是一个矩阵，怎样把“键 k → 值 v”这对关系写进去？答案是外积。</p>
+<aside class="primer" id="c09-outer-product">
+<h3>外积与秩一更新</h3>
+<p>第 3 章的点积把两个向量变成<strong>一个数</strong>：q · k = Σ qᵢkᵢ。<dfn>外积</dfn>反过来，把两个向量变成<strong>一张表</strong>：k vᵀ 的第 i 行第 j 列是 kᵢ × vⱼ。k 有 3 个数、v 有 2 个数，外积就是 3 × 2 的表，见专栏后的图 9-2。</p>
+<p>这张表有个特点：每一行都是 v 的倍数（第 i 行 = kᵢ × v）。所有行都“指向同一个方向”，线性代数里说它的<dfn>秩</dfn>是 1。所以把一个外积加到矩阵上，叫<dfn>秩一更新</dfn>：S ← S + k vᵀ。</p>
+<p>秩一更新为什么适合做记忆？因为用同一个 k 去“读”，正好能把 v 取回来。读的方法是 Sᵀk：每一列和 k 做点积。如果 S = k vᵀ 且 k 的长度是 1，那么 Sᵀk = v × (k · k) = v。不同的键如果互相垂直（点积为 0），各自写进去的内容互不干扰；如果有重叠，就会互相串味。</p>
+<p>代价也很直观：一次秩一更新要改动整张表的每一个格子，S × S 个乘加；但它只依赖当前这一对 k、v，不需要回看任何历史。</p>
+<p>和本章的关系：GDN 每个 token 对每个值头做一次秩一更新，每块白板是 128 × 128。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/外积" target="_blank" rel="noopener noreferrer">维基百科：外积</a> · <a href="https://zh.wikipedia.org/zh-cn/秩_(线性代数)" target="_blank" rel="noopener noreferrer">维基百科：秩</a> · <a href="https://oi-wiki.org/math/linear-algebra/matrix/" target="_blank" rel="noopener noreferrer">OI Wiki：矩阵</a> · <a href="https://en.wikipedia.org/wiki/Outer_product" target="_blank" rel="noopener noreferrer">Wikipedia: Outer product</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 222" role="img" aria-label="图 9-2：k 等于 1、0、2，v 等于 2、3，外积是 3 行 2 列的表，每一行都是 v 的倍数">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">v = [2, 3]</text>
+<rect class="f-soft" fill="#e5f1df" x="170" y="24" width="56" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="198" y="44" font-size="13" text-anchor="middle">2</text>
+<rect class="f-soft" fill="#e5f1df" x="230" y="24" width="56" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="258" y="44" font-size="13" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="120" y="44" font-size="12" text-anchor="middle">k</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="62" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="84" font-size="13" text-anchor="middle">1</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="100" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="138" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="160" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="170" y="62" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="198" y="84" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="62" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="258" y="84" font-size="13" text-anchor="middle">3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="100" width="56" height="34" rx="3"/><text class="f-muted" fill="#5c6d66" x="198" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="100" width="56" height="34" rx="3"/><text class="f-muted" fill="#5c6d66" x="258" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-accent" fill="#136d5a" x="170" y="138" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="198" y="160" font-size="13" text-anchor="middle">4</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="138" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="258" y="160" font-size="13" text-anchor="middle">6</text>
+<text class="f-text" fill="#182f2b" x="296" y="84" font-size="12">= 1 × v</text>
+<text class="f-text" fill="#182f2b" x="296" y="122" font-size="12">= 0 × v</text>
+<text class="f-text" fill="#182f2b" x="296" y="160" font-size="12">= 2 × v</text>
+<text class="f-text" fill="#182f2b" x="20" y="196" font-size="12">第 i 行第 j 列 = kᵢ × vⱼ；每一行都是 v 的倍数，所以秩是 1</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="216" font-size="12">把它加到状态上：S ← S + k vᵀ，就是一次秩一更新</text>
+</svg><figcaption>图 9-2　外积把两个向量“织”成一张表。表里的信息其实只有 k 和 v 两串数，所以叫秩一。</figcaption></figure>
+
+<h2 id="sec-3">9.3 Delta 规则：先读旧值，只写差额</h2>
+<p>最朴素的写法是每次都加一个 k vᵀ。问题是，同一个键写两次，两次的值会<strong>叠在一起</strong>。在 2 × 2 的白板上试一下：先写“苹果”（键 [1, 0]）→ [2, 3]，再把苹果改成 [5, 1]。纯加法之后，白板第一行是 [2, 3] + [5, 1] = [7, 4]，读回来是 [7, 4]，哪个都不是。</p>
+<p><dfn>Delta 规则</dfn>的办法是：写之前先用这个键读一下，看白板上已经存着什么（记作 v̂），然后只写“目标减旧值”的差额 δ = v − v̂。第二次写苹果时，v̂ = [2, 3]，δ = [5, 1] − [2, 3] = [3, −2]，加上去第一行变成 [5, 1]，读回来正好是新值。见图 9-3。</p>
+<div class="viz" data-viz="delta-memory"><figure class="fig"><svg viewBox="0 0 400 220" role="img" aria-label="图 9-3：先写苹果为 2、3，再改写为 5、1。纯加法读回 7、4，Delta 规则读回 5、1">
+<text class="f-text" fill="#182f2b" x="200" y="16" font-size="12" text-anchor="middle">先写 苹果 → [2, 3]，再改写 苹果 → [5, 1]</text>
+<text class="f-text" fill="#182f2b" x="100" y="42" font-size="13" font-weight="600" text-anchor="middle">纯加法</text>
+<rect class="f-warn" fill="#9e5d24" x="30" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="77" font-size="14" text-anchor="middle">7</text>
+<rect class="f-warn" fill="#9e5d24" x="104" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="137" y="77" font-size="14" text-anchor="middle">4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="30" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="63" y="121" font-size="14" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="104" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="137" y="121" font-size="14" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="100" y="160" font-size="12" text-anchor="middle">读 苹果 = [7, 4]：新旧叠加</text>
+<text class="f-text" fill="#182f2b" x="300" y="42" font-size="13" font-weight="600" text-anchor="middle">Delta 规则</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="77" font-size="14" text-anchor="middle">5</text>
+<rect class="f-accent" fill="#136d5a" x="304" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="337" y="77" font-size="14" text-anchor="middle">1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="263" y="121" font-size="14" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="304" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="337" y="121" font-size="14" text-anchor="middle">0</text>
+<text class="f-text" fill="#182f2b" x="300" y="160" font-size="12" text-anchor="middle">读 苹果 = [5, 1]：正确</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="190" font-size="12">Delta 第二次写：旧值 v̂ = [2, 3]</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="210" font-size="12">差额 δ = [5, 1] − [2, 3] = [3, −2]，第一行变成 [5, 1]</text>
+</svg><figcaption>图 9-3　同一个键写两次：纯加法把新旧值叠在一起，Delta 规则先扣掉旧值再写，读回来的正是最新的值。</figcaption></figure></div>
+<p>真实的 GDN 还多一个旋钮：写入强度 β。差额先乘 β 再写，δ = β(v − v̂)。β = 1 是“完全改成新值”，β = 0.25 是“只往新值挪四分之一”。β 必须落在 0 到 1 之间，所以层先把它过一遍 sigmoid，内核不负责这一步（第 7 章讲过这个契约）。[S17]</p>
+<p>2 × 2 的白板只有 4 个数。写的键越多、键之间重叠越多，互相干扰就越严重：在上面的模拟器里写完苹果、香蕉再写橙子，橙子读得准，苹果和香蕉却变了。真实的白板是 128 × 128，干扰小得多，但“固定大小 = 有损”的道理一样。</p>
+
+<h2 id="sec-4">9.4 门控衰减：顺序错一步，结果就变</h2>
+<p>白板还需要“遗忘”。每个 token 来时，GDN 先把整块白板乘一个衰减系数 α，再做 Delta 写入。α 接近 1，旧记忆几乎不褪色；α 接近 0，几乎从空白板开始。每个值头有自己的 α，由当前 token 现算：α = e<sup>gate</sup>。[S17]</p>
+<p>gate 的算法是 softplus(…) × ssm_a（<code>layer.hpp</code> 第 14 行）。softplus 的输出不小于 0，ssm_a 是模型里每个值头的一个系数。只要 ssm_a 是负数，gate 就不大于 0，α 就落在 0 到 1 之间，相当于“每一步旧记忆打个折”。</p>
+<p>把一个值头的完整一步写出来，状态 S 是“键维 × 值维”的矩阵 <span class="ev ev-code">代码事实</span>[S17]：</p>
+<ol>
+<li>衰减：S̄ = α S</li>
+<li>读旧值：v̂ = S̄ᵀ k</li>
+<li>算差额：δ = β (v − v̂)</li>
+<li>写入：S′ = S̄ + k δᵀ</li>
+<li>输出：o = S′ᵀ q</li>
+</ol>
+<p>GDN 的头文件特别强调：衰减必须在秩一更新<strong>之前</strong>，并且有测试专门钉住这一点。[S17] 为什么顺序这么要紧？把矩阵缩成一个数来手算。取旧状态 S = 2，α = 0.5，k = 1，v = 3，β = 0.25，q = 1：</p>
+<ul>
+<li><strong>先衰减再写</strong>（契约）：S̄ = 1；v̂ = 1；δ = 0.25 × (3 − 1) = 0.5；S′ = 1.5；输出 1.5。</li>
+<li><strong>先写再衰减</strong>（错误）：v̂ = 2；δ = 0.25 × (3 − 2) = 0.25；写完是 2.25；再乘 0.5 得 1.125。</li>
+</ul>
+<p>两个结果都合理、有限、不越界，只有一个符合模型。错误顺序把<strong>刚写进去的新信息</strong>也打了折，相当于“刚记下就忘了一部分”。下面的工具让你换参数，两边同时算：</p>
+<div class="viz" data-viz="gdn-order"><figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="图 9-4：同一组参数，先衰减再写得到 1.5，先写再衰减得到 1.125">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">S = 2，α = 0.5，k = 1，v = 3，β = 0.25，q = 1</text>
+<rect class="f-soft" fill="#e5f1df" x="8" y="26" width="188" height="170" rx="8"/>
+<text class="f-text" fill="#182f2b" x="102" y="48" font-size="13" font-weight="600" text-anchor="middle">先衰减再写（契约）</text>
+<text class="f-text" fill="#182f2b" x="18" y="76" font-size="12">S̄ = 0.5 × 2 = 1</text>
+<text class="f-text" fill="#182f2b" x="18" y="100" font-size="12">v̂ = 1 × 1 = 1</text>
+<text class="f-text" fill="#182f2b" x="18" y="124" font-size="12">δ = 0.25 × (3 − 1) = 0.5</text>
+<text class="f-text" fill="#182f2b" x="18" y="148" font-size="12">S′ = 1 + 1 × 0.5 = 1.5</text>
+<text class="f-text" fill="#182f2b" x="18" y="178" font-size="13" font-weight="600">输出 o = 1.5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="204" y="26" width="188" height="170" rx="8"/>
+<text class="f-warn" fill="#9e5d24" x="298" y="48" font-size="13" font-weight="600" text-anchor="middle">先写再衰减（错误）</text>
+<text class="f-text" fill="#182f2b" x="210" y="76" font-size="12">v̂ = 2 × 1 = 2</text>
+<text class="f-text" fill="#182f2b" x="210" y="100" font-size="12">δ = 0.25 × (3 − 2) = 0.25</text>
+<text class="f-text" fill="#182f2b" x="210" y="124" font-size="12">写完 = 2 + 0.25 = 2.25</text>
+<text class="f-text" fill="#182f2b" x="210" y="148" font-size="12">S′ = 0.5 × 2.25 = 1.125</text>
+<text class="f-warn" fill="#9e5d24" x="210" y="178" font-size="13" font-weight="600">输出 o = 1.125</text>
+</svg><figcaption>图 9-4　顺序不同，结果不同。错误顺序会把刚写进去的 0.25 也打五折。</figcaption></figure></div>
+<p>这个一维例子也是写测试的好材料。三个边界各验证一件事：α = 0 时旧记忆全部清空；β = 0 时什么都不写；k = 0 时没有任何键被改写。这三种情况下，两种顺序有的相同、有的不同，正好能检验实现有没有偷换顺序。</p>
+
+<h2 id="sec-5">9.5 为什么能并行，又为什么不能</h2>
+<p>回头看那五步公式，会发现一件不显眼的事：对固定的值头 h 和值维 j，每一步只碰白板上第 j 列的数。读旧值是沿键维 i 求和，写入也只改第 j 列。不同的列之间完全没有往来。<span class="ev ev-code">代码事实</span>[S17] 所以一个线程可以独占一列，从头算到尾，整个递推里一个同步屏障都不需要，见图 9-5。</p>
+<figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="图 9-5：同一个 token 内，白板的每一列可以交给不同线程并行计算；但相邻 token 之间必须按顺序进行">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">同一个 token 内：每一列交给一个线程</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="94" y="26" width="30" height="120"/><rect class="f-accent" fill="#136d5a" x="128" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="162" y="26" width="30" height="120"/><rect class="f-accent" fill="#136d5a" x="196" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="230" y="26" width="30" height="120"/>
+<text class="f-muted" fill="#5c6d66" x="75" y="164" font-size="12" text-anchor="middle">j=0</text>
+<text class="f-muted" fill="#5c6d66" x="143" y="164" font-size="12" text-anchor="middle">j=2</text>
+<text class="f-muted" fill="#5c6d66" x="211" y="164" font-size="12" text-anchor="middle">j=4</text>
+<text class="f-muted" fill="#5c6d66" x="54" y="40" font-size="12" text-anchor="end">i=0</text>
+<text class="f-muted" fill="#5c6d66" x="54" y="140" font-size="12" text-anchor="end">i=S−1</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M276 30V142M270 134L276 144L282 134"/>
+<text class="f-text" fill="#182f2b" x="288" y="80" font-size="12">沿键维 i</text>
+<text class="f-text" fill="#182f2b" x="288" y="98" font-size="12">求和与写入</text>
+<text class="f-text" fill="#182f2b" x="20" y="192" font-size="12" font-weight="600">token 之间：必须一个接一个</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="65" y="224" font-size="12" text-anchor="middle">状态 Sₜ</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="195" y="224" font-size="12" text-anchor="middle">状态 Sₜ₊₁</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="325" y="224" font-size="12" text-anchor="middle">状态 Sₜ₊₂</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M110 219H148M140 213L148 219L140 225M240 219H278M270 213L278 219L270 225"/>
+</svg><figcaption>图 9-5　并行在“列”上，串行在“时间”上。同一步里 128 × 48 列可以同时算；但第 t + 1 步必须等第 t 步的状态。</figcaption></figure>
+<p>为了让并行的线程读内存时步调一致，Strata 把状态的存放顺序从参考实现的（键维, 值维, 头）改成了（键维, 头, 值维），让相邻线程读相邻地址。状态是运行时缓冲区，不是权重，所以布局可以自由选；但头文件特别提醒，两种布局都在索引同样三个数，混用了不会报错。[S17]</p>
+<p>但“列可以并行”不等于“token 可以并行”。第 t + 1 步的状态依赖第 t 步，时间方向上仍是一条链。并行的是一步之内的工作，不是步与步之间。</p>
+<p>头的配对也有讲究。GDN 有 16 个键/查询头、48 个值头，值头 h 配的是第 h % 16 个键头（取余）。[S17] 第 8 章的 GQA 用的却是整数除法。两个模块的约定正好相反，如果写一个“通用的多头映射函数”到处复用，反而会出错。</p>
+<p>最后算一笔账。每个 GDN 层的主状态是 128 × 128 × 48 个 FP32 数，即 3,145,728 字节，正好 3 MiB；36 层共 108 MiB。再加上卷积历史（每层 10,240 个通道 × 3 列 × 4 字节 = 120 KiB），合计约 112.2 MiB。<span class="ev ev-est">教学推演</span>（尺寸来自[S04]；每层的浮点数个数见 <code>session.cpp</code> 第 41–44 行）这个数从第一个 token 到第 262,144 个 token 都不变。但它不是整个模型的全部状态：QSA 层的 KV 缓存仍随上下文增长。</p>
+<p>顺带一提：GDN 头文件开头的说明写着“48 层是 GDN、12 层是 QSA”，加起来 60 层，和真实的 36 + 12 = 48 对不上。[S17] 本书以可执行的几何定义和会话的状态分配为准，不把过时的注释当成模型事实。[S04][S13]</p>
+
+<h2 id="sec-6">9.6 动手：一维 GDN，以及“回退”有多难</h2>
+<p>打开本章的交互实验「递归的一次更新」。它把 GDN 缩成一个标量状态，并排展示正确和错误的更新顺序。建议做三件事：</p>
+<ol>
+<li>设置 α = 0、β = 0、k = 0，逐个验证 9.4 节说的三个边界性质。</li>
+<li>找一组参数，让两种顺序结果相同；再解释为什么一般情况下它们不同。</li>
+<li>回到本章的「顺序真的重要」，把 α 拉到 1：两种顺序还会不同吗？用公式解释为什么。</li>
+</ol>
+<p>状态只能往前走，这在投机解码（第 18、19 章）里会变成实际问题：引擎先用便宜的办法猜几个词（Strata 用模型自带的 MTP 层），再让完整的 48 层一次性核对，猜错的要退回去。[S02]KV 缓存好办：猜错位置上的键值留在那里也没关系，下次处理这些位置时直接覆盖。GDN 的状态却已经被猜错的词改写过，不能简单“退回计数器”。Strata 的做法是：核对窗口<strong>不碰</strong> GDN 状态；确定接受前 n 个词之后，再用窗口里存下的输入，把这 n 个词重放一遍，推进卷积历史和递归状态。<span class="ev ev-code">代码事实</span>[S08] 见图 9-6。</p>
+<figure class="fig"><svg viewBox="0 0 400 238" role="img" aria-label="图 9-6：拒绝草稿时，KV 缓存只要以后覆盖错误位置；GDN 状态则要保持不动，用存下的输入重放被接受的词">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">核对 3 个草稿词，接受前 2 个</text>
+<text class="f-text" fill="#182f2b" x="20" y="42" font-size="12">KV 缓存（按位置存）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="50" width="70" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="55" y="70" font-size="12" text-anchor="middle">已提交</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="50" width="70" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="70" font-size="12" text-anchor="middle">草稿 1 ✓</text>
+<rect class="f-accent" fill="#136d5a" x="172" y="50" width="70" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="207" y="70" font-size="12" text-anchor="middle">草稿 2 ✓</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="248" y="50" width="70" height="30" rx="4"/><text class="f-warn" fill="#9e5d24" x="283" y="70" font-size="12" text-anchor="middle">草稿 3 ✗</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="102" font-size="12">✗ 的位置先放着，下次处理这个位置时直接覆盖</text>
+<text class="f-text" fill="#182f2b" x="20" y="134" font-size="12">GDN 状态（只有一份）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="142" width="96" height="34" rx="4"/><text class="f-text" fill="#182f2b" x="68" y="164" font-size="12" text-anchor="middle">核对时不动</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M116 159H150M142 153L150 159L142 165"/>
+<rect class="f-soft" fill="#e5f1df" x="152" y="142" width="128" height="34" rx="4"/><text class="f-text" fill="#182f2b" x="216" y="164" font-size="12" text-anchor="middle">重放草稿 1、2</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M280 159H314M306 153L314 159L306 165"/>
+<rect class="f-accent" fill="#136d5a" x="316" y="142" width="70" height="34" rx="4"/><text class="f-on" fill="#ffffff" x="351" y="164" font-size="12" text-anchor="middle">新状态</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="202" font-size="12">重放用的是核对窗口里存下的输入</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="224" font-size="12">只把位置计数器退回去，状态里仍留着草稿 3 的痕迹</text>
+</svg><figcaption>图 9-6　KV 缓存按位置存，错了可以覆盖；GDN 状态只有一份，错了擦不回去。所以 Strata 先不碰它，确认之后再重放被接受的词。</figcaption></figure>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>GDN 用一块固定大小的状态矩阵记历史：每层每个值头 128 × 128，36 层合计约 112 MiB，不随上下文增长；代价是有损，而且只能往前走。</li>
+<li>每个 token 的一步：先衰减 S̄ = αS，再读旧值 v̂ = S̄ᵀk，算差额 δ = β(v − v̂)，用外积写入 S′ = S̄ + kδᵀ。先衰减后写入是契约，反过来会把新信息也打折。</li>
+<li>同一步内，白板的每一列互不相干，可以一列一个线程并行；token 与 token 之间仍是串行的链。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“GDN 状态大小固定，所以整个模型的内存都不随上下文增长，也能随便回退。”</strong></p>
+<p>固定的只是 36 个 GDN 层的状态。12 个 QSA 层的 KV 缓存照样随上下文增长。固定大小也不等于“能倒推”：写入时旧信息已经被部分擦掉，想回到较早的状态，只能事先存快照，或者从已知状态重放。</p></div>
+
+<details class="deep"><summary>深入一层：完整的张量形状、几个容易读错的契约、怎样测试一个递推</summary>
+<h3>一次 GDN 递推的完整写法</h3>
+<p><code>gdn.hpp</code> 用这样六行描述一步（状态按参考实现的下标写成 st[i, j, h]）[S17]：</p>
+<ul>
+<li>dec = exp(gate)，每个值头一个数；st = state × dec</li>
+<li>sk[h, j] = Σᵢ st[i, j, h] × k[idx[h]][i]（读旧值）</li>
+<li>d[h, j] = (v[h, j] − sk[h, j]) × beta[h]（差额）</li>
+<li>st[i, j, h] += k[idx[h]][i] × d[h, j]（秩一写入）</li>
+<li>o[h, j] = Σᵢ st[i, j, h] × q[idx[h]][i]（读出）</li>
+</ul>
+<p>其中 idx[h] = h % h_k，h_k = 16，h_v = 48，S = 128。每一行都只碰 (j, h) 这一列，这就是“一列一个线程、不需要屏障”的依据。[S17]</p>
+<h3>四个容易读错的输入契约</h3>
+<ul>
+<li><strong>q 和 k 已经做过 L2 归一化，而且 q 已经乘过 1/√S。</strong>两条 llama.cpp 路径在不同地方乘这个系数，所以由调用者负责。[S17] L2 归一化的 ε 加在平方和上，不能除以宽度，否则差 √128 ≈ 11.3 倍（第 7 章）。[S17]</li>
+<li><strong>gate 是取指数之前的值。</strong>dec = exp(gate) 在内核里算。[S17]</li>
+<li><strong>beta 由层先过 sigmoid。</strong>内核的契约是 d = (v − sk) × beta，收到的必须已经是分数；直接传原始投影值，写入强度就会无界且可正可负。[S17]</li>
+<li><strong>v 不做归一化。</strong>只有 q 和 k 做（<code>layer.hpp</code> 第 23 行）。</li>
+</ul>
+<p>层的最后一步是 y = rms_norm(o) × ssm_norm × sigmoid(z)，按每个头单独做 RMS 归一化；这里是 sigmoid，不是 qwen3.5 用过的 SiLU。[S17]</p>
+<h3>卷积历史：还有一小块状态</h3>
+<p>递推之前，10,240 个通道先过一个长度为 4 的短卷积。它需要记住前 3 列输入，按“最旧的在前”排列：卷积核的第 0 个系数乘最旧的那一列，新输入落在最后一列。权重按 GGML 的原生布局存放，tap 是变化最快的那一维，和参考实现的行主序不同。[S17] 这 3 列历史和递归状态一样，是每层一份、随 token 前进的状态，回退时同样要处理。[S08]</p>
+<h3>怎样测试一个递推</h3>
+<p>第一类是边界测试：α = 0 检验遗忘，β = 0 检验不写入，k = 0 检验无键更新，以及“先衰减后写入”的顺序测试（GDN 的参考实现专门有一条性质钉住它）。[S17]</p>
+<p>第二类是快照与重放测试：处理一段固定的序列，保存第 t 步的状态，继续走两步，然后恢复快照、重放这两步，要求结果和不中断地一路算下来逐位一致。投机解码的提交逻辑依赖的正是这个性质。[S08]</p>
+<p>第三类是头映射测试：取余和整数除法两种配对都能产生形状正确的输出，测试必须用能区分二者的数据，否则永远发现不了用错。[S17]</p>
+<p>不要尝试把最终状态“倒推”回较早的状态。衰减可能把某些方向乘到接近 0，Delta 写入又覆盖了旧值；没有保存必要的信息，这个逆运算一般不存在。</p>
+</details>
