@@ -28,8 +28,10 @@ if (lang !== 'zh') {
     need(a === b, `${what} differ from the Chinese master: zh=[${a.slice(0, 120)}] ${lang}=[${b.slice(0, 120)}]`);
   }
   // Chinese teaching samples are allowed inside <code> or inside an element marked lang="zh".
-  const cjk = html.replace(/<code>[\s\S]*?<\/code>/g, '').replace(/<(text|tspan|code|span)\b[^>]*\blang="zh"[^>]*>[\s\S]*?<\/\1>/g, '').match(/[\u4e00-\u9fff]/g);
-  need(!cjk, `contains ${cjk ? cjk.length : 0} Chinese characters`);
+  // Japanese is written with kanji, so for ja only glyphs found in Simplified Chinese alone count as leftovers.
+  const han = lang === 'ja' ? /[这们说时过发个对现么无问还进动样实关应长开见边头间两东车将经资没认该处准则网签据维计读写钟递传输钮页图标题码块缓选择设显错误]/g : /[\u4e00-\u9fff]/g;
+  const cjk = html.replace(/<code>[\s\S]*?<\/code>/g, '').replace(/<(text|tspan|code|span)\b[^>]*\blang="zh"[^>]*>[\s\S]*?<\/\1>/g, '').match(han);
+  need(!cjk, `contains ${cjk ? cjk.length : 0} Chinese characters${cjk ? ': ' + [...new Set(cjk)].slice(0, 12).join('') : ''}`);
 }
 
 // Template blocks
