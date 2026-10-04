@@ -1,0 +1,169 @@
+<div class="hook"><span class="eyebrow">You might have noticed</span>
+<p>Graphics cards advertise trillions of operations per second. Yet running a large language model on the same card produces only dozens of tokens per second. By operation count, generating one token shouldn't take nearly that long. Where is the time going?</p>
+<p>A comment in Strata's source code states plainly that the engine is "bottlenecked by launch overhead, not bandwidth". Another says that GEMV accounts for only about 16% of a token, so optimizing it by a few percentage points "won't move the needle on the total". <span class="ev ev-code">Code fact</span>[S13][S14] This chapter teaches you three ways to measure where the time goes: bandwidth vs. latency, the roofline model, and Amdahl's law.</p></div>
+<p class="tldr"><strong>In one line:</strong> the time to run a computation is at least the longer of "arithmetic time" and "data transfer time"; when writing answers, data is large and arithmetic is small, so you stall on data transfer. Before optimizing, measure how much each part costs: if one part is only 16% of the total, even making it infinitely fast speeds up the whole system by only 19%.</p>
+
+<h2 id="sec-1">5.1 The GPU is so fast—why do tokens still come slowly?</h2>
+<p>Imagine a chef with lightning-fast hands. But the ingredients have to be carried up from the warehouse downstairs, trip after trip. As long as supplies lag behind, the chef must wait, no matter how sharp the knife. A GPU's arithmetic units are the chef; VRAM and RAM are the warehouse; the number of bytes per second a channel can carry decides whether the chef can stay busy.</p>
+<p>When writing answers, generating each token requires reading the weights for that step once. Chapter 10 calculated that the expert data alone is about 664 MB. Strata's source records a measurement: on that test machine, reading experts from main memory reaches 44.14 GB/s. <span class="ev ev-code">Code fact</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/core/expert_source.hpp#L378-L385" target="_blank" rel="noopener noreferrer">expert_source.hpp</a> If every token reads all 663.6 MB of expert data from RAM, just that transfer takes 663.6 MB ÷ 44.14 GB/s ≈ 15 ms, capping the output at 66 tokens per second, before any arithmetic. <span class="ev ev-est">Teaching estimate</span></p>
+<p>This is why Strata puts hot experts in VRAM (much faster reads) and lets the CPU compute experts in RAM in-place (data never crosses PCIe). Real-world testing shows output speed of about 93 tokens per second (RTX 5070 with 12 GB, Q2_0, 4K context, engine 0.1.26, speculative decoding enabled), above the "read everything from RAM" ceiling just calculated. The reasons are two: many experts never get read from RAM at all; speculative decoding can produce more than one token per step (Chapter 18). <span class="ev ev-report">Upstream report</span>[S03]</p>
+<aside class="primer" id="c05-bandwidth-latency">
+<h3>Bandwidth and latency</h3>
+<p>Chapter 1's storage hierarchy sidebar mentioned these two terms; here they become a formula. <dfn>Latency</dfn> is "how long to wait for the first byte after the request"—like how long a package takes to ship. <dfn>Bandwidth</dfn> is "how many bytes per second after it starts moving"—like a truck's cargo capacity. The time to transfer a batch of data is roughly:</p>
+<div class="equation">Transfer time ≈ latency + data size ÷ bandwidth</div>
+<p>Which term dominates depends on data size, as Figure 5-1 shows. Small packages are almost pure latency: transferring 1 KB and 2 KB take nearly the same time. Large packages are almost pure bandwidth: 664 MB is determined entirely by bandwidth. So to optimize small, frequent operations, find a way to reduce the count; to optimize large transfers, raise bandwidth or move less data.</p>
+<figure class="fig"><svg viewBox="0 0 400 242" role="img" aria-label="Figure 5-1: transferring 1 KB is almost pure latency, about 10 microseconds; transferring 664 MB is almost pure bandwidth, about 10.5 milliseconds">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">Transfer time = latency + data size ÷ bandwidth</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="40" font-size="12">Teaching assumption: latency 10 μs, bandwidth 63 GB/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="77" font-size="13">Transfer 1 KB</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="60" width="289.5" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="379.5" y="60" width="1" height="24"/>
+<text class="f-text" fill="#182f2b" x="90" y="106" font-size="12">Latency is 99.8%, total about 10 μs</text>
+<text class="f-text" fill="#182f2b" x="10" y="147" font-size="13">Transfer 664 MB</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="130" width="1" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="91" y="130" width="289.5" height="24"/>
+<text class="f-text" fill="#182f2b" x="90" y="176" font-size="12">Bandwidth is 99.9%, total about 10.5 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="212" font-size="12">Each bar is drawn to scale; timescales differ by about a thousand.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">Color: latency; accent: transfer</text>
+</svg><figcaption>Figure 5-1　Small packets show latency, large ones show bandwidth. The same channel; which is the bottleneck depends on how much you move at once.</figcaption></figure>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Bandwidth" target="_blank" rel="noopener noreferrer">Wikipedia: Bandwidth</a> · <a href="https://en.wikipedia.org/wiki/Latency" target="_blank" rel="noopener noreferrer">Wikipedia: Latency (engineering)</a> · <a href="https://en.wikipedia.org/wiki/Memory_bandwidth" target="_blank" rel="noopener noreferrer">Wikipedia: Memory bandwidth</a></p>
+</aside>
+
+<h2 id="sec-2">5.2 Two ceilings: the roofline model</h2>
+<p>Put "arithmetic" and "data movement" in the same picture. Say a computation does F floating-point operations, moving D bytes through some storage level; the hardware can do at most P operations per second and move at most B bytes per second through that level. Ignoring other overhead, time is at least:</p>
+<div class="equation">T ≥ max(F ÷ P, D ÷ B)</div>
+<p>The larger of the two terms wins. Now define <dfn>arithmetic intensity</dfn> I = F ÷ D: how many operations per byte moved. The speed you can achieve is pinned by two "ceilings": operations per second ≤ min(P, B × I). Plot this and it looks like a roof shape, called the <dfn>roofline model</dfn>, shown in Figure 5-2.</p>
+<div class="viz" data-viz="roofline-lab"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="Figure 5-2: roofline plot. The slanted line is the bandwidth ceiling, the flat line is the compute ceiling. When computing one token at a time, arithmetic intensity is about 1 and falls on the slant; at batch 128 tokens, it crosses the corner and reaches the flat ceiling">
+<text class="f-muted" fill="#5c6d66" x="60" y="20" font-size="12">Achievable throughput (TFLOPS, log scale)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M60 40V200H380"/>
+<text class="f-muted" fill="#5c6d66" x="56" y="204" font-size="12" text-anchor="end">0.01</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="164" font-size="12" text-anchor="end">0.1</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="124" font-size="12" text-anchor="end">1</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="84" font-size="12" text-anchor="end">10</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="56" font-size="12" text-anchor="end">100</text>
+<text class="f-muted" fill="#5c6d66" x="60" y="218" font-size="12" text-anchor="middle">0.1</text>
+<text class="f-muted" fill="#5c6d66" x="140" y="218" font-size="12" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="218" font-size="12" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="218" font-size="12" text-anchor="middle">100</text>
+<text class="f-muted" fill="#5c6d66" x="378" y="218" font-size="12" text-anchor="end">1000</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M60 166.9L289.7 52H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M289.7 52V200"/>
+<text class="f-muted" fill="#5c6d66" x="380" y="44" font-size="12" text-anchor="end">compute limit P = 50 TFLOPS (teaching assumption)</text>
+<text class="f-muted" fill="#5c6d66" x="295" y="190" font-size="12">ridge ≈ 74</text>
+<circle class="f-warn" fill="#9e5d24" cx="140" cy="126.9" r="6"/>
+<text class="f-text" fill="#182f2b" x="150" y="146" font-size="12">decode: b = 1, I ≈ 1</text>
+<circle class="f-accent" fill="#136d5a" cx="308.6" cy="52" r="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="76" font-size="12" text-anchor="middle">prefill: b = 128</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="244" font-size="12" text-anchor="middle">arithmetic intensity I (FLOP/byte, log scale)</text>
+</svg><figcaption>Figure 5-2　Roofline: the slant is the bandwidth ceiling, the flat part is the compute ceiling. When decoding, each step computes 1 token and falls on the slant—most compute goes unused. Bandwidth from RTX 5070 VRAM spec is 672 GB/s, for FP16 weights.</figcaption></figure></div>
+<aside class="primer" id="c05-roofline">
+<h3>Compute and roofline</h3>
+<p><dfn>Compute throughput</dfn> is how many floating-point operations per second, measured in FLOPS; 1 TFLOPS is one trillion per second. The roofline model says: how fast you run depends on which ceiling it sits under. The two ceilings meet at a point called the <dfn>ridge</dfn>, located at I = P ÷ B. Below the ridge, you are <strong>bandwidth-limited</strong>: no amount of compute power helps while waiting for data; above it, you are <strong>compute-limited</strong>: data is plentiful, arithmetic is the bottleneck.</p>
+<p>Take a matrix-vector product to compute I. Each weight multiplies each input once, adds the result once—2 operations per weight; if weights are FP16, that is 2 bytes per weight. Computing 1 token at a time, I = 2 ÷ 2 = 1. Assume P = 50 TFLOPS (teaching assumption) and B = 672 GB/s; the ridge is around 74. At I = 1, you can achieve at most 0.672 TFLOPS, under 2% of the limit. <span class="ev ev-est">Teaching estimate</span></p>
+<p>Two cautions. First, D must specify <strong>which storage level</strong> the bytes cross: VRAM, RAM, PCIe, or disk. Using VRAM bandwidth to compute transfer time through RAM is like applying a highway speed limit to a country road. Second, this is a <strong>lower bound</strong>, not a prediction: real time is extended by kernel launch overhead, synchronization, irregular access patterns, insufficient parallelism, page faults, and serial dependencies.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Roofline_model" target="_blank" rel="noopener noreferrer">Wikipedia: Roofline model</a> · <a href="https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html" target="_blank" rel="noopener noreferrer">NVIDIA Nsight Compute documentation: Roofline analysis</a> · <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html" target="_blank" rel="noopener noreferrer">CUDA C++ Best Practices Guide</a></p>
+</aside>
+
+<h2 id="sec-3">5.3 One person eating, a table of people eating</h2>
+<p>One dish is served. Whether one person eats it or the whole table, the person serving exerts the same effort. But the number fed differs by ten times. Weights work the same way: read them once, feed them to 1 token, or to 32 tokens, and the transfer cost barely changes.</p>
+<p>A concrete example: <span class="ev ev-est">Teaching estimate</span> suppose a linear layer has about 8 million weights, 2 bytes each, about 16 MB total. Computing 1 input: about 16 million operations, I ≈ 1. Computing 32 inputs at once—same weights read once—about 512 million operations, weight traffic still about 16 MB, I ≈ 32. Inputs and outputs add their own traffic, so this is approximate; the scale doesn't change.</p>
+<p>This is the root cause of Chapter 1's "prefill is fast, decode is slow". During prefill, a long prompt is computed in one pass, and one set of weights is shared by thousands of tokens; during decode, each step computes just 1 token. Upstream measured on the same machine: a 4K context takes 1,299 tokens per second to prefill but only 93.0 per second to decode (RTX 5070 with 12 GB, Q2_0, engine 0.1.26). <span class="ev ev-report">Upstream report</span>[S03] Do not expect both modes to follow the same "time per token" rule.</p>
+<p>Quantization also raises I: the same weights fit in fewer bytes, so the same bandwidth feeds more arithmetic. The Q2_0 from Chapter 4 shrinks each weight to 0.28125 bytes, raising I from 1 to about 7 for 1 token. The cost: each weight must be unpacked before use, extra arithmetic the roofline ceilings don't include.</p>
+<p class="bridge"><strong>If you studied CS:</strong> this is the "memory-intensive" versus "compute-intensive" distinction from computer architecture, and blocking (or tiling) to improve cache reuse is the same idea: make every byte read participate in more operations.</p>
+
+<h2 id="sec-4">5.4 Dependency chains: some work just cannot be parallelized</h2>
+<p>Your home has both a washer and a dryer, but one load of laundry must finish washing before it can dry. More machines don't speed it up. A chain of "this must wait for that" forms a graph; the longest path from start to finish is the <dfn>critical path</dfn>: total time is at least its length.</p>
+<p>Each layer in Strata has such a chain. One layer's output must be merged before the next layer can receive correct input; layers serialize strictly. The source code comment is clear: the CPU compute for unmatched experts "cannot be hidden in a strictly serial residual chain". While that CPU time runs, the GPU can only parallelize the shared experts, because everything downstream depends on the expert result. <span class="ev ev-code">Code fact</span>[S13] See Figure 5-3.</p>
+<figure class="fig"><svg viewBox="0 0 400 284" role="img" aria-label="Figure 5-3: timeline of one layer. GPU computes attention and routing, then GPU computes matched experts and CPU computes unmatched ones; GPU finishes early and waits; merge must wait for CPU; next layer must wait for merge">
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="13" font-weight="600">GPU</text>
+<text class="f-text" fill="#182f2b" x="10" y="104" font-size="13" font-weight="600">CPU</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="26" width="90" height="36" rx="4"/><text class="f-on" fill="#ffffff" x="105" y="41" font-size="12" text-anchor="middle">attention +</text><text class="f-on" fill="#ffffff" x="105" y="55" font-size="12" text-anchor="middle">routing</text>
+<rect class="f-soft" fill="#e5f1df" x="152" y="26" width="80" height="36" rx="4"/><text class="f-text" fill="#182f2b" x="192" y="41" font-size="12" text-anchor="middle">matched</text><text class="f-text" fill="#182f2b" x="192" y="55" font-size="12" text-anchor="middle">experts</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="234" y="26" width="50" height="36" rx="4"/><text class="f-muted" fill="#5c6d66" x="259" y="48" font-size="12" text-anchor="middle">idle</text>
+<rect class="f-accent" fill="#136d5a" x="286" y="26" width="50" height="36" rx="4"/><text class="f-on" fill="#ffffff" x="311" y="48" font-size="12" text-anchor="middle">merge</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="338" y="26" width="52" height="36" rx="4"/><text class="f-text" fill="#182f2b" x="364" y="41" font-size="12" text-anchor="middle">next</text><text class="f-text" fill="#182f2b" x="364" y="55" font-size="12" text-anchor="middle">layer…</text>
+<rect class="f-accent" fill="#136d5a" x="152" y="82" width="132" height="36" rx="4"/><text class="f-on" fill="#ffffff" x="218" y="104" font-size="12" text-anchor="middle">unmatched experts</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M284 86L298 64"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M60 132H390"/>
+<text class="f-muted" fill="#5c6d66" x="390" y="150" font-size="12" text-anchor="end">time → (schematic, not to scale)</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">Color: critical path. Attention + routing →</text>
+<text class="f-text" fill="#182f2b" x="10" y="192" font-size="12">CPU experts → merge → next layer</text>
+<text class="f-text" fill="#182f2b" x="10" y="218" font-size="12">The next layer must use this layer's merged output;</text>
+<text class="f-text" fill="#182f2b" x="10" y="234" font-size="12">it cannot start early</text>
+<text class="f-text" fill="#182f2b" x="10" y="260" font-size="12">The longer the CPU part, the longer the chain;</text>
+<text class="f-text" fill="#182f2b" x="10" y="276" font-size="12">GPU finishes early and just waits</text>
+</svg><figcaption>Figure 5-3　Critical path of one layer. Two parallel paths; time for this phase is the slower one plus merge time. GPU finishes first and must wait for CPU.</figcaption></figure>
+<p>For two parallel paths A and B, time for this phase is roughly max(T<sub>A</sub>, T<sub>B</sub>) plus merge time; for serial steps, it is T<sub>A</sub> + T<sub>B</sub>. To address the CPU part, Strata's answer is not "hide it better" but "put more experts in VRAM cache so the CPU has less to compute" (Chapters 10 and 12). The comment says exactly: for the CPU item, the answer is VRAM caching in phase 3, not overlap in the pipeline. [S13]</p>
+<p>Beware one illusion: "both started at the same time" does not mean "they really overlap". Strata added a diagnostic counter just for this—it counts whether the CPU begins while the GPU is still running, or after the GPU finishes. Both cases yield correct tokens and identical per-layer time; only this counter reveals whether overlap actually happened. <span class="ev ev-code">Code fact</span>[S13]</p>
+
+<h2 id="sec-5">5.5 Optimizing one part—how much faster is the whole?</h2>
+<p>Suppose you speed up the part that takes 20% of total time by 2×. How much faster is the system? Not 2×, not 1.2×. New time = 80% + 20% ÷ 2 = 90%, so the whole thing is 1.11× faster. The interactive plot below lets you try any two numbers:</p>
+<div class="viz" data-viz="amdahl-bar"><figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="Figure 5-4: when GEMV is 16%, speeding it 2× makes total time 92%, whole system 1.087× faster; speeding it to infinity makes it 84%, whole system 1.19× faster">
+<text class="f-text" fill="#182f2b" x="10" y="30" font-size="12">Before optimization</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="14" width="235.2" height="22"/><text class="f-text" fill="#182f2b" x="217.6" y="30" font-size="12" text-anchor="middle">other 84%</text>
+<rect class="f-accent" fill="#136d5a" x="335.2" y="14" width="44.8" height="22"/><text class="f-on" fill="#ffffff" x="357.6" y="30" font-size="12" text-anchor="middle">16%</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="54" font-size="12">100%</text>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">GEMV 2× faster</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="72" width="235.2" height="22"/><text class="f-text" fill="#182f2b" x="217.6" y="88" font-size="12" text-anchor="middle">other 84%</text>
+<rect class="f-warn" fill="#9e5d24" x="335.2" y="72" width="22.4" height="22"/>
+<text class="f-muted" fill="#5c6d66" x="100" y="112" font-size="12">92%: whole system 1.087× faster</text>
+<text class="f-text" fill="#182f2b" x="10" y="146" font-size="12">GEMV ∞ faster</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="130" width="235.2" height="22"/><text class="f-text" fill="#182f2b" x="217.6" y="146" font-size="12" text-anchor="middle">other 84%</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="170" font-size="12">84%: whole system 1.19× faster, this is the limit</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="194" font-size="12">16%: the fraction of one token that GEMV accounts for in Strata's source comments</text>
+</svg><figcaption>Figure 5-4　Amdahl's law: the parts you don't optimize shrink not at all. They set the ceiling on overall speedup.</figcaption></figure></div>
+<aside class="primer" id="c05-amdahl">
+<h3>Amdahl's law and critical path</h3>
+<p>Speed up the fraction f of total time by s×, leaving the rest unchanged. Overall speedup is:</p>
+<div class="equation">S = 1 ÷ [(1 − f) + f ÷ s]</div>
+<p>This is <dfn>Amdahl's law</dfn>. Let s go to infinity: S approaches 1 ÷ (1 − f). When f = 16%, the limit is 1.19×; when f = 50%, it is 2×; when f = 90%, it is 10×. The lesson is simple: the return on optimization depends on "what fraction does this part occupy", not "how many times faster did we make it".</p>
+<p>Critical path is its partner. Amdahl says "optimizing small parts yields little"; critical path says "optimizing parts not on the longest chain yields nothing"—it has no effect, because total time is set by the longest chain, and faster side chains just finish waiting earlier. So the first step of performance analysis is always: measure the timeline, find which steps sit on the critical path, and measure each.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Amdahl%27s_law" target="_blank" rel="noopener noreferrer">Wikipedia: Amdahl's law</a> · <a href="https://en.wikipedia.org/wiki/Critical_path_method" target="_blank" rel="noopener noreferrer">Wikipedia: Critical path method</a> · <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html" target="_blank" rel="noopener noreferrer">CUDA C++ Best Practices Guide (includes Amdahl's law section)</a></p>
+</aside>
+<p>Strata's source has a textbook example. Developers found that changing thread count from 32 to 64 per line raised bandwidth—seeming "free speedup". Yet measurements showed: with experts, 64 threads gave 11.75 tokens/s, 32 threads gave 11.99; without experts, 20.19 vs. 20.26, noise-level difference, even slightly worse. The comment explains by Amdahl's law: GEMV is about 16% of a token; a few percentage points there move the needle zero. <span class="ev ev-code">Code fact</span>[S14] Note: these token/s numbers are from early development and cannot be directly compared to today's speeds.</p>
+<p>The same code measured the real heavyweight: launch overhead. A tiny kernel that processes only 48 numbers still takes about 0.028 ms, because that is the cost to launch a kernel on this machine. One layer of GDN launches about 19 kernels; a block runs about 45. Record 43 nodes from one block as a CUDA Graph and replay it: time drops from 2.393 ms to 1.585 ms, 1.51× faster, all overhead gone. <span class="ev ev-code">Code fact</span>[S13] This is Chapter 5.1's sidebar revisited: each launch is a small packet.</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="Figure 5-5: the same computation, launched kernel-by-kernel takes 2.393 milliseconds; recorded as CUDA Graph and replayed takes 1.585 milliseconds">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">Same work, two launch methods</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">Launch kernels one by one directly</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="56" width="280" height="22"/>
+<text class="f-text" fill="#182f2b" x="296" y="72" font-size="12">2.393 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="12">Record as CUDA Graph, replay once</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="114" width="185.4" height="22"/>
+<text class="f-text" fill="#182f2b" x="201" y="130" font-size="12">1.585 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">The 0.8 ms gap is pure overhead; 1.51× faster</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="188" font-size="12">43 nodes from one block; bars to scale.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="204" font-size="12">Measurement from upstream source comments</text>
+</svg><figcaption>Figure 5-5　Many small kernels mean overhead dominates, not bandwidth. CUDA Graph merges one launch stream; Chapter 15 covers it more.</figcaption></figure>
+
+<h2 id="sec-6">5.6 Match metrics to experience, then optimize</h2>
+<p>Last, clarify terms often mixed up. <dfn>Time to first token</dfn> (TTFT) is the span from request to seeing the first token—includes queueing, templating, tokenization, prefill, and first-step generation. <dfn>Output speed</dfn> is generated tokens divided by generation time, not "final character count ÷ total wall time". When many users share a system, there is also <dfn>overall throughput</dfn>: tokens per second across all users. One system can have high throughput but make each user wait long; it can be fast on short requests but queue long ones indefinitely. So Chapters 25 and 27 cover queueing and percentiles—a single token/s number is never the whole story.</p>
+<p><strong>Hands-on:</strong> open this chapter's interactive experiment "compute or bandwidth".</p>
+<ol>
+<li>Enter the operation count, data size, compute throughput, and bandwidth; watch the bottleneck shift from data to compute.</li>
+<li>Add "unavoidable launch time"; see how it raises the lower bound.</li>
+<li>Speed up one phase 2×; observe why the end-to-end time does not speed up 2×.</li>
+</ol>
+<p>When reporting results, write all assumptions and units before the numbers; title it "theoretical lower bound" or "teaching estimate". Numbers from plugging a card's peak throughput into the formula are not "measured on that GPU".</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>Time is at least max(arithmetic ÷ compute throughput, bytes ÷ bandwidth); specify which storage level the bytes cross. During decode, intensity is small, so data transfer dominates.</li>
+<li>Computing many tokens at once reuses the same weights multiple times, raising intensity, until you hit the compute ceiling. That is why prefill is ten-plus times faster than decode.</li>
+<li>Before optimizing, measure the timeline: parts not on the critical path help zero, parts that are small help little (Amdahl's law).</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "Double the GPU compute, double the generation speed."</strong></p>
+<p>During decode, speed is constrained by data transfer and the dependency chain, not compute. Doubling compute just leaves it more idle. For Strata, VRAM size matters more than GPU speed: upstream says larger VRAM beats a faster card; more VRAM holds more experts, each expert held in VRAM means the CPU computes one fewer. <span class="ev ev-report">Upstream report</span>[S02]</p></div>
+
+<details class="deep"><summary>Go deeper: lower bounds, overlap, and how to report performance</summary>
+<h3>Lower bound is not prediction</h3>
+<p>The roofline bound T ≥ max(F ÷ P, D ÷ B) is just that: a lower bound. Real T is extended by kernel launch overhead, synchronization, irregular access, insufficient parallelism, page faults, and serial dependencies. Even when one cost is zero, you cannot hit all peak values at once. D must specify the storage level: VRAM, RAM, PCIe, or disk. Different storage levels mean different I for the same code.</p>
+<h3>Example: same weight matrix, single batch and large batch</h3>
+<p>Teaching scenario: a linear layer with about 8 million weights, 2 bytes each, about 16 MB. One input vector: about 16 million operations, I ≈ 1. Thirty-two inputs at once, same weights read once: about 512 million operations, weight traffic still 16 MB, theoretical I ≈ 32. Activations and outputs add traffic, so this is a simplification; the order of magnitude holds. It explains why decode's GEMV and prefill's GEMM should not be judged by the same token/s metric.</p>
+<h3>Overlap must be proven with a timeline</h3>
+<p>For two parallel paths A and B, time for this segment is roughly max(T<sub>A</sub>, T<sub>B</sub>) + T<sub>merge</sub>; for serial steps, T<sub>A</sub> + T<sub>B</sub>. Saying "they launched together" instead of measuring actual overlap is a common performance analysis error. Strata's session code shows how to detect it: if the host reads "this layer is done" at the same time the GPU event query shows completion, then that layer finished long ago—the CPU started while the GPU was idle, so the "pipeline" is really serial. This shows in no return value and no per-layer timing; a separate counter is needed. [S13]</p>
+<h3>Amdahl's two numbers</h3>
+<p>If GEMV is 20% and sped up 2×, total time becomes 0.8 + 0.2 ÷ 2 = 0.9, overall speedup only <strong>1.111×</strong>; even at infinite speed, the ceiling is 1.25×. True optimization depends on "what fraction of the target workload's critical path"—not how pretty the microbenchmark looks.</p>
+<h3>Metric definitions must be complete</h3>
+<p>TTFT may include queueing, templating, tokenization, prefill, first-step generation, and network transit. Report fully which are included. Output speed: is it generated tokens ÷ generation time, or something else? Upstream speed tables spelled it out: hardware and specs, model and quantization, context length, engine version, how many runs, mean or median. [S03] And note: speculative decoding speed varies with text content; one prompt's different answers can differ by a few percent. [S03]</p>
+<h3>Report template</h3>
+<p>Write assumptions first: hardware model and specs, model and quantization format, context length, engine version, number of runs, mean or median. Title it "theoretical lower bound", "teaching estimate", or "measured". Numbers from peak specifications are not "measured on that GPU".</p>
+</details>
