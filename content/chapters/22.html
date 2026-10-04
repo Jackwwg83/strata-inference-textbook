@@ -1,18 +1,255 @@
-<h2 id="sec-1">22.1 算法可移植，不代表每条内核路径可移植</h2>
-<p>矩阵乘法在数学上不依赖 GPU 品牌，但一个实现可能依赖特定线程宽度、指令、内存布局或库调用。仓库声明支持 CUDA / HIP，并在 CPU 侧利用 AVX-512、AVX2 或 ggml 相关路径。[S01][S02] 具体设备与量化组合仍须以受支持构建和实测为准。</p>
-<p>“成功编译”只说明源码与编译器接受某种组合；“能够启动”只说明部分初始化走通；“固定输入数值通过”才触及正确性；“稳定完成真实负载”又是更高一层。教材不把这些证据合并成一个支持勾选。</p>
-<h2 id="sec-2">22.2 SIMD 与 SIMT 的区别怎样影响实现？</h2>
-<p>CPU SIMD 常由单条指令同时处理一个向量的若干 lane；GPU SIMT 以大量线程组织工作。[R01] 两者可以执行同一数学运算，却采用不同分块和归约次序。量化解码与点积是否融合、尾部如何处理、对齐是否满足，也会造成性能和数值差异。</p>
-<p>若向量长度不整除 lane 数，剩余尾部必须用掩码或其他受控路径处理。为了方便而读到下一专家的字节，即便没有触发异常，结果仍然错。</p>
-<h2 id="sec-3">22.3 例题：支持矩阵至少四个维度</h2>
-<p>假设有 2 个后端、3 种量化、2 种 KV 格式、2 种输入路径，已经有 24 种组合；再加入设备架构与多 GPU，数量很快增加。不能只测一个 Q2_0 decode，就声称所有 IQ prefill 与 K8V4 路径已验证。</p>
-<p>用分层策略控制成本：纯数学小样本覆盖算法；格式测试覆盖量化解码；CPU-only 测试覆盖预算 / 匹配；每个后端覆盖代表性内核；端到端覆盖最关键组合。尚未验证的组合保留空白，而不是默认打勾。</p>
-<h2 id="sec-4">22.4 构建配置是实验输入</h2>
-<p>报告应记录 commit、编译器及版本、目标架构、编译选项、依赖版本和开启的 feature。两个二进制即使来自相同 commit，不同 flags 也可能选择不同代码路径。启动日志应暴露实际后端与回退，不让用户根据文件名猜测。</p>
-<p>本教材网站与推理引擎的构建完全分离：网站是静态 HTML / CSS / JavaScript，不含 GPU 引擎，不下载权重。把网站部署到 Vercel 只是在发布课程，不意味着在该静态服务上运行了 Strata。</p>
-<h2 id="sec-5">22.5 许可与模型身份也属于交付边界</h2>
-<p>仓库 <code>LICENSE</code> 是 MIT，代码片段在本交付中保留该声明。[S19] 模型文件不随教材附带，上游文档也说明权重及部分第三方材料有自己的许可。[S01] 发布课程时应标明是独立教材，不暗示获得原项目或模型厂商官方认证。</p>
-<p>这里的实践要求很具体：记录引用路径与固定 SHA；不要重新打包上游字体或权重；把自己写的教学模拟器明确标成教学实现，避免被误认为上游性能实现。</p>
-<h2 id="sec-6">22.6 实验与验收</h2>
-<p>选择一个标量 reference dot product，分别写简单循环与分块累加，比较误差与时间。先校验逻辑，再测性能；小数组的解释器开销不能代表真实 SIMD。</p>
-<p>有硬件的学生再做同一张量、同一量化与同一输入的 CPU/GPU 差分；没有显卡的学生完成构建矩阵设计与纯函数测试，同样能理解可移植性工程的核心。</p>
+<div class="hook"><span class="eyebrow">你可能见过</span>
+<p>下载开源软件时，发布页上常常排着一串文件：<code>windows-x64</code>、<code>linux-x64</code>、<code>macos-arm64</code>……同一个程序，为什么要准备这么多份？</p>
+<p>Strata 的 README 开头写着：NVIDIA 或 AMD 显卡，Windows 或 Linux。<span class="ev ev-report">上游报告</span>[S01] 它的原理文档说得更干脆：在 NVIDIA（CUDA）和 AMD（HIP）显卡上，跑的是同一个引擎，只是各自编译一次。[S02] 这一章回答两个问题：同一份源码，怎样变成能在不同机器上跑的程序？“能跑起来”又证明了多少？</p></div>
+<p class="tldr"><strong>一句话：</strong>每种芯片只懂自己的指令。Strata 只写一份源码，靠编译开关、条件编译和一张 CUDA→HIP 的“改名表”，编出 NVIDIA 版和 AMD 版两个引擎；CPU 这边则在启动时先问清 CPU 会哪些指令，再挑 AVX-512 或 AVX2 内核。能编译、测试通过、真卡跑通、维护者验证，是四级不同的证据。</p>
+
+<h2 id="sec-1">22.1 同一份菜谱，三种厨房</h2>
+<p>想象你写了一份菜谱，要寄给三家餐馆。一家用燃气灶，一家用电磁炉，一家只有烤箱。菜谱上的“炒三分钟”，每家都得翻译成自己设备上的操作。</p>
+<p>程序也一样。程序员写的是<dfn>源代码</dfn>：人能读懂的文字。芯片真正执行的是<dfn>机器码</dfn>：一串二进制指令。芯片能执行哪些指令、每条指令怎样编码，由它的<dfn>指令集</dfn>规定，相当于“这个厨房里有哪些电器”。把源代码翻译成某一种指令集的机器码，是<dfn>编译器</dfn>的活。</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="图 22-1：同一份源代码经过预处理器和编译器，变成 x86 CPU、NVIDIA GPU、AMD GPU 三种机器码">
+<rect class="f-soft" fill="#e5f1df" x="90" y="8" width="220" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="33" font-size="14" font-weight="600" text-anchor="middle">源代码：只写一次</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="70" y="70" width="260" height="46" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="90" font-size="14" font-weight="600" text-anchor="middle">预处理器</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="108" font-size="11" text-anchor="middle">展开 #include、替换宏、按 #if 留下一个分支</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="138" width="260" height="46" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="158" font-size="14" font-weight="600" text-anchor="middle">编译器</text>
+<text class="f-on" fill="#ffffff" x="200" y="176" font-size="11" text-anchor="middle">翻译成某一种指令集的机器码</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 48V68M200 116V136M200 184V196H70V210M200 196V210M200 196H330V210"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="212" width="124" height="54" rx="8"/>
+<text class="f-text" fill="#182f2b" x="70" y="234" font-size="13" font-weight="600" text-anchor="middle">x86 CPU</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="254" font-size="11" text-anchor="middle">AVX2 / AVX-512</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="138" y="212" width="124" height="54" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="234" font-size="13" font-weight="600" text-anchor="middle">NVIDIA GPU</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="254" font-size="11" text-anchor="middle">sm_75 … sm_120</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="268" y="212" width="124" height="54" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="234" font-size="13" font-weight="600" text-anchor="middle">AMD GPU</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="254" font-size="11" text-anchor="middle">gfx1030 … gfx1201</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="12" text-anchor="middle">同一份源码，三种“方言”的机器码</text>
+</svg><figcaption>图 22-1　源代码只写一次。预处理器先按目标改写源码，编译器再把它翻译成目标芯片的指令。换一种芯片，就要重新编译一次。</figcaption></figure>
+<p>图里的 <code>sm_120</code>、<code>gfx1100</code> 是显卡架构的编号，相当于厨房的型号。Strata 的构建脚本要求 NVIDIA 显卡的计算能力至少是 7.5，也就是 RTX 20 系列及更新；AMD 这边只收一份明确的名单，名单外的架构直接报错。<span class="ev ev-code">代码事实</span></p>
+<aside class="primer" id="c22-compiler">
+<h3>编译器、指令集与条件编译</h3>
+<p><dfn>指令集</dfn>是硬件和软件之间的契约：芯片承诺“我认识这些指令”，软件只能用这些指令说话。同一个家族的芯片会不断加新指令。比如 x86 CPU 家族先有了 AVX2，后来又加了更宽的 AVX-512。老芯片遇到不认识的指令，会直接报“非法指令”并让程序崩溃。</p>
+<p><dfn>编译器</dfn>把源代码翻译成机器码。C 和 C++ 的编译分两段：先由<dfn>预处理器</dfn>做文字加工，再由编译器本体做翻译。预处理器干三件事：把 <code>#include</code> 的文件原样贴进来；把 <code>#define</code> 定义的<dfn>宏</dfn>按名字替换掉，像“查找替换”；按 <code>#if</code> 的条件只留下一个分支，其他分支整段删掉。最后这一招叫<dfn>条件编译</dfn>。</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="图 22-2：一份含 #if 分支的源文件，为 gfx1100 编译时只剩 sudot4 分支，为 gfx1030 编译时只剩 sdot4 分支">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">源文件（一份）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="30" width="184" height="148" rx="8"/>
+<text class="f-text" fill="#182f2b" x="16" y="52" font-size="11">#if defined(__gfx1100__)</text>
+<text class="f-muted" fill="#5c6d66" x="28" y="70" font-size="11">用 sudot4 指令</text>
+<text class="f-text" fill="#182f2b" x="16" y="88" font-size="11">#elif defined(__gfx1030__)</text>
+<text class="f-muted" fill="#5c6d66" x="28" y="106" font-size="11">用 sdot4 指令</text>
+<text class="f-text" fill="#182f2b" x="16" y="124" font-size="11">#else</text>
+<text class="f-muted" fill="#5c6d66" x="28" y="142" font-size="11">逐字节循环</text>
+<text class="f-text" fill="#182f2b" x="16" y="160" font-size="11">#endif</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M192 66H212M192 140H212"/>
+<rect class="f-soft" fill="#e5f1df" x="214" y="34" width="178" height="62" rx="8"/>
+<text class="f-text" fill="#182f2b" x="224" y="56" font-size="12" font-weight="600">为 gfx1100 编译</text>
+<text class="f-text" fill="#182f2b" x="224" y="80" font-size="11">编译器只看到：用 sudot4 指令</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="110" width="178" height="62" rx="8"/>
+<text class="f-text" fill="#182f2b" x="224" y="132" font-size="12" font-weight="600">为 gfx1030 编译</text>
+<text class="f-text" fill="#182f2b" x="224" y="156" font-size="11">编译器只看到：用 sdot4 指令</text>
+<text class="f-text" fill="#182f2b" x="200" y="202" font-size="12" text-anchor="middle">预处理器在编译之前，删掉没选中的分支</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="222" font-size="11" text-anchor="middle">所以同一份源码，能编出只含一条路的不同程序</text>
+</svg><figcaption>图 22-2　条件编译：一份源文件写好所有分支，每次编译只留下与目标相符的那一个。编译器根本看不到其他分支。</figcaption></figure>
+<p>这正是 Strata 在 AMD 显卡上做“四字节点积”的写法：RDNA3、RDNA4 显卡用一条 sudot4 指令；RDNA2 没有这条，改用老一些的 sdot4；其他情况退回一个逐字节相乘再相加的循环。三条路算出的整数一模一样，快慢不同。<span class="ev ev-code">代码事实</span> 22.3 节会亲手编译它。</p>
+<p class="further">延伸阅读：<a href="https://oi-wiki.org/tools/compiler/" target="_blank" rel="noopener noreferrer">OI Wiki：编译器</a> · <a href="https://zh.wikipedia.org/zh-cn/指令集" target="_blank" rel="noopener noreferrer">维基百科：指令集架构</a> · <a href="https://zh.wikipedia.org/zh-cn/C预处理器" target="_blank" rel="noopener noreferrer">维基百科：C 预处理器</a> · <a href="https://en.cppreference.com/w/cpp/preprocessor/conditional" target="_blank" rel="noopener noreferrer">cppreference：条件编译（英文）</a></p>
+</aside>
+<p class="bridge"><strong>学过计算机的同学：</strong>《编译原理》课讲的是词法分析、语法分析、代码生成这条主线；预处理发生在这一切之前，是纯文本加工，不懂语法。所以宏替换出了错，报错位置常常很怪：编译器看到的已经是替换之后的代码。</p>
+
+<h2 id="sec-2">22.2 CPU：先问清会哪些指令，再挑内核</h2>
+<p>第 10 章讲过，显卡没缓存的专家，由 CPU 在内存里就地计算。上游文档的概括是：这些计算用 AVX-512 或 AVX2 内核，i-quant 格式的模型用 ggml 的内核。<span class="ev ev-report">上游报告</span>[S02] 源码里分得更细：i-quant 格式在一组有多个 token 时，也会改用 Strata 自己的多 token 内核。<span class="ev ev-code">代码事实</span> 这里的<dfn>内核</dfn>，指一段专门写来跑得飞快的核心计算代码。</p>
+<p>AVX2 和 AVX-512 都是 <dfn>SIMD</dfn> 指令：一条指令同时处理一排数（第 13 章细讲）。区别在于这一排有多宽。AVX2 的寄存器是 256 位，AVX-512 是 512 位，见图 22-3。</p>
+<figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="图 22-3：AVX2 寄存器 256 位能装 32 个 8 位整数，AVX-512 寄存器 512 位能装 64 个">
+<defs><pattern id="c22-lane" width="4.6875" height="18" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="3.6" height="18"/></pattern></defs>
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="11">一个向量寄存器能装多少个 8 位整数（条长按比例，一格一个）</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="12" font-weight="600">AVX2</text>
+<rect fill="url(#c22-lane)" x="90" y="38" width="150" height="18"/>
+<text class="f-text" fill="#182f2b" x="250" y="52" font-size="12">256 位 = 32 个</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12" font-weight="600">AVX-512</text>
+<rect fill="url(#c22-lane)" x="90" y="84" width="300" height="18"/>
+<text class="f-text" fill="#182f2b" x="90" y="124" font-size="12">512 位 = 64 个：一条指令干两倍的活</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="156" font-size="11">Strata 的 CPU 专家内核：有 AVX-512 先用它，没有就用 AVX2 版</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="178" font-size="11">前提：CPU 认识这组指令，操作系统也愿意保存这组寄存器</text>
+</svg><figcaption>图 22-3　寄存器宽一倍，一条指令处理的数也多一倍。可老 CPU 不认识 AVX-512，程序就得准备两套内核。</figcaption></figure>
+<p>麻烦在于：如果整个程序都用 AVX-512 编译，编译器可能在任何地方插入 AVX-512 指令，程序到了老 CPU 上就会崩。Strata 的构建脚本只给几个内核源文件加上 AVX-512 或 AVX2 的编译开关（GCC 写作 <code>-mavx512f</code> 这类参数，MSVC 写作 <code>/arch:AVX512</code>）。负责“探测 CPU”的那个文件不加，所以在任何 x86-64 CPU 上都能安全运行。<span class="ev ev-code">代码事实</span></p>
+<p>探测靠 <dfn>CPUID</dfn>：一条让 CPU 做“自我介绍”的指令，返回一串比特，每一位代表一项功能。Strata 检查 AVX-512 的五个子功能（F、BW、VL、VNNI、VBMI）是否都在，还检查操作系统会不会在切换线程时保存这组大寄存器。缺一样，就当作没有 AVX-512。<span class="ev ev-code">代码事实</span> 然后按下面的顺序挑内核：</p>
+<div class="viz" data-viz="cpu-dispatch"><figure class="fig"><svg viewBox="0 0 400 384" role="img" aria-label="图 22-4：CPU 内核的选择顺序：没有 AVX2 就拒绝启动；标准 Q2_0 包必须有 AVX-512；原生格式先试 AVX-512 内核，再试 AVX2 内核，最后退回 ggml-cpu">
+<rect class="f-soft" fill="#e5f1df" x="60" y="8" width="280" height="36" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" font-weight="600" text-anchor="middle">启动：用 CPUID 问 CPU 会哪些指令</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="64" width="250" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="135" y="87" font-size="12" text-anchor="middle">有 AVX2（含 FMA、F16C）吗？</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="268" y="64" width="124" height="36" rx="8"/>
+<text class="f-warn" fill="#9e5d24" x="330" y="87" font-size="12" text-anchor="middle">否：拒绝启动</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="120" width="250" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="135" y="143" font-size="12" text-anchor="middle">是标准 Q2_0 包吗？</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="268" y="116" width="124" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="134" font-size="11" text-anchor="middle">是：只有 AVX-512 版</text>
+<text class="f-warn" fill="#9e5d24" x="330" y="151" font-size="11" text-anchor="middle">没有就拒绝启动</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="176" width="250" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="135" y="199" font-size="12" text-anchor="middle">有完整 AVX-512，且没被关掉？</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="268" y="172" width="124" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="190" font-size="11" text-anchor="middle">是：iq512 内核</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="207" font-size="11" text-anchor="middle">一组 ≥ 2 个 token</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="232" width="250" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="135" y="255" font-size="12" text-anchor="middle">这种格式有 AVX2 版，且没被关掉？</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="268" y="228" width="124" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="246" font-size="11" text-anchor="middle">是：iq256 内核</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="263" font-size="11" text-anchor="middle">一组 ≥ 2 个 token</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="292" width="382" height="38" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="316" font-size="13" font-weight="600" text-anchor="middle">都不满足：ggml-cpu 的单 token 点积</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V62M260 82H266M135 100V118M260 138H266M135 156V174M260 194H266M135 212V230M260 250H266M135 268V290"/>
+<text class="f-muted" fill="#5c6d66" x="142" y="113" font-size="11">是</text>
+<text class="f-muted" fill="#5c6d66" x="142" y="169" font-size="11">否</text>
+<text class="f-muted" fill="#5c6d66" x="142" y="225" font-size="11">否</text>
+<text class="f-muted" fill="#5c6d66" x="142" y="283" font-size="11">否</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="352" font-size="11">示意：省略了 IQ4_XS 在 AVX-512 CPU 上退回 ggml 的特例</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="374" font-size="11">逻辑来自 generate.cpp 与 native_expert.cpp</text>
+</svg><figcaption>图 22-4　同一个程序文件，在不同 CPU 上走不同的内核。判断发生在运行时，所以发布一个二进制就能照顾新老 CPU。</figcaption></figure></div>
+<p>几个细节值得停一下。<span class="ev ev-code">代码事实</span></p>
+<ul>
+<li><strong>没有 AVX2，干脆不启动。</strong>每个 CPU 专家内核最低都要 AVX2、FMA 和 F16C。引擎会报出 CPU 型号，说明需要 Intel Haswell（2013 年）、AMD Zen（2017 年）或更新的 CPU。</li>
+<li><strong>标准 Q2_0 包只有 AVX-512 内核。</strong>上游安装文档说，setup 只在 AVX-512 CPU 上为 Q2_0 额外写出一份约 40 GB 的专家副本，给这个快速内核用。<span class="ev ev-report">上游报告</span> 头文件的注释把为什么要在启动时就拒绝说得很直白：让老 CPU 的用户在第 0 秒就知道原因，而不是到第 4000 个 token 时撞上一条非法指令。</li>
+<li><strong>环境变量也能改路线。</strong><code>STRATA_NO_IQ512</code> 让 AVX-512 CPU 改走 AVX2 内核，<code>STRATA_NO_IQ256</code> 再关掉 AVX2 内核，只剩 ggml。同一台机器、同一个程序，换个环境变量就换了一条计算路径。</li>
+</ul>
+<p class="bridge"><strong>学过计算机的同学：</strong>这是“运行时分派”，和面向对象里的虚函数一个思路：调用的地方不变，真正执行哪段代码，到运行时才定。区别是这里的依据不是对象类型，而是 CPUID 返回的功能位。</p>
+
+<h2 id="sec-3">22.3 GPU：一份 CUDA 写法，编出 NVIDIA 和 AMD 两个引擎</h2>
+<p>CPU 这边，一个程序文件里装两套内核，运行时挑。GPU 这边走得更远：NVIDIA 和 AMD 的显卡指令完全不同，连编程平台都不同，只能为每家各编一个引擎。</p>
+<aside class="primer" id="c22-cuda-hip">
+<h3>CUDA 与 HIP</h3>
+<p><dfn>CUDA</dfn> 是 NVIDIA 的 GPU 编程平台：一套 C++ 扩展语法、一套运行时函数库，加上编译器 nvcc。程序员用它写在 GPU 上并行执行的函数，再用 <code>cudaMalloc</code>、<code>cudaMemcpy</code> 这类函数申请显存、搬运数据。CUDA 只能编出 NVIDIA 显卡的机器码。</p>
+<p><dfn>HIP</dfn> 是 AMD 在 ROCm 平台上提供的对应物。它有意照着 CUDA 设计：函数名大多只把前缀 <code>cuda</code> 换成 <code>hip</code>，比如 <code>cudaMalloc</code> 对应 <code>hipMalloc</code>，语义基本一致。所以一份 CUDA 代码，常常只要“改名”就能在 AMD 显卡上编译。AMD 官方还提供了自动改名的工具 HIPIFY。</p>
+<p>改名之外，还有改不掉的差异。GPU 把一组线程捆在一起同步执行，NVIDIA 叫 warp，AMD 叫 wavefront（简称 wave）。NVIDIA 的一组固定是 32 个线程；AMD 的老架构是 64 个，RDNA 系列可以是 32 个。依赖“一组 32 个”的代码，搬到 64 的机器上就会出错。Strata 的 HIP 内核只支持 wave32，启动时还会再查一遍。<span class="ev ev-code">代码事实</span> 线程、warp 这些概念，第 15 章会细讲。</p>
+<p>和本章的关系：Strata 没有用工具把源码改写一遍，而是把一张“改名表”在编译时自动塞进每个源文件。下面马上看它怎么做。</p>
+<p class="further">延伸阅读：<a href="https://rocm.docs.amd.com/projects/HIP/en/latest/what_is_hip.html" target="_blank" rel="noopener noreferrer">ROCm 文档：What is HIP</a> · <a href="https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_porting_guide.html" target="_blank" rel="noopener noreferrer">ROCm 文档：从 CUDA 移植到 HIP</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA：CUDA 编程指南</a> · <a href="https://zh.wikipedia.org/zh-cn/CUDA" target="_blank" rel="noopener noreferrer">维基百科：CUDA</a> · <a href="https://zh.wikipedia.org/zh-cn/ROCm" target="_blank" rel="noopener noreferrer">维基百科：ROCm</a></p>
+</aside>
+<p>Strata 的 GPU 代码按 CUDA 的写法写，放在 <code>.cu</code> 文件里，<code>src</code> 目录下有 53 个。打开 HIP 构建开关后，发生三件事：<span class="ev ev-code">代码事实</span></p>
+<ol>
+<li>构建脚本把所有 <code>.cu</code> 文件标成 HIP 语言，交给 AMD 的编译器。</li>
+<li>编译参数里加上 <code>-include hip_compat/cuda_runtime.h</code>，把这份垫片头文件强行塞到每个源文件的最前面。这里的<dfn>垫片</dfn>（shim），指夹在两层之间、专门抹平差异的一薄层代码。</li>
+<li>垫片里有 82 行形如 <code>#define cudaMalloc hipMalloc</code> 的宏，另一份 <code>cublas_v2.h</code> 垫片再管 17 行矩阵库的名字。预处理器一替换，CUDA 的名字就变成了 HIP 的名字。</li>
+</ol>
+<p>构建脚本还规定：CUDA 和 HIP 两个开关不能同时打开，一次构建只编一个后端。<span class="ev ev-code">代码事实</span></p>
+<p>光改名还不够。有些 CUDA 的显卡内置函数，HIP 在 RDNA 显卡上没有现成的，垫片只好自己实现。比如四字节点积 <code>__dp4a</code>：把两个 32 位整数各拆成 4 个有符号字节，对应相乘再加到累加器上。垫片按显卡架构分三路（见 22.1 节的专栏）。再比如 warp 内交换数据的 <code>__shfl_xor_sync</code>：垫片先检查“32 条通道是否全部参与”，不是就立刻中止，而不是悄悄丢掉这层语义。<span class="ev ev-code">代码事实</span></p>
+<p>下面的模拟器把三行源码交给不同的目标显卡。按<strong>编译</strong>，看流程条一步步走：</p>
+<div class="viz" data-viz="portable-build"><figure class="fig"><svg viewBox="0 0 400 296" role="img" aria-label="图 22-5：同一份 CUDA 写法的源码，NVIDIA 构建原样保留名字并用硬件 dp4a，AMD 构建把 cudaMalloc 换成 hipMalloc，把 dp4a 换成 sudot4 指令">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">同一份 CUDA 写法的源码</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="28" width="320" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="56" y="51" font-size="12">cudaMalloc(&amp;buf, bytes);</text>
+<text class="f-text" fill="#182f2b" x="56" y="73" font-size="12">acc = STRATA_DP4A(a, b, acc);</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 86V98H102V108M200 98H298V108"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="110" width="188" height="120" rx="8"/>
+<text class="f-text" fill="#182f2b" x="20" y="134" font-size="13" font-weight="600">NVIDIA：nvcc 编译</text>
+<text class="f-text" fill="#182f2b" x="20" y="160" font-size="11">cudaMalloc 原样保留</text>
+<text class="f-text" fill="#182f2b" x="20" y="184" font-size="11">STRATA_DP4A → __dp4a</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="208" font-size="11">硬件 dp4a 指令</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="204" y="110" width="188" height="120" rx="8"/>
+<text class="f-text" fill="#182f2b" x="216" y="134" font-size="13" font-weight="600">AMD：HIP 编译</text>
+<text class="f-text" fill="#182f2b" x="216" y="160" font-size="11">cudaMalloc → hipMalloc</text>
+<text class="f-text" fill="#182f2b" x="216" y="184" font-size="11">STRATA_DP4A → sudot4</text>
+<text class="f-muted" fill="#5c6d66" x="216" y="208" font-size="11">RDNA3 的 v_dot4 指令</text>
+<text class="f-text" fill="#182f2b" x="200" y="258" font-size="12" text-anchor="middle">改名靠 hip_compat/cuda_runtime.h 里的 82 行 #define</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="282" font-size="11" text-anchor="middle">例题 dp4a 在两边都算出 95：整数运算逐位相同</text>
+</svg><figcaption>图 22-5　源码一个字不改。NVIDIA 构建直接用 CUDA 的名字；AMD 构建由垫片把名字换成 HIP 的说法，把点积换成 AMD 自己的指令。</figcaption></figure></div>
+<p>编出来的引擎还记着自己是给哪些架构编的。启动时，引擎拿显卡的实际架构和这份名单对照，并要求 wave32。对不上就带着显卡名字和名单报错退出，而不是等到运行中冒出一句看不懂的“invalid device function”。<span class="ev ev-code">代码事实</span></p>
+<p>NVIDIA 这边同样用条件编译照顾老卡。<code>__dp4a</code> 从计算能力 6.1 才有。给 6.0 的老卡编译时，<code>#if</code> 会换成一段等价的软件循环；不过这条路要手动打开实验开关，上游不提供支持。另一个例子：用 CUDA 12.8 给 RTX 50 系列编译时，构建脚本会给出警告，因为有用户报告这样编出的引擎在长提示词上崩溃过。<span class="ev ev-code">代码事实</span> 可见编译器版本本身也是变量。</p>
+
+<h2 id="sec-4">22.4 “能编译”离“支持”还有多远</h2>
+<p>假设你的显卡架构在名单里，引擎也编出来了。这算“支持”吗？Strata 自己的构建脚本给出了很细的回答。它把 AMD 架构分成三档，CMake 配置时对每档的态度不同：<span class="ev ev-code">代码事实</span></p>
+<figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="图 22-6：支持的四级证据：能编译、测试通过、真卡跑通、维护者验证，并标出 Strata 各 AMD 架构所在的级别">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle">“支持”有几级证据（越往上越强）</text>
+<rect class="f-accent" fill="#136d5a" x="190" y="40" width="200" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="59" font-size="13" font-weight="600">④ 维护者验证</text>
+<text class="f-on" fill="#ffffff" x="200" y="77" font-size="11">gfx1100、gfx1201</text>
+<rect class="f-soft" fill="#e5f1df" x="130" y="100" width="200" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="140" y="119" font-size="13" font-weight="600">③ 真卡跑通模型</text>
+<text class="f-muted" fill="#5c6d66" x="140" y="137" font-size="11">gfx1101、gfx1200 用户验证</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="70" y="160" width="200" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="80" y="179" font-size="13" font-weight="600">② 自带测试通过</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="197" font-size="11">gfx1102：ctest 通过</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="220" width="200" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="20" y="239" font-size="13" font-weight="600">① 能编译</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="257" font-size="11">gfx1102、gfx1030 编译时带警告</text>
+<text class="f-muted" fill="#5c6d66" x="222" y="247" font-size="11">← 只证明编译器接受</text>
+<text class="f-muted" fill="#5c6d66" x="282" y="187" font-size="11">← 没崩、算得对</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="127" font-size="11">真实负载跑通 →</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="67" font-size="11">可复现、有人负责 →</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="286" font-size="11" text-anchor="middle">名单外的架构：第 ① 级就被拒绝</text>
+</svg><figcaption>图 22-6　“能编译”只是最底层的证据。Strata 的构建脚本把 AMD 架构按证据强弱分档，名单外的直接拒绝。</figcaption></figure>
+<ul>
+<li><strong>维护者验证</strong>：gfx1100（RX 7900 XT / XTX）和 gfx1201（RX 9070 系列、Radeon AI PRO R9700），维护者在真卡上跑过。</li>
+<li><strong>用户验证</strong>：gfx1101 和 gfx1200，由显卡的主人跑通并回报。配置时只打一行提示。</li>
+<li><strong>未验证</strong>：gfx1102 和 gfx1030 能编译，配置时给出警告，请用户回报结果。gfx1102 通过了自带测试，但还没有人报告过完整的模型运行；gfx1030 有一台社区机器跑通了，维护者还没亲自验证。</li>
+</ul>
+<p>第二个陷阱是数值。图 22-5 里的 dp4a 是整数运算，三条路逐位相同。浮点运算就不同了：加法的先后顺序一变，最后几位就可能不同（第 4 章讲过浮点数的舍入）。Strata 的 AMD 文档明说：不承诺两个后端给出逐位相同的回答。<span class="ev ev-report">上游报告</span> 同一台机器上也会这样。用 IQ 系列模型时，CPU 单独算一个 token 用 ggml 的点积，成组算用 Strata 的多 token 内核，两者舍入略有不同；一组有几个 token 又取决于草稿。所以温度为 0 时，同一个提示词也可能得到另一个同样合理的回答。引擎 0.1.30 起可以设置 <code>STRATA_IQ_MT_MIN=1</code> 消除这一差异，代价是上游在 Ryzen 7600（AVX-512）上测得 IQ3_S 解码慢 1–3%。<span class="ev ev-report">上游报告</span>[S03]</p>
+<p>所以<strong>构建配置是实验条件</strong>，和硬件一样要写进报告。同一个提交，开不开 <code>STRATA_PORTABLE</code>，ggml 的 CPU 部分就会按“任何 AVX2 CPU”或“本机 CPU”来编；改一个环境变量，就换了一条计算路径。<span class="ev ev-code">代码事实</span> 再看 README 里的速度表：Q2_0 模型在 RTX 5070 的机器上每秒写 94 个 token，在 RX 9070 XT 的机器上每秒 60 个。<span class="ev ev-report">上游报告</span>[S01] 条件是短对话，README 没写引擎版本，也没写具体上下文长度。两台机器的 CPU 也不同：一台是 Ryzen 5 7600，有 AVX-512；一台是 Ryzen 9 3900X（Zen 2），只有 AVX2。这组数字说明“两台机器都能跑”，却不能拿来比较 NVIDIA 和 AMD 谁快。</p>
+<p>要验证的组合有多少？粗算一下，见图 22-7。<span class="ev ev-est">教学推演</span></p>
+<figure class="fig"><svg viewBox="0 0 400 172" role="img" aria-label="图 22-7：10 种 GPU 架构乘 3 条 CPU 路线乘 2 种操作系统乘 5 种模型包，共 300 种组合">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="10" width="76" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="46" y="32" font-size="13" font-weight="600" text-anchor="middle">GPU 架构</text>
+<text class="f-text" fill="#182f2b" x="46" y="56" font-size="14" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="93" y="44" font-size="14" text-anchor="middle">×</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="102" y="10" width="76" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="140" y="32" font-size="13" font-weight="600" text-anchor="middle">CPU 路线</text>
+<text class="f-text" fill="#182f2b" x="140" y="56" font-size="14" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="187" y="44" font-size="14" text-anchor="middle">×</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="196" y="10" width="76" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="234" y="32" font-size="13" font-weight="600" text-anchor="middle">操作系统</text>
+<text class="f-text" fill="#182f2b" x="234" y="56" font-size="14" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="281" y="44" font-size="14" text-anchor="middle">×</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="10" width="76" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="328" y="32" font-size="13" font-weight="600" text-anchor="middle">模型包</text>
+<text class="f-text" fill="#182f2b" x="328" y="56" font-size="14" text-anchor="middle">5</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="90" width="200" height="40" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="115" font-size="14" font-weight="600" text-anchor="middle">共 300 种组合</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 68V88"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="160" font-size="11" text-anchor="middle">再乘上上下文长度、多卡、KV 格式，数量还会成倍增长</text>
+</svg><figcaption>图 22-7　粗算一下就有 300 种组合，一台机器只能点亮其中一格。没测过的格子应当留空，而不是默认打勾。</figcaption></figure>
+<p>算式：GPU 架构 10 种（NVIDIA 按构建脚本列的 RTX 20/30/40/50 四代，AMD 按 Windows 版引擎编进去的 6 种），CPU 路线 3 条（AVX-512、AVX2、ggml），操作系统 2 种，README 列的模型包 5 种：10 × 3 × 2 × 5 = 300。没人能全测一遍。可行的办法是分层：纯数学的小样本覆盖算法；格式测试覆盖量化解码；每个后端挑代表性的内核做对比测试；端到端只覆盖最关键的几种组合。</p>
+
+<h2 id="sec-5">22.5 动手：把一行源码交给两个后端</h2>
+<p>本章没有单独的交互实验，两个模拟器就是实验台。建议按这个顺序玩：</p>
+<ol>
+<li>在「一份源码，两个后端」里依次编译 RTX 50、RX 7900、RX 6900。对比预处理之后的三行：哪些名字换了，dp4a 落到了哪条分支。再看例题结果是否始终是 95。</li>
+<li>选“名单外的架构”，体会 CMake 为什么宁可在第一步拒绝。</li>
+<li>在「CPU 内核选择器」里固定 CPU 和模型包，只改环境变量和 token 数。数一数：同一台机器上能走出几条不同的计算路径？</li>
+</ol>
+<p>手边有 C 编译器的同学，可以再做一个小实验：写一个标量的点积函数，再写一个每 8 个数一组累加的版本。用同一组随机浮点数比较两者的结果和耗时。你会看到最后几位不同。先确认逻辑正确，再谈性能；数组太小时测出的速度，代表不了真实的 SIMD 内核。</p>
+
+<h2 id="sec-6">22.6 边界：许可证、模型和这本教材自己</h2>
+<p>“可移植”还有一层意思：代码、模型和文档，各自能被谁拿去、怎么用。Strata 仓库的代码采用 MIT 许可证。<span class="ev ev-code">代码事实</span>[S19] 仓库里少数部分另有许可证：<code>third_party/ggml</code> 来自 llama.cpp / ggml（MIT），网页应用用的字体是 SIL 开放字体许可证。模型文件不在仓库里，每个模型适用它自己的许可证。<span class="ev ev-report">上游报告</span>[S02]</p>
+<p>这本教材本身是一个静态网站：HTML、CSS 和 JavaScript，不含推理引擎，也不下载模型权重。把它部署到任何网页托管服务，只是在发布课程，并不等于在那台服务器上运行了 Strata。教材里的交互图都是教学模拟：它们复刻了 Strata 源码里的判断逻辑，却不是 Strata 的内核，也不预测任何真实机器的性能。</p>
+<p>引用上游代码时，本书记录固定的提交号，不重新打包上游的字体或模型，并说明这是一本独立编写的教材，没有获得原项目或模型厂商的官方认证。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>芯片只懂自己的指令集。同一份源码，要为每种目标各编译一次；条件编译让一份源码在每次编译时只留下与目标相符的分支。</li>
+<li>Strata 在 CPU 上运行时分派：先用 CPUID 问清有没有 AVX-512、AVX2，再挑内核。在 GPU 上编译时分派：一张 CUDA→HIP 的改名表加几段自写的内置函数，编出 NVIDIA 版和 AMD 版两个引擎。</li>
+<li>能编译、测试通过、真卡跑通、维护者验证，是四级不同的证据。浮点结果跨后端也不保证逐位相同，构建配置和环境变量都要当作实验条件记录下来。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“代码在我的显卡上能编译通过，就说明支持我的显卡。”</strong></p>
+<p>编译通过只说明编译器认得这段代码。Strata 的构建脚本里就有现成的反例：gfx1102 能编译，也通过了自带测试，但还没人报告过完整的模型运行，所以配置时照样给出“未验证”的警告。真正的支持，要靠在真卡上跑真模型、结果对得上，并且有人能复现。</p></div>
+
+<details class="deep"><summary>深入一层：编译期与运行期的分工、垫片的边界与支持声明</summary>
+<h3>为什么 AVX-512 开关只加在单个文件上</h3>
+<p>构建脚本的注释说明了理由：一个用 <code>/arch:AVX512</code> 编译的源文件，编译器可以在<strong>任何</strong>地方使用 AVX-512 指令，包括你以为是“退路”的那段标量代码。如果把标量退路和 AVX-512 内核放在同一个文件里，退路就不再是退路，在老 CPU 上一样会崩。所以 Strata 只给内核文件加开关；探测 CPU 的函数放在不加开关的文件里，保证“问一问”这一步在任何 x86-64 CPU 上都安全。<span class="ev ev-code">代码事实</span></p>
+<p>探测本身也用了条件编译：同一段 CPUID 代码，MSVC 编译器用 <code>__cpuidex</code> 和 <code>_xgetbv</code>，GCC/Clang 用 <code>__cpuid_count</code> 和内联汇编 <code>xgetbv</code>。检查 XCR0 寄存器，是确认操作系统在线程切换时会保存 AVX-512 的大寄存器；CPU 支持而系统不保存，照样不能用。<span class="ev ev-code">代码事实</span></p>
+<h3>垫片的边界：宁可中止，不可悄悄改语义</h3>
+<p>CUDA 的 warp 交换函数带一个“哪些通道参与”的掩码参数。HIP 的对应函数没有这个参数。垫片的做法是：当前内核只用全掩码，所以遇到不是全掩码的调用就直接中止（<code>__builtin_trap</code>），而不是把掩码丢掉继续算。<code>__nanosleep</code> 在 CUDA 里按时钟周期计数，AMD 的休眠指令只接受 0 到 15，垫片干脆统一用最小值 1，因为这里只把它当作“稍等一下”的提示。<span class="ev ev-code">代码事实</span></p>
+<p>dp4a 的三条路也各有讲究。RDNA3/RDNA4 的 sudot4 指令能分别指定两个操作数是否有符号，垫片把两个都标成有符号，才和 CUDA 的 <code>__dp4a</code> 语义一致。RDNA2 的 sdot4 本来就是“有符号 × 有符号，按 2³² 取模累加”，语义相同。可移植循环用无符号 32 位整数累加，再按有符号解释，结果同样是模 2³²。本章模拟器的测试文件逐一核对了这三种写法在溢出边界上也逐位相同。</p>
+<h3>名字不决定格式：按类型分派</h3>
+<p>同一个张量名，在不同层可能用不同的量化格式。<code>layer.cpp</code> 的注释记录了一次教训：早期代码假设“名字决定格式”，比如 <code>attn_qkv</code> 一定是某种 K-quant；实际的模型包里，36 个 GDN 层的 <code>attn_qkv</code> 有 IQ4_XS、Q3_K、Q2_0、Q4_K 四种。规则因此改成按<strong>类型</strong>分派：2 位编码走 Q8_0 激活，其余量化格式走 Q8_K。用错了，矩阵向量乘法的误差是 0.6%–1.4%：算出的是一个“看起来合理”的向量，而不是一个明显坏掉的向量，最难发现。<span class="ev ev-code">代码事实</span>[S14]</p>
+<h3>依赖也要钉死</h3>
+<p>Strata 的 CPU 专家用 ggml-cpu 的点积，构建时从 llama.cpp 仓库拉取 ggml。拉取的不是“最新版”，而是 <code>third_party/ggml/VERSION.txt</code> 里写死的一个提交号。<span class="ev ev-code">代码事实</span> 道理和本书固定 Strata 的提交号一样：依赖一变，数值路径就可能变。</p>
+<h3>一份最小的支持声明</h3>
+<p>为一个新后端写支持声明时，至少写清：</p>
+<ul>
+<li>源码提交号；编译器及版本；目标架构列表；全部编译开关；依赖库的版本；运行时的环境变量。</li>
+<li>测过的设备、驱动、模型包、量化格式、KV 格式、预填充和解码两种路径、上下文长度范围。</li>
+<li>证据按层级分列：编译通过、自带测试通过、张量级对比（与参考实现的误差）、端到端质量、稳定性、性能。</li>
+<li>没测过的组合明确列为“未测”，不写“全面支持”。</li>
+</ul>
+<p>两个二进制即使来自同一个提交，编译开关不同，也可能走不同的代码路径。启动日志应当说出实际用了哪个后端、哪条 CPU 路线、有没有回退；Strata 在没有 AVX-512 的 CPU 上启动时，就会打印它改用了 AVX2 还是 ggml。<span class="ev ev-code">代码事实</span> 用户不该靠文件名去猜。</p>
+<h3>向量化的尾巴</h3>
+<p>向量长度不能被通道数整除时，剩下的“尾巴”必须用掩码或单独的标量路径处理。为了省事多读几个字节，可能读到下一个专家的数据：不一定崩，但结果是错的。Strata 加载原生专家时，会先检查专家的尺寸是不是格式块大小的整数倍，不是就拒绝。<span class="ev ev-code">代码事实</span></p>
+</details>
