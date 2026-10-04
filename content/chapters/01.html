@@ -5,7 +5,7 @@
 
 <h2 id="sec-1">1.1 你按下回车之后，发生了什么</h2>
 <p>你在聊天框里输入一句话，按下回车。几秒后，回答一个字一个字地冒出来。这中间，你的话经历了六次转换，见图 1-1。</p>
-<figure class="fig"><svg viewBox="0 0 400 486" role="img" aria-label="图 1-1：一句话从输入到输出的六次转换，第 4 到第 6 步每生成一个 token 重复一次">
+<div class="viz" data-viz="token-journey"><figure class="fig"><svg viewBox="0 0 400 486" role="img" aria-label="图 1-1：一句话从输入到输出的六次转换，第 4 到第 6 步每生成一个 token 重复一次">
 <rect class="f-soft" fill="#e5f1df" x="40" y="8" width="300" height="50" rx="10"/>
 <text class="f-text" fill="#182f2b" x="190" y="30" font-size="14" font-weight="600" text-anchor="middle">① 你的消息</text>
 <text class="f-muted" fill="#5c6d66" x="190" y="48" font-size="12" text-anchor="middle">“帮我解释一下 MoE 是什么”</text>
@@ -29,7 +29,7 @@
 <path class="f-muted" fill="#5c6d66" d="M346 249l8-5v10z"/>
 <text class="f-muted" fill="#5c6d66" x="190" y="446" font-size="12" text-anchor="middle">虚线：回答没写完，就把新 token 接到末尾，</text>
 <text class="f-muted" fill="#5c6d66" x="190" y="464" font-size="12" text-anchor="middle">回到第 ④ 步再来一轮。一轮只产出一个 token。</text>
-</svg><figcaption>图 1-1　一句话的六次转换。第 ④–⑥ 步每生成一个 token 就重复一次。</figcaption></figure>
+</svg><figcaption>图 1-1　一句话的六次转换。第 ④–⑥ 步每生成一个 token 就重复一次。</figcaption></figure></div>
 <p>图里有几个新词，先用大白话解释。</p>
 <p><dfn>token</dfn>是模型读写文字的最小单位。它可能是一个汉字、一个词、半个英文单词，或者一个标点。模型不直接认字，只认 token 的编号。<dfn>分词器</dfn>就是把文字切成 token、再换成编号的程序，见图 1-2。</p>
 <figure class="fig"><svg viewBox="0 0 400 196" role="img" aria-label="图 1-2：分词器把一句话切成 token，再换成整数编号，模型只看到编号">
@@ -53,7 +53,7 @@
 
 <h2 id="sec-2">1.2 为什么第一个字总是慢一点</h2>
 <p>你可能注意到：发出问题后，要等一会儿才出现第一个字；之后的字就出得很快。这是因为一次回答分成两个阶段，见图 1-3。</p>
-<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="图 1-3：一次回答的时间线。先一次性读完整段提问，再一轮一个 token 地写答案">
+<div class="viz" data-viz="first-token-wait"><figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="图 1-3：一次回答的时间线。先一次性读完整段提问，再一轮一个 token 地写答案">
 <text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">一次回答的时间线（示意，不按比例）</text>
 <rect class="f-accent" fill="#136d5a" x="10" y="32" width="150" height="48" rx="8"/>
 <text class="f-on" fill="#ffffff" x="85" y="52" font-size="13" font-weight="600" text-anchor="middle">读题（prefill）</text>
@@ -66,7 +66,7 @@
 <text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">· 读题：每秒约 1,299 个 token</text>
 <text class="f-text" fill="#182f2b" x="10" y="184" font-size="12">· 写答案：每秒约 93 个 token</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="11">读题快十几倍，因为提问里的 token 能一起算（第 16 章）</text>
-</svg><figcaption>图 1-3　先读题，后写答案。读题时整段提问一起算，所以单位时间处理的 token 多得多；写答案只能一个接一个。</figcaption></figure>
+</svg><figcaption>图 1-3　先读题，后写答案。读题时整段提问一起算，所以单位时间处理的 token 多得多；写答案只能一个接一个。</figcaption></figure></div>
 <p>第一阶段叫 <dfn>prefill</dfn>（读题）：模型把你的整段提问一次读进去。提问里的 token 都是已知的，可以一起算。第二阶段叫 <dfn>decode</dfn>（写答案）：每个新 token 都依赖上一个，只能一个一个来。</p>
 <p>Strata 的上游测量显示，同一台机器上，读题每秒能处理约 1,299 个 token，写答案每秒约 93 个。<span class="ev ev-report">上游报告</span>[S03] 所以提问越长，等第一个字的时间越长。README 也提醒：一段对话的第一条消息要完整读一遍，大约每 30,000 个 token 需要 1 分钟；之后的追问只读新增部分，几秒就能开始回答。[S01]</p>
 
@@ -134,7 +134,7 @@
 <h3>存储层次结构</h3>
 <p>计算机里的存储设备，总是在“快”“大”“便宜”三者之间取舍：越快的越小、越贵，越大的越慢。于是计算机把它们叠成一座金字塔：最常用的数据放在最快的一层，不常用的放在下面，需要时再往上搬。这就是<dfn>存储层次结构</dfn>。</p>
 <p>衡量“快”有两个指标。<dfn>带宽</dfn>是每秒能搬多少字节，像水管的粗细；<dfn>延迟</dfn>是从发出请求到拿到第一个字节要等多久，像水从龙头流到杯子的时间。推理引擎每生成一个 token 都要读大量参数，所以最在意带宽。图 1-6 是上游测速机器上各层的理论带宽。</p>
-<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="图 1-6：上游测速机器各层存储的理论带宽，显存约 672 GB/s，内存约 83 GB/s，PCIe 5.0 约 63 GB/s，固态硬盘约 7 GB/s">
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="图 1-6：上游测速机器各层存储的理论带宽，显存约 672 GB/s，内存约 83 GB/s，PCIe 5.0 约 63 GB/s，固态硬盘约 7 GB/s">
 <text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">理论峰值带宽，单位 GB/s（条长按比例）</text>
 <text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">显存</text>
 <rect class="f-accent" fill="#136d5a" x="92" y="36" width="250" height="16" rx="3"/>
@@ -148,8 +148,8 @@
 <text class="f-text" fill="#182f2b" x="10" y="156" font-size="12">固态硬盘</text>
 <rect class="f-accent" fill="#136d5a" x="92" y="144" width="3" height="16" rx="1"/>
 <text class="f-text" fill="#182f2b" x="101" y="157" font-size="12">约 7（常见 NVMe 顺序读）</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="190" font-size="11">显存：RTX 5070 规格；内存：上游测速机配置。实际可用带宽通常更低。</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="11">从显存读数据，比从硬盘读快约一百倍。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="190" font-size="12">显存按 RTX 5070 规格，内存按上游测速机；实测通常更低。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="207" font-size="12">从显存读数据，比从硬盘读快约一百倍。</text>
 </svg><figcaption>图 1-6　同一台电脑里，各层存储的带宽相差可达百倍。把常用数据放在快的一层，是一切缓存设计的出发点。</figcaption></figure>
 <p>Strata 的全部设计，都可以看成在这座金字塔上摆放数据：热门的专家放显存，全部专家放内存，大查找表放硬盘。后面的章节会反复回到这张图。</p>
 <p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/記憶體階層" target="_blank" rel="noopener noreferrer">维基百科：存储器层次结构</a> · <a href="https://en.wikipedia.org/wiki/Memory_hierarchy" target="_blank" rel="noopener noreferrer">Wikipedia: Memory hierarchy</a> · <a href="https://csapp.cs.cmu.edu/" target="_blank" rel="noopener noreferrer">《深入理解计算机系统》（CS:APP）第 6 章</a></p>
