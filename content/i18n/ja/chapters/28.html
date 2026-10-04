@@ -1,0 +1,217 @@
+<div class="hook"><span class="eyebrow">部品がすべて緑だった話</span>
+<p>Strata のモデルには、PLE というテーブル引きのモジュールがあります（第 11 章で説明しました）。開発者はそれをいくつかの部品に分けました。ハッシュを計算する、大きなテーブルから 1 行を読む、小さな計算をする。どの部品も書き上がり、照合テストにも通りました。参照スクリプト、numpy、ggml の結果とそれぞれ一致したのです。</p>
+<p>ところが、モデル全体の検収が 1 つ通りませんでした。理由はソースのコメントに書かれています。これらの部品は、<strong>モデルの主経路から一度も呼び出されていなかった</strong>のです。<span class="ev ev-code">コード上の事実</span>[S13] どの部品も正しいのに、機械全体では 1 つ欠けていました。この章は、本全体の最後の章です。あなたのコース課題で、この落とし穴をどう避けるかを説明します。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>システムを作るときは、まずいちばん細い「縦切り」を通します。1 つのトークンを入力から出力まで通し、確かめられる証拠を残してから、層ごとに機能を足していきます。取捨選択をするたびに、何を得て何を払ったか、どう検証するかを書き留めます。納品のときは、各コンポーネントの証拠がどの段階まで来ているかを明記します。</p>
+
+<h2 id="sec-1">28.1 モジュールはすべて緑なのに、システムは間違っている</h2>
+<p>図 28-1 は、PLE の置かれた状況を描いたものです。3 つの部品はそれぞれ照合テストに通りましたが、モデルの主経路は第 0 層から第 47 層まで、一度もそれらを通りません。どの部品のテストレポートを見ても、問題には気づけません。</p>
+<figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="図 28-1：PLE の 3 つの部品はそれぞれ照合テストに通ったが、モデルの主経路はそれらを一度も呼び出さず、モデル全体の検収には通らなかった">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="15" font-weight="600" text-anchor="middle">部品はテストに通ったのに、誰にも呼ばれていない</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="70" y="58" font-size="13" text-anchor="middle">ハッシュ計算</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="80" font-size="13" text-anchor="middle">✓ 照合に合格</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="58" font-size="13" text-anchor="middle">表の 1 行を読む</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="80" font-size="13" text-anchor="middle">✓ 照合に合格</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="270" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="58" font-size="13" text-anchor="middle">計算ブロック</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="80" font-size="13" text-anchor="middle">✓ 照合に合格</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M70 94V128M200 94V128M330 94V128"/>
+<text class="f-warn" fill="#9e5d24" x="80" y="116" font-size="13">✗ 未接続</text>
+<text class="f-warn" fill="#9e5d24" x="210" y="116" font-size="13">✗</text>
+<text class="f-warn" fill="#9e5d24" x="340" y="116" font-size="13">✗</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="132" width="380" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="157" font-size="13" text-anchor="middle">モデルの主経路：第 0 層 → 第 1 層 → … → 第 47 層</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 172V188"/>
+<rect class="f-warn" fill="#9e5d24" x="70" y="190" width="260" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="215" font-size="13" text-anchor="middle">モデル全体の検収（C1）に不合格</text>
+</svg><figcaption>図 28-1　部品レベルのテストがすべて通っても、システムがつながっているとは限りません。「そもそも呼び出されていない」という間違いは、主経路を本当に最後まで走るテストだけが見つけられます。[S13]</figcaption></figure>
+<p>この種の間違いには、共通の根っこがあります。各層を「横に」すべて作り終えてから、最後にそれらをつなぐことです。A の街から B の街まで道を作るのに、1 キロごとに最終的な幅まで舗装していって、最後の日になってはじめて、途中の区間がどこにもつながっていなかったと気づくようなものです。もっと確かなやり方は、まず細い道を、A から B まで通しきることです。車が走れるようになってから、少しずつ広げます。</p>
+<p>ソフトウェアでは、この「細い道」を<dfn>縦切り</dfn>（vertical slice）と呼びます。1 つの機能を入口から出口まで貫き、各層は必要最小限の部分だけを作りますが、リンクの全体は本物で、動き、確かめられる結果を出します。推論エンジンなら、最初の縦切りは次のようになります。1 つの文が入り、エンコード、層ごとの計算、単語の選択を通って、トークンを 1 つ出し、途中の重要なデータを出力して、人が突き合わせられるようにすること。</p>
+<p>縦切りは、いい加減に書くことではありません。求めるのは「細く」であって、「粗く」ではありません。この 1 本の鎖のどのステップにもテストが必要で、第 26 章で説明した基準の答えと反例も、1 つとして欠けてはいけません。省くのは幅であって、正しさではありません。</p>
+
+<h2 id="sec-2">28.2 システム設計とは、取捨選択を書き留めること</h2>
+<p>縦切りを通したあとは、機能を 1 つ足すたびに選択に出会います。VRAM を使って速度を買うか、VRAM を節約するか。速さを先に求めるか、デバッグのしやすさを先に求めるか。こうした選択に標準の答えはありませんが、標準の書き方はあります。</p>
+<aside class="primer" id="c28-system-design">
+<h3>システム設計とエンジニアリングのトレードオフ</h3>
+<p><dfn>システム設計</dfn>が答えるのは、与えられた制約のもとで、たくさんの部品を組み合わせて、要求を満たす 1 つの全体にするにはどうするか、という問いです。アルゴリズムを書くのとは違います。アルゴリズムの問題にはたいてい最適解がありますが、システム設計は、ほとんどいつも、いくつかの目標の間で<dfn>トレードオフ</dfn>をとることです。速度、メモリ、正しさ、デバッグのしやすさ、開発時間は、一方が伸びれば他方が縮むことが多いものです。</p>
+<p>まともなトレードオフには、少なくとも 5 つのことを書きます。</p>
+<p>① <strong>決定</strong>：何を選び、何を選ばなかったか。② <strong>得たもの</strong>：どんな利点を得たか。できれば数字で。③ <strong>代償</strong>：何を払ったか。これも数字で。④ <strong>検証</strong>：利点が本当に得られ、代償が本当にこれだけだと、どう確かめるか。⑤ <strong>再検討の条件</strong>：どんなことが起きたら、この決定を覆すべきか。</p>
+<p>⑤ がいちばん忘れられがちです。これがないと、当初は妥当だった決定が、条件が変わったあとも残り続け、誰も手を付けられない「歴史的遺産」になってしまいます。工学の世界では、こうして積もり積もって、いずれ返さなければならない代償を<dfn>技術的負債</dfn>と呼びます。</p>
+<p>トレードオフには、よくある落とし穴がもう 1 つあります。測れる 1 項目だけを最適化してしまうことです。たとえば平均の速度だけを見ていると、末尾のレイテンシを犠牲にしているかもしれません。単体テストだけを見ていると、組み合わせの間違いを見逃すかもしれません。だから設計のときに、各目標を何の指標で測るかを決めておく必要があります。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%82%BD%E3%83%95%E3%83%88%E3%82%A6%E3%82%A7%E3%82%A2%E5%B7%A5%E5%AD%A6" target="_blank" rel="noopener noreferrer">Wikipedia：ソフトウェア工学</a> · <a href="https://ja.wikipedia.org/wiki/%E6%8A%80%E8%A1%93%E7%9A%84%E8%B2%A0%E5%82%B5" target="_blank" rel="noopener noreferrer">Wikipedia：技術的負債</a> · <a href="https://en.wikipedia.org/wiki/Systems_design" target="_blank" rel="noopener noreferrer">Wikipedia: Systems design（英語）</a> · <a href="https://ja.wikipedia.org/wiki/%E3%83%88%E3%83%AC%E3%83%BC%E3%83%89%E3%82%AA%E3%83%95" target="_blank" rel="noopener noreferrer">Wikipedia：トレードオフ</a></p>
+</aside>
+<p>Strata のソースのコメントには、こうして明快に書かれたトレードオフがたくさんあります。図 28-2 は、その 1 つを整理したものです。QSA 層の indexer は、読むべき過去の位置を選ぶ役で、その key を、より節約できる FP16 ではなく、FP32 で保存しています。<span class="ev ev-code">コード上の事実</span>[S18]</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="図 28-2：トレードオフの完全な記録：indexer の key を FP32 で保存し、選択結果が参照と一致するという利点を得て、代償は 32K コンテキストで約 50 MiB">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="15" font-weight="600" text-anchor="middle">1 つのトレードオフの完全な記録</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="380" height="234" rx="10"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="62" font-size="13">決定</text><text class="f-text" fill="#182f2b" x="104" y="62" font-size="13">indexer の key を FP32 で保存し、</text>
+<text class="f-text" fill="#182f2b" x="104" y="80" font-size="13">FP16 は使わない</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="108" font-size="13">得たもの</text><text class="f-text" fill="#182f2b" x="104" y="108" font-size="13">選ばれる位置が参照と完全に一致する</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="134" font-size="13">代償</text><text class="f-text" fill="#182f2b" x="104" y="134" font-size="13">32K コンテキストで、key は約 50 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="162" font-size="13">理由</text><text class="f-text" fill="#182f2b" x="104" y="162" font-size="13">FP16 は各スコアに約 2⁻¹¹ の相対誤差を生み、</text>
+<text class="f-text" fill="#182f2b" x="104" y="180" font-size="13">ちょうど「誰を選ぶか」の境界に当たる</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="208" font-size="13">検証</text><text class="f-text" fill="#182f2b" x="104" y="208" font-size="13">選択位置は 1 つずつ一致、許容差なし</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="236" font-size="13">再検討</text><text class="f-text" fill="#182f2b" x="104" y="236" font-size="13">INT8 化の前に、入れ替わり率を測る</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="13" text-anchor="middle">出典：qsa.hpp の冒頭にあるレイアウトの説明</text>
+</svg><figcaption>図 28-2　きちんと書かれたトレードオフ：決定、得たもの、代償、理由、検証、再検討の時期。6 つとも揃っています。コメントの原文は、このくらいの VRAM は「正しさの契約に比べれば安い」というものです。[S18]</figcaption></figure>
+<p>さらに、いくつか例を見ましょう。<code>session.hpp</code> から取ったもので、どれも「何を得て、何を払うか」が一緒に書かれています <span class="ev ev-code">コード上の事実</span>[S13]。</p>
+<ul>
+<li><strong>層ごとに GPU 計算グラフを 1 つ。</strong>1 つの層の数十回のカーネル起動を 1 つのグラフに記録して再生すると、同じ仕事が 2.393 ミリ秒から 1.585 ミリ秒に、1.51 倍速くなりました。エンジンのボトルネックは帯域幅ではなく、「カーネルを起動する」オーバーヘッドだからです。関連する代償も、隣に書かれています。層ごとのエキスパートの結果をその層の重みで合流させるため、層ごとにもう 1 つグラフを足す必要があり、CPU が GPU と重ねて働ける窓は、共有エキスパートの短い区間だけになりました。コメントは「厳密に直列な残差の鎖では、層ごとの CPU 計算を隠せない」とはっきり述べていて、この部分は VRAM 上のエキスパートキャッシュで解決するしかありません。</li>
+<li><strong>デバッグスイッチを実行時パラメータにする。</strong>「層ごとに 1 回同期する」と、ほかでは見えない間違いを捕まえられますが、速度が落ちます。これはコンパイル時のオプションではなく、実行時パラメータになっています。必要なときに入れ、普段は切っておきます。</li>
+<li><strong>トークン生成時はメモリ割り当てゼロ。</strong>1 つのセッションに必要な状態は、すべて最初に一度で割り当てます。コメントは特に説明しています。長いシーケンスの最初のトークンで VRAM を確保しようとすると、既存のどのテストも通ってしまい、この制約だけが破られる。</li>
+</ul>
+<p>サービス層も同じです。Strata のサーバーは一度に 1 つのシーケンスだけを処理し、リクエストは先着順です。プロンプトに出力の上限を足したものがコンテキスト長を超えるときは、こっそり切り詰めずに、すぐ断って 400 を返します。[S15] 前者は、シンプルさと引き換えに、状態が混ざらないことを手に入れ、後者は、エラーを 1 回出すのと引き換えに、ユーザーが、切り詰められたことに気づかない結果を受け取らずにすむことを手に入れました。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>産業界には「アーキテクチャ決定記録」（ADR）というやり方があります。大事な決定ごとに、背景、決定、結果を書いた短い文書を 1 ページ書くのです。あなたのコースのレポートでも、設計上の選択ごとに、図 28-2 の形式で小さなカードを書くとよいでしょう。</p>
+
+<h2 id="sec-3">28.3 3 種類のプロジェクトから、1 つ選ぶ</h2>
+<p>コース課題は 3 種類あり、手元の条件に合わせて選びます。3 つとも評価基準は同じで、証拠の質、分析とエンジニアリングの完成度を見ます。GPU の値段は見ません。</p>
+<p><strong>プロジェクト A：GPU がなくてもできる小さなエンジン。</strong>この本に付属する <code>labs/tiny_inference.py</code> から始めます。とても小さな固定のランダムな重みと文字の語彙を使い、エンコード、正規化、再帰層とアテンション層、エキスパートのルーティング、出力、貪欲な単語選択を、1 本の完全な鎖につないであります。ランダムな重みは意味のある言語を生みません。このプロジェクトの目標は仕組みを理解することで、チャットモデルを訓練したふりをすることではありません。28.5 節に段階的な道筋があります。</p>
+<p><strong>プロジェクト B：測れる最適化から始める。</strong>局所的な方向を 1 つ選びます。量子化ブロックのデコード、ページテーブルの収集、キャッシュ方針、チャンクサイズ、ドラフトウィンドウの制御、またはストリーミング出力の断片の解析。原理の導出、ベースライン、変更点、反例、結果、限界を提出します。一度に 1 つの要因だけを変えてください。5 つのスイッチを同時に変えて、最後に 1 つの総所要時間だけを見せるのはいけません。GPU のない人は、CPU の参照実装と数学的なシミュレーションを行い、GPU のある人は、固定した Strata のコミットで、本物の再現ができます。</p>
+<p><strong>プロジェクト C：マルチユーザー設計のレビュー。</strong>「複数のシーケンスを同時に走らせる」設計を提出します。学期の終わりに、無理やり本番のサービスを作るのではありません。設計の第一歩は、データのひとかたまりごとに持ち主を決めることです（図 28-3）。</p>
+<figure class="fig"><svg viewBox="0 0 400 298" role="img" aria-label="図 28-3：マルチユーザー設計のデータの持ち主。重みは読み取り専用で共有、シーケンスごとに状態が 1 セット、一時作業領域は時間で共用">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="14" font-weight="600" text-anchor="middle">マルチユーザー設計の第一歩：データごとに持ち主を決める</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="34" width="360" height="62" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="58" font-size="15" font-weight="600" text-anchor="middle">読み取り専用、全シーケンスで共有</text>
+<text class="f-text" fill="#182f2b" x="200" y="82" font-size="13" text-anchor="middle">モデルの重み、エキスパートのデータ</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="108" width="360" height="62" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="132" font-size="15" font-weight="600" text-anchor="middle">各シーケンスが 1 セットずつ持つ</text>
+<text class="f-on" fill="#ffffff" x="200" y="156" font-size="13" text-anchor="middle">KV キャッシュ、GDN の再帰状態、PLE の履歴</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="182" width="360" height="62" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="206" font-size="15" font-weight="600" text-anchor="middle">一時作業領域（scratch）</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="230" font-size="13" text-anchor="middle">同じ瞬間に使うのは 1 層だけなので、共用できる</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="268" font-size="13" text-anchor="middle">Strata の SessionState：</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="286" font-size="13" text-anchor="middle">シーケンスに必要な、重み以外のデータすべて</text>
+</svg><figcaption>図 28-3　データの持ち主の 3 分類。Strata は「1 つのシーケンスが必要とするもののうち、重みではないすべて」を SessionState に入れます。GDN 層の作業領域は 36 層で共用し、状態は層ごとに 1 つずつです。[S13]</figcaption></figure>
+<p>設計文書には、次のことを挙げます。何が読み取り専用の共有オブジェクトか。何がシーケンスごとの状態か。一時作業領域は誰のものか。スケジューリングと VRAM の予算をどう配分するか。キャンセル、復元、観測、ロールバックをどうするか。そのうえで、第 25 章の並行性の受け入れシナリオを使って、自分の案に反論してください。加点になるのは、動く小さなスケジューラか、状態分離のプロトタイプです。検証していない能力は、「未実装」と書かなければなりません。画面に 5 人のユーザーが表示されていても、本当に動いている推論ストリームが 5 本あるとは限りません。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは「オペレーティングシステム」のプロセスモデルとまったく同じです。複数のプロセスが読み取り専用のコードセグメントを共有し、それぞれがプライベートなスタックとヒープを持ちます。KV キャッシュは各シーケンスの「プライベートなメモリ」で、それを保護せずに共有するのは、2 つのプロセスが互いのデータを書き換えるのと同じことです。</p>
+
+<h2 id="sec-4">28.4 何を納品するか：各コンポーネントに証拠を明記する</h2>
+<p>プロジェクトのレポートでいちばんよくある問題は、コードの間違いではなく、「書き終えた」を「作り終えた」と言ってしまうことです。そのため、レポートの各コンポーネントには、証拠がどの段階まで来ているかを明記します。</p>
+<div class="table-wrap"><table><thead><tr><th>状態</th><th>意味</th><th>提示できる証拠</th></tr></thead><tbody>
+<tr><td>コードを書き終えた</td><td>書いて、テストも通ったが、まだ主経路につながっていない</td><td>単体テストの出力</td></tr>
+<tr><td>主経路につながった</td><td>主経路が、確かにそれを呼び出している</td><td>1 回の完全な実行のログ。呼び出されているのが分かる</td></tr>
+<tr><td>実データ</td><td>本物の入力がそれを通り、完全な結果を出した</td><td>1 件の完全な記録：入力、途中の値、出力。フィールドが揃っている</td></tr>
+<tr><td>模擬、空値、または推算</td><td>画面では見えるが、裏は偽のデータ、空のフィールド、見積もり</td><td>必ず明記し、「教育用の試算」と付ける</td></tr>
+</tbody></table></div>
+<p>1 つのコンポーネントが、「コードは書き終え、主経路にもつながっている」のに、まだ本物のデータを出していない、ということは十分ありえます。この状態は、そのままの形で書く必要があり、「完了」の 2 文字で覆い隠してはいけません。Strata のソースに、よい例があります。CPU と GPU は重なって働くはずですが、CPU が仕事を受け取った時点で、GPU がすでにその層の計算を終えていたら、パイプライン全体が実は直列に退化しています。このとき、各トークンの答えは正しいままで、層ごとの所要時間にも違いは見えません。そこで作者は、わざわざカウンタを 1 つ足して、CPU が、GPU がまだ動いている間に仕事を受け取った層の数を数え、この重ね合わせの仕組みが「本当に働いている」のか、「ただの飾り」なのかを判断できるようにしました。<span class="ev ev-code">コード上の事実</span>[S13]</p>
+<p>レポート自体は、次の順で書きます。まず、実験で覆されうる問いを立てます。たとえば「同じ入力と品質ゲートのもとで、VRAM 上のホットなエキスパートの予算を増やすと、CPU の計算時間を減らせるか」。そのうえで、理論、ソースの位置、方法、データ、解釈、限界を順に挙げます。すべての図に、単位、サンプル数、測定条件を書きます。ソースへのリンクは、固定したコミットを指し、変わりうる main ブランチは指しません。生データと失敗のログもすべて残します。評価は次の表のとおりです。</p>
+<div class="table-wrap"><table><thead><tr><th>観点</th><th>配点</th><th>確かめられる証拠</th></tr></thead><tbody>
+<tr><td>原理と導出</td><td>20</td><td>式、単位、依存関係、前提が正しい</td></tr>
+<tr><td>ソースと契約</td><td>20</td><td>本物のコードを指し、現在のコードと古いコメントを区別している</td></tr>
+<tr><td>実装とテスト</td><td>25</td><td>動き、独立した基準の答え、反例、境界のテストがある</td></tr>
+<tr><td>実験と品質</td><td>20</td><td>ペアまたは交互の比較、生データ、品質ゲート、失敗も数える</td></tr>
+<tr><td>表現と再現性</td><td>15</td><td>環境、手順、限界が書かれ、他の人が再検証できる</td></tr>
+</tbody></table></div>
+<p>レッドラインが 2 本あります。教育用のシミュレーションを実機の測定と書いたら、「実験と品質」の項目は丸ごと 0 点です。説明のない状態の混用があれば、「実装とテスト」の項目は丸ごと 0 点で、性能がどれだけ良くても、正しさの欠陥は相殺できません。次の自己チェック表を使うと、提出する前に自分で採点してみることができます。</p>
+<div class="viz" data-viz="rubric-check"><figure class="fig"><svg viewBox="0 0 400 256" role="img" aria-label="図 28-4：評価表の 5 つの項目の配点。原理 20、ソース 20、実装とテスト 25、実験 20、表現 15、そして 2 本のレッドライン">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="15" font-weight="600" text-anchor="middle">100 点の配分</text>
+<text class="f-text" fill="#182f2b" x="10" y="50" font-size="13">原理と導出</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="36" width="200" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="312" y="51" font-size="13">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="13">ソースと契約</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="70" width="200" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="312" y="85" font-size="13">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="13">実装とテスト</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="104" width="250" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="362" y="119" font-size="13">25</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="13">実験と品質</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="138" width="200" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="312" y="153" font-size="13">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="186" font-size="13">表現と再現性</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="172" width="150" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="262" y="187" font-size="13">15</text>
+<text class="f-warn" fill="#9e5d24" x="10" y="222" font-size="13">レッドライン：模擬を実測と書く → 「実験と品質」が 0 点</text>
+<text class="f-warn" fill="#9e5d24" x="10" y="246" font-size="13">レッドライン：状態の無断共用 → 「実装とテスト」が 0 点</text>
+</svg><figcaption>図 28-4　評価表の配点の分布。「実装とテスト」がいちばん大きく、2 本のレッドラインは、どちらも 1 つの項目をまるごと 0 点にできます。インタラクティブ版では、項目ごとにチェックを入れて、自分で採点できます。</figcaption></figure></div>
+
+<h2 id="sec-5">28.5 手を動かす：まず最初の縦切りを通す</h2>
+<p>プロジェクト A を例にします。最初の一歩は、新しい機能を書くことではなく、既存の鎖を 1 回通して走らせ、それが出すすべてのフィールドを見極めることです。この本のリポジトリで、次を実行します。</p>
+<p><code>python3 labs/tiny_inference.py --prompt "hello" --tokens 8</code></p>
+<p>この本の執筆時に実際に走らせた出力には、次のものがありました。モデルの形状（4 層、8 次元、4 つのエキスパートから 2 つ選ぶ）、すべての重みから計算したモデルのフィンガープリント <code>model_id</code>、プロンプトの番号 <code>[8, 5, 12, 12, 15]</code>、生成された 8 つの番号と対応する文字 <code>"mzjsldhx"</code>、そして <code>"draft_matches_greedy": true</code> で、ドラフトのデモの結果が、1 つずつ生成した結果とまったく一致したことを示します。文字に意味はありません。重みがランダムだからです。でも、どのフィールドも本当に計算された値です。これが、あなたの最初の「実データ」の証拠になります。</p>
+<p>次に、縦切りの考え方で、1 段ずつ上に足していきます。各段で、まず失敗するテストを書き、それから実装を書きます。</p>
+<ol>
+<li><strong>形状と持ち主を見極める。</strong>各層でテンソルの形状を表示し、どれが読み取り専用の重みで、どれが変わる状態かを図にします。</li>
+<li><strong>保存と復元、分割プリフィル。</strong>セッションを保存し、復元して生成を続けたとき、結果は中断しなかったときと同じでなければなりません。プロンプトを何段かに分けて処理したときも、一度に処理したときと結果が同じでなければなりません。</li>
+<li><strong>ドラフトと検証。</strong>ドラフトのデモの候補を変更し、どこかの位置で最初に拒否されたら、後ろのドラフトを捨てます。出力は貪欲な生成と一致しなければなりません。</li>
+<li><strong>測定。</strong>速度を測るのは最後で、第 27 章の方法で記録に書きます。注意：このスクリプトの所要時間を、Strata の性能とみなしてはいけません。</li>
+</ol>
+<p><code>labs/README.md</code> の 5 つの課題は、おおよそこの道筋に沿っています。すぐに手を動かす前に、次のプランナーで体感してみてください。同じ週数で、横に広げた場合と縦に切った場合で、締め切りの日に手元に何があるか。</p>
+<div class="viz" data-viz="slice-planner"><figure class="fig"><svg viewBox="0 0 400 330" role="img" aria-label="図 28-5：第 10 週時点の進み具合。横に広げると、完全にデモできる機能が 1 つもない。縦切り優先なら、2 つの機能が最後まで通っている">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="15" font-weight="600">横に広げる：10 週目の時点</text>
+<text class="f-muted" fill="#5c6d66" x="89" y="46" font-size="12" text-anchor="middle">コード</text>
+<text class="f-muted" fill="#5c6d66" x="131" y="46" font-size="12" text-anchor="middle">テスト</text>
+<text class="f-muted" fill="#5c6d66" x="173" y="46" font-size="12" text-anchor="middle">配線</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="46" font-size="12" text-anchor="middle">証拠</text>
+<text class="f-text" fill="#182f2b" x="10" y="72" font-size="13">生成</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="13">保存</text>
+<text class="f-text" fill="#182f2b" x="10" y="124" font-size="13">分割</text>
+<text class="f-text" fill="#182f2b" x="10" y="150" font-size="13">ドラフト</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="56" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="56" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="56" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="56" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="82" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="82" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="82" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="82" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="108" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="108" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="108" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="108" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="134" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="134" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="134" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="134" width="38" height="22" rx="3"/>
+<text class="f-warn" fill="#9e5d24" x="250" y="76" font-size="13" font-weight="600">デモ可能：0 個</text>
+<text class="f-text" fill="#182f2b" x="250" y="102" font-size="13">コードは 4 つ書いた</text>
+<text class="f-text" fill="#182f2b" x="250" y="128" font-size="13">証拠は 1 つもない</text>
+<text class="f-text" fill="#182f2b" x="10" y="190" font-size="15" font-weight="600">縦切り優先：10 週目の時点</text>
+<text class="f-muted" fill="#5c6d66" x="89" y="216" font-size="12" text-anchor="middle">コード</text>
+<text class="f-muted" fill="#5c6d66" x="131" y="216" font-size="12" text-anchor="middle">テスト</text>
+<text class="f-muted" fill="#5c6d66" x="173" y="216" font-size="12" text-anchor="middle">配線</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="216" font-size="12" text-anchor="middle">証拠</text>
+<text class="f-text" fill="#182f2b" x="10" y="242" font-size="13">生成</text>
+<text class="f-text" fill="#182f2b" x="10" y="268" font-size="13">保存</text>
+<text class="f-text" fill="#182f2b" x="10" y="294" font-size="13">分割</text>
+<text class="f-text" fill="#182f2b" x="10" y="320" font-size="13">ドラフト</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="226" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="226" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="226" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="196" y="226" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="252" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="252" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="252" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="196" y="252" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="278" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="278" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="278" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="278" width="38" height="22" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="304" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="112" y="304" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="304" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="304" width="38" height="22" rx="3"/>
+<text class="f-text" fill="#182f2b" x="250" y="246" font-size="13" font-weight="600">デモ可能：2 個</text>
+<text class="f-text" fill="#182f2b" x="250" y="272" font-size="13">4 週目から証拠あり</text>
+<text class="f-text" fill="#182f2b" x="250" y="298" font-size="13">ドラフトは未着手</text>
+</svg><figcaption>図 28-5　同じ 10 週間、同じ 16 マスの仕事（1 マスが 1 週間）。横に広げると、マスはぎっしり埋まっているのに、デモできる機能は 1 つもありません。縦に切ると、2 つの機能が、すでに本物の証拠を出せています。</figcaption></figure></div>
+<p>プランナーの「1 マス 1 週間」と「インターフェースに隠れた間違った仮定」は、どちらも教育用の仮定で、実際のどのプロジェクトの統計でもありません。見てほしいのは、構造上の違いです。縦切りなら、問題が最初の機能をつなぐ時点で露見するので、そのときの手戻りの範囲がいちばん小さくなります。</p>
+
+<h2 id="sec-6">28.6 教材にもバージョンがある</h2>
+<p>この本のコード上の事実は、すべて Strata の固定した 1 つのコミットと照らして確かめてあります。<code>99f3dbd0b21d1401b3769e0c0d963913607f380b</code>、調査日は 2026-10-04 です。Strata は今も急速に更新されていて、新しいバージョンでは、数字、既定値、インターフェースが変わるかもしれません。教材をアップグレードするときは、図 28-6 の順序で行います。</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="図 28-6：教材のアップグレードの 4 段階。コミットを固定する、上流の変化を観察する、まず契約を比べる、それから影響を受ける章を更新する">
+<rect class="f-accent" fill="#136d5a" x="40" y="10" width="320" height="56" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="33" font-size="15" font-weight="600" text-anchor="middle">この本は 1 つのコミットに固定</text>
+<text class="f-on" fill="#ffffff" x="200" y="55" font-size="13" text-anchor="middle">99f3dbd…、調査日 2026-10-04</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 66V84"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="86" width="320" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="109" font-size="15" font-weight="600" text-anchor="middle">上流の main は進み続ける</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="131" font-size="13" text-anchor="middle">数字、既定値、インターフェースが変わりうる</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 142V160"/>
+<rect class="f-soft" fill="#e5f1df" x="40" y="162" width="320" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="185" font-size="15" font-weight="600" text-anchor="middle">まず契約を比べる</text>
+<text class="f-text" fill="#182f2b" x="200" y="207" font-size="13" text-anchor="middle">モデル形状、状態、量子化、スケジューリング、API</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 218V236"/>
+<rect class="f-soft" fill="#e5f1df" x="40" y="238" width="320" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="261" font-size="15" font-weight="600" text-anchor="middle">それから、影響を受ける章と実験を更新</text>
+<text class="f-text" fill="#182f2b" x="200" y="283" font-size="13" text-anchor="middle">変更ごとに新しいソースの行番号を添える</text>
+</svg><figcaption>図 28-6　教材のアップグレードの順序：まず契約が変わったかを見て、それから影響を受ける章を直します。main が更新されるたびに、コースを書き直すわけではありません。</figcaption></figure>
+<p>なぜ先に「契約」を比べるのでしょうか。契約が変われば、それに依存する導出や実験がすべて無効になるからです。Strata 自身もそう考えています。<code>layout.hpp</code> には、モデル形状のどのフィールドも、あるカーネルが依存する数であり、それを変えることはカーネルの契約を変えることで、パラメータを 1 つ調整することではない、と書かれています。<span class="ev ev-code">コード上の事実</span>[S04] 学期の途中では、2 つのバージョンを維持できます。学期の間は変えない安定版と、上流を追いかける研究版です。</p>
+<p>はっきりさせておくべきことが、あと 2 つあります。第 1 に、Strata のコードは MIT ライセンスで公開されています [S19]。このライセンスが扱うのはリポジトリの中のコードで、モデルの重みやほかのサードパーティのコンポーネントそれぞれのライセンスの代わりにはなりません。第 2 に、この本は独立して書かれた教材であり、元のプロジェクトのお墨付きを表すものではありません。授業や独学に使える完全な初版ですが、出版社や複数の教員による外部のレビューは、まだ受けていません。公開して配布する前に、システム分野とモデルの数値の分野の先生に、それぞれ相互レビューをお願いし、試験授業のフィードバックで入門の難しさを確かめることをおすすめします。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>まず縦切りを 1 本通します。1 つのトークンを入力から出力まで通し、確かめられる本物のデータを残してから、層ごとに機能を足していきます。部品がすべて緑でも、システムがつながっているとは限りません。</li>
+<li>トレードオフごとに、5 つのことを書きます。決定、得たもの、代償、どう検証するか、いつ再検討するか。数字には単位と条件を付けます。</li>
+<li>納品のときは、各コンポーネントの証拠の段階を明記します。コードを書き終えた、主経路につながった、実データ、それとも模擬か。「完了」の 2 文字で、どの層も覆い隠してはいけません。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「まずすべてのモジュールを書いてテストし終え、最後に組み立てるのがいちばん効率的。」</strong></p>
+<p>モジュールごとに開発すること自体は間違っていません。間違っているのは「最後に組み立てる」ところです。モジュール間のインターフェースの仮定は、本当につないだときにはじめて検査されます。Strata の PLE モジュールがその例です。どの部品も照合テストに通りましたが、主経路はそれらを一度も呼び出しておらず、モデル全体の検収でやっと露見しました。[S13] つなぐのが遅いほど、間違った仮定に基づいて書かれたコードが増え、手戻りも大きくなります。まず細い線を 1 本つなぎ、それから上に足していくほうが、全体の作業量はたいてい少なくなります。</p></div>
+
+<details class="deep"><summary>もう一歩深く：レポートの構成、可観測性、最後の理解の確認</summary>
+<h3>合格するレポートの構成</h3>
+<p>まず、実験で覆されてもかまわない問いを立てます。そして、理論、ソースの位置、方法、データ、解釈、限界の順に書きます。結論には、自分がどの種類かを明記します。コード上の事実か、実験結果か、推測か。すべての図に、単位、サンプル数、測定条件を付けます。出典のリンクは、固定したコミット番号を使い、main だけを指さないようにします。性能の生データと失敗のログは、すべて残します。モデルファイルと依存ライブラリのハッシュは、一覧に書き込みます。見栄えのよいスクリーンショットだけを提出してはいけません。</p>
+<h3>評価表のレッドラインの運用</h3>
+<p>教育用のシミュレーションを実機の測定と偽ったら、その実験の結論は、ほかの部分がどれだけ真面目に作られていても、すべて採点しません。読者が、どの数字が信頼できるかを見分けられなくなるからです。説明のない状態の混用があれば、性能の点数では、正しさの欠陥を相殺できません。2 本のレッドラインに共通するのは、どちらも「証拠が信頼できる」というそのものを壊すことです。</p>
+<h3>可観測性：「働いていない」仕組みを目に見えるようにする</h3>
+<p>Strata のセッションのコードには、見習う価値のある設計が 2 つあります。1 つ目は「層ごとの同期」のデバッグモードです。「あるカーネルが、後ろの層でしか書かれないバッファを読んでしまう」ような間違いを捕まえられます。普段は見えず、代償は同期のオーバーヘッドなので、実行時パラメータにして、必要なときに入れます。2 つ目は、あの重なりのカウンタです。CPU と GPU の重なりが直列に退化しても、戻り値や層ごとの所要時間からは見えません。「CPU が、GPU がまだ動いている間に仕事を受け取った層の数」を専用に数えてはじめて気づけます。[S13] あなたのプロジェクトでも、「高速化」「重ね合わせ」「キャッシュヒット」を謳う仕組みには、それが本当に働いていることを証明できるカウンタを付けるべきです。</p>
+<h3>制約は、テストで捕まえられなければならない</h3>
+<p>Strata は、トークン生成時に VRAM の割り当てを一切しないことを求めています。そのため、セッションの状態はすべて、最初に最大の長さで一度に計算し、一度に割り当てます。コメントは落とし穴を指摘しています。もし割り当てが「もっと長いシーケンスの最初のトークン」で起きたら、既存のどのテストも通ってしまう。[S13] 言い換えれば、ある制約を調べる専用のテストがなければ、その制約は願いごとにすぎません。設計文書を書くときは、制約ごとに、「破られたときに失敗するのはどのテストか」を横に書いてください。</p>
+<h3>この本を離れるときの理解の確認</h3>
+<p>次のことを自分の言葉で説明できるはずです。40 GB のモデルファイルが、必ずしも 40 GB の VRAM を必要としないのはなぜか。1 回で複数のトークンを検証することは、未来を前もって知っていることではないのはなぜか。同じポインタが、層によって違うデータを指すことがあるのはなぜか。状態が固定されていることは、自由にロールバックできることではないのはなぜか。スレッドを増やしても、より多くのセッションを処理できるとは限らないのはなぜか。より速いという数字が、完全な条件と一緒でなければならないのはなぜか。この数文は、どんな推論エンジンにも持ち出せます。Strata は本物のシステムに踏み込むための入口であって、パラメータを丸暗記するための終点ではありません。</p>
+</details>

@@ -1,0 +1,235 @@
+<div class="hook"><span class="eyebrow">まず 3 つの数を見よう</span>
+<p>Strata の README には、RTX 5070 で Q2_0 版が毎秒 94 トークンを書き出す、と書かれています。<span class="ev ev-report">上流レポート</span>[S01] この数は、とても確かなものに見えます。</p>
+<p>もう 1 つ、コミュニティのメンバーが提出したテストを見てみましょう。RTX 3090 が 1 枚、Coder モデル、32K の長さのプロンプトで、同じ設定のまま 3 回続けて走らせました。前後で 30 秒もかかっていません。3 回の出力速度は、毎秒 52.7、66.8、97.4 トークンでした。<span class="ev ev-report">上流レポート</span> いちばん速いものと遅いものとで、ほぼ 2 倍も違います。このマシンは、結局どれくらい速いのでしょうか。この章では、速度の数字が追及に耐えるように測る方法を説明します。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>性能の数字は、条件、サンプル数、統計の方法とセットでなければ意味がありません。まずウォームアップし、次に繰り返し、中央値とばらつきの範囲を報告し、1 回目の実行は別に挙げ、「速度」がどの式で計算されたかをはっきり書きます。</p>
+
+<h2 id="sec-1">27.1 同じマシンで、30 秒の間に 3 つの速度が出た</h2>
+<p>まず、この 3 回の実行の生の記録を見ましょう。Strata のリポジトリにある、コミュニティが提出したテストレポートからのものです。エンジンのバージョンは 0.1.26、RTX 3090 が 1 枚、Coder モデル、32K の長さのプロンプトです。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/bench/results/2026-09-29-rtx3090-epyc-milan/README.md" target="_blank" rel="noopener noreferrer">RTX 3090 テストレポート</a>）</p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="図 27-1：同じマシンで 3 回続けて走らせた出力速度は、毎秒 52.7、66.8、97.4 トークン。中央値は 66.8、平均は 72.3">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="13">同じマシン、同じ設定、32K プロンプトで</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="34" font-size="13">3 回続けて走らせたときの出力速度</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40 118H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 114V122M137.1 114V122M234.3 114V122M331.4 114V122"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="136" font-size="13" text-anchor="middle">40</text>
+<text class="f-muted" fill="#5c6d66" x="137.1" y="136" font-size="13" text-anchor="middle">60</text>
+<text class="f-muted" fill="#5c6d66" x="234.3" y="136" font-size="13" text-anchor="middle">80</text>
+<text class="f-muted" fill="#5c6d66" x="331.4" y="136" font-size="13" text-anchor="middle">100</text>
+<circle class="f-accent" fill="#136d5a" cx="101.7" cy="100" r="6"/>
+<circle class="f-accent" fill="#136d5a" cx="170.2" cy="100" r="6"/>
+<circle class="f-accent" fill="#136d5a" cx="318.8" cy="100" r="6"/>
+<text class="f-text" fill="#182f2b" x="101.7" y="80" font-size="13" text-anchor="middle">1 回目 52.7</text>
+<text class="f-text" fill="#182f2b" x="170.2" y="58" font-size="13" text-anchor="middle">2 回目 66.8</text>
+<text class="f-text" fill="#182f2b" x="318.8" y="80" font-size="13" text-anchor="middle">3 回目 97.4</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M170.2 108V154"/>
+<text class="f-text" fill="#182f2b" x="165" y="154" font-size="13" text-anchor="end">中央値 66.8</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M196.9 108V174"/>
+<text class="f-text" fill="#182f2b" x="202" y="174" font-size="13" text-anchor="start">平均 72.3</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="196" font-size="13">TTFT は 3 回ともほぼ同じ：12.87、12.79、12.80 秒</text>
+</svg><figcaption>図 27-1　3 回の実行の出力速度（毎秒のトークン数）。いちばん速いものと遅いもので、ほぼ 2 倍違います。同じ実行の最初のトークンまでの遅延（TTFT）は、驚くほど安定しています。データは上流の RTX 3090 コミュニティレポートによるものです。</figcaption></figure>
+<p>なぜこんなに違うのでしょうか。生の記録に手がかりがあります <span class="ev ev-report">上流レポート</span>。</p>
+<ul>
+<li><strong>出力が短すぎる。</strong>3 回で生成されたトークンは、それぞれ 48、26、45 個だけで、モデルが早めに言い終えて止まりました。デコード段階は、どれも 1 秒に届きません（911、389、462 ミリ秒）。こんなに短い時間では、ちょっとした揺れでも拡大されます。</li>
+<li><strong>毎回書く内容が違う。</strong>3 回の答えは、冒頭からそれぞれ違います。Strata は投機的デコーディングで速くします。いくつかのトークンを先に予想し、まとめて 1 回で検証するのです。当たりが多いほど速くなります。3 回で受理されたのは、38 個のドラフトのうち 31 個、21 個のうち 12 個、37 個のうち 33 個でした。2 回目は予想がいちばん外れたのに、速度は中間でした。速度に効く要因が 1 つだけではないことが分かります。</li>
+<li><strong>入力も揺れている。</strong>名目上はどれも「32K プロンプト」ですが、実際の長さは 28,317、31,630、31,601 トークンでした。レポートは、実際の長さを特別に記録しています。「名目上の長さのラベルはずれることがある」からです。</li>
+</ul>
+<p>レポート自身の結論は、とても控えめです。各マスを 3 回ずつ走らせて中央値を報告し、1 回目の値も並べて挙げる。結果全体には「暫定」と明記する。これがまさに、この章で説明する習慣です。</p>
+<p>まず、2 つの言葉をはっきりさせます。<dfn>スループット</dfn>は、単位時間にどれだけの仕事を終えるかで、ここでは毎秒何トークン出力するか、token/s と書き、大きいほど良い値です。<dfn>レイテンシ</dfn>（遅延）は、あることが終わるまでどれだけ待つかで、たとえばリクエストを出してから最初の 1 文字が見えるまでの時間のことで、小さいほど良い値です。この 2 つはよく混ぜて語られますが、答えている問いが違います。</p>
+
+<h2 id="sec-2">27.2 数字は、その条件と一緒に持ち歩く</h2>
+<p>README の「94 token/s」は、Strata の詳しいドキュメントに、出所がきちんと書かれています。ドキュメントは、まず条件を書き、それから表を載せています <span class="ev ev-report">上流レポート</span>[S03]（図 27-2）。</p>
+<figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="図 27-2：Strata の速度表の条件リスト。GPU、CPU とメモリ、OS、エンジンのバージョン、量子化、入力、出力、設定">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="15" font-weight="600" text-anchor="middle">性能の数字の「身分証」</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="380" height="222" rx="10"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="58" font-size="13">GPU</text><text class="f-text" fill="#182f2b" x="120" y="58" font-size="13">RTX 5070（12 GB）</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="84" font-size="13">CPU とメモリ</text><text class="f-text" fill="#182f2b" x="120" y="84" font-size="13">Ryzen 5 7600、64 GB DDR5-5200</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="110" font-size="13">OS</text><text class="f-text" fill="#182f2b" x="120" y="110" font-size="13">Windows</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="136" font-size="13">エンジン版</text><text class="f-text" fill="#182f2b" x="120" y="136" font-size="13">0.1.26（一部のマスは古い版を流用）</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="162" font-size="13">量子化</text><text class="f-text" fill="#182f2b" x="120" y="162" font-size="13">Q2_0、IQ2_XS など 5 種類</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="188" font-size="13">入力</text><text class="f-text" fill="#182f2b" x="120" y="188" font-size="13">各長さにつきコード補助のプロンプト 1 つ</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="214" font-size="13">出力</text><text class="f-text" fill="#182f2b" x="120" y="214" font-size="13">256 トークンを生成</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="240" font-size="13">設定</text><text class="f-text" fill="#182f2b" x="120" y="240" font-size="13">インストーラの既定値、MTP ドラフトあり</text>
+<text class="f-warn" fill="#9e5d24" x="200" y="280" font-size="13" text-anchor="middle">1 項目でも欠けると、他の人の結果と並べて比べられない</text>
+</svg><figcaption>図 27-2　Strata の詳しいドキュメントにある、速度表の条件。どの項目も結果を変えうるので、すべて書き出す必要があります。[S03]</figcaption></figure>
+<p>このドキュメントには、学ぶ価値のある細かい工夫がほかにもあります <span class="ev ev-report">上流レポート</span>[S03]。</p>
+<ul>
+<li><strong>バージョンの混在を明示する。</strong>表の本体は 0.1.26 の結果ですが、262K の列のいくつかのマスは測り直されておらず、0.1.22 や 0.1.14 の数を流用していて、記号で別に印が付けられています。1 つの表に混ざった数は、同じ実験の結果とは限りません。</li>
+<li><strong>数字は内容で変わることを説明する。</strong>出力速度は、文章そのものにも左右されます。投機的デコーディングは、当たりが多いほど速くなるので、同じプロンプトで答えが違うだけで、速度が数パーセント変わります。</li>
+<li><strong>比べるときは、続けざまに走らせる。</strong>ドキュメントが 0.1.14 と 0.1.12 を比べたときは、同じ 4K プロンプトで続けざまに走らせて、88.5 と 85.7 token/s を得ています。</li>
+</ul>
+<p>最初の 3090 の話に戻りましょう。README は、RTX 3090 の速度を「毎秒 100〜140 トークンくらい書ける」と見積もっています。[S01] コミュニティのレポートで測られた数は、これより低いのですが、2 つの条件はまったく違います。レポートが使ったのは仮想マシンで、テスト機の 2 枚の GPU の消費電力は、どちらも手動で 280 W に制限されていました。プロンプトは、テストした人が自分でソースから生成したもので、何度かのリクエストは早めに終わっています。レポート自身が、上流のプロンプトとテスト方法を手に入れるまでは、上流との比較はすべて「参考にしかならない」と明記しています。<span class="ev ev-report">上流レポート</span> どちらの数も間違っていません。ただ、直接は比べられないのです。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは「コンピュータアーキテクチャ」で性能評価を習うときの、最初の決まりです。テスト環境を書くこと、一度に 1 つの変数だけを変えること。科学実験では「条件の統制」と呼ばれます。条件のないベンチマーク値は、単位のない物理量と同じで、使いものになりません。</p>
+
+<h2 id="sec-3">27.3 平均は、1 つの遅いリクエストに引っ張られる</h2>
+<p>同じことを何回か測って、数の列ができたとき、どの数でそれを代表させるのでしょうか。いちばんよくある答えは平均ですが、大きな欠点があります。次のコラムで説明します。</p>
+<aside class="primer" id="c27-statistics">
+<h3>平均、分位数、分散</h3>
+<p>まず、あるリクエストの所要時間を見ます。8、9、10、11、100 ミリ秒。最初の 4 回はどれも普通で、最後の 1 回は、ほかのプログラムに資源を奪われたのかもしれません。</p>
+<p><dfn>平均</dfn>は、全部足して個数で割ったものです。(8 + 9 + 10 + 11 + 100) ÷ 5 = 27.6 ミリ秒。ところが 5 回のうち、27.6 に近いものは 1 つもありません。平均は、100 に引っ張られたのです。<dfn>中央値</dfn>は、並べ替えたときのちょうど真ん中の数で、ここでは 10 ミリ秒です。100 を 10000 に替えても、中央値は動きません。このように「個々の極端な値を恐れない」性質を、ロバスト（頑健）と呼びます。</p>
+<p><dfn>分位数</dfn>は、「ほとんどのリクエストはどれくらい遅いか」に答えます。p95 とは、95% のリクエストがそれより遅くない、という意味です。ユーザー体験は、遅いほうの端で決まることがよくあります。20 回のリクエストのうち、いちばん遅い 1 回を、ユーザーはいちばんよく覚えています。p95 の計算にはいくつもの流儀があります。この本はいちばん簡単な「最近順位法」を使います。小さい順に並べ、⌈0.95 × n⌉ 番目を取ります。注意：サンプルが 20 個に満たないときは、p95 は最大値になります。5 回しか走らせずに p95 を報告するのは、実は「いちばん遅い 1 回」を報告しているのです。</p>
+<p><dfn>分散</dfn>と<dfn>標準偏差</dfn>は、データがどれだけ散らばっているかを表します。標本標準偏差 = √( Σ(xᵢ − 平均)² ÷ (n − 1) ) です。上の数の列の標準偏差は約 40.5 ミリ秒で、典型的な値そのものより大きくなります。これは、データに外れ値があり、平均は信用できないことを知らせています。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E4%B8%AD%E5%A4%AE%E5%80%A4" target="_blank" rel="noopener noreferrer">Wikipedia：中央値</a> · <a href="https://ja.wikipedia.org/wiki/%E5%88%86%E4%BD%8D%E6%95%B0" target="_blank" rel="noopener noreferrer">Wikipedia：分位数</a> · <a href="https://ja.wikipedia.org/wiki/%E6%A8%99%E6%BA%96%E5%81%8F%E5%B7%AE" target="_blank" rel="noopener noreferrer">Wikipedia：標準偏差</a> · <a href="https://docs.python.org/ja/3/library/statistics.html" target="_blank" rel="noopener noreferrer">Python ドキュメント：statistics（quantiles の 2 つのアルゴリズムを含む）</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 186" role="img" aria-label="図 27-3：5 回の所要時間 8、9、10、11、100 ミリ秒。中央値は 10、平均は 27.6、p95 は最大値の 100 に等しい">
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M20 96H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 92V100M105.7 92V100M191.4 92V100M277.1 92V100M362.9 92V100"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="114" font-size="13" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="105.7" y="114" font-size="13" text-anchor="middle">25</text>
+<text class="f-muted" fill="#5c6d66" x="191.4" y="114" font-size="13" text-anchor="middle">50</text>
+<text class="f-muted" fill="#5c6d66" x="277.1" y="114" font-size="13" text-anchor="middle">75</text>
+<text class="f-muted" fill="#5c6d66" x="362.9" y="114" font-size="13" text-anchor="middle">100 ms</text>
+<circle class="f-accent" fill="#136d5a" cx="47.4" cy="80" r="4.5"/>
+<circle class="f-accent" fill="#136d5a" cx="50.9" cy="70" r="4.5"/>
+<circle class="f-accent" fill="#136d5a" cx="54.3" cy="80" r="4.5"/>
+<circle class="f-accent" fill="#136d5a" cx="57.7" cy="70" r="4.5"/>
+<circle class="f-warn" fill="#9e5d24" cx="362.9" cy="76" r="5.5"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M54.3 46V90M114.6 46V90"/>
+<text class="f-text" fill="#182f2b" x="54.3" y="38" font-size="13" text-anchor="middle">中央値 10</text>
+<text class="f-text" fill="#182f2b" x="118" y="38" font-size="13" text-anchor="start">平均 27.6</text>
+<text class="f-text" fill="#182f2b" x="390" y="38" font-size="13" text-anchor="end">p95 = 最大値 100</text>
+<text class="f-text" fill="#182f2b" x="10" y="144" font-size="13">1 回の 100 ms が平均を 27.6 に引き上げる。</text>
+<text class="f-text" fill="#182f2b" x="10" y="162" font-size="13">中央値は 10 のまま。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="180" font-size="13">標準偏差は約 40.5 ms で、典型値より大きい：外れ値あり</text>
+</svg><figcaption>図 27-3　5 つのサンプル、3 つの統計量、3 つの違う物語。中央値を報告し、遅いほうの端を p95 や最大値で補うほうが、平均だけを報告するより、ずっと誠実です。</figcaption></figure>
+<p>図 27-1 の 3 回の実行を振り返りましょう。中央値は 66.8、平均は 72.3、「p95」は、いちばん速い 97.4 です（ここでは数が大きいほうが良いので、遅いほうの端を見るには、最小値の 52.7 を見る必要があります）。3 つの数は、どれも単独では不完全です。上流レポートのやり方は、中央値を報告し、1 回目の値と生の記録を添えることです。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>「確率論と数理統計」では、中央値の「ブレークダウンポイント」は 50% です。データの半分未満を任意の値に変えても、中央値は無限の彼方へは行きません。平均のブレークダウンポイントは 0 で、悪いデータが 1 つあれば引っ張られてしまいます。性能のデータは、まさに個々の極端な値がいちばん出やすいものです。</p>
+
+<h2 id="sec-4">27.4 1 回目はいつも特別に遅い：ウォームアップと繰り返し</h2>
+<p>多くのシステムは、最初の実行が後の実行より遅くなります。Strata にも、使ううちに「温まる」ものがいくつもあります。</p>
+<ul>
+<li><strong>エキスパートキャッシュ。</strong>VRAM にどのエキスパートを置くかは、会話に合わせて調整され、使うほど今の内容に合ってきます。<span class="ev ev-report">上流レポート</span>[S02]</li>
+<li><strong>ドラフトコントローラ。</strong>「ドラフトがいくつ当たるか」の初期の見積もりを持っていて、各セッションの中で、使いながら学んでいきます。<span class="ev ev-code">コード上の事実</span>[S09]</li>
+<li><strong>計算グラフ。</strong>検証ウィンドウの GPU 計算グラフは、最初に使うときにはじめて記録されます。<span class="ev ev-code">コード上の事実</span>[S08]</li>
+<li><strong>OS のファイルキャッシュ。</strong>読んだばかりのファイルはメモリに残るので、2 回目の読み込みはずっと速くなります。</li>
+</ul>
+<p>逆に、後の実行を「現実離れして速く」するものもあります。Strata は会話を保持し、追加の質問では、増えた部分だけを読みます。[S02] 速度を測るときに同じプロンプトを繰り返し送ると、2 回目からはプリフィルにほとんど時間がかからず、測れているのは「32K のプロンプトを読む」速度ではなくなってしまいます。だから、あの 3090 レポートは、リクエストごとに別々の ID を使い、会話を再利用していません。<span class="ev ev-report">上流レポート</span></p>
+<p>別のコミュニティレポートは、測定方法をもっと完全に書いています（図 27-4）。RTX 5090 で IQ2_XS 量子化版を測っていて、エンジンは 0.1.29 です。まず、とても短いウォームアップのリクエストを 1 つ送り、結果には数えません。そのあと、ロード済みの同じエンジンで、4K、32K、128K の順に、各長さを 3 回ずつ続けて走らせます。どのリクエストも質問を丸ごと読み、再利用したトークン数は 0 です。表の各マスには「中央値 [最小値–最大値]」を書きます。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/bench/results/2026-09-30-community-rtx-5090/README.md" target="_blank" rel="noopener noreferrer">RTX 5090 テストレポート</a>）</p>
+<figure class="fig"><svg viewBox="0 0 400 238" role="img" aria-label="図 27-4：RTX 5090 レポートの実行順序。ウォームアップが 1 回で集計外、その後は各長さ 3 回。4K の 1 回目は明らかに遅く、レポートはそれを残している">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="13">コミュニティ測定：RTX 5090、エンジン 0.1.29、IQ2_XS</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="10" y="32" width="56" height="34" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="38" y="54" font-size="13" text-anchor="middle">予熱</text>
+<rect class="f-warn" fill="#9e5d24" x="72" y="32" width="32" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="88" y="54" font-size="14" text-anchor="middle">1</text>
+<rect class="f-accent" fill="#136d5a" x="107" y="32" width="32" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="123" y="54" font-size="14" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="142" y="32" width="32" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="158" y="54" font-size="14" text-anchor="middle">3</text>
+<rect class="f-soft" fill="#e5f1df" x="177" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="193" y="54" font-size="14" text-anchor="middle">1</text>
+<rect class="f-soft" fill="#e5f1df" x="212" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="228" y="54" font-size="14" text-anchor="middle">2</text>
+<rect class="f-soft" fill="#e5f1df" x="247" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="263" y="54" font-size="14" text-anchor="middle">3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="282" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="298" y="54" font-size="14" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="317" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="333" y="54" font-size="14" text-anchor="middle">2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="352" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="368" y="54" font-size="14" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="38" y="84" font-size="13" text-anchor="middle">集計外</text>
+<text class="f-text" fill="#182f2b" x="123" y="84" font-size="14" text-anchor="middle">4K</text>
+<text class="f-text" fill="#182f2b" x="228" y="84" font-size="14" text-anchor="middle">32K</text>
+<text class="f-text" fill="#182f2b" x="333" y="84" font-size="14" text-anchor="middle">128K</text>
+<text class="f-text" fill="#182f2b" x="20" y="120" font-size="15" font-weight="600">4K の 3 回の実行</text>
+<text class="f-text" fill="#182f2b" x="20" y="144" font-size="13">TTFT：1.183 s → 0.974 s → 0.973 s</text>
+<text class="f-text" fill="#182f2b" x="20" y="166" font-size="13">デコード速度：161.3 → 184.8 → 179.4 token/s</text>
+<text class="f-text" fill="#182f2b" x="20" y="188" font-size="13">キャッシュヒット率：97.8% → 99.3% → 98.9%</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="222" font-size="13">レポートは遅い 1 回目を残し、「中央値 [最小–最大]」で報告</text>
+</svg><figcaption>図 27-4　とても短いウォームアップでは、すべてを「温める」ことはできませんでした。4K の最初の本番の実行は、まだ遅いままです。レポートはそれを消さず、範囲の中に現れるようにしています。</figcaption></figure>
+<p>あのウォームアップのリクエストに注目してください。プロンプトはわずか 19 トークンで、出力は 2 トークンだけです。こんなに短いリクエストでは、すべてを温め切れませんでした。4K の最初の本番の実行は、TTFT が約 0.2 秒長く、デコードも約 10% 遅くなりました。レポートはこの実行をこっそり消さず、「遅い 4K の 1 回目を範囲に残した」と明記しています。<span class="ev ev-report">上流レポート</span> 消してしまうより誠実ですし、読者に判断の材料も残します。</p>
+<aside class="primer" id="c27-benchmark-method">
+<h3>ウォームアップとベンチマークの方法</h3>
+<p><dfn>ベンチマーク</dfn>とは、統制した条件のもとで、同じタスクを繰り返し走らせ、その性能を測ることです。結果を信頼できるものにするには、いくつかの基本があります。</p>
+<p><strong>ウォームアップ。</strong>本番の計時の前に何回か走らせ、キャッシュ、計算グラフ、ファイルキャッシュを安定した状態にします。この何回かは結果に入れません。何回ウォームアップするか、何をウォームアップするかは、あらかじめ決めてレポートに書きます。あなたが気にしているのがまさにコールドスタート（たとえば、ユーザーが初めて開いたとき）なら、コールドスタートは別に測り、温まった状態と混ぜてはいけません。</p>
+<p><strong>繰り返し。</strong>1 回の実行は、1 つのサンプルにすぎません。何回も繰り返してはじめて、ばらつきの大きさが見えます。繰り返しの回数は、あらかじめ決めておき、「満足するまで走らせる」のはいけません。</p>
+<p><strong>交互。</strong>A と B を比べるときは、A を走らせ終えてから B を走らせるのではなく、A、B、A、B と交互にします。そうしないと、マシンの温まり具合、温度、バックグラウンドのタスクの変化が、すべてどちらか一方の分になってしまいます。</p>
+<p><strong>生データを残す。</strong>中央値と範囲を報告し、同時に、失敗や異常があった回も含めて、各回の生の記録を添えます。</p>
+<p>最速の 1 回だけを見てよい場面が 1 つあります。<strong>決定的な</strong>小さなコードを測るときです。Python の <code>timeit</code> のドキュメントは、最小値を見るよう勧めています。遅い結果は、たいてい別のプロセスの邪魔で生じるので、最小値が、そのマシンがそのコードを走らせられる下限を与えてくれるからです。けれども推論サービスの速度は、入力の内容、ドラフトがいくつ当たるか、キャッシュがいくつヒットするかにも左右されます。これらは「邪魔」ではなく、ユーザーが実際に出会う状況です。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%83%99%E3%83%B3%E3%83%81%E3%83%9E%E3%83%BC%E3%82%AF" target="_blank" rel="noopener noreferrer">Wikipedia：ベンチマーク</a> · <a href="https://docs.python.org/ja/3/library/timeit.html" target="_blank" rel="noopener noreferrer">Python ドキュメント：timeit</a> · <a href="https://en.wikipedia.org/wiki/Benchmark_(computing)" target="_blank" rel="noopener noreferrer">Wikipedia: Benchmark (computing)（英語）</a></p>
+</aside>
+<p>ウォームアップ、繰り返し、交互は、それぞれ何を解決するのでしょうか。次の実験で、自分で測定の計画を設計してみましょう。この実験の良いところは「真実が分かっている」ことです。B は本当に A より 5% 速く、自分の計画がどれだけ正確に測れたかを、直接見られます。</p>
+<div class="viz" data-viz="bench-warmup"><figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="図 27-5：3 通りの実行順序。A の後に B を走らせると、コールドスタートはすべて A に乗る。交互に走らせると両側に分散する。さらにウォームアップを加えると、コールドスタートは捨てられる">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="13">起動直後の 3 回の実行は遅くなる。それは誰の分になるか</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="13">A の後に B</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="34" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="103" y="52" font-size="14" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="118" y="34" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="52" font-size="14" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="146" y="34" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="159" y="52" font-size="14" text-anchor="middle">A</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="174" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="187" y="52" font-size="14" text-anchor="middle">A</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="215" y="52" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="243" y="52" font-size="14" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="258" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="52" font-size="14" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="299" y="52" font-size="14" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="314" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="327" y="52" font-size="14" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="342" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="355" y="52" font-size="14" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="10" y="102" font-size="13">A、B 交互</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="84" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="103" y="102" font-size="14" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="118" y="84" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="102" font-size="14" text-anchor="middle">B</text>
+<rect class="f-warn" fill="#9e5d24" x="146" y="84" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="159" y="102" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="174" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="187" y="102" font-size="14" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="215" y="102" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="243" y="102" font-size="14" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="258" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="102" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="299" y="102" font-size="14" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="314" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="327" y="102" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="342" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="355" y="102" font-size="14" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="13">交互＋予熱</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#9e5d24" stroke-dasharray="3 3" x="90" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="103" y="152" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#9e5d24" stroke-dasharray="3 3" x="118" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="131" y="152" font-size="14" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#9e5d24" stroke-dasharray="3 3" x="146" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="159" y="152" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="174" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="187" y="152" font-size="14" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="215" y="152" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="243" y="152" font-size="14" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="258" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="152" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="299" y="152" font-size="14" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="314" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="327" y="152" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="342" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="355" y="152" font-size="14" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="10" y="196" font-size="13">警告色：まだ温まっていない実行。破線の枠は予熱で、捨てる</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="13">1 行目は起動直後の遅さがすべて A に乗り、B が速く見える</text>
+</svg><figcaption>図 27-5　実行の順序が、コールドスタートの分を誰が背負うかを決めます。交互に走らせると、両側に分散します。さらにウォームアップを加えると、まるごと捨てられます。下の実験では、真実は B が 5% 速いことです。</figcaption></figure></div>
+
+<h2 id="sec-5">27.5 まず時計を定義する：TTFT と「毎秒何トークン」</h2>
+<p>測定方法に問題がなくても、「速度」という言葉自体に、何通りもの計算法がありえます。ユーザーがリクエストを出すと、いくつかの時間の区間を経験します。キュー待ち、プリフィル、最初のトークンの出現、後続のトークンが次々に出る、終了。ストップウォッチをどこで押し、どこで止めるかで、出てくる数はまったく違ってきます（図 27-6）。</p>
+<div class="viz" data-viz="rate-clock"><figure class="fig"><svg viewBox="0 0 400 248" role="img" aria-label="図 27-6：1 回のストリーミングリクエストのタイムラインと、3 通りの速度の式。エンドツーエンド、デコード時間あたり、間隔あたり">
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="36" width="70" height="26" rx="4"/>
+<text class="f-text" fill="#182f2b" x="55" y="54" font-size="13" text-anchor="middle">キュー</text>
+<rect class="f-soft" fill="#e5f1df" x="90" y="36" width="140" height="26" rx="4"/>
+<text class="f-text" fill="#182f2b" x="160" y="54" font-size="13" text-anchor="middle">プリフィル</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" d="M230 32V66M245 32V66M260 32V66M275 32V66M290 32V66M305 32V66M320 32V66M335 32V66M350 32V66M365 32V66M380 32V66"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="84" font-size="13">リクエスト送信</text>
+<text class="f-muted" fill="#5c6d66" x="230" y="84" font-size="13" text-anchor="middle">最初のトークン</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="84" font-size="13" text-anchor="end">最後</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M20 92V98H228V92M232 92V98H380V92"/>
+<text class="f-text" fill="#182f2b" x="124" y="114" font-size="13" text-anchor="middle">TTFT（最初のトークンまで）</text>
+<text class="f-text" fill="#182f2b" x="306" y="114" font-size="13" text-anchor="middle">デコード時間</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="13">速度 ① 全体 = N ÷ 送信から終了までの総時間</text>
+<text class="f-text" fill="#182f2b" x="20" y="168" font-size="13">速度 ② = N ÷ デコード時間</text>
+<text class="f-text" fill="#182f2b" x="20" y="190" font-size="13">速度 ③ = (N − 1) ÷ デコード時間（N = 1 では未定義）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="214" font-size="13">どれも計算は間違っていませんが、答える問いが違います。</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="232" font-size="13">報告では、どの式を使ったかを明記します</text>
+</svg><figcaption>図 27-6　1 回のリクエスト、1 本のタイムライン、3 通りの「速度」。N は出力のトークン数です。アニメーション版では、キュー待ち、出力の長さ、ドラフトの受理率を調整できます。</figcaption></figure></div>
+<p><dfn>TTFT</dfn>（time to first token、最初のトークンまでの時間）は、リクエストを出してから、最初のトークンが現れるまでの時間です。キュー待ちとプリフィルを含み、ユーザーが「何かが動くまでどれだけ待つか」を決めます。RTX 5090 のレポートは、その定義をとても厳密にしています。HTTP リクエストを出す前から計時を始め、最初の空でないテキストを受け取るまでとし、空のロール情報やキープアライブのメッセージは無視する、というものです。<span class="ev ev-report">上流レポート</span></p>
+<p>出力速度の計算法はもっとあります。上の図の速度 ② と ③ は、「1 を引く」かどうかの違いだけですが、出力がとても短いときには差が小さくありません。出力が 26 トークンだけなら、両者は 26 ÷ 25 − 1 = 4% 違います。<span class="ev ev-est">教育用の試算</span> 出力が 1 トークンだけなら、速度 ③ はそもそも定義されず、無理に計算すれば 0 での割り算になります。</p>
+<p>「リアルタイムの速度メーター」にも工夫があります。Strata のサーバーのソースのコメントによると、画面に表示するリアルタイム速度は、ある時間の窓の中のレートであって、「最初のトークンからの平均」ではありません。後者は、最初のトークンが出た直後には、ほぼ 1 ÷ 経過時間になり、かつて監視画面に 5 桁の数を表示したことがあり、その後の 1 秒間は逆に低すぎました。コードの窓は 2 秒で、0.25 秒に満たないときは 0.25 秒として計算します。<span class="ev ev-code">コード上の事実</span>[S15]</p>
+<p>複数のユーザーが同時に使うときは、さらに 2 つのことを区別する必要があります。<dfn>システム全体のスループット</dfn>は、すべてのリクエストを合わせて毎秒何トークン出力するか。<dfn>単一ストリームの速度</dfn>は、各ユーザー自身が見る速度です。5 人のユーザーを合わせて毎秒 100 トークンでも、1 人ずつが毎秒 100 トークンというわけではありません。Strata のサーバーは、一度に 1 つのシーケンスしか処理せず、リクエストは先着順に並びます。[S15] だからこのサーバーにとって、「5 人が同時に使う」とは、後ろの 4 人が待つことを意味し、その TTFT は長くなり、デコード速度は変わりません。この待ちのコストは、第 25 章で説明しました。</p>
+
+<h2 id="sec-6">27.6 手を動かす：1 回の測定を、再検証できる記録にする</h2>
+<p>この本には、測定プロトコル <code>labs/benchmark_protocol.md</code> と、記録のテンプレート <code>labs/benchmark_template.csv</code> が付属しています。テンプレートは 31 列で、リポジトリのバージョン、ビルドパラメータ、モデルファイルのハッシュから、キュー待ち、TTFT、デコード時間、VRAM のピーク、品質が通ったかまで、1 回の実行ごとに 1 行を埋めます。テンプレートには、本物のベンチマーク値は 1 つも入れていません。本物のハードウェアで測っていないマスは、空欄にしておくべきです。</p>
+<ol>
+<li><strong>まず、この章の 2 つの実験で遊ぶ。</strong>「測定実験」で、5% を安定して測れる計画を見つけ、使った繰り返し回数、ウォームアップの回数、実行順序を記録します。「3 つの速度」では、出力の長さを 1 まで下げて、どの式が使えなくなるかを見ます。</li>
+<li><strong>次に、インタラクティブ実験「短いリクエストはなぜ待ち続けるのか」を開く。</strong>先着順とラウンドロビンの 2 つのスケジューリングで、各リクエストの最初のトークンまでの時間と完了時間を比べます。注意：全体のスループットはほとんど変わらないのに、人ごとの体験は大きく違います。これが、「単一ストリーム」と「全体スループット」を分けて報告すべき理由です。</li>
+<li><strong>最後に、記録を 1 つ書く。</strong>Strata を動かせるコンピュータがあるなら、プロトコルに従って A/B を 1 組走らせます。一度に 1 つの設定だけを変え、A、B を交互にし、各組はウォームアップのあとで少なくとも 5 回繰り返し、各回の生データをテンプレートに記入します。そういうコンピュータがなければ、上流の RTX 3090 レポートで練習します。生の JSON から各回の数を書き写し、自分で中央値を計算し直し、レポートにテンプレートのどの列が欠けているかを挙げます。</li>
+</ol>
+<p>この章の 2 つのインタラクティブ実験の時間は、教育用の仮定であり、Strata の実測ではありません。実演しているのは測定の方法であって、特定の GPU の速度ではありません。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>性能の数字は、条件と一緒でなければなりません。ハードウェア、モデルと量子化、エンジンのバージョン、入出力の長さ、キャッシュの温まり具合、並行数。条件が違う数は、直接比べられません。</li>
+<li>先にウォームアップし、次に繰り返し、A/B を交互に走らせます。中央値と範囲を報告し、1 回目の実行は別に挙げ、生データと失敗した実行も残します。</li>
+<li>「速度」は、まず時計を定義します。TTFT、エンドツーエンドの速度、デコード速度は、それぞれ別の問いに答えます。システム全体のスループットは、各ユーザーの速度とは違います。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「いちばん速く走った 1 回こそが、マシンの本当の実力を表す。」</strong></p>
+<p>小さな決定的なコードを測るときは、最速の 1 回に確かに意味があります。Python の <code>timeit</code> のドキュメントも、最小値がそのマシンがそのコードを走らせられる速度の下限を与える、と言っています。けれども推論サービスの速度は、今回何を書いたか、ドラフトがいくつ当たったか、キャッシュがいくつヒットしたかにも左右されます。図 27-1 でいちばん速い 97.4 は、3 回のうちいちばん運が良かった 1 回にすぎません。ユーザーが毎日出会うのは中央値のあたりの速度で、覚えているのは、いちばん遅い数回です。最速の 1 回だけを報告するのは、自分に都合のよいデータを選んでいることになります。</p></div>
+
+<details class="deep"><summary>もう一歩深く：実験の単位、代表的な場面、ペア比較、品質ゲート</summary>
+<h3>実験の単位は、条件の組み合わせ一式</h3>
+<p>少なくとも次を記録します。リポジトリのバージョン（コミット番号）、実行ファイルとビルドパラメータ、モデルファイルのハッシュ、量子化の方式、CPU と GPU の型番、メモリのチャネルと周波数、ドライバのバージョン、コンテキスト長、入力トークン数、出力の上限、KV キャッシュのモード、プリフィルのチャンクサイズ、ドラフトの設定、キャッシュの温まり具合、並行の定義、サンプリングパラメータと乱数シード。重要な変数が 1 つ欠けるだけで、2 組の数字はもう比べられなくなるかもしれません。Strata の詳しいドキュメントは、1 つの表の中で、異なるエンジンバージョンのマスを混在させ、さらに別の段落で、新しいカーネルの結果を補っています。[S03] このドキュメントは「性能の表を読む」練習に向いていますが、すべてのマスを 1 回の統一された実験とみなしてはいけませんし、ましてやこの本の実測だとはみなせません。</p>
+<h3>時計の境界を、1 つずつ定義する</h3>
+<p>エンドツーエンドの TTFT：リクエストを出してから、最初の出力トークンまで。キュー待ちの時間：キューに入ってから、実行を許可されるまで。プリフィルの時間：新しい入力の処理を始めてから、必要な履歴状態が準備できるまで。デコード時間：はっきりした始点と終点で、生成の過程を計る。完了時間：リクエストを出してから、成功か失敗かの終わりの状態まで。2 つのデコードレート <code>N ÷ デコード時間</code> と <code>(N − 1) ÷ (最後のトークンの時刻 − 最初のトークンの時刻)</code> は、どちらを報告してもかまいませんが、定義を明記する必要があり、システム間でこっそり入れ替えてはいけません。N = 1 のとき後者は定義されません。巨大なレートではなく、「未定義」と表示すべきです。</p>
+<h3>コーディングアシスタントの 3 つの代表的な場面</h3>
+<p><strong>コールドなリポジトリの理解</strong>：長いシステムプロンプト、ツールの定義、コードのコンテキスト、最初の回答。主に、コールドなプリフィル、TTFT、メモリのピークを見ます。<strong>差分の修正</strong>：大きな先頭部分を再利用でき、エラーとコードの差分だけを追加します。キャッシュが効いているか、末尾の処理がどれだけ速いかを見ます。<strong>ツールのループと分岐</strong>：短い生成、ツールの出力、続き、別の枝を立てる。状態の復元、キャンセル、プロトコルの意味を見ます。入力の長さは、1K、4K、16K、32K、64K、128K と、実際に対応しているほぼ満杯の窓まで取り、出力用に明確な余地を残します。「最大コンテキスト」をすべてプロンプトに使っておいて、さらに追加で生成を求めてはいけません。具体的なモデルと設定の有効な境界は、本物のエンジンで確かめる必要があります。Strata のサーバーは、「プロンプト + 出力の上限がコンテキストを超える」リクエストを、すぐに 400 で拒否し、決して切り詰めません。[S15]</p>
+<h3>単一ストリームと複数ストリームは、別々の問いに答える</h3>
+<p>単一ストリームのテストが見るのは、各ユーザーのその場の体験です。複数ストリームのテストでは、さらに、アクティブなストリーム数、全体のスループット、ストリームごとの TTFT とトークン間隔の p50 / p95、失敗率、キュー待ち、公平性を報告します。まばらな到着と、同期した集中も違います。複数ストリームでスケールさせるテストでは、到着の過程、リクエストの長さの分布、温まり具合を固定し、各リクエストの生のタイムスタンプを残すべきです。すでに計算したレートをいくつか平均しても、たいていは、全トークン数を全時間で割ったものにはなりません。</p>
+<h3>ペア、交互、区間</h3>
+<p>A/B の比較は、できるだけペアにします。同じプロンプトを A と B で 1 回ずつ走らせて、差を比べるのです。それぞれ別のプロンプトで 3 回ずつ走らせて、中央値を比べるのではありません。あの RTX 3090 レポートは、異なる層分割点を比べるときに、こう注意しています。各回のプロンプトは独立に生成されたので、順位は「ペア比較ではなく」、中央値は慎重に見る必要がある。<span class="ev ev-report">上流レポート</span> Strata のドキュメントも、A/B をするときは <code>--pcie-frac 0</code> などのスイッチを付けて、同じプロンプトから毎回同じ答えが出るようにすることを勧めています。そうしないと、答えが違うせいで、速度まで変わってしまうからです。[S03] サンプルがとても少ないときは、p95 はとても不安定なので、サンプル数と生の記録を一緒に示します。信頼区間を示したいなら、ブートストラップ法で生のサンプルを再抽出できます。外れ値を取り除くには、あらかじめ書いた規則が必要で、取り除いた理由も残します。最速の 1 回を選んで報告することには、一般化できる統計的な意味がありません。</p>
+<h3>まず品質ゲートを通し、それから速度を比べる</h3>
+<p>投機的デコーディング、量子化、KV キャッシュの形式、プレフィックスキャッシュ、CPU / GPU のディスパッチは、どれも実行経路を変えうるものです。「20% 速くなった」と言っても、答えが半分に短くなっていたり、失敗したリクエストが数えられていなければ、成功した最適化ではありません。Strata のドキュメントは、高速化を報告するとき、それが FP16 の参照にどれだけ近いか（teacher forcing での KL ダイバージェンス）も一緒に報告しています。[S03] 各回の記録には <code>labs/benchmark_template.csv</code> を使います。A/B の手順と、公開を拒否する条件は <code>labs/benchmark_protocol.md</code> にあります。本物のハードウェアのデータがないマスは空欄のままにしてあり、この本には、推測による GPU のベンチマーク値は 1 つも入れていません。</p>
+</details>

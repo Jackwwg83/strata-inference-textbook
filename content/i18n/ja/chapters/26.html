@@ -1,0 +1,286 @@
+<div class="hook"><span class="eyebrow">まず、ある起動時の警告から</span>
+<p>Strata は以前、起動のたびに警告を 1 行表示していました。大意はこうです。GPU 上のエキスパート計算の経路は「正しくない」ので、そこから出る出力は何も信用できない。その後、issue #23 が、とても率直な問いを出しました。エキスパートキャッシュをオンにすると、答えは悪くなりますか。<span class="ev ev-report">上流レポート</span></p>
+<p>作者は実験をしました。同じ文章を、キャッシュありとなしで 1 回ずつ流し、位置ごとにモデルの予測を比べたのです。結果は少し直感に反していました。2%〜5% の位置で、両者が選ぶ「いちばんありそうな次の単語」が違う。それなのに全体としては、どちらが正確ということもない。違うのに、どちらも正しい。この章はここから始めます。「正解」さえはっきり言い切れないシステムを、どうやってテストするのでしょうか。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>推論エンジンのテストは階層に分けます。小さな関数は正確な答えと照らし、1 つの演算子は独立した参照実装と照らし、モデル全体には同じ文章を入れて位置ごとに比べます。浮動小数点の下の数桁は計算の順序で変わるので、「等しい」は、まず許容差つきの比較として定義しなければなりません。そして良いテストは、わざと入れたバグを本当に捕まえられることを、証明する必要があります。</p>
+
+<h2 id="sec-1">26.1 なぜ「正しく見える」のがいちばん危ないのか</h2>
+<p>プログラムの間違いには、2 つの姿があります。1 つはクラッシュです。エラー、終了、文字化けした出力。この種のバグは見つけやすく、最初の実行で露見します。もう 1 つはもっと厄介です。プログラムは普通に動き、普通の数を出力し、生成された文もなめらかなのに、中身はもう間違っているのです。図 26-1 は、2 つのバグを並べたものです。</p>
+<figure class="fig"><svg viewBox="0 0 400 266" role="img" aria-label="図 26-1：クラッシュするバグは走らせればすぐ露見し、一見正常に見えるバグは、ざっとした確認をすり抜ける">
+<text class="f-text" fill="#182f2b" x="102" y="20" font-size="15" font-weight="600" text-anchor="middle">クラッシュするバグ</text>
+<text class="f-text" fill="#182f2b" x="298" y="20" font-size="15" font-weight="600" text-anchor="middle">一見正常に見えるバグ</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="185" height="112" rx="10"/>
+<text class="f-text" fill="#182f2b" x="102" y="64" font-size="14" text-anchor="middle">エラーで終了する</text>
+<text class="f-text" fill="#182f2b" x="102" y="92" font-size="14" text-anchor="middle">NaN や文字化けを出力</text>
+<text class="f-text" fill="#182f2b" x="102" y="120" font-size="14" text-anchor="middle">最初の実行で露見</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="32" width="185" height="112" rx="10"/>
+<text class="f-text" fill="#182f2b" x="298" y="64" font-size="14" text-anchor="middle">出力は有限の数</text>
+<text class="f-text" fill="#182f2b" x="298" y="92" font-size="14" text-anchor="middle">生成された文はなめらか</text>
+<text class="f-warn" fill="#9e5d24" x="298" y="120" font-size="14" font-weight="600" text-anchor="middle">でも中身はもう間違い</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="168" font-size="13" text-anchor="middle">見つけやすい：</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="186" font-size="13" text-anchor="middle">テストを走らせれば赤くなる</text>
+<text class="f-muted" fill="#5c6d66" x="298" y="168" font-size="13" text-anchor="middle">見つけにくい：</text>
+<text class="f-muted" fill="#5c6d66" x="298" y="186" font-size="13" text-anchor="middle">独立した基準の答えが必要</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 202H390"/>
+<text class="f-text" fill="#182f2b" x="200" y="224" font-size="13" text-anchor="middle">Strata のソースのコメントが名指しする例は、すべて右側です：</text>
+<text class="f-text" fill="#182f2b" x="200" y="244" font-size="13" text-anchor="middle">重みを 2 回掛ける、アドレスでキャッシュする、</text>
+<text class="f-text" fill="#182f2b" x="200" y="262" font-size="13" text-anchor="middle">ヘッドの対応規則を間違える</text>
+</svg><figcaption>図 26-1　クラッシュするバグは走らせればすぐ露見しますが、一見正常に見えるバグは、ざっとした確認をすり抜けます。推論エンジンがいちばん恐れるのは、右側のほうです。</figcaption></figure>
+<p>推論エンジンは、右側のようなバグがとても出やすいものです。理由は簡単で、モデルが出力するのは確率の列なので、少し計算を間違えても、選ばれる単語は「それらしい単語」のままだからです。Strata のソースのコメントには、作者がこの種の落とし穴を 1 つずつ書き残しています <span class="ev ev-code">コード上の事実</span>。</p>
+<ul>
+<li><strong>アドレスでキャッシュする。</strong>各層がエキスパートに送る入力は、同じメモリ領域を使い、アドレスは変わらず、中身だけが層ごとに違います。これをアドレスでキャッシュすると、第 0 層のデータを後ろの 47 層でも使い回してしまい、「有限で、もっともらしく見えて、完全に間違ったトークン」が出てきます。[S06]</li>
+<li><strong>重みを 2 回掛ける。</strong>エキスパートプールはルーティングの重みを掛けません。掛けるのは合流のステップです。両方で掛けてしまうと、1 層だけ見てもほとんど気づけませんが、48 層を重ねると誤差がどんどん増幅されます。[S06]</li>
+<li><strong>ヘッドの対応規則。</strong>GDN 層では、48 個の value ヘッドを 16 個の key ヘッドと対応づけます。正しい規則は剰余（<code>h % 16</code>）です。コメントはわざわざ、もう 1 つの「ブロックごとにまとめる」規則でも、形式の整った出力が出てしまう、と書いています。[S17]</li>
+<li><strong>アクティベーション形式の選び間違い。</strong>量子化された行列にどのアクティベーション形式を組み合わせるかは、その行列の名前ではなく、データ型で決まります。間違えると、行列ベクトル積の結果が 0.6%〜1.4% ずれます。コメントの原文は「壊れたベクトルではなく、もっともらしく見えるベクトル」です。[S14]</li>
+</ul>
+<p>だから、推論エンジンのテストには、あるものが必要です。<dfn>基準の答え</dfn>、テストオラクル（test oracle）とも呼ばれるもので、「正しい結果は何であるべきか」を教えてくれる独立した情報源のことです。手計算した数でも、別の信頼できる実装でも、必ず成り立つべき法則でもかまいません。基準の答えがなければ、テストは「プログラムが落ちなかった」ことしか確かめられません。</p>
+
+<h2 id="sec-2">26.2 テストは何層に分かれるか：1 行の計算式からセッション全体まで</h2>
+<p>推論エンジン全体を一度にテストするのは非現実的です。工学的なやり方は階層に分けることです。下の層のテストは小さくて速く、失敗したときにどの行かを正確に指せます。上の層のテストは遅いものの、ユーザーが実際に目にするものにいちばん近くなります。図 26-2 は、Strata に合わせて整理した「テストの階段」です。</p>
+<figure class="fig"><svg viewBox="0 0 400 360" role="img" aria-label="図 26-2：推論エンジンの 5 層のテストの階段。純関数からセッション全体まで">
+<rect class="f-accent" fill="#136d5a" x="55" y="10" width="290" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="31" font-size="15" font-weight="600" text-anchor="middle">セッション全体と実際のタスク</text>
+<text class="f-on" fill="#ffffff" x="200" y="49" font-size="13" text-anchor="middle">針探しテスト、2 ターン再利用、品質ゲート</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="64" width="320" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="85" font-size="15" font-weight="600" text-anchor="middle">モデル全体：固定した履歴で位置ごとに比較</text>
+<text class="f-on" fill="#ffffff" x="200" y="103" font-size="13" text-anchor="middle">同じ文章で、各位置の予測を比べる</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="118" width="340" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="139" font-size="15" font-weight="600" text-anchor="middle">組み合わせと契約</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="157" font-size="13" text-anchor="middle">モデル読み込み時に、各テンソルの形状を検査</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="172" width="360" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="193" font-size="15" font-weight="600" text-anchor="middle">1 つの演算子：参照実装と照合</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="211" font-size="13" text-anchor="middle">src/kernels/ に照合テストが 34 個</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="226" width="380" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="247" font-size="15" font-weight="600" text-anchor="middle">純関数</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="265" font-size="13" text-anchor="middle">例：FP32→BF16 変換、2³² 通りの全入力を走査</text>
+<text class="f-text" fill="#182f2b" x="200" y="298" font-size="13" text-anchor="middle">上へ行くほど：ユーザーが見る結果に近いが、</text>
+<text class="f-text" fill="#182f2b" x="200" y="316" font-size="13" text-anchor="middle">遅く、原因の特定も難しい</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="338" font-size="13" text-anchor="middle">下へ行くほど：速く、どの行か指せるが、</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="356" font-size="13" text-anchor="middle">カバーする範囲は狭い</text>
+</svg><figcaption>図 26-2　テストの階段。各層が捕まえる間違いは違い、どの層も別の層の代わりにはなれません。下の層がすべて通っても、上の層が通るとは限りません。</figcaption></figure>
+<p>いくつかの層で、Strata が実際にどうしているかを見てみましょう。</p>
+<p><strong>いちばん下は純関数です。</strong>32 ビット浮動小数点数を 16 ビットの BF16 形式に変換する関数の入力は、2³² 通り、およそ 43 億通りしかありません。Strata のテストは、思い切ってその全部を試します。入力のすべてを、ggml（llama.cpp の裏にある計算ライブラリ）の変換規則と比べ、数秒で走り終えます。このテストは本物のバグを捕まえたことがあります。古い丸めの書き方は、NaN（「数ではない」）に出会うと繰り上がりが起こり、NaN を −0 や無限大に変えてしまいました。上流から来た NaN が、こうして静かに隠されていたのです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/bf16_bits_test.cpp#L1-L13" target="_blank" rel="noopener noreferrer">bf16_bits_test.cpp</a>）</p>
+<p><strong>2 層目は、1 つの演算子です。</strong>どの GPU カーネルにも照合テストがあり、信頼できる参照実装と比べます。ビルドスクリプトのコメントがはっきり書いています。参照実装自身が、まず ggml と照合済みであること。「あるカーネルを、自分自身の別のコピーと比べても、何も証明できない」ということです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/CMakeLists.txt#L219-L221" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）</p>
+<p><strong>3 層目は、組み合わせと契約です。</strong><code>layout.hpp</code> は、モデルを読み込む時点で、各テンソルの形状がカーネルの前提に合っているかを検査します。合っていなければ、テンソルの名前、実際の形状、求められる形状を報告します。コメントの原文は、エラーにするのは読み込み時であって、4000 個目のトークンで行列積の中の間違った数になってからではない、というものです。[S04] 同じコメントには、実際にあった教訓も記されています。ある開発の 1 周で、indexer の key キャッシュを「4 ヘッド」としてサイズ計算していましたが、実際には共有ヘッドが 1 つだけで、4 倍大きかったのです。この間違いは、予算をより保守的にするだけだったので、誰もどこかおかしいとは思わず、コードの中で 1 周生き延びました。[S04]</p>
+<p><strong>上の 2 層</strong>は、モデル全体を走らせる必要があります。26.4 節で詳しく説明します。</p>
+<p>階段のどの層も省けません。Strata には、ちょうどよい悪い例があります。モデルには PLE というモジュールがあります（第 11 章で説明したテーブル引きのモジュールです）。部品はすべて書かれ、どれも単独で照合テストに通っていました。ところが、モデルのコードのどこも、それを実際に呼び出していなかったのです。その結果、モデル全体の検収の関門（コード名 C1）は通りませんでした。<span class="ev ev-code">コード上の事実</span>[S13] 部品がすべて緑でも、システムは間違ったままです。</p>
+<aside class="primer" id="c26-test-levels">
+<h3>ソフトウェアテストの階層</h3>
+<p>大きなシステムのテストは、ふつう何層かに分けます。<dfn>単体テスト</dfn>は、1 つの関数か 1 つのクラスだけをテストし、入力を与えて出力を確認します。実行時間はミリ秒単位です。<dfn>結合テスト</dfn>は、いくつかのモジュールをつなぎ、モジュール間の「インターフェースの約束」が両側で守られているかを確認します。<dfn>システムテスト</dfn>（エンドツーエンドテストとも呼ぶ）は、ユーザーの入口から入って、最終結果を見ます。ほかに、各層を貫く<dfn>回帰テスト</dfn>があります。バグを 1 つ直すたびに、それを再現するテストを残し、後でまた戻ってくるのを防ぎます。</p>
+<p>よく言われる経験則が「テストピラミッド」です。下の層の単体テストは多くて速く、上の層のエンドツーエンドテストは少なくて遅い。理由はコストです。エンドツーエンドテストが失敗すると、どの層に問題があるのかを探す時間がまた必要です。単体テストが失敗すれば、たいてい数行のコードを直接指しています。</p>
+<p>もう 1 つよく使う道具が<dfn>テストダブル</dfn>です。本物だけれど高価な部品の代わりに、偽物で、振る舞いを制御できるものを使います。Strata のサービス層には <code>MockEngine</code> があり、台本どおりにトークンを出すので、すべての API の経路を、GPU のないマシンでテストできます。<span class="ev ev-code">コード上の事実</span>[S15] これで「HTTP プロトコルの層は間違っていない」ことは証明できますが、本物のエンジンの計算が正しいことは証明できません。どの層のテストも、自分がカバーする層にだけ責任を持ちます。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%82%BD%E3%83%95%E3%83%88%E3%82%A6%E3%82%A7%E3%82%A2%E3%83%86%E3%82%B9%E3%83%88" target="_blank" rel="noopener noreferrer">Wikipedia：ソフトウェアテスト</a> · <a href="https://ja.wikipedia.org/wiki/%E5%8D%98%E4%BD%93%E3%83%86%E3%82%B9%E3%83%88" target="_blank" rel="noopener noreferrer">Wikipedia：単体テスト</a> · <a href="https://ja.wikipedia.org/wiki/%E5%9B%9E%E5%B8%B0%E3%83%86%E3%82%B9%E3%83%88" target="_blank" rel="noopener noreferrer">Wikipedia：回帰テスト</a> · <a href="https://docs.python.org/ja/3/library/unittest.html" target="_blank" rel="noopener noreferrer">Python ドキュメント：unittest 単体テストフレームワーク</a></p>
+</aside>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは「ソフトウェア工学」で習うテストピラミッドと V モデルそのものです。推論エンジンに特有なのは、中間に「参照実装との照合」という層が 1 つ多いことです。ほとんどの演算子は、正しい答えを手計算できません。独立した、信頼できる実装を見つけて比べるしかないのです。</p>
+
+<h2 id="sec-3">26.3 浮動小数点の「等しい」は、まず定義する</h2>
+<p>冒頭の実験に戻りましょう。GPU と CPU が計算しているのは同じ量子化エキスパートで、データは 1 バイトも違わないのに、結果は小数点以下の下の数桁で違っていました。作者の説明はこうです。両者は浮動小数点演算の順序が違い、どちらもモデルにとって同じくらい良い近似である。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity レポート</a>）</p>
+<p>順序はなぜ結果に影響するのでしょうか。コンピュータの浮動小数点数は桁数が限られていて、足し算のたびに 1 回ずつ四捨五入するからです。極端な例を挙げます。32 ビット浮動小数点数（FP32）では、1 億の付近で表せる隣り合う 2 つの数は 8 離れています。だから 1 億に 1 を足しても結果は 1 億のままで、その 1 は「食われて」しまいます。同じ 4 つの数でも、足す順序を変えると答えが変わります（図 26-3）。</p>
+<div class="viz" data-viz="tolerance-lab"><figure class="fig"><svg viewBox="0 0 400 298" role="img" aria-label="図 26-3：4 つの数 1 億、1、−1 億、1 を FP32 で 2 通りの順序で足すと、それぞれ 1 と 0 になる。正しい答えは 2">
+<text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="14" text-anchor="middle">4 つの数 [1億, 1, −1億, 1] を FP32 で足す</text>
+<text class="f-text" fill="#182f2b" x="102" y="44" font-size="14" font-weight="600" text-anchor="middle">経路 A：左から順に</text>
+<text class="f-text" fill="#182f2b" x="298" y="44" font-size="14" font-weight="600" text-anchor="middle">経路 B：2 つずつ組にする</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="54" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="73" font-size="13" text-anchor="middle">1億から始める</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="88" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="107" font-size="13" text-anchor="middle">1億 + 1 = 1億（1 は消失）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="122" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="141" font-size="13" text-anchor="middle">1億 − 1億 = 0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="156" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="175" font-size="13" text-anchor="middle">0 + 1 = 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="54" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="298" y="73" font-size="13" text-anchor="middle">1億 + 1 = 1億（1 は消失）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="88" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="298" y="107" font-size="13" text-anchor="middle">−1億 + 1 = −1億（消えた）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="122" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="298" y="141" font-size="13" text-anchor="middle">1億 + (−1億) = 0</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="204" font-size="13" text-anchor="middle">1億付近では、FP32 の隣り合う 2 つの数は 8 離れていて、</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="222" font-size="13" text-anchor="middle">1 を足しても、足さなかったのと同じになる</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="234" width="185" height="30" rx="6"/>
+<text class="f-on" fill="#ffffff" x="102" y="254" font-size="14" font-weight="600" text-anchor="middle">A の結果：1</text>
+<rect class="f-accent" fill="#136d5a" x="205" y="234" width="185" height="30" rx="6"/>
+<text class="f-on" fill="#ffffff" x="298" y="254" font-size="14" font-weight="600" text-anchor="middle">B の結果：0</text>
+<text class="f-text" fill="#182f2b" x="200" y="288" font-size="13" text-anchor="middle">正解は 2：どちらの経路も情報を失い、失い方も違う</text>
+</svg><figcaption>図 26-3　足し算の順序で、浮動小数点の結果が変わります。数学の足し算は結合法則を満たしますが、コンピュータの浮動小数点の足し算は満たしません。下の実験台で、場面や精度を変え、許容差を調整して、自分で試してみてください。</figcaption></figure></div>
+<p>この例は、わざと極端なものを選んでいます。本物の推論では、違いはたいてい下の 1、2 桁だけで、<dfn>ULP</dfn>（unit in the last place、最後の桁の 1 単位）が 1、2 個違う、と言います。それでも、<code>a == b</code> のようなテストを失敗させるには十分です。</p>
+<p>工学的な解決策は、<dfn>許容差</dfn>つきの比較に切り替えることです。2 つの数の差が十分に小さければ、等しいとみなします。「十分に小さい」の測り方は 2 通りあります。<dfn>相対許容差</dfn>は、数の大きさに応じて割り引きます。たとえば 1 万分の 1 までの差を許す、という具合です。<dfn>絶対許容差</dfn>は固定の関門で、たとえば 10⁻⁶ 以内の差ならどれも等しいとみなします。たいてい両方を一緒に使います。なぜか、次のコラムで説明します。</p>
+<aside class="primer" id="c26-float-tolerance">
+<h3>浮動小数点比較の許容差</h3>
+<p>まず直感から。1 億と 1 億 8 を比べるとき、差の 8 は FP32 が区別できる最小の違いなので、等しいとみなすべきです。0.000001 と 0.000009 を比べるときは、差は 0.00001 に届きませんが、一方がもう一方の 9 倍なので、明らかに等しいとは言えません。だから「どれだけ違えば等しいとみなすか」は、数自身の大きさと結びつける必要があります。これが相対許容差です。</p>
+<p>ただし相対許容差は、0 の付近では役に立ちません。ある結果が理論上は 0 のはずなのに、計算すると 2×10⁻⁸ になり、もう 1 つはちょうど 0 になったとします。相対差は 100% ですが、実際の意味ではまったく違いがありません。そこで、絶対許容差で下支えする必要があります。Python の標準ライブラリの <code>math.isclose</code> は、この 2 つを合わせています。</p>
+<p style="text-align:center"><code>|a − b| ≤ max(rtol × max(|a|, |b|), atol)</code></p>
+<p>既定値は rtol = 10⁻⁹、atol = 0 です。ドキュメントがわざわざ注意しています。0 と比べるとき、既定の設定では永遠に「等しくない」と判定されるので、自分で正の atol を与える必要があります。さらに、NaN はどんな数とも「近く」ありません。自分自身ともです。コラムの下の図 26-4 は、この規則を描いたものです。横軸が数の大きさ、縦軸が許される誤差です。</p>
+<p>許容差をどれだけにするかに、万能の答えはありません。データ型（FP32 は有効数字が約 7 桁、FP16 は 3 桁あまり）、計算の連鎖の長さ、下流が誤差にどれだけ敏感かで決まります。確かな方法は、まず<strong>どちらも正しい</strong>2 つの実装の間の典型的な違いを測り、許容差をそれより上、明らかな間違いの差より下に決めることです。</p>
+<p>見落とされがちな点がもう 1 つあります。許容差が見逃してよいのは、「順序が違う」ような正当な違いだけです。アルゴリズム自体が情報を失う問題は、救えません。図 26-3 では、2 つの経路がどちらも間違っています。許容差を、それらが「等しい」と言えるまで広げたら、テストは何も確かめなくなります。</p>
+<p class="further">さらに読む：<a href="https://docs.python.org/ja/3/library/math.html#math.isclose" target="_blank" rel="noopener noreferrer">Python ドキュメント：math.isclose</a> · <a href="https://developer.mozilla.org/ja/docs/Web/JavaScript/Reference/Global_Objects/Number/EPSILON" target="_blank" rel="noopener noreferrer">MDN：Number.EPSILON（マシンイプシロン）</a> · <a href="https://ja.wikipedia.org/wiki/IEEE_754" target="_blank" rel="noopener noreferrer">Wikipedia：IEEE 754</a> · <a href="https://en.wikipedia.org/wiki/Unit_in_the_last_place" target="_blank" rel="noopener noreferrer">Wikipedia: Unit in the last place（英語）</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="図 26-4：許容される誤差が数値の大きさでどう変わるか。小さい値では絶対許容差が決め、大きい値では相対許容差が決める">
+<text class="f-muted" fill="#5c6d66" x="44" y="14" font-size="13">許される誤差（対数目盛り）</text>
+<path class="f-soft" fill="#e5f1df" d="M40 190V119.2H210L380 34.2V190Z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40 20V190H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M40 119.2H210L380 34.2"/>
+<text class="f-text" fill="#182f2b" x="48" y="100" font-size="13">atol = 10⁻⁸：これで下支え</text>
+<text class="f-text" fill="#182f2b" x="300" y="40" font-size="13" text-anchor="end">相対許容差：10⁻⁵ × |b|</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="164" font-size="13">影の部分：|a − b| がここなら「等しい」</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="206" font-size="13">10⁻⁹</text>
+<text class="f-muted" fill="#5c6d66" x="125" y="206" font-size="13" text-anchor="middle">10⁻⁶</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="206" font-size="13" text-anchor="middle">10⁻³</text>
+<text class="f-muted" fill="#5c6d66" x="295" y="206" font-size="13" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="206" font-size="13" text-anchor="end">10³</text>
+<text class="f-text" fill="#182f2b" x="210" y="230" font-size="13" text-anchor="middle">比べる数 |b| の大きさ（対数目盛り）</text>
+</svg><figcaption>図 26-4　許される誤差 = max(rtol × |b|, atol)。数が大きいときは相対許容差、数が 0 に近いときは絶対許容差が決め手です。図の rtol = 10⁻⁵、atol = 10⁻⁸ は、あくまで目安です。</figcaption></figure>
+<p>では、いつ 1 ビットまで同じであることにこだわるべきでしょうか。答えは、両側が<strong>まったく同じ演算を、まったく同じ順序で</strong>行っているときです。たとえば、量子化データをある保存形式から別の形式へ変えるときは、バイトを並べ替えるだけなので、デコードした値は 1 ビットも違ってはいけません。Strata の <code>canonical_xcheck.py</code> は、まさにそう求めています。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/tools/canonical_xcheck.py#L1-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>）逆に、コンパイラの最適化でさえ順序を変えることがあります。Strata は、AMD の GPU で、2 つのファイルの「積和融合」（FMA）をわざと切っています。掛け算と足し算を 1 つの命令にまとめると、丸めが 1 回で済み、「ちょうど真ん中」のときの取捨の結果が変わるからです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/CMakeLists.txt#L313-L317" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>「数値解析」で習ったとおり、浮動小数点の足し算は交換法則は満たしますが、結合法則は満たしません。(a + b) + c と a + (b + c) は違うことがあります。GPU では何千ものスレッドが縮約を行い、足し算のグループ分けはスレッドの配置で決まります。だから「同じ式」でも、CPU と GPU で 1 ビットまで同じになることを、もともと期待してはいけません。</p>
+
+<h2 id="sec-4">26.4 ほんの少しの差で、単語が変わる</h2>
+<p>数値のほんの少しの差は、目に見える結果を生むでしょうか。生みます。しかも、まさに「単語を選ぶ」ところで。モデルは最後に各候補の単語にスコアをつけ、これを logit（ロジット）と呼びます。スコアがいちばん高い単語が選ばれます。1 位と 2 位のスコアがほとんど同じなら、わずかな数値誤差で順位が入れ替わります。</p>
+<p>例を見ましょう。参照エンジンが 2 つの候補単語に与えたスコアは [1.00000, 0.99999] で、最初のものが選ばれます。テスト対象のエンジンは [0.99998, 1.00001] と計算し、2 番目が選ばれます。両者の最大の差は 0.00002 しかないのに、選ばれた単語が変わりました。逆に、スコアが [10, 0] なら、誤差が 10 倍大きくても、単語は変わりません。だから「最大誤差が小さい」ことと「選ばれる単語が同じ」ことは別のことで、分けて確認する必要があります。</p>
+<p>2 つのエンジンを比べるには、もう 1 つ面倒があります。それぞれ自由に生成させると、1 つの単語が違った時点で、その後の「前の文脈」が違ってしまい、さらに先のどのステップも比べられなくなります。解決策が <dfn>teacher forcing</dfn>（履歴の固定）です。エンジンに自分で続きを書かせず、両方に同じ基準の文章を入れて、各位置で「次の単語」の予測を比べます。図 26-5 が、2 つのやり方の比較です。</p>
+<figure class="fig"><svg viewBox="0 0 400 258" role="img" aria-label="図 26-5：自由生成では最初の食い違いが後ろのすべての位置に伝わる。teacher forcing では両方に同じ文を入れるので、各位置を独立に比べられる">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="15" font-weight="600">自由生成：それぞれが勝手に書く</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="44" font-size="13">エンジン A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="86" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="108" y="46" font-size="13" text-anchor="middle">今日</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="134" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="156" y="46" font-size="13" text-anchor="middle">は</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="182" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="204" y="46" font-size="13" text-anchor="middle">天気</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="252" y="46" font-size="13" text-anchor="middle">が</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="278" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="300" y="46" font-size="13" text-anchor="middle">良い</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="326" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="348" y="46" font-size="13" text-anchor="middle">、</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="80" font-size="13">エンジン B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="86" y="62" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="108" y="80" font-size="13" text-anchor="middle">今日</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="134" y="62" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="156" y="80" font-size="13" text-anchor="middle">は</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="182" y="62" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="204" y="80" font-size="13" text-anchor="middle">天気</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="62" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="252" y="80" font-size="13" text-anchor="middle">が</text>
+<rect class="f-warn" fill="#9e5d24" x="278" y="62" width="44" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="300" y="80" font-size="13" text-anchor="middle">最高</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="80" font-size="13">以降は</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="100" font-size="13">全部違う</text>
+<text class="f-text" fill="#182f2b" x="10" y="124" font-size="15" font-weight="600">Teacher forcing：同じ文を入れて、位置ごとに比べる</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="150" font-size="13">基準文</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="86" y="134" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="108" y="152" font-size="13" text-anchor="middle">今日</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="134" y="134" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="156" y="152" font-size="13" text-anchor="middle">は</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="182" y="134" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="204" y="152" font-size="13" text-anchor="middle">天気</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="230" y="134" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="252" y="152" font-size="13" text-anchor="middle">が</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="278" y="134" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="300" y="152" font-size="13" text-anchor="middle">良い</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="326" y="134" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="348" y="152" font-size="13" text-anchor="middle">、</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="184" font-size="13">A の予測</text>
+<rect class="f-soft" fill="#e5f1df" x="86" y="168" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="108" y="186" font-size="13" text-anchor="middle">は</text>
+<rect class="f-soft" fill="#e5f1df" x="134" y="168" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="156" y="186" font-size="13" text-anchor="middle">天気</text>
+<rect class="f-soft" fill="#e5f1df" x="182" y="168" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="204" y="186" font-size="13" text-anchor="middle">が</text>
+<rect class="f-soft" fill="#e5f1df" x="230" y="168" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="252" y="186" font-size="13" text-anchor="middle">良い</text>
+<rect class="f-soft" fill="#e5f1df" x="278" y="168" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="300" y="186" font-size="13" text-anchor="middle">、</text>
+<rect class="f-soft" fill="#e5f1df" x="326" y="168" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="348" y="186" font-size="13" text-anchor="middle">私</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="218" font-size="13">B の予測</text>
+<rect class="f-soft" fill="#e5f1df" x="86" y="202" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="108" y="220" font-size="13" text-anchor="middle">は</text>
+<rect class="f-soft" fill="#e5f1df" x="134" y="202" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="156" y="220" font-size="13" text-anchor="middle">天気</text>
+<rect class="f-soft" fill="#e5f1df" x="182" y="202" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="204" y="220" font-size="13" text-anchor="middle">が</text>
+<rect class="f-warn" fill="#9e5d24" x="230" y="202" width="44" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="252" y="220" font-size="13" text-anchor="middle">最高</text>
+<rect class="f-soft" fill="#e5f1df" x="278" y="202" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="300" y="220" font-size="13" text-anchor="middle">、</text>
+<rect class="f-soft" fill="#e5f1df" x="326" y="202" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="348" y="220" font-size="13" text-anchor="middle">私</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="250" font-size="13">文脈はすべて同じ。4 つ目の位置の食い違いは後ろへ伝わらない</text>
+</svg><figcaption>図 26-5　自由生成では、最初の食い違いのあとは、位置ごとに比べられなくなります。teacher forcing なら、どの位置にも同じ文脈があり、食い違いは起きた位置に閉じ込められます。</figcaption></figure>
+<p>Strata が「キャッシュは出力を悪くするか」に答えたときに使ったのが、このやり方です。エンジンにはスイッチがあり、基準の文章をトークンごとに走らせ、各位置の logits をすべて書き出します。キャッシュをオフにすると、すべてのエキスパートを CPU が計算します。オンにすると、よく使う 5,130 個のエキスパートが GPU に置かれます。テスト条件は Q2_0 量子化、RTX 5070、固定した 3 つの文章の先頭 512 または 1,024 トークンです。<span class="ev ev-report">上流レポート</span></p>
+<div class="table-wrap"><table><thead><tr><th>文章</th><th>最有力の単語が同じ位置</th><th>パープレキシティ：キャッシュ OFF</th><th>パープレキシティ：キャッシュ ON</th></tr></thead><tbody>
+<tr><td>コードアシスタント（512 トークン）</td><td>97.7%</td><td>2.672</td><td>2.630</td></tr>
+<tr><td>長文ドキュメント（1,024 トークン）</td><td>96.2%</td><td>29.844</td><td>29.843</td></tr>
+<tr><td>チャット（1,024 トークン）</td><td>95.0%</td><td>18.380</td><td>18.301</td></tr>
+</tbody></table></div>
+<p>表の<dfn>パープレキシティ</dfn>（perplexity、困惑度）は、モデルがその本物の文章にどれだけ「意外」を感じるかを測るもので、低いほど予測が正確です。レポートの結論は 3 つあります。キャッシュは、2%〜5% の位置で「ほぼ同点の 2 つの候補のどちらが勝つか」を変える。順位の入れ替わりの大半は、上位 2 つのスコア差が 0.5 に満たないところで起きる。両者のパープレキシティは標準誤差 1 つの範囲で同じで、どちらが正確ということはない。GPU と CPU は同じエキスパートを違う浮動小数点の順序で計算するが、どちらも同じくらい良い近似である。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity レポート</a>）</p>
+<p>この表は、良い比較がどうあるべきかを示しています。離散的な判断（最有力の単語が同じか）も、連続的な品質（パープレキシティ）も見て、順位の入れ替わりがどこで起きたかも説明すること。「96% の単語が同じ」とだけ報告すれば、読者は 4% の箇所が間違っていると思うでしょう。「パープレキシティが同じ」とだけ報告すれば、ごく一部の位置だけで間違うバグを隠してしまうかもしれません。</p>
+
+<h2 id="sec-5">26.5 テストをまず 1 回失敗させる：基準の答えと反例</h2>
+<p>テストが通ったことは、何を示すのでしょうか。そのテストが、本当にバグのあるプログラムに対しても通ってしまうなら、その「通過」にはまったく意味がありません。テスト自身を検査する素朴な方法があります。コードにわざとバグを入れて、テストがそれを捕まえられるか見るのです。これを<dfn>ミューテーションテスト</dfn>と呼び、壊した版を「ミュータント」と呼びます。</p>
+<p>次の実験では、48 層のおもちゃのモデルでこれを実演します。4 つの版の実装と 5 つのテストを用意しました。先に当ててみてください。「重みを 2 回掛ける」バグを捕まえられるのは、どのテストでしょうか。</p>
+<div class="viz" data-viz="test-mutants"><figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="図 26-6：4 つの実装版 × 5 つのテストの結果表。スモークテストはバグを 1 つも捕まえられず、許容差つきの差分テストは 3 つすべてを捕まえて誤報もない">
+<text class="f-muted" fill="#5c6d66" x="175" y="16" font-size="13" text-anchor="middle">スモーク</text><text class="f-muted" fill="#5c6d66" x="175" y="34" font-size="13" text-anchor="middle">テスト</text>
+<text class="f-muted" fill="#5c6d66" x="225" y="16" font-size="13" text-anchor="middle">弱い</text><text class="f-muted" fill="#5c6d66" x="225" y="34" font-size="13" text-anchor="middle">単体</text>
+<text class="f-muted" fill="#5c6d66" x="275" y="16" font-size="13" text-anchor="middle">強い</text><text class="f-muted" fill="#5c6d66" x="275" y="34" font-size="13" text-anchor="middle">単体</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="16" font-size="13" text-anchor="middle">差分</text><text class="f-muted" fill="#5c6d66" x="325" y="34" font-size="13" text-anchor="middle">厳密</text>
+<text class="f-muted" fill="#5c6d66" x="375" y="16" font-size="13" text-anchor="middle">差分</text><text class="f-muted" fill="#5c6d66" x="375" y="34" font-size="13" text-anchor="middle">許容差</text>
+<text class="f-text" fill="#182f2b" x="10" y="62" font-size="13">正しい実装（順序違い）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="152" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="175" y="62" font-size="13" text-anchor="middle">通過</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="225" y="62" font-size="13" text-anchor="middle">通過</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="252" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="275" y="62" font-size="13" text-anchor="middle">通過</text>
+<rect class="f-warn" fill="#9e5d24" x="302" y="42" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="62" font-size="13" text-anchor="middle">誤報</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="352" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="375" y="62" font-size="13" text-anchor="middle">通過</text>
+<text class="f-text" fill="#182f2b" x="10" y="100" font-size="13">バグ：重みを 2 回掛ける</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="175" y="100" font-size="13" text-anchor="middle">見逃し</text>
+<rect class="f-warn" fill="#9e5d24" x="202" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="225" y="100" font-size="13" text-anchor="middle">見逃し</text>
+<rect class="f-accent" fill="#136d5a" x="252" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="275" y="100" font-size="13" text-anchor="middle">検出</text>
+<rect class="f-accent" fill="#136d5a" x="302" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="100" font-size="13" text-anchor="middle">検出</text>
+<rect class="f-accent" fill="#136d5a" x="352" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="375" y="100" font-size="13" text-anchor="middle">検出</text>
+<text class="f-text" fill="#182f2b" x="10" y="138" font-size="13">バグ：エキスパート欠落</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="175" y="138" font-size="13" text-anchor="middle">見逃し</text>
+<rect class="f-accent" fill="#136d5a" x="202" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="225" y="138" font-size="13" text-anchor="middle">検出</text>
+<rect class="f-accent" fill="#136d5a" x="252" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="275" y="138" font-size="13" text-anchor="middle">検出</text>
+<rect class="f-accent" fill="#136d5a" x="302" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="138" font-size="13" text-anchor="middle">検出</text>
+<rect class="f-accent" fill="#136d5a" x="352" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="375" y="138" font-size="13" text-anchor="middle">検出</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="13">バグ：毎層で古い入力</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="175" y="176" font-size="13" text-anchor="middle">見逃し</text>
+<rect class="f-warn" fill="#9e5d24" x="202" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="225" y="176" font-size="13" text-anchor="middle">見逃し</text>
+<rect class="f-warn" fill="#9e5d24" x="252" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="275" y="176" font-size="13" text-anchor="middle">見逃し</text>
+<rect class="f-accent" fill="#136d5a" x="302" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="176" font-size="13" text-anchor="middle">検出</text>
+<rect class="f-accent" fill="#136d5a" x="352" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="375" y="176" font-size="13" text-anchor="middle">検出</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="212" font-size="13" text-anchor="middle">主色：検出　警告色：見逃し、または誤報</text>
+</svg><figcaption>図 26-6　ミューテーションテストの結果表。スモークテストはバグを 1 つも捕まえられません。「バグはすべて捕まえ、正しい実装は誤報しない」を実現したのは、許容差つきの差分テストだけです。</figcaption></figure></div>
+<p>表でいちばん考えどころのあるのは、2 つのマスです。1 つ目は、「弱い単体テスト」が「重みを 2 回掛ける」を見逃したことです。このテストはたまたま重み 1.0 を使っていて、1.0 の 2 乗は 1.0 のままだからです。テストが選ぶ入力が「きれいすぎる」と、ある種のバグには生まれつき盲目になります。2 つ目は、「毎層で古い入力」が、2 つの単体テストをだましたことです。バグは、テスト対象の関数の中ではなく、関数をつなぐループの中にあるからです。これがまさに 26.2 節の「部品がすべて緑でも、システムは間違ったまま」です。</p>
+<p>表でバグ捕獲にいちばん力を発揮したのは<dfn>差分テスト</dfn>です。同じ入力の組を、テスト対象の実装と独立した参照実装の両方に入れ、出力を比べます。次のコラムで詳しく説明します。</p>
+<aside class="primer" id="c26-differential-testing">
+<h3>差分テストとメタモルフィックテスト</h3>
+<p>多くの計算には、手計算できる正しい答えがありません。2560 次元の行列積を、紙の上で検算できる人はいません。<dfn>差分テスト</dfn>の考え方は、独立に実装された版を参照として探し、両側に同じ入力を食べさせて、出力を比べることです。参照は遅くても、愚直でも、信頼できさえすればかまいません。Strata の照合テストはこうなっています。GPU カーネルを、検証済みのスカラーの参照経路と照らし、その参照経路自身も、まず ggml と照合済みです。</p>
+<p>参照のカギは<strong>独立</strong>していることです。Strata の <code>layer.cpp</code> には教訓が記されています。2 つのパッキングツールが、ある量子化データのオフセット面を、どちらも <code>mins</code> というフィールド名で探していましたが、その面の本当の名前は <code>offsets</code> でした。2 つのツールが「満場一致」で、一緒に 54 個のテンソルのオフセット、合計 136 MiB を取りこぼしました。コメントの結論は、2 つのツールの意見が一致しても、それが証拠になるのは、両者が同じ誤った前提を共有していないときだけ、というものです。<span class="ev ev-code">コード上の事実</span>[S14]</p>
+<p>参照すら見つけにくいときは、<dfn>メタモルフィックテスト</dfn>も使えます。正しい答えがいくつかは分からなくても、「入力をこう変えたら、出力はこう変わるはず」ということは分かる、という場合です。たとえば Strata の KV キャッシュはページ単位で保存します。テストは、同じデータを 1 ページあたり 1、4、512 マスで保存し直し、ページテーブルをシャッフルして、アテンションの出力がまったく同じであることを求めます。[S18] 別の例は、投機的デコーディングの検証ウィンドウです。設計上、各位置で選ぶ単語は、1 トークンずつ生成したときと 1 ビットまで同じであることを求めています。[S08] こうした「変わらないはず」という法則は、正解の答えを必要としない参照になります。</p>
+<p class="further">さらに読む：<a href="https://en.wikipedia.org/wiki/Differential_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Differential testing（英語）</a> · <a href="https://en.wikipedia.org/wiki/Metamorphic_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Metamorphic testing（英語）</a> · <a href="https://en.wikipedia.org/wiki/Test_oracle" target="_blank" rel="noopener noreferrer">Wikipedia: Test oracle（英語）</a> · <a href="https://ja.wikipedia.org/wiki/%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%86%E3%83%BC%E3%82%B7%E3%83%A7%E3%83%B3%E8%A7%A3%E6%9E%90" target="_blank" rel="noopener noreferrer">Wikipedia：ミューテーション解析</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="図 26-7：差分テストの流れ。同じ入力の組を、テスト対象の実装と独立した参照の両方に渡し、規則に従って比べる">
+<rect class="f-soft" fill="#e5f1df" x="120" y="8" width="160" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="15" font-weight="600" text-anchor="middle">同じ入力の組</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V54H100V68M200 54H300V68"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="70" width="180" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="100" y="91" font-size="15" font-weight="600" text-anchor="middle">テスト対象の実装</text>
+<text class="f-on" fill="#ffffff" x="100" y="109" font-size="13" text-anchor="middle">例：GPU カーネル</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="70" width="180" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="300" y="91" font-size="15" font-weight="600" text-anchor="middle">独立した参照</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="109" font-size="13" text-anchor="middle">例：ggml の計算規則</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 118V132H300V118M200 132V146"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="148" width="360" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="169" font-size="15" font-weight="600" text-anchor="middle">規則に従って比べる</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="187" font-size="13" text-anchor="middle">バイトの並べ替え：完全一致　演算順序の変更：許容差つき</text>
+<text class="f-text" fill="#182f2b" x="200" y="222" font-size="13" text-anchor="middle">参照は独立していること。同じ誤った前提を共有すると、</text>
+<text class="f-text" fill="#182f2b" x="200" y="240" font-size="13" text-anchor="middle">比較は意味を失います</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="262" font-size="13" text-anchor="middle">反例：2 つのツールがどちらも mins を探し、</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="280" font-size="13" text-anchor="middle">同じデータをそろって取りこぼした</text>
+</svg><figcaption>図 26-7　差分テスト：独立した 2 つの実装に同じ入力を食べさせ、結果を、あらかじめ決めた規則で比べます。規則は、1 ビットまで一致でも、許容差つきでもかまいません。</figcaption></figure>
+<p>差分テストは、Strata の本物のバグも捕まえています。Q2_0 量子化形式では、2 ビットのコード値 0〜3 をデコードするとき、まず 1 を引く必要があり、表せる値は {−d, 0, d, 2d} であって、{0, d, 2d, 3d} ではありません。この「1 を引く」を忘れると、ほとんどの値は正しく見えますが、実際にはどれも 1 目盛りずれます。そこで変換ツールは、ggml のデコード式をそのまま書き写し、1 ビットずつ照合しています。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/tools/canonical_xcheck.py#L7-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>）同じファイルには、Q8_0 形式の本物の失敗も記録されています。コード値が符号付きの数として保存されていて、自分自身のデコーダとは完全に一致していました。本物のモデルをパッキングしてはじめて、その 2 つのテンソルが、デコード後に全体でコード値 128 個ぶんずれていることが分かりました。ほかの 12 種類の型は正常でした。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>コンパイラの授業にある古典的な手法に、同じプログラムを 2 つのコンパイラに渡して実行結果を比べる、というものがあります。競技プログラミングで、力ずくの解法を書いて、最適化した解法と突き合わせるのも、同じ発想です。</p>
+
+<h2 id="sec-6">26.6 手を動かす：小さなエンジンにテストを書く</h2>
+<p>この本には、純 Python の小さな推論エンジン <code>labs/tiny_inference.py</code> が付属しています。4 層、8 次元、各層 4 つのエキスパートから 2 つを選び、重みは固定の乱数で、GPU はいりません。Strata の互換実装ではなく、出力にも言語としての意味はありませんが、「エンコード → 層ごとの計算 → 単語の選択 → 保存と復元」という流れは本物です。付属の 10 個のテストは、この本の環境ではすべて通っています。</p>
+<ol>
+<li><strong>まずテストを読む。</strong><code>labs/test_tiny_inference.py</code> を開き、「分割して処理しても、一度に処理したのと等しい」テストを探します。これは完全一致を使っています。考えてみましょう。なぜここでは完全一致が正しいのでしょうか。（ヒント：2 つの経路が、完全に同じ順序で演算しています。）</li>
+<li><strong>バグを 1 つ注入する。</strong><code>labs/README.md</code> の 3 番目の課題に従い、再帰層の「先に減衰、次に更新」の順序を入れ替えます。どのテストが失敗するでしょうか。1 つも失敗しなければ、失敗するテストを足してください。</li>
+<li><strong>比較規則を書き換える。</strong>トークンごとのプリフィルを、全体をまとめて計算する行列積に置き換えたとします。演算の順序が変わりました。完全一致のテストを許容差つきの比較に書き換え、許容差をどう決めたかを説明してください。</li>
+</ol>
+<p>この章の 2 つのインタラクティブ実験は、ブラウザの中で本当に計算します。数字は教育用の試算です。実験台の許容差の式は、Python の <code>math.isclose</code> と一致しています。ミューテーションテストが使うのはおもちゃのモデルで、Strata のカーネルではありません。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>推論エンジンでいちばん危ないのは、「一見正常に見える」バグです。テストには独立した基準の答えが必要で、プログラムが落ちなかったことを確かめるだけでは足りません。</li>
+<li>浮動小数点の結果は、計算の順序で変わります。同じ演算を同じ順序で行うときだけ、1 ビットまで同じであることを求めます。そうでなければ、相対と絶対の許容差を合わせて比べ、選ばれた単語は別に確認します。</li>
+<li>テスト自身も検査が必要です。わざとバグを入れて、失敗するかを見ます。参照実装は独立でなければならず、テスト対象のコードと同じ誤った前提を共有してはいけません。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「CPU と GPU で出した数が違うなら、どちらかにバグがある。」</strong></p>
+<p>そうとは限りません。両者は浮動小数点演算の順序が違うので、下の数桁が違うのはもともと当たり前で、Strata の実測でも、両者が同じように正確なことが示されています。ただし、逆に何でも見逃してよいわけでもありません。あの「GPU の経路は正しくない」という起動時の警告は、もとは本物の不具合から生まれました。当時の出力は、第 0 トークンからすでに食い違っていたのです。のちに不具合は直され、エキスパートの照合テストでカバーされ、0.1.8 版から、警告は正確な説明の文に置き換えられました。<span class="ev ev-report">上流レポート</span> 2 つを見分けるには、規則性を見ます。正当な違いは、ほぼ同点の位置でだけ入れ替わり、パープレキシティは変わりません。本物のバグは、たいてい最初から食い違うか、品質の指標を系統的に悪くします。</p></div>
+
+<details class="deep"><summary>もう一歩深く：5 層の証拠、指標の落とし穴、「1 ビットまで同じ」の境界</summary>
+<h3>5 層の証拠の階段</h3>
+<p>1 層目は純関数です。アドレスのオフセット、容量、top-k、期待される長さ。2 層目は 1 つの演算子です。同じ入力で、出力と誤差を比べます。3 層目は組み合わせです。正規化、ゲート、エキスパートの重みづけ、状態の更新の先後の順序。4 層目は、固定した履歴のもとでのモデル全体の分布です。5 層目は、実際のタスクと長いセッションでの振る舞いです。下の層が通っても、上の層が通るとは言えません。「エキスパートプールは routing の重みを掛けない」という点や、GDN の β と状態軸についての説明は、組み合わせの間違いが、それぞれ単独ではテストに通るモジュールの間に隠れうることを示しています。[S06][S17]</p>
+<h3>teacher forcing で、どの指標を記録するか</h3>
+<p>最大絶対誤差、相対誤差、平均二乗誤差、KL ダイバージェンス、最有力の単語が変わったか、ルーティングが選んだエキスパートの番号や indexer が選んだ位置が変わったかを、記録できます。どの指標にも落とし穴があります。相対誤差は、参照値が 0 に近いと歪みます。KL ダイバージェンスでは、確率をどう正規化するか、確率 0 をどう扱うかを説明する必要があります。最有力の単語が同じ割合は、上位 2 つのスコア差の分布と一緒に見る必要があります。Strata の QSA indexer は、選ばれる位置が<strong>完全に同じ</strong>でなければならない、と定めており、許容差を認めていません。違うマスが 1 つ選ばれると、アテンションの入力が変わってしまうからです。そのため、indexer の key を FP16 ではなく FP32 で保存しています。FP16 では、各スコアに約 2⁻¹¹ の相対的な揺れが生じ、それがちょうど選択の境界に当たるからです。代償は小さく、32K コンテキストでは、これらの FP32 の key は合計で約 50 MiB です。[S18]</p>
+<h3>そのまま使えるメタモルフィック関係</h3>
+<p>ページテーブルとデータに同じ置換を施しても、論理的なアテンションの結果は変わらないはずです。同じ入力を違うチャンクに分けても、チャンク間の状態の受け渡しは等価のはずです。保存して復元してから続けても、一度も離れなかったのと同じはずです。ドラフトを切っても、対応するターゲットの経路と意味が一致するはずです。[S08][S18] こうした関係からは、強いテストを大量に作れます。ただし、許容差と数値の経路を書いておく必要があります。CPU と GPU をまたぐとき、行列積の実装を替えるとき、量子化の経路を替えるときは、1 ビットまで同じとは限りません。すべての違いをそのまま見逃してもいけませんし、既知の丸めの境界を無視してもいけません。</p>
+<h3>「1 ビットまで同じ」という約束には、境界がある</h3>
+<p>Strata の検証ウィンドウは、ヘッダの中で約束しています。各位置の単語の選択が、1 トークンずつ生成したときと 1 ビットまで同じであること。[S08] ところが上流のドキュメントは同時にこう記録しています。IQ 系の量子化を使うと、CPU が 1 トークンを計算するときと複数トークンを計算するときとでは、丸めが少し違う 2 組のカーネルを使います。だから温度 0 の同じプロンプトでも、ドラフト、キャッシュの状態、セッションの復元の違いによって、もう 1 つの同じくらい良い答えが出ることがあります（issue #152）。<code>STRATA_IQ_MT_MIN=1</code> を設定すると、すべての場合がマルチトークンのカーネルを通り、答えがドラフトに依存しなくなります。サービスでバイト単位の再現性を得るには、さらに <code>--prompt-cache 0 --adapt-swaps 0 --pcie-frac 0</code> も加えます。作者の実測（IQ3_XXS、3.6K トークンのプロンプト、4 回繰り返し）：3 つのスイッチをすべて付けると、4 回で答えは 1 種類だけ。<code>--pcie-frac 0</code> を付けないと 2 種類（1 回目だけ違う）。すべて既定値でも 2 種類でした。<span class="ev ev-report">上流レポート</span>[S03] ヘッダに書かれているのは設計の目標で、ドキュメントに書かれているのは実測の境界です。両方を読む必要があります。</p>
+<h3>わざと注入する反例のリスト</h3>
+<p>テストに、次の間違いをわざと注入します。ヘッドの対応を剰余から整数除算に変える。L2 正規化の代わりに RMS 正規化を使う。各層のアクティベーションキャッシュをポインタだけで判断する。ルーティングの重みを二重に掛ける。位置カウンタを凍結する。セッションの復元で PLE の履歴を落とす。テストは安定して失敗し、最初に破られた契約を指さなければなりません。注入しても通ってしまうなら、それはたぶん「プロセスが落ちなかった」ことしか見ていません。参照実装は、テスト対象のコードと同じ誤った前提を共有してはいけません。<code>layer.cpp</code> にある、2 つのツールがどちらもフィールド名を間違えて探した事例は、授業で議論するのに向いています。[S14]</p>
+<h3>公開リポジトリで走らせられるテスト</h3>
+<p>Strata の <code>CMakeLists.txt</code> のコメントには、完全なテストスイートとマイクロベンチマークは <code>tests/</code> と <code>bench/micro/</code> にあり、公開ソースには含まれていないので、テストをビルドするスイッチは既定でオフだ、と書かれています。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/CMakeLists.txt#L52-L57" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）同じように、<code>gdn.hpp</code> のコメントで触れている参照実装 <code>ref/gdn.py</code> も、公開リポジトリの <code>ref/</code> ディレクトリには見当たらず、そこにあるのは <code>load.py</code> だけです。この章が引用する照合テストと実測は、公開されたソースのコメント、テストファイル、レポートによるものです。この本は、それらを GPU で再実行してはいません。</p>
+<h3>この本に付属するテストが証明するもの</h3>
+<p><code>labs/tiny_inference.py</code> のテストが確かめるのは、分割処理、保存と復元、参照の再生、制御されたドラフトの受理です。証明しているのはこの本の教育用コードであって、上流 Strata の GPU 実装では<strong>ありません</strong>。Strata のディスパッチ、量子化、非同期実行、本物の重みは、それぞれの環境で独立に検証する必要があります。</p>
+</details>
