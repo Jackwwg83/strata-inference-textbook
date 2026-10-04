@@ -41,3 +41,17 @@ test('all chapter static fullbook anchors unique and no script dependency',()=>{
  const html=fs.readFileSync(path.join(root,'dist/fullbook.html'),'utf8'),ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);
  assert.equal(new Set(ids).size,ids.length);assert.equal(ids.filter(id=>/^chapter-\d{2}$/.test(id)).length,28);assert.ok(!/<script\b/.test(html));
 });
+test('public edition states author, licenses, draft status and errata channel',()=>{
+ const p=load('provenance');
+ assert.match(p.author,/Jackwwg83/);assert.match(p.author,/AI 辅助编写/);
+ assert.match(p.license,/CC BY-SA 4\.0/);assert.match(p.license,/MIT/);
+ assert.match(p.issues,/^https:\/\/github\.com\/Jackwwg83\/strata-inference-textbook\/issues$/);
+ for(const f of ['LICENSE','LICENSE-CONTENT.md'])assert.ok(fs.existsSync(path.join(root,f)),f+' missing');
+ assert.match(fs.readFileSync(path.join(root,'LICENSE'),'utf8'),/MIT License[\s\S]*Jackwwg83/);
+ assert.match(fs.readFileSync(path.join(root,'LICENSE-CONTENT.md'),'utf8'),/creativecommons\.org\/licenses\/by-sa\/4\.0/);
+ const app=fs.readFileSync(path.join(root,'src/app.js'),'utf8');
+ assert.match(app,/class="draft-note"/,'every route needs the draft notice');
+ const index=fs.readFileSync(path.join(root,'dist/index.html'),'utf8'),full=fs.readFileSync(path.join(root,'dist/fullbook.html'),'utf8');
+ for(const html of [index,full]){assert.ok(html.includes(p.issues));assert.ok(html.includes('CC BY-SA 4.0'));}
+ assert.ok(full.includes('AI 辅助编写')&&full.includes('Jackwwg83'));
+});
