@@ -1,18 +1,244 @@
-<h2 id="sec-1">23.1 协议适配层存在的价值</h2>
-<p>服务层可以把不同客户端格式归一为模型模板需要的消息结构，再把模型输出变成对应协议的事件。<code>serve/frontend.py</code> 把消息转换、Jinja 模板渲染和输出增量解析放在不依赖 GPU 的模块。[S16] 这让协议测试可以不加载大模型。</p>
-<p>“OpenAI-compatible”或其他兼容名称应理解为实现的接口子集与语义范围，而不能仅凭 <code>/v1/...</code> 路径相似判断全兼容。本书只描述已读源文件列出的端点和边界，没有审计所有协议字段。[S15]</p>
-<h2 id="sec-2">23.2 三层边界：字节、文本与事件</h2>
-<p>TCP / HTTP 读取块可以在任意位置切开；一个 UTF-8 字符可能跨块；一个 SSE 事件也可能跨多个读取块。正确顺序是<strong>增量字节解码 → 累积文本并按事件边界分帧 → 解析 data 载荷</strong>，而不是每读一块就 JSON.parse。</p>
-<p>SSE 规范要求 UTF-8，事件通常以空行结束，多个 data 行需要组合；CR、LF、CRLF 的边界也应被正确处理。[R05] 本站实验展示有限的 data-only 子集，不声称是完整 EventSource 客户端。</p>
-<h2 id="sec-3">23.3 例题：一个汉字在三个块里</h2>
-<p>“中”的 UTF-8 编码是三个字节。若三个网络块各含一个字节，分别作为完整文本解码可能得到替换字符。增量解码器会保留尚不完整的序列，到第三个字节才输出正确字符。</p>
-<p>同样，<code>data: {&quot;delta&quot;:&quot;中&quot;}\n\n</code> 可能在冒号、引号或两个换行之间任意断开。网络块数与模型 token 数没有固定关系；不能拿 SSE event 个数作为输出 token 计量。</p>
-<h2 id="sec-4">23.4 模型标记也需要增量解析</h2>
-<p>模型可能先输出 <code>&lt;thi</code>，下一步才输出 <code>nk&gt;</code>。如果前端把所有片段立即作为正文发出，内部标记会泄漏到用户界面。源码说明 <code>OutputParser</code> 按 reasoning、content、tool call 结构增量处理，不发出部分标签。[S16]</p>
-<p>工具调用尤其需要等待完整结构、验证参数和区分文本意图。模型生成一个函数名称不等于获得系统执行许可；执行端仍需独立的权限、参数验证与资源限制。本教材静态页面不执行任何模型工具命令。</p>
-<h2 id="sec-5">23.5 FIFO 单序列不等于只有一个 HTTP 连接</h2>
-<p><code>serve/server.py</code> 使用 HTTP 服务和驻留引擎边界，文件明确说明 FIFO 后一次一个序列。[S15] 多个客户端可以同时连接并排队，但这不能算多个活动推理流。工具调用期间是否让位、取消如何转发等，需要服务层和引擎共同契约。</p>
-<p>这与网络课程中的连接并发、操作系统中的线程并发、推理引擎中的序列调度形成三层区别。不能看到 <code>ThreadingHTTPServer</code> 就宣布内核有 continuous batching。</p>
-<h2 id="sec-6">23.6 实验与验收</h2>
-<p>SSE 实验把含中文的两条 JSON 事件按 1…32 字节切片，要求重组结果始终相同。加入 CRLF、多个 data 行和结尾残缺事件作为测试；残缺事件应保持未完成或报错，而不是伪造完整成功。</p>
-<p>MockEngine 可用于验证流 / 非流响应、取消、工具参数和错误终帧；它不能证明 GPU 推理质量或真实性能。[S15] 这是分层测试的优点，也是其证据边界。</p>
+<div class="hook"><span class="eyebrow">你可能注意到过</span>
+<p>聊天网页里的回答，是一个字一个字冒出来的。如果绕过网页，直接用命令行去调本机 Strata 的接口，你看到的却是另一番景象：一行行 <code>data: {…}</code>，每行之间隔一个空行，最后一行是 <code>data: [DONE]</code>。</p>
+<p>这些行叫 <dfn>SSE</dfn>（Server-Sent Events，服务器推送事件）。它们从服务器出发时是一串<strong>字节</strong>，到你手里之前，会被网络随手切成大小不一的块。一个汉字可能被切成两半，一条消息也可能分两次才到齐。这一章讲清楚：怎样把这些碎块拼回一句完整、不乱码的话。</p></div>
+<p class="tldr"><strong>一句话：</strong>从模型吐出的 token 到你屏幕上的字，要过三道门：字节拼成字（UTF-8），字切成事件（SSE 的空行），事件解析成结构（JSON）。每道门前都要先攒齐，再处理。</p>
+
+<h2 id="sec-1">23.1 模型和你的应用之间，还隔着一层服务</h2>
+<p>推理引擎只认 token 编号：给它一串编号，它一个接一个吐出新编号。可你的应用说的是另一种语言：它发来一条 JSON 格式的聊天消息，期待收到一段段文字。中间负责翻译的，就是<dfn>服务层</dfn>。图 23-1 是 Strata 的服务层。</p>
+<figure class="fig"><svg viewBox="0 0 400 400" role="img" aria-label="图 23-1：Strata 的服务层分为 HTTP 服务、文本前端和引擎边界三层，最下面才是常驻的引擎进程">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="8" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="14" font-weight="600" text-anchor="middle">你的应用</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="48" font-size="12" text-anchor="middle">聊天网页、编程助手、OpenAI SDK……</text>
+<rect class="f-soft" fill="#e5f1df" x="50" y="84" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="106" font-size="14" font-weight="600" text-anchor="middle">HTTP 服务：serve/server.py</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="124" font-size="12" text-anchor="middle">认路径、查 API Key、排队、写 SSE</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="160" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="182" font-size="14" font-weight="600" text-anchor="middle">文本前端：serve/frontend.py</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="200" font-size="12" text-anchor="middle">套聊天模板 · 把输出分成思考、正文、工具调用</text>
+<rect class="f-accent" fill="#136d5a" x="50" y="236" width="300" height="50" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="258" font-size="14" font-weight="600" text-anchor="middle">引擎边界：Engine.generate</text>
+<text class="f-on" fill="#ffffff" x="200" y="276" font-size="12" text-anchor="middle">输入 token 编号，逐个吐出 token 编号</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="312" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="334" font-size="14" font-weight="600" text-anchor="middle">strata --serve 常驻进程</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="352" font-size="12" text-anchor="middle">权重只加载一次 · 用 stdin/stdout 收发文本行</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 58V82M200 134V158M200 210V234M200 286V310"/>
+<text class="f-muted" fill="#5c6d66" x="208" y="75" font-size="12">HTTP + JSON</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="151" font-size="12">消息列表</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="227" font-size="12">token 编号</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="303" font-size="12">一行一条命令或结果</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="388" font-size="12" text-anchor="middle">上面三层只处理文字；只有最下面一层用到显卡</text>
+</svg><figcaption>图 23-1　Strata 的服务层。HTTP 服务和文本前端只处理文字，所以不装显卡也能测试；真正的计算在最下面的常驻进程里。</figcaption></figure>
+<p><code>serve/server.py</code> 开头就写明了它的职责：在“把 token 编号映射成 token 的任何引擎”之上，提供 OpenAI 和 Anthropic 两种风格的接口。端点包括 <code>POST /v1/chat/completions</code>（OpenAI 风格，支持流式和非流式）、<code>POST /v1/messages</code>（Anthropic 风格）、<code>GET /v1/models</code>、<code>GET /health</code> 等。<span class="ev ev-code">代码事实</span>[S15]</p>
+<p>它和引擎之间的约定只有一个函数：<code>Engine.generate(prompt_ids, max_new, sampling, cancel)</code>，返回一个逐个产出 token 编号的迭代器。真实的 <code>StrataEngine</code> 让一个 <code>strata --serve</code> 进程常驻，通过标准输入输出和它对话；<code>MockEngine</code> 则按剧本吐 token，让每条接口路径都能在没有显卡的机器上测试。[S15]</p>
+<p><code>serve/frontend.py</code> 开头的第一句话是：“这里的一切都是文本：没有模型，没有 GPU。”它做三件事：把 OpenAI 和 Anthropic 两种请求格式统一成聊天模板要的消息列表；用模型自带的 Jinja 模板渲染提示词，并用 10 个样例核对过和 Hugging Face 的结果一致；把流式输出增量地拆成思考、正文和工具调用，<strong>从不发出半个标签</strong>。<span class="ev ev-code">代码事实</span>[S16]</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这就是《计算机网络》里分层思想的一个小号版本：每层只和上下两层打交道，接口约定好了，层内实现可以随意替换。<code>MockEngine</code> 能顶替真引擎，正是因为边界只有 <code>generate</code> 这一个函数。</p>
+
+<h2 id="sec-2">23.2 回答为什么能边写边送</h2>
+<p>普通的网页请求是一问一答：浏览器发一个请求，服务器准备好<strong>整个</strong>回答，一次性送回。对于大模型，这意味着要等几十秒才看到第一个字。<dfn>流式响应</dfn>换了个做法：同一个回答拆成很多小段，写好一段就送一段。图 23-2 对比了两种方式。</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="图 23-2：普通响应要等整段回答写完才送回；流式响应写好一段就送一段，第一个字出现得早得多">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">普通响应：答完再一次性送回</text>
+<text class="f-muted" fill="#5c6d66" x="175" y="42" font-size="12" text-anchor="middle">等待……（模型在生成）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 60H390"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="44" width="8" height="16"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="32" y="48" width="286" height="8"/>
+<rect class="f-accent" fill="#136d5a" x="322" y="44" width="66" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="78" font-size="12" text-anchor="middle">发请求</text>
+<text class="f-muted" fill="#5c6d66" x="355" y="78" font-size="12" text-anchor="middle">整段回答</text>
+<text class="f-text" fill="#182f2b" x="10" y="120" font-size="13" font-weight="600">流式响应（SSE）：写好一段就送一段</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 160H390"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="144" width="8" height="16"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="92" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="114" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="136" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="158" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="180" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="202" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="224" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="246" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="268" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="290" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="312" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="334" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="356" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="378" y="144" width="12" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="178" font-size="12" text-anchor="middle">发请求</text>
+<text class="f-muted" fill="#5c6d66" x="84" y="178" font-size="12" text-anchor="middle">第一个字</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="178" font-size="12" text-anchor="middle">最后一个字</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">示意，不按比例。总时长差不多，差别在第一个字什么时候出现。</text>
+</svg><figcaption>图 23-2　流式响应不会让模型算得更快，但让你更早看到第一个字。对一个要写几百个 token 的回答，体验差别很大。</figcaption></figure>
+<aside class="primer" id="c23-http-sse">
+<h3>HTTP 与流式传输（SSE）</h3>
+<p><dfn>HTTP</dfn> 是浏览器和服务器对话的规矩。一次对话分两半：客户端发<strong>请求</strong>（要访问哪个路径、带什么数据），服务器回<strong>响应</strong>（一个状态码，比如 200 表示成功、400 表示请求有问题、401 表示没通过认证；再加一些头部和正文）。头部里的 <code>Content-Type</code> 告诉对方正文是什么格式。</p>
+<p>普通响应的正文一次写完。<dfn>SSE</dfn> 则把响应的 <code>Content-Type</code> 设成 <code>text/event-stream</code>，然后连接不关，服务器想到什么就往里写一段，每段叫一个<dfn>事件</dfn>。格式非常朴素：</p>
+<ul>
+<li>每个事件由若干行组成，以 <code>data:</code> 开头的行装数据；</li>
+<li>一个<strong>空行</strong>表示这个事件结束；</li>
+<li>以冒号开头的行是注释，客户端直接忽略；</li>
+<li>可选的 <code>event:</code> 行给事件起个名字。</li>
+</ul>
+<p>举个例子：服务器写出 <code>data: 你好</code>、换行、再一个空行，客户端就收到一条内容为“你好”的事件。规范还要求：事件流必须用 UTF-8 编码；换行可以是 LF、CR 或 CRLF；同一事件里的多行 <code>data</code> 用换行连起来；流断在半个事件中间时，这半个事件直接丢弃，不能当成完整的发出。[R05]</p>
+<p>和 Strata 的关系：<code>/v1/chat/completions</code> 带上 <code>"stream": true</code>，回答就以 SSE 形式送回；不带，就等生成结束后一次性送回一个 JSON。</p>
+<p class="further">延伸阅读：<a href="https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Guides/Overview" target="_blank" rel="noopener noreferrer">MDN：HTTP 概述</a> · <a href="https://developer.mozilla.org/zh-CN/docs/Web/API/Server-sent_events/Using_server-sent_events" target="_blank" rel="noopener noreferrer">MDN：使用服务器发送事件</a> · <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html" target="_blank" rel="noopener noreferrer">HTML 标准：Server-sent events</a> · <a href="https://zh.wikipedia.org/zh-cn/超文本传输协议" target="_blank" rel="noopener noreferrer">维基百科：超文本传输协议</a></p>
+</aside>
+<p>Strata 写 SSE 的代码很短。它先回一个 200 状态码，头部写上 <code>Content-Type: text/event-stream</code>、<code>Cache-Control: no-cache</code>，再加一个 <code>X-Accel-Buffering: no</code>，请 nginx 这类反向代理不要攒着，收到一个事件就立刻转发。<span class="ev ev-code">代码事实</span> 之后，每一段回答写成 <code>data: </code> 加一段 JSON 加一个空行；全部结束时写 <code>data: [DONE]</code>。图 23-3 把这串字节拆开来看。</p>
+<figure class="fig"><svg viewBox="0 0 400 312" role="img" aria-label="图 23-3：Strata 写出的 SSE 字节流：每个事件是 data 加一段 JSON 再加空行，冒号开头的保活注释被客户端忽略，最后以 data: [DONE] 结束">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">↵ 表示一个换行；两个 ↵ 连在一起，就是“空行”</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="44" font-size="12" font-family="monospace">data: {…"delta":{"role":"assistant",…}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="68" font-size="12">第 1 个事件：只宣布“助手开始说话”，还没有文字</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="82" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="100" font-size="12" font-family="monospace">data: {…"delta":{"content":"你好"}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="124" font-size="12">一个事件 = data: + 一段 JSON + 空行</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="138" width="380" height="26" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="18" y="156" font-size="12" font-family="monospace">: keep-alive↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="180" font-size="12">冒号开头的是注释：客户端忽略它，它只证明连接还活着</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="194" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="212" font-size="12" font-family="monospace">data: {…"delta":{"content":"，世界"}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="236" font-size="12">又一段文字。思考内容放在 reasoning_content 字段里</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="250" width="380" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="18" y="268" font-size="12" font-family="monospace">data: [DONE]↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="294" font-size="12">结束信号。这是 OpenAI 接口的约定，不属于 SSE 规范本身</text>
+</svg><figcaption>图 23-3　Strata 写出的一段 SSE 字节流（JSON 里的 id、model 等字段用“…”省略）。客户端靠空行判断一个事件何时完整。</figcaption></figure>
+<p>注意中间那条 <code>: keep-alive</code>。读一段很长的提问时，引擎可能好几分钟不吐 token。这期间 Strata 每 10 秒产出一个“心跳”，HTTP 层把它写成一条 SSE 注释。<span class="ev ev-code">代码事实</span> 客户端会忽略注释，但看到有字节进来，就不会以为连接断了；服务器写的时候，也能顺便发现对方是不是已经走了（第 24 章细讲）。</p>
+
+<h2 id="sec-3">23.3 一个汉字，三个字节</h2>
+<p>网络只认字节，不认字。拿一个简化的事件 <code>data: {"delta":"你好"}</code> 来说，连同结尾的空行，它在线路上是 26 个字节，其中“你”和“好”各占 3 个。问题来了：TCP 连接每次交给程序的“一块”有多大，由网络和操作系统决定，跟字的边界毫无关系。一个汉字的 3 个字节，完全可能前 1 个在这一块、后 2 个在下一块。</p>
+<aside class="primer" id="c23-utf8">
+<h3>UTF-8：一个字占几个字节</h3>
+<p>计算机里每个字符都有一个编号，叫<dfn>码点</dfn>，比如“中”是 U+4E2D。<dfn>UTF-8</dfn> 是把码点写成字节的一套规则：英文字母这类常用字符只占 1 个字节，和老式的 ASCII 完全相同；大部分汉字占 3 个字节；emoji 占 4 个。</p>
+<p>它的巧妙之处在于每个字节都“自带身份”，见图 23-4。第一个字节开头有几个 1，这个字符就占几个字节；后面的字节都以 <code>10</code> 开头，叫<dfn>续字节</dfn>。所以解码器读到 <code>E4</code>（二进制 1110 0100）就知道：后面还应该跟 2 个续字节。如果这时块已经结束了，正确的做法是<strong>把 E4 先扣住</strong>，等下一块来了再拼。</p>
+<p>Python 的 <code>codecs.getincrementaldecoder</code>、浏览器的 <code>TextDecoder</code>（加上 <code>stream: true</code>）都是这样的<dfn>增量解码器</dfn>。反过来，如果每块单独解码，半个字会变成替换字符 �，而且再也拼不回去。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/UTF-8" target="_blank" rel="noopener noreferrer">维基百科：UTF-8</a> · <a href="https://developer.mozilla.org/zh-CN/docs/Web/API/TextDecoder" target="_blank" rel="noopener noreferrer">MDN：TextDecoder</a> · <a href="https://docs.python.org/zh-cn/3/library/codecs.html" target="_blank" rel="noopener noreferrer">Python 文档：codecs</a> · <a href="https://www.rfc-editor.org/rfc/rfc3629" target="_blank" rel="noopener noreferrer">RFC 3629：UTF-8</a></p>
+<figure class="fig"><svg viewBox="0 0 400 254" role="img" aria-label="图 23-4：“中”的码点 U+4E2D 被拆成三个字节 E4 B8 AD，每个字节开头的标记位说明它在字符里的位置">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle">中 = U+4E2D = 0100 111000 101101（16 位）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="36" width="110" height="40" rx="6"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="36" width="110" height="40" rx="6"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="270" y="36" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">1110</tspan> 0100</text>
+<text class="f-text" fill="#182f2b" x="200" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">10</tspan>111000</text>
+<text class="f-text" fill="#182f2b" x="325" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">10</tspan>101101</text>
+<text class="f-text" fill="#182f2b" x="75" y="96" font-size="13" font-weight="600" text-anchor="middle">E4</text>
+<text class="f-text" fill="#182f2b" x="200" y="96" font-size="13" font-weight="600" text-anchor="middle">B8</text>
+<text class="f-text" fill="#182f2b" x="325" y="96" font-size="13" font-weight="600" text-anchor="middle">AD</text>
+<text class="f-muted" fill="#5c6d66" x="75" y="114" font-size="12" text-anchor="middle">首字节：共 3 字节</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="114" font-size="12" text-anchor="middle">续字节</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="114" font-size="12" text-anchor="middle">续字节</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="128" width="380" height="96" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="148" font-size="12" font-family="monospace">0xxxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="148" font-size="12">1 字节：英文、数字</text>
+<text class="f-text" fill="#182f2b" x="20" y="170" font-size="12" font-family="monospace">110xxxxx 10xxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="170" font-size="12">2 字节：如 é</text>
+<text class="f-text" fill="#182f2b" x="20" y="192" font-size="12" font-family="monospace">1110xxxx 10xxxxxx 10xxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="192" font-size="12">3 字节：大部分汉字</text>
+<text class="f-text" fill="#182f2b" x="20" y="214" font-size="12" font-family="monospace">11110xxx 10xxxxxx ×3</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="214" font-size="12">4 字节：如 emoji</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="244" font-size="12" text-anchor="middle">高亮的标记位说明身份，其余位按顺序拼出码点</text>
+</svg><figcaption>图 23-4　UTF-8 把“中”拆成 E4 B8 AD 三个字节。只看第一个字节就知道这个字一共几个字节，所以解码器能判断“这块结尾是不是半个字”。</figcaption></figure>
+</aside>
+<p>Strata 自己就要处理这个问题，而且是在更早的地方：模型的一个 token 未必是一个完整的字。<code>serve/server.py</code> 里的 <code>Detokenizer</code> 把每个 token 的字节送进一个增量 UTF-8 解码器，完整的字立刻发出，跨 token 的半个字先扣住，等后面的 token 补齐。<span class="ev ev-code">代码事实</span> 代码注释还记了一笔账：旧做法每来一个 token 就把<strong>全部</strong>已生成的编号重新解码一遍，回答到 8K token 时每个 token 要多花 2 毫秒，到 16K 时多花 4 毫秒；增量解码每个 token 的开销是常数。</p>
+<p>服务器把字节写出去以后，客户端要再解决一遍同样的问题，而且还多了一层：事件也会被切开。下面的切片器把一段 126 字节的 SSE 流随机切块，让两个客户端同时接收：</p>
+<div class="viz" data-viz="sse-chunk-split"><figure class="fig"><svg viewBox="0 0 400 248" role="img" aria-label="图 23-5：“你”的三个字节被切在两块之间。粗心的客户端每块单独解码，得到乱码；正确的客户端先扣住 E4，凑齐后才解出“你”">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">一个“你”字被切在两块之间</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="70" y="34" width="38" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="89" y="54" font-size="13" text-anchor="middle">"</text>
+<rect class="f-warn" fill="#9e5d24" x="112" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="54" font-size="13" text-anchor="middle">E4</text>
+<rect class="f-accent" fill="#136d5a" x="168" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="187" y="54" font-size="13" text-anchor="middle">BD</text>
+<rect class="f-accent" fill="#136d5a" x="210" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="229" y="54" font-size="13" text-anchor="middle">A0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="252" y="34" width="38" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="54" font-size="13" text-anchor="middle">…</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="3 3" d="M159 28V72"/>
+<text class="f-muted" fill="#5c6d66" x="110" y="86" font-size="12" text-anchor="middle">第 3 块的末尾</text>
+<text class="f-muted" fill="#5c6d66" x="229" y="86" font-size="12" text-anchor="middle">第 4 块的开头</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="100" width="185" height="112" rx="8"/>
+<text class="f-text" fill="#182f2b" x="20" y="122" font-size="13" font-weight="600">粗心的客户端</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="12">第 3 块单独解码：E4 → �</text>
+<text class="f-text" fill="#182f2b" x="20" y="168" font-size="12">第 4 块单独解码：BD A0 → ��</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="194" font-size="12">“你”永远丢了</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="100" width="185" height="112" rx="8"/>
+<text class="f-text" fill="#182f2b" x="215" y="122" font-size="13" font-weight="600">正确的客户端</text>
+<text class="f-text" fill="#182f2b" x="215" y="146" font-size="12">第 3 块：先扣住 E4</text>
+<text class="f-text" fill="#182f2b" x="215" y="168" font-size="12">第 4 块：凑齐 E4 BD A0 → 你</text>
+<text class="f-text" fill="#182f2b" x="215" y="194" font-size="12">等到空行，再解析 JSON</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="236" font-size="12" text-anchor="middle">交互版：按“单步”逐块接收 126 字节，对比两个客户端</text>
+</svg><figcaption>图 23-5　块的边界不管字的边界。每块单独解码，半个字就成了乱码，而且再也拼不回去；增量解码先扣住不完整的字节，凑齐了才输出。</figcaption></figure></div>
+<p>玩几次就会发现：粗心的客户端不只丢字，还会把被切开的事件当成坏数据扔掉。它的错法每次都不一样，这类时有时无的 bug 最难查。</p>
+
+<h2 id="sec-4">23.4 JSON：事件里装的是结构</h2>
+<p>SSE 只负责把事件切出来，事件里装什么它不管。Strata 在 <code>data:</code> 后面放的是一段 JSON。</p>
+<aside class="primer" id="c23-json">
+<h3>JSON：一种人和程序都能读的数据格式</h3>
+<p><dfn>JSON</dfn> 用很少的规矩表示结构化数据：花括号 <code>{}</code> 是一组“名字: 值”，方括号 <code>[]</code> 是列表，值可以是字符串、数字、<code>true</code>/<code>false</code>、<code>null</code>，或者再嵌套一层。比如 <code>{"delta":{"content":"你好"}}</code> 表示：delta 里的 content 是“你好”。</p>
+<p>解析 JSON 有一个硬性要求：<strong>文本必须完整</strong>。少一个右括号、少半个引号，解析器都会报错。这正是要先按空行切出完整事件、再解析的原因。</p>
+<p>JSON 字符串里的非 ASCII 字符有两种写法：直接写 UTF-8 字节，或者写成 <code>中</code> 这样的转义。两种写法意思相同，字节数不同，见图 23-6。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/JSON" target="_blank" rel="noopener noreferrer">维基百科：JSON</a> · <a href="https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/JSON" target="_blank" rel="noopener noreferrer">MDN：JSON</a> · <a href="https://docs.python.org/zh-cn/3/library/json.html" target="_blank" rel="noopener noreferrer">Python 文档：json（含 ensure_ascii）</a> · <a href="https://www.rfc-editor.org/rfc/rfc8259" target="_blank" rel="noopener noreferrer">RFC 8259</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="图 23-6：同样的“中文”两个字，直接写 UTF-8 是 18 字节，写成 \u 转义是 24 字节；100 个汉字分别是 300 和 600 字节">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">同一段 JSON 的两种写法</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="32" width="380" height="28" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="51" font-size="12" font-family="monospace">{"delta":"中文"}</text>
+<text class="f-text" fill="#182f2b" x="380" y="51" font-size="12" text-anchor="end">18 字节</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="68" width="380" height="28" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="87" font-size="12" font-family="monospace">{"delta":"中文"}</text>
+<text class="f-text" fill="#182f2b" x="380" y="87" font-size="12" text-anchor="end">24 字节</text>
+<text class="f-text" fill="#182f2b" x="10" y="124" font-size="12" font-weight="600">一段 100 个汉字的回答，光是文字部分：</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="134" width="125" height="16"/>
+<text class="f-text" fill="#182f2b" x="143" y="147" font-size="12">直接写 UTF-8：300 字节</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="160" width="250" height="16"/>
+<text class="f-text" fill="#182f2b" x="268" y="173" font-size="12">转义：600 字节</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="202" font-size="12">每个汉字：UTF-8 是 3 字节，\u 转义是 6 个 ASCII 字符</text>
+</svg><figcaption>图 23-6　Strata 的流式事件用 <code>ensure_ascii=False</code> 直接写 UTF-8，中文的字节数是转义写法的一半；代价是一个汉字的字节可能被网络切开，客户端必须增量解码。</figcaption></figure>
+<p>Strata 写流式事件时调用的是 <code>json.dumps(c, ensure_ascii=False)</code>，中文按 UTF-8 原样写出。<span class="ev ev-code">代码事实</span> 如果改成转义写法，线路上就全是 ASCII 字节，不会再有“半个汉字”；可中文的字节数会翻倍，而且 SSE 规范本来就要求按 UTF-8 解码，事件被切开的问题也依然存在。所以正确的方向是客户端老老实实增量解码，而不是靠转义回避。</p>
+<p>把三道门连起来，顺序不能乱：</p>
+<ol>
+<li><strong>字节 → 字</strong>：增量 UTF-8 解码，扣住不完整的字节；</li>
+<li><strong>字 → 事件</strong>：攒进缓冲区，遇到空行才切出一个完整事件，注释丢掉；</li>
+<li><strong>事件 → 结构</strong>：对完整的 <code>data</code> 做 JSON 解析，取出文字。</li>
+</ol>
+<p class="bridge"><strong>学过计算机的同学：</strong>这和《编译原理》里“字符流 → 词法分析 → 语法分析”的流水线是一个思路：每一层只在上一层给出<strong>完整单元</strong>之后才工作，而 TCP 只保证字节的顺序，不保证任何更高层单元的完整。</p>
+
+<h2 id="sec-5">23.5 模型的输出也要“攒齐再发”</h2>
+<p>同样的麻烦在服务器内部还会再出现一次。这个模型会先“想”，再回答：思考内容写在 <code>&lt;think&gt;</code> 和 <code>&lt;/think&gt;</code> 之间；需要调用工具时，它会写出 <code>&lt;tool_call&gt;&lt;function=名字&gt;&lt;parameter=参数&gt;值&lt;/parameter&gt;…</code> 这样的标签。这些标签是给程序看的，不该出现在你的屏幕上。</p>
+<p>麻烦在于，标签也可能被切开：这一步吐出 <code>&lt;/th</code>，下一步才吐出 <code>ink&gt;</code>。<code>frontend.py</code> 的 <code>OutputParser</code> 专门处理这件事：被切开的标签先扣住，等它完整了再处理，所以客户端永远看不到 <code>&lt;tool_</code> 或 <code>&lt;/thi</code> 这样的半截标签。<span class="ev ev-code">代码事实</span>[S16]</p>
+<div class="viz" data-viz="think-tag-holdback"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 23-7：模型输出的两个片段把思考结束标签切成两半。解析器扣住前半截，等下一片到达后识别出完整标签，再把后面的文字归入正文">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">模型连续吐出的两个片段</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="180" height="30" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="46" font-size="13">一想。<tspan class="f-warn" fill="#9e5d24">&lt;/th</tspan></text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="26" width="180" height="30" rx="5"/>
+<text class="f-text" fill="#182f2b" x="220" y="46" font-size="13"><tspan class="f-warn" fill="#9e5d24">ink&gt;</tspan>好的，</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 60V78"/>
+<rect class="f-soft" fill="#e5f1df" x="70" y="80" width="260" height="30" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="100" font-size="13" font-weight="600" text-anchor="middle">解析器：扣住可能是标签开头的尾巴</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 110V126"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="128" width="120" height="58" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="70" y="148" font-size="12" text-anchor="middle">思考</text>
+<text class="f-text" fill="#182f2b" x="70" y="172" font-size="13" text-anchor="middle">一想。</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="128" width="120" height="58" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="148" font-size="12" text-anchor="middle">扣住，等下一片</text>
+<text class="f-warn" fill="#9e5d24" x="200" y="172" font-size="13" text-anchor="middle">&lt;/th</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="128" width="120" height="58" rx="6"/>
+<text class="f-on" fill="#ffffff" x="330" y="148" font-size="12" text-anchor="middle">正文</text>
+<text class="f-on" fill="#ffffff" x="330" y="172" font-size="13" text-anchor="middle">好的，</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="210" font-size="12" text-anchor="middle">两片拼起来是完整的 &lt;/think&gt;：思考结束，后面的文字归正文</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="228" font-size="12" text-anchor="middle">交互版：逐片送入 6 个片段，看思考、正文、工具调用怎样分开</text>
+</svg><figcaption>图 23-7　解析器只扣住“可能是标签开头”的几个字符，其余文字照常立刻发出。这样既不漏出半截标签，也不拖慢显示。</figcaption></figure></div>
+<p>真实的 <code>OutputParser</code> 比这个组件多做了两件事。第一，它会边写边报告工具调用的进度：工具名一出现就发一个开始事件，参数也一段段报告，免得客户端在模型写一个大文件时干等几分钟。<span class="ev ev-code">代码事实</span> 第二，标签前后的换行也要小心处理，保证流式输出和一次性输出的结果完全一致。</p>
+<p>工具调用还牵涉安全。模型写出一个函数名，不等于系统允许执行它：模型的输出是<strong>不可信输入</strong>，执行前要检查参数、检查权限。Strata 只给明确要求的请求（带 <code>"strata_mcp": true</code>）提供 MCP 工具，其他客户端看到的接口和原来一模一样。[S15] 第 24 章会继续讲“谁有权让模型做什么”。</p>
+
+<h2 id="sec-6">23.6 动手：把同一段流切成任意大小</h2>
+<p>打开本章的交互实验「字节分片不会等于事件」。它把一段带中文的 SSE 流按 1 到 32 字节的固定大小切块，再用正确的三道门还原。按顺序试三件事：</p>
+<ol>
+<li>从 1 字节一路试到 32 字节：每一种切法，还原出的文字都必须一模一样。只要有一种不一样，解析器就有 bug。</li>
+<li>打开 CRLF 换行：SSE 允许三种换行，解析器都要认。</li>
+<li>留意“未完成”的缓冲区：流断在半个事件中间时，这半个事件应该留着或报错，不能假装它已经完整。</li>
+</ol>
+<p>再回到本章的两个交互图，把分片调到 1 字节和 64 字节各跑一遍。你会更直观地看到：块越小，粗心的写法错得越明显；块越大，错误藏得越深。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>Strata 的服务层把应用的 JSON 请求翻译成 token 编号，再把引擎吐出的 token 变回文字，以 SSE 事件流的形式送回。它和引擎之间只有 <code>Engine.generate</code> 一个接口。</li>
+<li>从字节到文字有三道门：UTF-8 增量解码、按空行切事件、解析完整的 JSON。网络块的边界和这三种边界都无关，每道门前都要先攒齐。</li>
+<li>模型输出里的标签同样会被切开。Strata 的 <code>OutputParser</code> 扣住可能是标签开头的尾巴，从不发出半个标签；完整的工具调用要等它写完才算数。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“数一数 SSE 事件，就知道模型生成了多少个 token。”</strong></p>
+<p>两者没有固定关系。Strata 的第一个事件只宣布“助手开始说话”，不含任何 token；读长提问时会插入保活注释；一个 token 只带来半个汉字时，这一步没有文字可发；标签被扣住时，也可能暂时不发。反过来，一个事件里的文字也可能来自好几个 token。要统计 token 数，请看响应结尾的 <code>usage</code> 字段，不要数事件。</p></div>
+
+<details class="deep"><summary>深入一层：三道边界的严格要求、“兼容”的范围与验收方法</summary>
+<h3>三道边界，按规范写清楚</h3>
+<p>SSE 规范对解析器的要求可以归纳为几条 [R05]：事件流按 UTF-8 解码；行尾可以是 CRLF、单独的 LF 或单独的 CR；空行触发一次事件分发；同一事件的多行 <code>data</code> 用 LF 连接；以冒号开头的行是注释；流结束时，没有以空行收尾的半个事件直接丢弃。</p>
+<p>由此推出实现顺序：<strong>增量字节解码 → 累积文本并按事件边界分帧 → 解析 data 载荷</strong>。每读一块就 <code>JSON.parse</code>，会同时被字符截断和事件截断坑到。本书的交互实验只实现了 data-only 的子集，支持 LF 和 CRLF，没有实现 EventSource 的自动重连、<code>id</code> 和 <code>retry</code> 字段，不能当完整的 SSE 客户端用。</p>
+<h3>例题：一个汉字在三个块里</h3>
+<p>“中”的三个字节 E4 B8 AD 分在三个网络块里。每块单独当完整文本解码，会得到三个替换字符。增量解码器读到 E4 时知道还缺 2 个字节，先扣住；读到 B8 还缺 1 个；读到 AD 才输出“中”。同理，<code>data: {"delta":"中"}</code> 后面的两个换行，也可能被切在冒号、引号或两个换行之间的任意位置。网络块数和 token 数之间没有固定关系。</p>
+<h3>“OpenAI 兼容”指的是一个接口子集</h3>
+<p>“兼容”要按实现了哪些端点、哪些字段、什么语义来理解，不能只凭路径长得像 <code>/v1/...</code> 就判断全部兼容。本书只描述 <code>serve/server.py</code> 开头列出的端点和边界 [S15]，没有逐个审计所有协议字段。几个读源码能确认的细节：第一个事件的 delta 是 <code>{"role":"assistant","content":""}</code>；思考内容放在 <code>reasoning_content</code> 字段；取消导致的结束，对客户端报告为 <code>stop</code>。</p>
+<h3>流已经开始了，才发现出错怎么办</h3>
+<p>HTTP 状态码在响应头里，响应头一旦发出就不能改。所以 Strata 把能提前发现的错误放在流开始之前：提问长度加上最大输出长度超过上下文时，直接回 400 拒绝，从不偷偷截断。[S15] 流开始后引擎才报错（例如引擎进程意外退出），状态码已经是 200 了，Strata 就在流里写一个带 <code>error</code> 字段的事件，再写 <code>data: [DONE]</code> 正常收尾；Anthropic 风格的接口则写一个 <code>event: error</code> 事件。<span class="ev ev-code">代码事实</span> 客户端必须检查事件内容，不能只看状态码。</p>
+<h3>模板沙箱只管模板这一层</h3>
+<p><code>frontend.py</code> 用 Jinja 的 <code>ImmutableSandboxedEnvironment</code> 渲染聊天模板。[S16] 这是模板层的具体防护，限制模板代码能做的事；它不能自动证明工具执行、图片 URL 获取、本地文件读取也都安全。每一种资源访问都需要单独的威胁模型。Strata 对 MCP 工具另有一道检查：只有 Strata 自己的网页（或配置里明确信任的来源），并且以 JSON 格式发送，才能让模型用这些工具，因为工具以你在这台电脑上的权限运行。<span class="ev ev-code">代码事实</span></p>
+<h3>验收方法与证据边界</h3>
+<p>SSE 解析的验收：把含中文的两条 JSON 事件按 1 到 32 字节切片，要求每种切法的还原结果完全相同；加入 CRLF、多行 data 和结尾残缺事件作为测试；残缺事件要保持未完成或报错，不能伪造成功。</p>
+<p><code>MockEngine</code> 能验证流式和非流式响应、取消、工具参数和出错时的收尾事件，但它不能证明 GPU 推理的质量或真实性能。[S15] 这正是分层测试的好处，也是它的证据边界。</p>
+</details>
