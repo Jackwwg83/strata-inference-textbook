@@ -18,6 +18,7 @@
       ready: '<span class="c">$</span> ready. 按 [ ▶ 单步 ] 开始',
       t0: (r, row, x) => `<span class="c">第 ${r} 行</span>：W 的第 ${r} 行是 ${row}，要和 x = ${x} 一一配对`,
       t1: (prods) => `<span class="m">对应相乘</span>：${prods}`,
+      sep: '，',
       t2: (r, sum, y) => `<span class="y">相加</span>：${sum} = ${y}，这就是 y${r === 1 ? '₁' : '₂'}。一个输出 = 一次点积`,
       done: (y) => `<span class="w">完成</span>：y = ${y}。2 行 × 3 列，一共 6 次乘加`,
       eqIdle: '按单步开始计算',
@@ -55,6 +56,55 @@
         '看“步长”一栏：最后一个轴的步长总是 1，前面每个轴的步长 = 它后面所有轴的大小相乘。会算步长，就会算任意张量的地址。',
       ],
       sVerdict: '① 同一个数学元素，换一种排法就换一个地址。<br>② 两种地址都合法、都不越界，所以用错排法不会报错，只会悄悄算错。<br>③ Strata 的 GDN 内核让 j 最快，好让一组线程读连续的内存；它和参考实现的排法不同，必须写进接口说明。',
+    },
+    en: {
+      code: 'MATVEC', title: 'Matrix times vector, step by step', tag: 'Teaching estimate · a small matrix by hand',
+      intro: 'W is a 2 × 3 matrix and x has 3 numbers. Press <b>Step</b> to watch y = Wx being computed row by row. Drag the three sliders for x, then step again to see which outputs change.',
+      lgRow: 'Row of weights in use', lgX: 'Inputs being multiplied', lgY: 'Output just computed',
+      steps: ['Take row 1', 'Multiply pairs', 'Add up → y₁', 'Take row 2', 'Multiply pairs', 'Add up → y₂'],
+      bStep: '▶ Step', bReset: 'Reset',
+      xLabel: (k) => `x${['₁', '₂', '₃'][k]}`, bLabel: 'Inputs computed at once (b)',
+      ready: '<span class="c">$</span> ready. Press [ ▶ Step ] to begin',
+      t0: (r, row, x) => `<span class="c">Row ${r}</span>: row ${r} of W is ${row}; pair it up with x = ${x}`,
+      t1: (prods) => `<span class="m">Multiply pairs</span>: ${prods}`,
+      sep: ', ',
+      t2: (r, sum, y) => `<span class="y">Add up</span>: ${sum} = ${y}, which is y${r === 1 ? '₁' : '₂'}. One output = one dot product`,
+      done: (y) => `<span class="w">Done</span>: y = ${y}. 2 rows × 3 columns, 6 multiply-adds in total`,
+      eqIdle: 'Press Step to start computing',
+      sShapeK: 'Shape of y', sShapeF: '<b>= (2 × 3) · (3 × 1)</b><br>the 3 in the middle must match, then it cancels out',
+      sMacK: 'Multiply-adds', sMacF: (b) => `<b>= 2 × 3 × ${b}</b><br>every input is multiplied once by every weight`,
+      sReuseK: 'Uses per weight read', sReuseF: '<b>= b</b><br>b = 1 is a GEMV; b > 1 is a GEMM',
+      try: [
+        'Keep pressing <b>Step</b> through both rows: every output is the dot product of "one row of weights" and "all of x".',
+        'Set x to <b>[0, 1, 0]</b> and compute: y is exactly column 2 of W. When x holds a single 1, Wx just picks out one column of W.',
+        'Drag b from 1 to 8: the multiply-adds grow 8 times, but the weights are still the same 6. One copy of the weights is used 8 times; that is where batching saves data movement (Chapter 5).',
+      ],
+
+      sCode: 'STRIDE_LAB', sTitle: 'One element, two addresses', sTag: 'Teaching estimate · a shrunken GDN state',
+      sIntro: 'A three-dimensional array with axes i, h and j of sizes 2, 3 and 2: 12 numbers in all. Memory is a single line, so the 12 numbers must come in some order. Click any cell above to see its place in memory; then switch layouts and see where the same cell moves.',
+      lgSel: 'Selected element', lgRead: 'Address read this time', lgCell: 'One memory cell',
+      sSteps: ['Pick element', 'Look up strides', 'Coord × stride', 'Sum = address'],
+      layA: '(i, h, j): j fastest', layB: '(i, j, h): h fastest',
+      layNoteA: 'Layout of Strata\'s kernel', layNoteB: 'Layout of the reference implementation',
+      block: (i) => `i = ${i}`, rowH: (h) => `h=${h}`, colJ: (j) => `j=${j}`,
+      memLabel: 'Memory (addresses 0–11)',
+      walk: '▶ Fix i, read in h, j order',
+      sReady: '<span class="c">$</span> ready. Click any cell above',
+      p0: (e) => `<span class="c">Selected</span> element ${e}`,
+      p1: (si, sh, sj) => `<span class="c">Strides</span>: in this layout, a +1 step moves i by ${si}, h by ${sh} and j by ${sj} cells`,
+      p2: (expr) => `<span class="m">Multiply and add</span>: ${expr}`,
+      p3: (a) => `<span class="y">Address = ${a}</span>. It is the highlighted cell in the memory strip`,
+      swap: (lay, e, a) => `<span class="y">// switched to "${lay}": the same element ${e} moved to address ${a}</span>`,
+      walkLog: (seq, ok) => `<span class="w">Read order</span>: ${seq}. ${ok ? '+1 each step: a contiguous read' : 'jumping back and forth'}`,
+      kStride: 'Strides (i, h, j)', fStride: '<b>the fastest axis has stride 1</b><br>each axis before it = product of the sizes after it',
+      kAddr: 'Address of the selected element', fAddr: (expr) => `<b>= ${expr}</b>`, fAddrIdle: 'Click a cell',
+      kStep: 'Address change when j grows by 1', vStep: (d) => d === 1 ? '+1 (contiguous)' : `+${d} (jumping)`, fStep: 'GPU threads read fastest from contiguous addresses',
+      sTry: [
+        'Click the cell <b>i=1, h=2, j=0</b>, then switch layouts: the address changes from 10 to 8. Both addresses are inside 0–11, so a bounds check cannot catch "the wrong layout".',
+        'Press <b>Fix i, read</b>: with j fastest the addresses go up by 1 each time; with h fastest they jump back and forth. A group of GPU threads works best reading neighboring addresses, which is why Strata changed the layout.',
+        'Look at the "Strides" box: the last axis always has stride 1, and each earlier axis has stride = product of the sizes of all axes after it. Once you can compute strides, you can compute the address in any tensor.',
+      ],
+      sVerdict: '① Change the layout and the same mathematical element gets a different address.<br>② Both addresses are valid and in bounds, so a wrong layout raises no error; it just quietly computes the wrong thing.<br>③ Strata\'s GDN kernel makes j fastest so a group of threads reads contiguous memory; this differs from the reference implementation and must be written into the interface notes.',
     },
   });
 
@@ -118,7 +168,7 @@
         pipe.set(phase);
         const xv = x(), y = M.matvec(W, xv), row = phase < 3 ? 0 : 1, r = W[row];
         if (phase % 3 === 0) term.log(T.t0(row + 1, vec(r), vec(xv)));
-        if (phase % 3 === 1) term.log(T.t1(r.map((w, k) => `${w}×${xv[k] < 0 ? '(' + num(xv[k]) + ')' : xv[k]} = ${num(w * xv[k])}`).join('，')));
+        if (phase % 3 === 1) term.log(T.t1(r.map((w, k) => `${w}×${xv[k] < 0 ? '(' + num(xv[k]) + ')' : xv[k]} = ${num(w * xv[k])}`).join(T.sep)));
         if (phase % 3 === 2) term.log(T.t2(row + 1, r.map((w, k) => num(w * xv[k])).map((s, k) => (k && s[0] === '−' ? `(${s})` : s)).join(' + '), num(y[row])));
         if (phase === 5) term.log(T.done(vec(y)));
         paint();
