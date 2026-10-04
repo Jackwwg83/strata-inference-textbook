@@ -1,18 +1,255 @@
-<h2 id="sec-1">25.1 先划清现状与设计</h2>
-<p>固定上游服务文件写明 FIFO 后一次处理一个序列。[S15] 用户曾说明自己修改过 Strata 的多并发能力，但该 fork 源码不在本次审阅输入中。本章提出<strong>多用户扩展设计与验收方法</strong>，不声称已经审计或实现了那个 fork。</p>
-<p>HTTP 同时连接数、排队请求数、活跃生成序列数、同一 kernel 内处理的序列数，应分别计数。四个数字可以完全不同。多开线程不自动解决 KV、GDN、PLE、随机数和临时缓冲的隔离问题。</p>
-<h2 id="sec-2">25.2 首先隔离可变状态</h2>
-<p>只读权重和只读缓存内容在适当同步下可以共享；每个序列的 token 历史、KV 页映射、GDN 状态、PLE、采样参数、随机计数器和取消标记必须有明确归属。当前 <code>SessionState</code> 是权重之外序列状态的良好阅读入口。[S13]</p>
-<p>共享 scratch 是否安全取决于调度是否保证互斥。若原先假设“各层永不并发”的 scratch 被两个会话同时使用，代码原来正确也会立刻失效。改并发时应列出所有单序列假设，而不是仅寻找一个全局 mutex。</p>
-<h2 id="sec-3">25.3 例题：权重不乘五，状态可能要乘五</h2>
-<p>教学预算：共享权重与缓存占 20 GiB，每条序列状态 2 GiB，共享 scratch 2 GiB，reserve 2 GiB。五条活动序列需要约 <code>20+5×2+2+2=34GiB</code>，而不是 5×24=120 GiB，也不是仍然只需 24 GiB。</p>
-<p>若五条同时需要独立 scratch，2 GiB 应再按实际并发分配计算。若 context 长短不同，每条状态也不同。准入控制必须在承诺活动序列之前原子预留预算，不能先全收进来再指望 allocator 不失败。</p>
-<h2 id="sec-4">25.4 调度不是只追求总 token/s</h2>
-<p>FCFS 简单，但长请求会阻塞后面的短请求；轮转改善首次响应公平性，却增加切换成本，可能拖慢短任务完成。continuous batching 把不同序列的当前位置组合计算，还需要动态加入、退出、页管理和变长掩码。</p>
-<p>浏览器调度实验只模拟已就绪的 decode 作业，用固定 token 服务时间比较 FCFS 与轮转。它不模拟真实 GPU batching，也不包含 prefill、MTP、prefix hit 或异构竞争，因此不能用图里的倍率宣传真实系统。</p>
-<h2 id="sec-5">25.5 一个小算例</h2>
-<p>请求长度 [8,3,5]，同时到达，单 token 1 ms，不计切换。FCFS 的完成时间为 [8,11,16] ms，首 token 为 [1,9,12] ms。按量子 1 轮转时，首 token 为 [1,2,3] ms，短请求更早开始，但总工作仍为 16 ms。</p>
-<p>若每次切换还需保存或恢复较大 GDN 状态，过小量子会显著增加成本。公平不是免费的；应同时看首次响应、完成时间、吞吐和状态搬运量。</p>
-<h2 id="sec-6">25.6 多并发验收必须击中串状态风险</h2>
-<p>设计 A/B 两条不同语言或任务的固定请求，分别独立运行得到参考，再交替或并行运行。覆盖 A 取消时 B 继续、A 长 prefill 时 B decode、相同前缀不同图片、会话恢复、预算只够最后一个槽的并发抢占。</p>
-<p>最小通过条件是正确隔离、无超预算承诺、无重复结束、无旧 generation 输出、无长请求饥饿。只有提高总吞吐而出现偶发串上下文的系统，不是合格的并发推理服务。</p>
+<div class="hook"><span class="eyebrow">先想一个场景</span>
+<p>你在家里的电脑上跑起了 Strata，室友、同学也想用。五个人同时打开网页提问。Strata 的 README 写得很直白：它一次只回答一个请求。<span class="ev ev-report">上游报告</span>[S01] 那么，第五个人要等多久？如果其中一个人让它写一篇长文，其他四个人是不是都得干等？</p>
+<p>这一章是一堂<strong>设计课</strong>。上游 Strata 只在一个先进先出的队列后面服务一条序列；多用户调度不是它的功能，而是我们要动手设计的扩展。我们先用调度算法和排队论算清“等多久”，再看把单序列改成多序列，到底要动哪些东西。</p></div>
+<p class="tldr"><strong>一句话：</strong>谁先上、等多久、能不能一起算，是三个不同的问题，分别由调度策略、排队论和批处理回答；而动手改造之前，必须先把每条序列的状态隔离干净。</p>
+
+<h2 id="sec-1">25.1 现状：一把锁，一条队</h2>
+<p><code>serve/server.py</code> 开头写着：“一次一条序列，排在一个 FIFO 后面。”<span class="ev ev-code">代码事实</span>[S15] 实现方式很简单：服务层有一把锁 <code>self.fifo = threading.Lock()</code>，哪个请求拿到锁，哪个请求就独占引擎；其他请求在锁外面排队，状态页上的“排队数”加一。<span class="ev ev-code">代码事实</span></p>
+<p>另一方面，HTTP 服务器用的是 Python 的 <code>ThreadingHTTPServer</code>，每个连接一个线程，所以五个人可以同时<strong>连上</strong>。连上不等于被服务，见图 25-1。</p>
+<figure class="fig"><svg viewBox="0 0 400 286" role="img" aria-label="图 25-1：五个连接同时到达，在 FIFO 锁前排队，引擎一次只服务一条序列。连接数、排队数、活动序列数是三个不同的数">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="44" y="31" font-size="13" text-anchor="middle">用户 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="88" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="122" y="31" font-size="13" text-anchor="middle">用户 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="166" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">用户 3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="278" y="31" font-size="13" text-anchor="middle">用户 4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="322" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="356" y="31" font-size="13" text-anchor="middle">用户 5</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M44 42L150 74M122 42L170 74M200 42V74M278 42L230 74M356 42L250 74"/>
+<rect class="f-soft" fill="#e5f1df" x="70" y="76" width="260" height="40" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="101" font-size="13" text-anchor="middle">FIFO 锁：先到先得，其余排队</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 116V138"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="140" width="260" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="165" font-size="13" text-anchor="middle">引擎：此刻只服务 1 条序列</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="198" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="221" font-size="12">HTTP 连接数：5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="198" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="215" y="221" font-size="12">排队的请求：4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="242" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="265" font-size="12">正在生成的序列：1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="242" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="215" y="265" font-size="12">一次计算里的序列：1</text>
+</svg><figcaption>图 25-1　上游 Strata 的现状：五个人都能连上，但同一时刻只有一个人的序列在生成。下面四个数要分开统计，它们可以完全不同。</figcaption></figure>
+<p>上游也有一个和“多会话”沾边的功能：可以选择打开一个容量受限的会话停车区，在内存里最多停放几段对话的状态，让交替到来的请求不必每次从头读题。但文档明确说，它<strong>不会并发执行请求</strong>。<span class="ev ev-report">上游报告</span> 管理这些停放会话的代码，复用的条件也很严格：token 完全一致、图片身份一致、引导模式一致，三者缺一不可。<span class="ev ev-code">代码事实</span>[S10]</p>
+<p>所以本章后面的一切，包括调度策略的比较、多序列的状态隔离，都是<strong>设计练习</strong>，不是上游已有的能力。</p>
+
+<h2 id="sec-2">25.2 谁先上：FIFO、SJF、轮转</h2>
+<aside class="primer" id="c25-scheduling">
+<h3>调度算法：FIFO、SJF 与轮转</h3>
+<p>只有一个服务员、却有一群客人时，“先服务谁”就是<dfn>调度</dfn>问题。操作系统给进程分配 CPU、打印机排打印任务、推理服务排请求，都是同一个问题。三种最经典的策略：</p>
+<ul>
+<li><dfn>FIFO</dfn>（先进先出，也叫 FCFS 先来先服务）：按到达顺序，一个做完再做下一个。简单、公平，但一个长任务会把后面所有短任务挡住，这叫<dfn>护航效应</dfn>。</li>
+<li><dfn>SJF</dfn>（短作业优先）：每次挑最短的先做。可以证明，在所有任务同时到达时，它让平均等待时间最短。代价有两个：要事先知道每个任务多长；长任务可能被源源不断的短任务一直往后推，这叫<dfn>饥饿</dfn>。</li>
+<li><dfn>轮转</dfn>（Round-Robin）：每人轮流做一小段，叫一个<dfn>时间片</dfn>，没做完就回到队尾。每个人都很快能开始，但来回切换有开销，平均完成时间也未必更短。</li>
+</ul>
+<p>衡量好坏的指标也不止一个：<strong>等待时间</strong>（完成时刻 − 到达时刻 − 自身长度）、<strong>首次响应</strong>（多久开始被服务；对聊天来说就是多久看到第一个字）、<strong>吞吐</strong>（单位时间做完多少）。不同策略在不同指标上各有输赢。</p>
+<p class="further">延伸阅读：<a href="https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-sched.pdf" target="_blank" rel="noopener noreferrer">OSTEP：调度入门（英文）</a> · <a href="https://zh.wikipedia.org/zh-cn/调度_(计算机)" target="_blank" rel="noopener noreferrer">维基百科：调度（计算机）</a> · <a href="https://zh.wikipedia.org/zh-cn/饥饿_(计算机科学)" target="_blank" rel="noopener noreferrer">维基百科：饥饿</a> · <a href="https://en.wikipedia.org/wiki/Round-robin_scheduling" target="_blank" rel="noopener noreferrer">Wikipedia: Round-robin scheduling</a></p>
+</aside>
+<p>先看一个最小的例子：三个请求同时到达，回答长度分别是 8、3、5 个 token，假设每生成一个 token 花 1 个时间单位，切换不花时间。<span class="ev ev-est">教学推演</span></p>
+<div class="viz" data-viz="sched-race"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 25-2：三个同时到达的请求，长度 8、3、5。FIFO 下首字时刻为 1、9、12；时间片为 1 的轮转下首字时刻为 1、2、3，但平均等待从 6.33 变成 7">
+<text class="f-text" fill="#182f2b" x="20" y="30" font-size="13" font-weight="600">FIFO：首字 1、9、12；平均等待 6.33</text>
+<rect class="f-accent" fill="#136d5a" x="20.0" y="40" width="179.0" height="28"/>
+<text class="f-on" fill="#ffffff" x="110.0" y="59" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="200.0" y="40" width="66.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="233.8" y="59" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="267.5" y="40" width="111.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="323.8" y="59" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<text class="f-text" fill="#182f2b" x="20" y="114" font-size="13" font-weight="600">轮转（时间片 1）：首字 1、2、3；平均等待 7</text>
+<rect class="f-accent" fill="#136d5a" x="20.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="31.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="42.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="53.8" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="65.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="76.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="87.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="98.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="110.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="121.3" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="132.5" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="143.8" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="155.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="166.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="177.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="188.8" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="200.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="211.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="222.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="233.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-soft" fill="#e5f1df" x="245.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="256.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="267.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="278.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-soft" fill="#e5f1df" x="290.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="301.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="312.5" y="124" width="66.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="346.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 168H380"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="186" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="186" font-size="12" text-anchor="middle">8</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="186" font-size="12" text-anchor="middle">16</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="210" font-size="12" text-anchor="middle">两条时间线一样长：总工作量没变，变的只是谁先谁后</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="228" font-size="12" text-anchor="middle">交互版：三种策略、三组请求，自己调时间片</text>
+</svg><figcaption>图 25-2　同样三个请求，轮转让每个人第 3 个时间单位之前就看到第一个字；但平均等待反而从 6.33 变成 7。公平和效率之间没有免费的午餐。<span class="ev ev-est">教学推演</span></figcaption></figure></div>
+<p>算一下 FIFO：A 在 8 完成，B 在 11，C 在 16；等待时间分别是 0、8、11，平均约 6.33。SJF 先做 B（3）、再做 C（5）、最后做 A（8），等待是 8、0、3，平均约 3.67，最短。轮转每人轮流做 1 个单位，首字时刻是 1、2、3，每个人都很快有了回应；可三个人都被拖到很晚才做完，平均等待是 7，反而最长。</p>
+<p>如果每次切换还要保存、恢复一大块序列状态（比如第 9 章讲的 GDN 循环状态），时间片太小，切换的开销会吃掉大量时间。公平不是免费的，要同时看首字时间、完成时间、吞吐和状态搬运量。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这就是《操作系统》CPU 调度一章的内容，只是“进程”换成了“生成请求”，“CPU 时间片”换成了“token 步”。有一处关键差别：操作系统切换进程，只需保存寄存器等少量上下文；推理引擎切换序列，背后是 KV 缓存和循环状态这些大块数据。</p>
+
+<h2 id="sec-3">25.3 排队论入门：忙到八成就开始堵</h2>
+<p>调度决定谁先上，但还有一个更根本的问题：请求来得有多密？哪怕调度策略再聪明，来的比做的快，队伍也会无限变长。</p>
+<aside class="primer" id="c25-queueing">
+<h3>排队论入门：利特尔法则与 M/M/1</h3>
+<p><dfn>排队论</dfn>研究“到达、排队、服务”这类系统。它用几个量描述系统：到达率 λ（每单位时间来几个），服务率 μ（每单位时间能服务几个），<dfn>利用率</dfn> ρ = λ ÷ μ（服务员有多大比例的时间在忙）。</p>
+<p>最有用的一条结论是<dfn>利特尔法则</dfn>：L = λ × W。系统里平均有 L 个顾客，等于到达率乘以每人平均停留的时间 W。它几乎不依赖任何假设，奶茶店、高速公路、推理服务都适用。比如每分钟来 3 个请求，每个平均停留 20 秒（1/3 分钟），系统里平均就有 1 个请求。</p>
+<p>最简单的排队模型叫 <dfn>M/M/1</dfn>：到达是随机的（相邻两次到达的间隔服从指数分布），服务时间也是随机的，只有一个服务员。它的平均停留时间是 W = 1 ÷ (μ − λ)。这个式子告诉我们一件反直觉的事：<strong>利用率越接近 100%，等待时间越是急剧变长</strong>。ρ = 50% 时，W 是服务时间的 2 倍；80% 时是 5 倍；95% 时是 20 倍。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/利特爾法則" target="_blank" rel="noopener noreferrer">维基百科：利特尔法则</a> · <a href="https://zh.wikipedia.org/zh-cn/M/M/1" target="_blank" rel="noopener noreferrer">维基百科：M/M/1</a> · <a href="https://zh.wikipedia.org/zh-cn/等候理論" target="_blank" rel="noopener noreferrer">维基百科：排队论</a></p>
+</aside>
+<p>套到 Strata 上算一笔账。<span class="ev ev-est">教学推演</span> 假设平均每个回答 10 秒（比如 500 个 token，每秒 50 个），那么一台 Strata 每分钟最多服务 μ = 6 个请求。如果平均每分钟来 3 个（ρ = 50%），平均停留 1 ÷ (6 − 3) 分钟 = 20 秒；每分钟来 4.8 个（ρ = 80%），就是 1 ÷ 1.2 分钟 = 50 秒；每分钟来 5.7 个（ρ = 95%），变成 200 秒。请求只多了不到一倍，等待却涨了十倍。</p>
+<div class="viz" data-viz="queue-load"><figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="图 25-3：M/M/1 模型下平均停留时间随利用率的变化。50% 时 20 秒，80% 时 50 秒，95% 时 200 秒，接近 100% 时急剧上升">
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M56 20V206H382"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.6" stroke-dasharray="3 4" d="M56 144H382M56 82H382M56 20H382"/>
+<text class="f-muted" fill="#5c6d66" x="50" y="211" font-size="12" text-anchor="end">0</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="148" font-size="12" text-anchor="end">100</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="86" font-size="12" text-anchor="end">200</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="24" font-size="12" text-anchor="end">300</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M56.0 199.8L62.5 199.7L69.0 199.5L75.4 199.4L81.9 199.3L88.4 199.1L94.9 199.0L101.4 198.8L107.8 198.6L114.3 198.4L120.8 198.3L127.3 198.1L133.8 197.8L140.2 197.6L146.7 197.4L153.2 197.1L159.7 196.9L166.2 196.6L172.6 196.3L179.1 196.0L185.6 195.7L192.1 195.3L198.6 194.9L205.0 194.5L211.5 194.1L218.0 193.6L224.5 193.1L231.0 192.5L237.4 191.9L243.9 191.2L250.4 190.5L256.9 189.7L263.4 188.8L269.8 187.8L276.3 186.6L282.8 185.3L289.3 183.9L295.8 182.2L302.2 180.2L308.7 177.8L315.2 175.0L321.7 171.6L328.2 167.2L334.6 161.7L341.1 154.3L347.6 144.0L354.1 128.5L360.6 102.7L367.0 51.0L369.2 20.0"/>
+<circle class="f-warn" fill="#9e5d24" cx="218.0" cy="193.6" r="5"/>
+<circle class="f-warn" fill="#9e5d24" cx="315.2" cy="175.0" r="5"/>
+<circle class="f-warn" fill="#9e5d24" cx="363.8" cy="82.0" r="5"/>
+<text class="f-text" fill="#182f2b" x="218" y="180" font-size="12" text-anchor="middle">50%：20 秒</text>
+<text class="f-text" fill="#182f2b" x="300" y="160" font-size="12" text-anchor="end">80%：50 秒</text>
+<text class="f-text" fill="#182f2b" x="354" y="80" font-size="12" text-anchor="end">95%：200 秒</text>
+<text class="f-muted" fill="#5c6d66" x="218" y="226" font-size="12" text-anchor="middle">50%</text>
+<text class="f-muted" fill="#5c6d66" x="315" y="226" font-size="12" text-anchor="middle">80%</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="226" font-size="12" text-anchor="middle">100%</text>
+<text class="f-muted" fill="#5c6d66" x="62" y="16" font-size="12">平均停留（秒）</text>
+<text class="f-muted" fill="#5c6d66" x="219" y="246" font-size="12" text-anchor="middle">利用率 ρ（假设每个回答平均 10 秒）</text>
+</svg><figcaption>图 25-3　等待时间随利用率急剧上升。80% 以前曲线还算平缓，过了 90% 几乎竖直。所以服务要留余量，不能按“刚好忙满”来规划。<span class="ev ev-est">教学推演</span></figcaption></figure></div>
+<p>M/M/1 只是一个粗糙的模型：大模型的回答长度并不服从指数分布，读题和生成的耗时也差别很大。但它给出的定性结论非常稳健：<strong>只要接近满负荷，等待就会失控</strong>。真实系统里，这意味着要么加机器，要么限流（排队太长就直接告诉用户“稍后再试”），要么想办法提高 μ，也就是下一节的批处理。</p>
+
+<h2 id="sec-4">25.4 连续批处理：让多条序列一起走</h2>
+<p>前两节都假设引擎一次只服务一条序列。提高 μ 的一个办法，是让多条序列<strong>在同一次计算里一起前进</strong>。</p>
+<aside class="primer" id="c25-continuous-batching">
+<h3>连续批处理</h3>
+<p>生成一个 token 时，引擎要把相关的权重从显存读一遍。只服务一条序列时，读一遍权重只算一个 token；同时服务 8 条序列时，读一遍权重能算 8 个 token。这就是<dfn>批处理</dfn>的收益：把矩阵乘向量变成矩阵乘矩阵，权重读一次、用多次（第 16 章细讲）。</p>
+<p>朴素的<dfn>静态批处理</dfn>把几条序列凑成一批，一起开始、一起结束。问题是回答有长有短：短的早就写完了，它的位置只能空着，等最长的那条写完，下一批才能开始。</p>
+<p><dfn>连续批处理</dfn>（也叫迭代级调度）把调度的粒度从“一批请求”缩小到“一步生成”：每生成一个 token，就检查一次有没有序列写完，有就立刻让排队的新序列补上它的位置。这个思路由 Orca 系统较早系统地提出，后来被 vLLM 等推理框架普遍采用，并配合分页式的 KV 缓存管理（第 17 章）。</p>
+<p class="further">延伸阅读：<a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener noreferrer">vLLM / PagedAttention 论文（arXiv）</a> · <a href="https://zh.wikipedia.org/zh-cn/批次檔" target="_blank" rel="noopener noreferrer">维基百科：批处理</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="图 25-4：三个槽位、六条序列。静态批处理要等整批最长的序列写完才换下一批，11 步做完，空转 10 个槽位步；连续批处理一有空位就补上，9 步做完，空转 4 个">
+<text class="f-text" fill="#182f2b" x="10" y="22" font-size="13" font-weight="600">静态批处理：整批一起开始、一起结束</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="51" font-size="12">槽 1</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="79" font-size="12">槽 2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="107" font-size="12">槽 3</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="13" font-weight="600">连续批处理：一有空位，立刻补上</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="181" font-size="12">槽 1</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="209" font-size="12">槽 2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="237" font-size="12">槽 3</text>
+<rect class="f-accent" fill="#136d5a" x="50.0" y="34" width="83.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="92.5" y="51" font-size="13" font-weight="600" text-anchor="middle">P</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="135.0" y="34" width="83.5" height="24" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="220.0" y="34" width="55.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="248.3" y="51" font-size="13" font-weight="600" text-anchor="middle">S</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="276.7" y="34" width="83.5" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="50.0" y="62" width="168.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="135.0" y="79" font-size="13" font-weight="600" text-anchor="middle">Q</text>
+<rect class="f-warn" fill="#9e5d24" x="220.0" y="62" width="140.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="290.8" y="79" font-size="13" font-weight="600" text-anchor="middle">T</text>
+<rect class="f-soft" fill="#e5f1df" x="50.0" y="90" width="111.8" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="106.7" y="107" font-size="13" font-weight="600" text-anchor="middle">R</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="163.3" y="90" width="55.2" height="24" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" x="220.0" y="90" width="83.5" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="262.5" y="107" font-size="13" font-weight="600" text-anchor="middle">U</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="305.0" y="90" width="55.2" height="24" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="50.0" y="164" width="83.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="92.5" y="181" font-size="13" font-weight="600" text-anchor="middle">P</text>
+<rect class="f-accent" fill="#136d5a" x="135.0" y="164" width="55.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="163.3" y="181" font-size="13" font-weight="600" text-anchor="middle">S</text>
+<rect class="f-soft" fill="#e5f1df" x="191.7" y="164" width="83.5" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="234.2" y="181" font-size="13" font-weight="600" text-anchor="middle">U</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="276.7" y="164" width="26.8" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="50.0" y="192" width="168.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="135.0" y="209" font-size="13" font-weight="600" text-anchor="middle">Q</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="220.0" y="192" width="83.5" height="24" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" x="50.0" y="220" width="111.8" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="106.7" y="237" font-size="13" font-weight="600" text-anchor="middle">R</text>
+<rect class="f-warn" fill="#9e5d24" x="163.3" y="220" width="140.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="234.2" y="237" font-size="13" font-weight="600" text-anchor="middle">T</text>
+<text class="f-muted" fill="#5c6d66" x="50.0" y="266" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="106.7" y="266" font-size="12" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="163.3" y="266" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="220.0" y="266" font-size="12" text-anchor="middle">6</text>
+<text class="f-muted" fill="#5c6d66" x="276.7" y="266" font-size="12" text-anchor="middle">8</text>
+<text class="f-muted" fill="#5c6d66" x="333.3" y="266" font-size="12" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="390.0" y="266" font-size="12" text-anchor="middle">12</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="12" text-anchor="middle">虚线框是空转的槽位。静态：11 步、空转 10；连续：9 步、空转 4</text>
+</svg><figcaption>图 25-4　同样三个槽位、六条长短不一的序列。连续批处理每一步都检查有没有空位，所以槽位很少闲着，整体更早做完。<span class="ev ev-est">教学推演</span></figcaption></figure>
+<p>对 Strata 这样的 MoE 模型，批处理还有一个特别的地方。每条序列在每一层要挑 10 个专家（第 10 章），不同序列挑中的专家往往不同。批里的序列越多，这一层要动用的专家<strong>并集</strong>就越大，见图 25-5。<span class="ev ev-est">教学推演</span></p>
+<figure class="fig"><svg viewBox="0 0 400 244" role="img" aria-label="图 25-5：每条序列每层挑 10 个专家，若各序列独立均匀地挑，1 条序列动用 10 个，4 条约 39 个，16 条约 139 个，32 条约 240 个">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">一批序列在一层里共动用多少个专家（共 512 个）</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">1 条序列</text><text class="f-text" fill="#182f2b" x="390" y="44" font-size="12" text-anchor="end">10 个（2%）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="50" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="50" width="7.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">4 条序列（最多 40 个）</text><text class="f-text" fill="#182f2b" x="390" y="88" font-size="12" text-anchor="end">约 38.8 个（8%）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="94" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="94" width="28.8" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="132" font-size="12">16 条序列（最多 160 个）</text><text class="f-text" fill="#182f2b" x="390" y="132" font-size="12" text-anchor="end">约 138.6 个（27%）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="138" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="138" width="102.9" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">32 条序列（最多 320 个）</text><text class="f-text" fill="#182f2b" x="390" y="176" font-size="12" text-anchor="end">约 239.6 个（47%）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="182" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="182" width="177.8" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">假设每条序列独立、均匀地挑 10 个专家</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="238" font-size="12">期望个数 = 512 × (1 − (1 − 10/512)^B)，B 是序列条数</text>
+</svg><figcaption>图 25-5　批越大，一层里被叫醒的专家越多。对专家大多放在内存、由 CPU 计算的 Strata 来说，批处理省下的“读一次权重”会被更多的专家读取部分抵消。<span class="ev ev-est">教学推演</span></figcaption></figure>
+<p>这个估算假设专家被均匀地挑选，真实的路由有冷热之分，并集会小一些。但方向是确定的：在“专家住在内存、CPU 算未命中专家”的架构里，批处理的收益不能直接照搬稠密模型的经验，要实测。这也是为什么本章只把它当设计题。</p>
+
+<h2 id="sec-5">25.5 改成多序列：先隔离状态，再谈速度</h2>
+<p>假设你决定动手，让 Strata 同时服务两条序列。第一步不是写调度器，而是列清楚：哪些东西是共享的，哪些是每条序列私有的。</p>
+<p>上游代码给了一个很好的阅读入口。<code>session.hpp</code> 里的 <code>SessionState</code>，注释写的是“一条序列需要的、除权重以外的一切”：每层的状态、块计算的临时空间、GPU 与 CPU 专家池之间的交接区。<span class="ev ev-code">代码事实</span>[S13] 也就是说，在上游的设计里，一条序列对应一份 <code>SessionState</code>。</p>
+<p>更要紧的是注释里的这两句。36 个 GDN 层<strong>共用一套</strong>临时空间，它们的<strong>状态</strong>才是每层一份；12 个 QSA 层也共用一套临时空间，理由写在括号里：“它们从不同时运行”。<span class="ev ev-code">代码事实</span>[S13] 在单序列、逐层顺序执行的前提下，这个共享完全正确，还省了显存。可一旦两条序列同时跑，“从不同时运行”这个前提就不成立了，共享的临时空间会被两边同时写，结果是两条序列的数据互相串扰。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这是并发编程里最典型的陷阱：代码原本正确，是因为某个“只有一个执行者”的隐含假设。改成多线程时，要把所有这类假设逐条找出来，重新证明互斥或者改成每人一份，而不是只在外面加一把全局锁就算完事。</p>
+<p>其次是显存预算。上游在会话初始化时一次性按最大上下文分配所有层的状态，注释说明这是因为它要求生成每个 token 的路径上<strong>零分配</strong>：一次临时的 <code>cudaMalloc</code> 能通过所有其他测试，却过不了这一条。<span class="ev ev-code">代码事实</span>[S13] 多序列时，同样的原则意味着：接纳一条新序列之前，必须先把它的全部状态空间预留好。图 25-6 用一组教学数字算这笔账。</p>
+<figure class="fig"><svg viewBox="0 0 400 222" role="img" aria-label="图 25-6：教学预算。一条序列 26 GiB；五条序列共享权重时只要 34 GiB；把整份复制五次则要 130 GiB">
+<text class="f-text" fill="#182f2b" x="10" y="22" font-size="12" font-weight="600">1 条序列：20 + 2 + 2 + 2 = 26 GiB</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="30" width="55.4" height="18"/><rect class="f-warn" fill="#9e5d24" x="65.4" y="30" width="5.5" height="18"/><rect class="f-soft" fill="#e5f1df" x="70.9" y="30" width="5.5" height="18"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76.4" y="30" width="5.5" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="78" font-size="12" font-weight="600">5 条序列，共享权重：20 + 5 × 2 + 2 + 2 = 34 GiB</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="86" width="55.4" height="18"/><rect class="f-warn" fill="#9e5d24" x="65.4" y="86" width="27.7" height="18"/><rect class="f-soft" fill="#e5f1df" x="93.1" y="86" width="5.5" height="18"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="98.6" y="86" width="5.5" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="12" font-weight="600">5 条序列，整份复制：5 × 26 = 130 GiB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="142" width="360" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="26" y="193" font-size="12">共享的权重和缓存</text>
+<rect class="f-warn" fill="#9e5d24" x="150" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="166" y="193" font-size="12">每条序列的状态</text>
+<rect class="f-soft" fill="#e5f1df" x="276" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="292" y="193" font-size="12">临时空间</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="202" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="26" y="213" font-size="12">预留余量（条长按比例，数字为教学假设）</text>
+</svg><figcaption>图 25-6　权重只需一份，状态才要每条序列一份。所以五条序列既不需要 5 倍显存，也不可能和一条序列一样多。<span class="ev ev-est">教学推演</span></figcaption></figure>
+<p>这组数字是教学假设：共享权重与缓存 20 GiB，每条序列状态 2 GiB，临时空间 2 GiB，预留 2 GiB。<span class="ev ev-est">教学推演</span> 五条活动序列需要 20 + 5 × 2 + 2 + 2 = 34 GiB。注意两点：上下文长短不同，每条序列的状态也不同；如果五条序列真的同时计算，临时空间也要按并发数重新算，不能再共用一份。</p>
+<p>由此得出<dfn>准入控制</dfn>的原则：一条序列被承诺为“活动”之前，要原子地预留它的全部预算；预算不够，就让它排队或明确拒绝。不能先把请求全收进来，再指望显存分配器别出错。</p>
+
+<h2 id="sec-6">25.6 动手：短请求为什么一直等</h2>
+<p>打开本章的交互实验「短请求为何一直等」。它比较 FIFO 和轮转在首字时间、完成时间和切换成本上的差别。所有请求在 0 时刻就绪，1 个 token 算 1 毫秒，不模拟真实显卡上的批处理和读题。按顺序试：</p>
+<ol>
+<li>用默认的几条请求，比较 FIFO 和轮转的首字时间：轮转让短请求更早开始。</li>
+<li>把切换成本调高：轮转的总时长变长，公平的代价变得看得见。</li>
+<li>把时间片调大，直到轮转的结果和 FIFO 完全一样。</li>
+</ol>
+<p>再回到本章的两个交互图：在调度比较器里试试“短请求接连到”，看 SJF 怎样饿着长请求；在排队曲线上把利用率拉到 95%，多按几次模拟。实验里的数字只用来讨论调度取舍，不能当成任何真实系统的跑分。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>上游 Strata 一次只服务一条序列，其余请求在 FIFO 锁前排队。多用户调度是本章的设计练习，不是上游功能。连接数、排队数、活动序列数要分开统计。</li>
+<li>FIFO 简单但会被长请求挡住，SJF 平均等待最短但会饿着长请求，轮转让人人更早看到第一个字但要付切换开销。利用率越接近 100%，等待越是急剧变长。</li>
+<li>改成多序列，先找出所有“只有一个执行者”的隐含假设，比如共享的临时空间；再按“权重一份、状态每条一份”算预算，并在接纳新序列前原子地预留。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“Strata 的 HTTP 服务器是多线程的，所以它能同时服务多个用户。”</strong></p>
+<p>多线程只让多个人能同时<strong>连上</strong>。真正干活的引擎前面有一把 FIFO 锁，同一时刻只有一条序列在生成。连接并发、线程并发和序列并发是三个层次的事，不能看到 <code>ThreadingHTTPServer</code> 就断定引擎支持连续批处理。</p></div>
+
+<details class="deep"><summary>深入一层：四个计数、预算细节、切换成本与并发验收</summary>
+<h3>先划清现状与设计</h3>
+<p>固定提交的上游服务文件写明：FIFO 后面一次处理一条序列。[S15] 本书的发起人曾说明自己改过一个支持多并发的 Strata 分支，但那个分支的源码不在本次审阅范围内。本章提出的是<strong>多用户扩展的设计与验收方法</strong>，不声称已经审计或实现了那个分支。</p>
+<p>四个数要分别计数：HTTP 同时连接数、排队的请求数、正在生成的序列数、同一次内核计算里处理的序列数。它们可以完全不同。多开线程，并不会自动解决 KV 缓存、GDN 状态、PLE 状态、随机数和临时缓冲的隔离问题。</p>
+<h3>可变状态逐项列清归属</h3>
+<p>只读的权重和只读的缓存内容，在适当同步下可以共享。每条序列的 token 历史、KV 页映射、GDN 状态、PLE 状态、采样参数、随机数计数器和取消标志，必须有明确的归属。上游的 <code>SessionState</code> 是阅读“除权重以外的序列状态”的好入口 [S13]；注意 PLE 的历史和 token 窗口也被注释明确称为“序列状态”。</p>
+<p>共享临时空间是否安全，取决于调度能否保证互斥。原先假设“各层从不并发”的临时空间，被两个会话同时使用时，原本正确的代码会立刻失效。改并发时，应列出所有单序列假设，而不是只找一把全局互斥锁。</p>
+<h3>预算的细节</h3>
+<p>正文的 34 GiB 只是一个起点。如果五条序列需要各自独立的临时空间，那 2 GiB 要按实际并发数再算；上下文长短不同，每条序列的状态大小也不同。准入控制必须在承诺活动序列之前原子地预留预算。会话停车区（上游可选功能）占的是主机内存，也要单独计入预算。<span class="ev ev-report">上游报告</span></p>
+<h3>轮转的真实成本</h3>
+<p>教学模拟假设切换不花时间，或者只花一个固定的常数。真实引擎切换序列时，如果要把一条序列的 KV 缓存和循环状态从显存挪出去、再把另一条挪进来，时间片太小会让搬运开销压倒计算。所以“公平”的评估要同时看首字时间、完成时间、吞吐和状态搬运量。SJF 还有一个现实难题：回答长度在生成完之前并不知道，只能估计；为了防止饥饿，常见做法是给等得越久的请求越高的优先级，这叫<dfn>老化</dfn>。</p>
+<h3>例题：最后一个槽位，两个请求同时到达</h3>
+<p>验收断言：恰好一个请求拿到有效预算并进入活动状态，另一个排队或被明确拒绝；不能重复预留，也不能因为客户端重试而创建两个会话。完成或取消后，预算恰好释放一次；旧请求不能继续写入新槽位的状态。</p>
+<h3>多并发验收要击中“串状态”风险</h3>
+<p>设计 A、B 两条语言或任务不同的固定请求，先分别单独运行，记下参考输出；再交替或并行运行。覆盖这些情况：A 取消时 B 继续；A 长时间读题时 B 在生成；相同前缀但图片不同；会话恢复；预算只够最后一个槽位时的并发抢占。</p>
+<p>最低通过条件：状态隔离正确、没有超预算的承诺、没有重复结束、没有旧请求的输出混入、没有长请求饥饿。一个总吞吐提高了、却偶尔串上下文的系统，不是合格的并发推理服务。</p>
+<h3>模拟器的证据边界</h3>
+<p>本章的两个交互图和交互实验都是离散的教学模拟：每个 token 耗时固定，没有真实的读题、草稿验证、前缀命中、GPU 内核和缓存竞争。它们只能用来讨论调度取舍，图上的倍数不能用来宣传任何真实系统的性能。</p>
+</details>

@@ -1,0 +1,238 @@
+/* Chapter 25 widgets: FIFO / SJF / round-robin on the same arrivals, and the M/M/1 waiting-time curve.
+   A design exercise, not an upstream feature: upstream Strata serves one sequence at a time behind a FIFO.
+   All visible text lives in the T tables below, keyed by language (zh is the master). */
+(function (root) {
+  'use strict';
+  const { Viz } = root;
+  const M = root.VizMath.sched;
+
+  const T = Viz.t({
+    zh: {
+      code: 'SCHED_RACE', title: '三种调度，同一批请求', tag: '教学推演 · 1 格 = 生成 1 个 token 的时间',
+      intro: '一台引擎一次只能服务一个请求。同一批请求按到达时间排好，分别交给三种调度策略：<b>FIFO</b> 按到达顺序，<b>SJF</b> 挑最短的先做，<b>轮转</b>每人轮流做一个时间片。按 <b>开始比较</b>，看三条时间线怎样一格格长出来。',
+      lgArrive: j => `${j.id}：第 ${j.arrive} 格到，要 ${j.len} 格`,
+      steps: ['FIFO 先来先服务', 'SJF 短作业优先', '轮转', '比较'],
+      lanes: { fifo: 'FIFO 先来先服务', sjf: 'SJF 短作业优先（不抢占）', rr: q => `轮转（时间片 ${q} 格）` },
+      stage: '三种调度策略的时间线，每格是生成一个 token 的时间',
+      presets: { convoy: '长请求先到', same: '同时到达', starve: '短请求接连到' },
+      bPlay: '▶ 开始比较', qtLabel: '轮转的时间片（格）',
+      ready: '<span class="c">$</span> ready. 选一组请求，按 [ ▶ 开始比较 ]',
+      start: (p) => `<span class="y">// ${p}</span>`,
+      dFifo: (t, j, w) => `t=${t}：${w ? `队里有 ${w}，` : ''}选最早到的 <span class="c">${j}</span>，一口气做完`,
+      dSjf: (t, j, len, w) => `t=${t}：${w ? `队里有 ${w}，` : ''}选最短的 <span class="c">${j}</span>（${len} 格），一口气做完`,
+      dRr: (t, j, w) => `t=${t}：轮到 <span class="c">${j}</span>，最多做一个时间片${w ? `，之后排到 ${w} 后面` : ''}`,
+      lEnd: (name, w, f) => `<span class="y">${name}</span>：平均等待 ${w} 格，平均 ${f} 格后看到第一个字`,
+      sK: { fifo: 'FIFO 平均等待', sjf: 'SJF 平均等待', rr: '轮转平均等待' },
+      sF: (f, sw) => `<b>= Σ(完成 − 到达 − 长度) ÷ 人数</b><br>平均首字：${f} 格 · 切换 ${sw} 次`,
+      unit: '格',
+      verdict: (bw, bf, extra) => `① 平均等待最短的是 <b>${bw}</b>；平均最早看到第一个字的是 <b>${bf}</b>。<br>② 三种策略做的总工作一样多，时间线一样长，差别只在<b>谁先谁后</b>。<br>③ ${extra}`,
+      xConvoy: 'FIFO 下，B、C、D 都被先到的长请求 A 挡在后面，这叫<b>护航效应</b>。轮转让每个人很快拿到第一个字，代价是来回切换。',
+      xSame: 'SJF 让短请求先走，平均等待最短；但它要求事先知道每个回答有多长，而大模型的回答长度在生成完之前并不知道。',
+      xStarve: (f, s) => `长请求 A 在 FIFO 下只等 ${f} 格，在 SJF 下要等 ${s} 格：短请求接连插队，A 一直被往后推，这叫<b>饥饿</b>。`,
+      try: [
+        '选 <b>长请求先到</b>：FIFO 下 B、C、D 都要等 A 做完。能看出：一个长请求能拖慢它后面所有人。',
+        '把时间片从 1 拉到 <b>8</b>：轮转的时间线变得和 FIFO 一模一样。能看出：时间片足够大时，轮转就退化成 FIFO。',
+        '选 <b>短请求接连到</b>：SJF 平均等待最短，可长请求 A 排到了最后。能看出：只看平均数，会漏掉被饿着的那个人。',
+      ],
+
+      qCode: 'QUEUE_LOAD', qTitle: '忙到几成就开始堵', qTag: '教学推演 · M/M/1 模型，假设平均每个回答 10 秒',
+      qIntro: '假设一台 Strata 平均 10 秒答完一个请求，也就是每分钟最多服务 6 个。拖动滑块改变每分钟来几个请求，看平均要等多久。<b>模拟</b>按钮会用随机数真的跑 2 万个请求，和公式对一对。',
+      qLgCurve: '公式算出的平均停留时间', qLgDot: '当前的到达率', qLgSim: '模拟结果',
+      qStage: '平均停留时间随利用率变化的曲线',
+      qAxisX: '利用率 ρ', qAxisY: '平均停留（秒）',
+      qLabel: '每分钟到达的请求', qSim: '▶ 模拟 2 万个请求',
+      qReady: '<span class="c">$</span> ready. 拖动滑块，或按 [ ▶ 模拟 ]',
+      qMove: (l, rho, w) => `<span class="c">λ = ${l}/分钟</span>：引擎忙碌 ${rho}% 的时间，平均停留 ${w} 秒`,
+      qRun: (n, seed) => `<span class="m">模拟</span>：随机生成 ${n} 个请求的到达间隔和服务时间（种子 ${seed}）`,
+      qRes: (w, f, peak) => `<span class="y">结果</span>：平均停留 ${w} 秒，公式给出 ${f} 秒；最拥挤时系统里同时有 ${peak} 个请求`,
+      sRhoK: '利用率 ρ', sRhoF: '<b>= λ ÷ μ</b><br>μ = 6 个/分钟（平均 10 秒一个）',
+      sec: n => `${n} 秒`,
+      sWK: '平均停留时间 W', sWF: '<b>= 1 ÷ (μ − λ)</b><br>排队时间 + 自己被服务的 10 秒',
+      sLK: '系统里平均有几个请求 L', sLF: '<b>= λ × W</b>（利特尔法则）<br>到达率乘以每人停留的时间',
+      qVerdict: (rho, w, sim) => `① 利用率 ${rho}% 时，公式给出平均停留 <b>${w} 秒</b>，模拟得到 <b>${sim} 秒</b>。<br>② 等待时间不是随利用率线性增长：从 50% 到 80%，停留从 20 秒涨到 50 秒；到 95% 就是 200 秒。<br>③ 越接近满负荷，模拟结果波动越大：偶尔一阵扎堆到达，队伍要很久才能消化。所以服务要留余量，不能按“刚好忙满”来规划。`,
+      qTry: [
+        '把到达率从 <b>3</b> 拉到 <b>4.8</b>：利用率从 50% 到 80%，平均停留从 20 秒变成 50 秒。能看出：多了六成的请求，等待却多了一倍半。',
+        '继续拉到 <b>5.7</b>（95%）：平均停留 200 秒。能看出：曲线在接近 100% 时陡然竖起来。',
+        '在 80% 和 95% 各按几次 <b>模拟</b>：80% 时结果和公式很接近，95% 时每次都差不少。',
+      ],
+    },
+  });
+
+  const JOB_FILL = ['var(--accent)', 'var(--a2)', 'var(--a3)', 'var(--muted)', 'var(--ink)'];
+
+  Viz.register('sched-race', {
+    mount(el, ctx) {
+      const body = Viz.frame(el, { code: T.code, title: T.title, tag: T.tag, intro: T.intro });
+      body.insertAdjacentHTML('beforeend', `<div class="viz-row s-presets" style="margin:0 0 12px">${Object.keys(M.PRESETS).map(k => Viz.button(T.presets[k], 'ghost')).join('')}</div><div class="s-legend"></div>`);
+      const pipe = Viz.pipe(body, T.steps);
+      body.insertAdjacentHTML('beforeend', '<div class="viz-cols"><div class="viz-left"></div><div class="viz-right"></div></div>');
+      const left = body.querySelector('.viz-left'), right = body.querySelector('.viz-right');
+      const svg = Viz.svg('svg', { viewBox: '0 0 400 236', class: 'viz-stage', role: 'img', 'aria-label': T.stage }, left);
+      left.insertAdjacentHTML('beforeend', `<div class="viz-slider"><label>${T.qtLabel}</label><input type="range" min="1" max="8" value="2" aria-label="${Viz.esc(T.qtLabel)}"><output>2</output></div>
+        <div class="viz-row">${Viz.button(T.bPlay)}</div>`);
+      const term = Viz.term(left, T.ready);
+      right.innerHTML = ['fifo', 'sjf', 'rr'].map(p => Viz.stat({ id: 's-' + p, k: T.sK[p], v: '—', f: '' })).join('');
+      body.insertAdjacentHTML('beforeend', '<div class="viz-verdict" hidden></div>' + Viz.tryList(T.try));
+      const $ = s => el.querySelector(s);
+      const presetBtns = [...el.querySelectorAll('.s-presets .viz-btn')];
+      const playBtn = left.querySelector('.viz-row .viz-btn');
+      const range = $('input[type=range]');
+      let preset = 'convoy', q = 2, runs = {}, busy = false;
+      const POL = ['fifo', 'sjf', 'rr'];
+      const color = id => JOB_FILL[(id.charCodeAt(0) - 65) % JOB_FILL.length];
+
+      function compute() { runs = Object.fromEntries(POL.map(p => [p, M.simulate(M.PRESETS[preset], p, { quantum: q })])); }
+      function legend() {
+        $('.s-legend').innerHTML = Viz.legend([...M.PRESETS[preset]].sort((a, b) => a.id.localeCompare(b.id)).map(j => ({ color: color(j.id), text: T.lgArrive(j) })));
+        presetBtns.forEach((b, i) => { b.className = 'viz-btn' + (Object.keys(M.PRESETS)[i] === preset ? '' : ' ghost'); });
+      }
+      function draw(upTo) {
+        while (svg.firstChild) svg.removeChild(svg.firstChild);
+        const span = Math.max(...POL.map(p => runs[p].makespan)), u = 380 / span;
+        POL.forEach((p, li) => {
+          const y = 8 + li * 66;
+          const lab = Viz.svg('text', { x: 10, y: y + 14, 'font-size': 14 }, svg);
+          lab.textContent = p === 'rr' ? T.lanes.rr(q) : T.lanes[p];
+          lab.setAttribute('style', 'fill:var(--ink)');
+          Viz.svg('rect', { x: 10, y: y + 22, width: 380, height: 30, style: 'fill:var(--side);stroke:var(--frame)' }, svg);
+          const lim = upTo[li];
+          for (const s of runs[p].segments) {
+            if (s.job === null || s.start >= lim) continue;
+            const end = Math.min(s.end, lim), w = (end - s.start) * u;
+            Viz.svg('rect', { x: 10 + s.start * u, y: y + 22, width: Math.max(0, w - 1), height: 30, style: `fill:${color(s.job)}` }, svg);
+            if (w >= 13) { const t = Viz.svg('text', { x: 10 + s.start * u + w / 2, y: y + 42, 'text-anchor': 'middle', 'font-size': 14 }, svg); t.textContent = s.job; t.setAttribute('style', 'fill:var(--paper);font-weight:700'); }
+          }
+        });
+        const step = span > 16 ? 4 : 2;
+        for (let t = 0; t <= span; t += step) {
+          const x = 10 + t * u;
+          Viz.svg('path', { d: `M${x} 204V210`, fill: 'none', style: 'stroke:var(--muted)' }, svg);
+          const tx = Viz.svg('text', { x, y: 226, 'text-anchor': 'middle', 'font-size': 14 }, svg);
+          tx.textContent = String(t);
+          tx.setAttribute('style', 'fill:var(--muted)');
+        }
+      }
+      function stats(show) {
+        const best = Math.min(...POL.map(p => runs[p].avgWait));
+        for (const p of POL) {
+          const r = runs[p], box = $(`[data-s=s-${p}-v]`).parentElement;
+          $(`[data-s=s-${p}-v]`).textContent = show[p] ? r.avgWait.toFixed(2) + ' ' + T.unit : '—';
+          $(`[data-s=s-${p}-f]`).innerHTML = show[p] ? T.sF(r.avgFirst.toFixed(2), r.switches) : '';
+          box.classList.toggle('hot', !!show[p] && show.rr && r.avgWait === best);
+        }
+      }
+      function reset() {
+        compute(); legend(); pipe.set(-1); draw([0, 0, 0]); stats({}); $('.viz-verdict').hidden = true;
+      }
+      function verdict() {
+        const name = p => (p === 'rr' ? T.lanes.rr(q) : T.lanes[p]);
+        const bw = POL.reduce((a, p) => (runs[p].avgWait < runs[a].avgWait ? p : a));
+        const bf = POL.reduce((a, p) => (runs[p].avgFirst < runs[a].avgFirst ? p : a));
+        const A = p => runs[p].jobs.find(j => j.id === 'A').wait;
+        const extra = preset === 'convoy' ? T.xConvoy : preset === 'same' ? T.xSame : T.xStarve(A('fifo'), A('sjf'));
+        $('.viz-verdict').innerHTML = T.verdict(name(bw), name(bf), extra);
+        $('.viz-verdict').hidden = false;
+      }
+      async function guard(fn) {
+        if (busy) return;
+        busy = true; el.querySelectorAll('.viz-btn, input').forEach(b => b.disabled = true);
+        try { await fn(); } catch (e) { if (ctx.alive) throw e; }
+        busy = false; if (ctx.alive) el.querySelectorAll('.viz-btn, input').forEach(b => b.disabled = false);
+      }
+      playBtn.onclick = () => guard(async () => {
+        reset(); term.clear();
+        const upTo = [0, 0, 0], shown = {};
+        for (let li = 0; li < 3; li++) {
+          const p = POL[li], r = runs[p];
+          pipe.set(li);
+          term.log(T.start(p === 'rr' ? T.lanes.rr(q) : T.lanes[p]));
+          const lens = Object.fromEntries(M.PRESETS[preset].map(j => [j.id, j.len]));
+          for (const d of r.decisions) {
+            const w = d.waiting.join('、');
+            term.log(p === 'fifo' ? T.dFifo(d.t, d.job, w) : p === 'sjf' ? T.dSjf(d.t, d.job, lens[d.job], w) : T.dRr(d.t, d.job, w));
+            const seg = r.segments.find(s => s.job === d.job && s.start <= d.t && s.end > d.t) || r.segments.find(s => s.job === d.job && s.start >= d.t);
+            const target = seg ? seg.end : r.makespan;
+            while (upTo[li] < target) { upTo[li] = Math.min(target, upTo[li] + 1); draw(upTo); await ctx.sleep(90); }
+          }
+          upTo[li] = r.makespan; draw(upTo);
+          shown[p] = true; stats(shown);
+          term.log(T.lEnd(p === 'rr' ? T.lanes.rr(q) : T.lanes[p], r.avgWait.toFixed(2), r.avgFirst.toFixed(2)));
+          await ctx.sleep(300);
+        }
+        pipe.set(3); stats(shown); verdict();
+      });
+      presetBtns.forEach((b, i) => { b.onclick = () => { if (busy) return; preset = Object.keys(M.PRESETS)[i]; term.clear(); term.log(T.ready); reset(); }; });
+      range.oninput = () => { if (busy) return; q = +range.value; $('output').textContent = String(q); reset(); };
+      reset();
+    },
+  });
+
+  Viz.register('queue-load', {
+    mount(el, ctx) {
+      const MU = 6;
+      const body = Viz.frame(el, { code: T.qCode, title: T.qTitle, tag: T.qTag, intro: T.qIntro });
+      body.insertAdjacentHTML('beforeend', Viz.legend([
+        { color: 'var(--accent)', text: T.qLgCurve },
+        { color: 'var(--a2)', text: T.qLgDot, glow: true },
+        { color: 'var(--a3)', text: T.qLgSim },
+      ]));
+      body.insertAdjacentHTML('beforeend', '<div class="viz-cols"><div class="viz-left"></div><div class="viz-right"></div></div>');
+      const left = body.querySelector('.viz-left'), right = body.querySelector('.viz-right');
+      const svg = Viz.svg('svg', { viewBox: '0 0 400 250', class: 'viz-stage', role: 'img', 'aria-label': T.qStage }, left);
+      const X = rho => 56 + rho * 324, Y = w => 206 - Math.min(w, 300) / 300 * 186;
+      const txt = (x, y, s, anchor, color) => { const t = Viz.svg('text', { x, y, 'font-size': 14, 'text-anchor': anchor || 'start' }, svg); t.textContent = s; t.setAttribute('style', `fill:${color || 'var(--muted)'}`); return t; };
+      Viz.svg('path', { d: 'M56 20V206H382', fill: 'none', style: 'stroke:var(--muted);stroke-width:1.2' }, svg);
+      for (const w of [100, 200, 300]) { Viz.svg('path', { d: `M56 ${Y(w)}H382`, fill: 'none', style: 'stroke:var(--frame);stroke-dasharray:3 4' }, svg); txt(50, Y(w) + 5, String(w), 'end'); }
+      txt(50, 211, '0', 'end');
+      for (const r of [0.5, 0.8, 1]) txt(X(r), 226, Math.round(r * 100) + '%', 'middle');
+      txt(219, 246, T.qAxisX, 'middle');
+      txt(62, 16, T.qAxisY);
+      let d = '';
+      for (let r = 0; r <= 0.967; r += 0.01) d += (d ? 'L' : 'M') + X(r).toFixed(1) + ' ' + Y(10 / (1 - r)).toFixed(1);
+      Viz.svg('path', { d, fill: 'none', style: 'stroke:var(--accent);stroke-width:2.5' }, svg);
+      const simDot = Viz.svg('circle', { cx: 0, cy: 0, r: 6, style: 'fill:var(--a3);opacity:0' }, svg);
+      const dot = Viz.svg('circle', { cx: 0, cy: 0, r: 7, style: 'fill:var(--a2)' }, svg);
+      const dotLabel = txt(0, 0, '', 'end', 'var(--ink)');
+      left.insertAdjacentHTML('beforeend', `<div class="viz-slider"><label>${T.qLabel}</label><input type="range" min="0.6" max="5.7" step="0.3" value="3" aria-label="${Viz.esc(T.qLabel)}"><output>3.0</output></div>
+        <div class="viz-row">${Viz.button(T.qSim)}</div>`);
+      const term = Viz.term(left, T.qReady);
+      right.innerHTML =
+        Viz.stat({ id: 'q-rho', k: T.sRhoK, v: '', f: T.sRhoF }) +
+        Viz.stat({ id: 'q-w', k: T.sWK, v: '', f: T.sWF, hot: true }) +
+        Viz.stat({ id: 'q-l', k: T.sLK, v: '', f: T.sLF });
+      body.insertAdjacentHTML('beforeend', '<div class="viz-verdict" hidden></div>' + Viz.tryList(T.qTry));
+      const $ = s => el.querySelector(s);
+      const range = $('input[type=range]'), simBtn = left.querySelector('.viz-row .viz-btn');
+      let lambda = 3, seed = 1;
+      function update(log) {
+        const q = M.mm1(lambda, MU), w = q.W * 60;
+        $('output').textContent = lambda.toFixed(1);
+        dot.setAttribute('cx', X(q.rho)); dot.setAttribute('cy', Y(w));
+        dotLabel.setAttribute('x', X(q.rho) - 10); dotLabel.setAttribute('y', Y(w) - 10);
+        dotLabel.textContent = Math.round(w) + ' s';
+        simDot.setAttribute('style', 'fill:var(--a3);opacity:0');
+        $('[data-s=q-rho-v]').textContent = Math.round(q.rho * 100) + '%';
+        $('[data-s=q-w-v]').textContent = T.sec(Math.round(w));
+        $('[data-s=q-l-v]').textContent = q.L.toFixed(2);
+        $('.viz-verdict').hidden = true;
+        if (log) term.log(T.qMove(lambda.toFixed(1), Math.round(q.rho * 100), Math.round(w)));
+      }
+      range.oninput = () => { lambda = +range.value; update(false); };
+      range.onchange = () => update(true);
+      simBtn.onclick = async () => {
+        simBtn.disabled = true;
+        const n = 20000, s = seed++;
+        term.log(T.qRun(Viz.fmt(n), s));
+        try { await ctx.sleep(120); } catch (e) { if (!ctx.alive) return; throw e; }
+        const q = M.mm1(lambda, MU), r = M.simulateMM1(lambda, MU, n, s), w = r.W * 60;
+        simDot.setAttribute('cx', X(q.rho)); simDot.setAttribute('cy', Y(w));
+        simDot.setAttribute('style', 'fill:var(--a3);opacity:1');
+        term.log(T.qRes(Math.round(w), Math.round(q.W * 60), r.maxInSystem));
+        $('.viz-verdict').innerHTML = T.qVerdict(Math.round(q.rho * 100), Math.round(q.W * 60), Math.round(w));
+        $('.viz-verdict').hidden = false;
+        simBtn.disabled = false;
+      };
+      update(false);
+    },
+  });
+})(typeof globalThis !== 'undefined' ? globalThis : this);
