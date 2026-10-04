@@ -1,0 +1,301 @@
+<div class="hook"><span class="eyebrow">気づいたことがあるかもしれません</span>
+<p>Strata が文字を出すところを見ていると、1 文字ずつ絞り出すのではなく、「ぴょんぴょんとひと続き」に出てくるように感じることがあります。README の説明はこうです。小さな助手が先に数語を推測し、大きなモデルがその推測をまとめて 1 回で検査します。だから、同じ答えが 1.6〜1.8 倍速く出ます。<span class="ev ev-report">上流レポート</span>[S01]</p>
+<p>上流のドキュメントには、モデルに最初から付いている推測層は、一度に最大 3 個のトークンを推測する、とも書かれています。<span class="ev ev-report">上流レポート</span>[S02] ここで疑問が出ます。当たった分は丸もうけなのに、なぜ 10 個まとめて推測しないのでしょうか。この章は 2 つに答えます。いくつ推測するのがいちばんお得か。そして、受理率がいつも変わるとき、エンジンは走りながらどう考えを変えるのか。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>トークンを 1 個多く推測しても、期待して得られる分は等比級数で減っていきます。一方、1 ラウンドの検証にかかる時間は増え続けます。Strata が比べるのは「1 ミリ秒あたりの期待コミット数」です。そして受理率は、指数移動平均で走りながら更新します。</p>
+
+<h2 id="sec-1">19.1 1 回推測して、1 回検証する：1 ラウンドで何個のトークンが取れるか</h2>
+<p>まず第 18 章の<dfn>投機的デコーディング</dfn>を復習します。安い方法で先に推測し、大きなモデルに採点してもらう方法です。推測を担当するのは、モデルに最初から付いている <dfn>MTP 層</dfn>（multi-token prediction、マルチトークン予測層）です。そこから出る候補を<dfn>ドラフト</dfn>と呼びます。<span class="ev ev-report">上流レポート</span>[S02]</p>
+<p>大きなモデルは、「直前に確定したトークン + k 個のドラフト」を 1 列に並べます。48 層を 1 回通るだけで、各位置について「ここは何になるべきか」を同時に出せます。この 1 列を<dfn>検証ウィンドウ</dfn>と呼び、長さは k + 1 です。図 19-1 で、k = 3 の例を 1 回たどってみましょう。</p>
+<figure class="fig"><svg viewBox="0 0 400 296" role="img" aria-label="図 19-1：投機的デコーディングの 1 ラウンド。ドラフトを 3 個推測し、最初の 2 個はターゲットモデルと一致、3 個目は不一致で、このラウンドは 3 トークンをコミットする">
+<text class="f-muted" fill="#5c6d66" x="150" y="22" font-size="12" text-anchor="middle">直前</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="22" font-size="12" text-anchor="middle">ドラフト1</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="22" font-size="12" text-anchor="middle">ドラフト2</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="22" font-size="12" text-anchor="middle">ドラフト3</text>
+<text class="f-text" fill="#182f2b" x="10" y="46" font-size="13" font-weight="600">① 推測</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="63" font-size="12">MTP 層が 3 個</text>
+<rect class="f-soft" fill="#e5f1df" x="125" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="150" y="55" font-size="15" text-anchor="middle">は</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="185" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="210" y="55" font-size="15" text-anchor="middle">公</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="245" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="270" y="55" font-size="15" text-anchor="middle">園</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="305" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="55" font-size="15" text-anchor="middle">に</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="13" font-weight="600">② 検証</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="123" font-size="12">48 層を 1 回だけ通る</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="185" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="210" y="115" font-size="15" text-anchor="middle">公</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="245" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="270" y="115" font-size="15" text-anchor="middle">園</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="305" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="115" font-size="15" text-anchor="middle">で</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="144" font-size="12" text-anchor="middle">各位置でターゲットが選ぶトークン</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="13" font-weight="600">③ 比較</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="193" font-size="12">左から右へ、違えば停止</text>
+<text class="f-text" fill="#182f2b" x="210" y="184" font-size="13" text-anchor="middle">一致</text>
+<text class="f-text" fill="#182f2b" x="270" y="184" font-size="13" text-anchor="middle">一致</text>
+<text class="f-warn" fill="#9e5d24" x="330" y="184" font-size="13" font-weight="600" text-anchor="middle">不一致</text>
+<text class="f-text" fill="#182f2b" x="10" y="232" font-size="13" font-weight="600">④ コミット</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="249" font-size="12">受理 2 個 + 自分の 1 個</text>
+<rect class="f-accent" fill="#136d5a" x="185" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="210" y="241" font-size="15" text-anchor="middle">公</text>
+<rect class="f-accent" fill="#136d5a" x="245" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="270" y="241" font-size="15" text-anchor="middle">園</text>
+<rect class="f-accent" fill="#136d5a" x="305" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="330" y="241" font-size="15" text-anchor="middle">で</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 80H390M10 154H390M10 204H390"/>
+<text class="f-text" fill="#182f2b" x="200" y="284" font-size="12" text-anchor="middle">1 回の検証で 3 トークンをコミット。「に」は破棄</text>
+</svg><figcaption>図 19-1　投機的デコーディングの 1 ラウンド。3 個推測し、最初の 2 個はターゲットモデルと一致、3 個目は不一致でした。3 番目の位置でのターゲットの答え「で」も、ついでにコミットされます。だからこのラウンドでは 3 トークンが取れます。</figcaption></figure>
+<p>ルールは単純です。左から右へ比べ、最初に食い違った所で止めます。それより前で一致したドラフトは、すべて<strong>受理</strong>します。さらに、止まった所でのターゲットモデル自身の答えを足します。だから a 個のドラフトを受理すると、このラウンドは a + 1 個のトークンをコミットします。Strata の生成ループも、まさにこう数えています。ウィンドウ内のドラフトとターゲットの出力を 1 つずつ比べ、そのあと <code>commit(a + 1)</code> を呼びます。<span class="ev ev-code">コード上の事実</span></p>
+<p>1 個も当たらなかったとしても、このラウンドにはターゲットモデル自身の 1 トークンがあります。推測しないときと同じ数です。外れても答えは悪くなりません。どの文字もターゲットモデルが決めるからです。<span class="ev ev-report">上流レポート</span>[S02] 外れたときの損は 1 つだけです。このラウンドの検証で、無駄な位置をいくつか余分に計算したことになります。</p>
+
+<h2 id="sec-2">19.2 平均して 1 ラウンドに何個か：期待値の出番</h2>
+<p>1 ラウンドでドラフトがいくつ受理されるかは、前もっては分かりません。計算できるのは、<strong>平均して</strong> 1 ラウンドに何個取れるか、つまり<dfn>期待値</dfn>です。</p>
+<p>i 番目のドラフトの<dfn>条件付き受理率</dfn>を pᵢ とします。前の i − 1 個がすべて受理されたという前提のもとで、i 番目も受理される確率です。「前提」という 2 文字が大事です。前で 1 個でも拒否されたら、後ろは比較の順番が回ってきません。</p>
+<p>i 番目のドラフトが役に立つには、最初の i 個がすべて受理される必要があります。その確率は p₁ × p₂ × … × pᵢ です。各位置の「役に立つ確率」を足し合わせると、1 ラウンドで期待されるコミット数になります。</p>
+<div class="equation">E = 1 + p₁ + p₁p₂ + … + p₁p₂…pₖ</div>
+<p>先頭の 1 は、ターゲットモデル自身のトークンです。これは毎ラウンド必ず得られます。Strata のソースコードは、まさにこのように、1 項ずつ掛けて 1 項ずつ足しています。<span class="ev ev-code">コード上の事実</span>[S09] どの位置の受理率も同じ p だとすると、この和は等比数列の最初の k + 1 項です。次のコラムで、なぜ「足すほど手応えがなくなる」のかを説明します。</p>
+<aside class="primer" id="c19-expected-value">
+<h3>期待値と等比級数</h3>
+<p>イメージ：期待値とは、「何度も何度もやったあとの平均的な結果」です。公平なサイコロを振ると、1 回ごとの結果は 1 から 6 のどれかです。でも平均すると 3.5 になります。<dfn>期待値</dfn>の定義は、結果ごとに「その確率」を掛けて、全部足したものです。</p>
+<p>「1 ラウンドで何トークン取れるか」を計算するときは、もっと手軽な方法があります。各位置が「使われる確率」を足していくのです。位置 1 は必ず使われるので確率 1。位置 2 が使われる確率は p。位置 3 は p²……こうして E = 1 + p + p² + … + pᵏ になります。どの項も、前の項に同じ数を掛けたものになっている和を<dfn>等比級数</dfn>（幾何級数、等比数列の和）と呼びます。公式があります：E = (1 − pᵏ⁺¹) ÷ (1 − p)。</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="図 19-2：p が 0.86 でドラフトを 3 個推測したとき、4 つの位置の期待貢献は 1、0.86、0.74、0.64 で、合計は約 3.24">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">3 個推測したときの、各位置の平均貢献（p = 0.86）</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="12">ターゲット自身</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="38" width="220" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="326" y="52" font-size="12">1（必ず）</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">ドラフト 1</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="70" width="189.2" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="295" y="84" font-size="12">p = 0.86</text>
+<text class="f-text" fill="#182f2b" x="10" y="116" font-size="12">ドラフト 2</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="102" width="162.7" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="269" y="116" font-size="12">p² ≈ 0.74</text>
+<text class="f-text" fill="#182f2b" x="10" y="148" font-size="12">ドラフト 3</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="134" width="139.9" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="246" y="148" font-size="12">p³ ≈ 0.64</text>
+<text class="f-text" fill="#182f2b" x="10" y="182" font-size="12" font-weight="600">合計 E = 1 + 0.86 + 0.74 + 0.64 ≈ 3.24 トークン</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">無限に推測しても上限がある：E → 1 ÷ (1 − p) ≈ 7.1</text>
+</svg><figcaption>図 19-2　1 個多く推測するたびに、その貢献は p をもう 1 回掛けた分になり、棒は 1 本ごとに短くなります。3 個推測すれば平均 3.24 個取れます。無限に推測しても、7.1 個は超えられません。</figcaption></figure>
+<p>だから、多く推測する利益は減っていきます。p = 0.86 のとき、8 個目のドラフトの貢献は 0.86⁸ ≈ 0.30 トークンしかありません。等比数列には上限もあります。項数が無限に近づくと、和は 1 ÷ (1 − p) に近づきます。p = 0.86 なら、無限に推測しても、1 ラウンドの平均は 7.2 個に届きません。</p>
+<p class="further">参考リンク：<a href="https://ja.wikipedia.org/wiki/期待値" target="_blank" rel="noopener noreferrer">Wikipedia：期待値</a> · <a href="https://ja.wikipedia.org/wiki/等比数列" target="_blank" rel="noopener noreferrer">Wikipedia：等比数列</a> · <a href="https://ja.wikipedia.org/wiki/幾何分布" target="_blank" rel="noopener noreferrer">Wikipedia：幾何分布</a></p>
+</aside>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>「1 ラウンドでコミットするトークン数」を確率変数 N とすると、上の計算は確率論の裾の和の公式 E[N] = Σ P(N ≥ i) です。これはどんな分布でも成り立ちます。だから導出では、各位置が互いに独立だと仮定する必要はありません。条件付き確率を掛け合わせるだけで済みます。</p>
+<p>Strata の数字を代入してみます。ソースコードは、MTP の各位置の初期受理率をどれも 0.86 にしています。コメントによると、同じモデルでの測定から来た値です。<span class="ev ev-code">コード上の事実</span>[S09] 3 個推測すると、E = 1 + 0.86 + 0.74 + 0.64 ≈ 3.24 です。上流のドキュメントが報告する実際の値は、1 回の検証で平均 2.4〜3.2 トークンのコミットです。<span class="ev ev-report">上流レポート</span>[S02] 両者は同じ桁なので、0.86 は無難な出発点だと分かります。実際の受理率は文章によって変わります。これは 19.4 節で詳しく見ます。<span class="ev ev-est">教育用の試算</span></p>
+
+<h2 id="sec-3">19.3 勘定のもう半分：ウィンドウが広いほど、検証は高くなる</h2>
+<p>検証に時間がかからないなら、もちろん推測は多いほどいいはずです。でも検証には時間がかかります。Strata のコストモデル <code>step_ms</code> は、1 ラウンドの時間を 4 つに分けます。<span class="ev ev-code">コード上の事実</span>[S09]</p>
+<ul>
+<li><strong>密な部分</strong>：アテンションなど、どのトークンでも計算が必要な部分です。ウィンドウが広いほど、この部分は遅くなります。ソースコードでは、ウィンドウの長さで引く倍率表を使っています。</li>
+<li><strong>CPU のエキスパート計算</strong>：GPU 上にキャッシュされていないエキスパートは、CPU が計算します（第 10 章で説明しました）。ウィンドウ内のトークンが多いほど、使われる<strong>異なる</strong>エキスパートが増え、CPU が忙しくなります。</li>
+<li><strong>同期</strong>：毎ラウンドかかる、決まった調整のコストです。</li>
+<li><strong>ドラフト作成</strong>：MTP 層が各ドラフトを推測するにも時間がかかります。</li>
+</ul>
+<p>これらの既定値は、ヘッダファイルに書かれています。密な部分は 11 ms。480 個のエキスパートをすべて CPU で計算すると 15.8 ms。VRAM のヒット率は 55%。同期は 2.4 ms。MTP のドラフト 1 個あたり 1.2 ms です。コメントによると、倍率表のような既定値は 9 月 23 日の測定から来ています。11 ms は計画上の目標値で、エンジンでは実測値に置き換えるべきものです。<span class="ev ev-code">コード上の事実</span> 図 19-3 は、これらの既定値を式に代入して、ウィンドウが広がるにつれて 4 つの部分がどう変わるかを示します。</p>
+<figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="図 19-3：Strata の既定パラメータでは、1 ラウンドの時間が、推測なしの 20.5 ミリ秒から、8 個推測の 92.0 ミリ秒まで増える">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">1 ラウンドの時間は 4 部分の合計（単位 ms、棒は比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="54" font-size="12">k = 0</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="40" width="34.7" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="90.7" y="40" width="22.4" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="113.1" y="40" width="7.6" height="20"/>
+<text class="f-text" fill="#182f2b" x="127" y="55" font-size="12">20.5</text>
+<text class="f-text" fill="#182f2b" x="10" y="94" font-size="12">k = 1</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="80" width="36.4" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="92.4" y="80" width="39.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="132.2" y="80" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="139.8" y="80" width="3.8" height="20"/>
+<text class="f-text" fill="#182f2b" x="150" y="95" font-size="12">27.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="12">k = 3</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="120" width="50.3" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="106.3" y="120" width="70.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="177.1" y="120" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="184.7" y="120" width="11.3" height="20"/>
+<text class="f-text" fill="#182f2b" x="202" y="135" font-size="12">44.4</text>
+<text class="f-text" fill="#182f2b" x="10" y="174" font-size="12">k = 8</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="160" width="114.4" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="170.4" y="160" width="137.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="308.2" y="160" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="315.8" y="160" width="30.2" height="20"/>
+<text class="f-text" fill="#182f2b" x="352" y="175" font-size="12">92.0</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="24" y="205" font-size="12">密な部分</text>
+<rect class="f-warn" fill="#9e5d24" x="84" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="98" y="205" font-size="12">CPU エキスパート</text>
+<rect class="f-muted" fill="#5c6d66" x="208" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="222" y="205" font-size="12">同期</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="260" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="274" y="205" font-size="12">ドラフト作成</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="226" font-size="12">推測が多いほど CPU の計算するエキスパートは増える</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="244" font-size="12">ただし、増え方はトークン数より緩やか</text>
+</svg><figcaption>図 19-3　ウィンドウが 1 トークンから 9 トークンになっても、1 ラウンドの時間は約 4.5 倍にしかなりません。同じウィンドウ内のトークンが、同じエキスパートの組を選ぶことが多いからです。重みを 1 回読めば、複数のトークンを計算できます。<span class="ev ev-est">教育用の試算</span></figcaption></figure>
+<p>CPU の部分に注目してください。9 個のトークンが、それぞれ互いに違うエキスパートを使うなら、CPU の仕事は 1 トークンのときの 9 倍になるはずです。ところがソースコードの倍率表は、5.2 倍までしかありません。コメントによると、この表はルーティングの軌跡の測定から来ています。<span class="ev ev-code">コード上の事実</span> 同じウィンドウ内のトークンは、同じエキスパートの組を選ぶことがよくあります。これはまさに、第 10 章で見た「人気エキスパート」が働いているのです。</p>
+<p>分子と分母がそろったので、目標がはっきりしました。<strong>速度 = 1 ラウンドの期待コミットトークン数 ÷ 1 ラウンドの時間</strong>です。コントローラは、どの k についてもこれを計算し、速度が最大のものを選びます。<span class="ev ev-code">コード上の事実</span>[S09] 次のインタラクティブ図で、この計算を目の前に広げてみましょう。</p>
+<div class="viz" data-viz="draft-window"><figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="図 19-4：Strata の既定パラメータと p = 0.86 での、k が 0 から 8 のときの速度。k = 3 が最速で、約 72.8 トークン毎秒">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">ウィンドウ別の速度（token/s、p = 0.86、既定コスト）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="102.4" width="26" height="97.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="85" y="66" width="26" height="134"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="124" y="58.6" width="26" height="141.4"/>
+<rect class="f-accent" fill="#136d5a" x="163" y="54.4" width="26" height="145.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="61.4" width="26" height="138.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="241" y="67.2" width="26" height="132.8"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="280" y="73.8" width="26" height="126.2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="319" y="80.2" width="26" height="119.8"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="358" y="84.8" width="26" height="115.2"/>
+<text class="f-text" fill="#182f2b" x="59" y="118" font-size="12" text-anchor="middle">49</text>
+<text class="f-text" fill="#182f2b" x="98" y="61" font-size="12" text-anchor="middle">67</text>
+<text class="f-text" fill="#182f2b" x="137" y="53" font-size="12" text-anchor="middle">71</text>
+<text class="f-text" fill="#182f2b" x="176" y="49" font-size="12" font-weight="600" text-anchor="middle">73</text>
+<text class="f-text" fill="#182f2b" x="215" y="56" font-size="12" text-anchor="middle">69</text>
+<text class="f-text" fill="#182f2b" x="254" y="62" font-size="12" text-anchor="middle">66</text>
+<text class="f-text" fill="#182f2b" x="293" y="68" font-size="12" text-anchor="middle">63</text>
+<text class="f-text" fill="#182f2b" x="332" y="75" font-size="12" text-anchor="middle">60</text>
+<text class="f-text" fill="#182f2b" x="371" y="79" font-size="12" text-anchor="middle">58</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="5 4" d="M40 97.6H390"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 200H390"/>
+<text class="f-muted" fill="#5c6d66" x="59" y="216" font-size="12" text-anchor="middle">k=0</text>
+<text class="f-muted" fill="#5c6d66" x="98" y="216" font-size="12" text-anchor="middle">k=1</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="216" font-size="12" text-anchor="middle">k=2</text>
+<text class="f-text" fill="#182f2b" x="176" y="216" font-size="12" font-weight="600" text-anchor="middle">k=3</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="216" font-size="12" text-anchor="middle">k=4</text>
+<text class="f-muted" fill="#5c6d66" x="254" y="216" font-size="12" text-anchor="middle">k=5</text>
+<text class="f-muted" fill="#5c6d66" x="293" y="216" font-size="12" text-anchor="middle">k=6</text>
+<text class="f-muted" fill="#5c6d66" x="332" y="216" font-size="12" text-anchor="middle">k=7</text>
+<text class="f-muted" fill="#5c6d66" x="371" y="216" font-size="12" text-anchor="middle">k=8</text>
+<text class="f-text" fill="#182f2b" x="10" y="238" font-size="12">強調：k = 3 が最速（72.8）。推測なし（48.8）の 1.49 倍</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="256" font-size="12">破線：推測なしの速度 × 1.05。これを超えたドラフトだけ採用</text>
+</svg><figcaption>図 19-4　速度は、まず上がってから下がります。3 個推測したときが最速です。それより先は、多く推測した分の貢献がどんどん減るのに、検証はどんどん高くなります。<span class="ev ev-est">教育用の試算</span></figcaption></figure></div>
+<p>この図の数字は、ソースコードの既定値を式に代入して計算したもので、実測ではありません。推測なしのとき、1 ラウンドは 20.5 ms で、毎秒 48.8 トークンです。3 個推測すると、1 ラウンドは 44.4 ms、期待値は 3.24 個で、毎秒 72.8 トークンです。<span class="ev ev-est">教育用の試算</span> 図が示すのは形です。曲線には山頂があり、山頂の位置は、受理率とコストで決まります。</p>
+<p>もう 1 つ関門があります。最良のウィンドウが推測なしより 5% 以上速くなければ、コントローラはそれを使いません。そうでなければ、推測しないほうを選びます。<span class="ev ev-code">コード上の事実</span>[S09] ヘッダファイルのコメントは、この 5% を計画上の設定として書いています。<span class="ev ev-code">コード上の事実</span> こうする利点は、受理率の推定そのものに誤差があることです。1、2 ポイントしか速くならない「利益」は、誤差が作った見せかけである可能性が高いのです。</p>
+
+<h2 id="sec-4">19.4 受理率は変わる：走りながら学ぶ</h2>
+<p>0.86 は出発点にすぎません。コードを書いているときは、後ろの内容が前の文から推測できることがよくあります。新しい詩を書くなら、推測はずっと難しくなります。上流のドキュメントにも、同じプロンプトで回答が変わると、出力速度が数パーセントも違うことがある、とあります。受理されるドラフトの数が変わるからです。<span class="ev ev-report">上流レポート</span>[S03] だから受理率は、走りながら推定しなければなりません。Strata が使う道具は、指数移動平均です。</p>
+<aside class="primer" id="c19-ema">
+<h3>指数移動平均（EMA）</h3>
+<p>イメージ：最近の平均気温を知りたいけれど、毎日の記録は保存したくありません。そこで「推定値」を 1 つだけ覚えておきます。新しい気温が来るたびに、推定値を新しい気温のほうへ少しだけ動かします。</p>
+<div class="equation">新しい推定 = 古い推定 + α × (新しいデータ − 古い推定)</div>
+<p>これが<dfn>指数移動平均</dfn>です。α（0 から 1 の間）は更新の重みと呼びます。展開すると、最新のデータの重みは α、1 つ前は α(1 − α)、その前は α(1 − α)²……となります。古いデータほど重みが小さくなり、指数的に減衰します。名前はここから来ています。必要なメモリは数 1 つ、1 回の更新は乗算 1 回と加減算 2 回です。</p>
+<p>α は、得と損のバランスを決めます。α が大きいと、推定は速く追いかけますが、1、2 回の偶然の結果に引きずられやすくなります。α が小さいと、推定は安定しますが、変化が来たときに気づくまで長くかかります。使いやすい量が<strong>半減期</strong>です。古いデータの重みが半分になるまでに何回更新が要るか、で、ln 0.5 ÷ ln(1 − α) に等しくなります。α = 0.05 なら約 13.5 回、α = 0.3 なら 2 回未満です。</p>
+<p>Strata のコントローラは、まさにこの式で各位置の受理率を更新します。受理は 1、拒否は 0 として数えます。<span class="ev ev-code">コード上の事実</span>[S09] ヘッダファイルでは、α の既定値は 0.05 です。<span class="ev ev-code">コード上の事実</span></p>
+<p class="further">参考リンク：<a href="https://ja.wikipedia.org/wiki/移動平均" target="_blank" rel="noopener noreferrer">Wikipedia：移動平均</a> · <a href="https://en.wikipedia.org/wiki/Exponential_smoothing" target="_blank" rel="noopener noreferrer">Wikipedia: Exponential smoothing</a> · <a href="https://www.rfc-editor.org/rfc/rfc6298" target="_blank" rel="noopener noreferrer">RFC 6298：TCP の再送タイマー</a></p>
+</aside>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>『コンピュータネットワーク』で、TCP が往復時間（RTT）を推定するときに使うのも EMA です。SRTT ← (1 − 1/8) × SRTT + 1/8 × 新しい RTT のサンプル、というもので、RFC 6298 に書かれています。受理率の推定とネットワーク遅延の推定は、同じ種類の問題です。データにはノイズがあり、環境は変わり、メモリも節約したいのです。</p>
+<p>記帳には、落とし穴もあります。このラウンドで 3 個推測し、1 個目がいきなり拒否されたとします。2 個目と 3 個目のドラフトは、どう記録するのでしょうか。これらは比較すらされていません。<strong>観測されていない</strong>のであって、「失敗」ではありません。統計学では、このように「結果が見えていない」状況を<dfn>打ち切り</dfn>（センサリング）と呼びます。</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="図 19-5：1 個目のドラフトが拒否されたあと、正しい記帳は位置 1 の失敗だけを記録する。誤った記帳は、検証されていない位置 2 と 3 も失敗として記録する">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">3 個推測して 1 個目が拒否。残りの位置はどう記帳する？</text>
+<text class="f-text" fill="#182f2b" x="10" y="58" font-size="13" font-weight="600">このラウンド</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="130" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="167.5" y="49" font-size="12" text-anchor="middle">位置 1</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="66" font-size="12" font-weight="600" text-anchor="middle">拒否</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="49" font-size="12" text-anchor="middle">位置 2</text>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="66" font-size="12" text-anchor="middle">未比較</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="300" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="49" font-size="12" text-anchor="middle">位置 3</text>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="66" font-size="12" text-anchor="middle">未比較</text>
+<text class="f-text" fill="#182f2b" x="10" y="112" font-size="13" font-weight="600">正しい記帳</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="129" font-size="12">Strata のやり方</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="120" font-size="12" text-anchor="middle">失敗と記録</text>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="120" font-size="12" text-anchor="middle">記録しない</text>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="120" font-size="12" text-anchor="middle">記録しない</text>
+<text class="f-text" fill="#182f2b" x="10" y="172" font-size="13" font-weight="600">誤った記帳</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="189" font-size="12">未観測も失敗扱い</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="180" font-size="12" text-anchor="middle">失敗と記録</text>
+<text class="f-warn" fill="#9e5d24" x="252.5" y="180" font-size="12" text-anchor="middle">失敗と記録</text>
+<text class="f-warn" fill="#9e5d24" x="337.5" y="180" font-size="12" text-anchor="middle">失敗と記録</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 88H390M10 146H390M10 204H390"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="226" font-size="12">誤った記帳では、p₃ の推定が 0.86³ ≈ 0.64 に向かって下がる</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="244" font-size="12">でも真の値は 0.86 です</text>
+</svg><figcaption>図 19-5　実際に比較された位置だけを記帳します。「見えていない」を「失敗」と記録すると、後ろの位置ほどひどく濡れ衣を着せられます。すると、コントローラは「長いウィンドウは割に合わない」と思い込みます。</figcaption></figure>
+<p>Strata の <code>observe</code> が更新するのは、受理された位置と、最初に拒否された位置だけです。それより後ろの位置には、いっさい触りません。<span class="ev ev-code">コード上の事実</span>[S09] 逆向きの場合もあります。1 ラウンドで推測した分がすべて受理されると、ウィンドウの外の位置は一度も試されていません。それらを永遠に更新しないと、ウィンドウは二度と長くなりません。ソースコードのやり方は、これらの位置の推定を、「観測済みのいちばん深い位置」の推定のほうへ少しだけ動かすことです。<span class="ev ev-code">コード上の事実</span>[S09]</p>
+<p>次のトラッカーで、この 2 つを自分の手で確かめましょう。α のバランスと、記帳の仕方による影響です。</p>
+<div class="viz" data-viz="draft-ema"><figure class="fig"><svg viewBox="0 0 400 296" role="img" aria-label="図 19-6：真の受理率が第 150 ラウンドで 0.86 から 0.55 に下がる。α = 0.05 の推定はなめらかだが遅く、α = 0.3 の推定は速いが乱れる">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">受理率が 0.86 から 0.55 に下がる。2 つの α はどう追う？</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="44" font-size="12" text-anchor="end">1.0</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="119" font-size="12" text-anchor="end">0.5</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="194" font-size="12" text-anchor="end">0</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width=".6" d="M40 40H380M40 115H380M40 190H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="2 3" d="M210 30V190"/>
+<text class="f-muted" fill="#5c6d66" x="214" y="36" font-size="12">話題が変わる</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40.0 61.0L43.4 47.2L46.8 42.5L50.2 40.8L53.6 40.3L57.0 62.1L60.4 47.6L63.8 87.6L67.2 101.3L70.6 92.5L74.0 111.6L77.4 86.6L80.8 56.0L84.2 45.5L87.6 73.4L91.0 51.4L94.4 75.4L97.8 52.2L101.2 44.2L104.6 117.9L108.0 66.7L111.4 49.2L114.8 88.1L118.2 56.5L121.6 45.7L125.0 41.9L128.4 85.7L131.8 55.7L135.2 45.4L138.6 41.8L142.0 72.1L145.4 51.0L148.8 120.3L152.2 112.5L155.6 64.9L159.0 48.5L162.4 42.9L165.8 41.0L169.2 62.4L172.6 92.7L176.0 89.6L179.4 57.0L182.8 45.8L186.2 64.1L189.6 48.2L193.0 42.8L196.4 41.0L199.8 40.3L203.2 40.1L206.6 40.0L210.0 62.1L213.4 124.1L216.8 167.4L220.2 160.2L223.6 179.8L227.0 186.5L230.4 143.8L233.8 75.6L237.2 128.7L240.6 101.9L244.0 83.3L247.4 86.3L250.8 87.4L254.2 56.3L257.6 90.6L261.0 155.9L264.4 79.8L267.8 53.6L271.2 111.7L274.6 131.7L278.0 170.0L281.4 106.6L284.8 94.4L288.2 80.7L291.6 130.5L295.0 124.6L298.4 136.1L301.8 104.4L305.2 93.6L308.6 156.9L312.0 133.7L315.4 139.2L318.8 105.5L322.2 107.5L325.6 116.7L329.0 66.3L332.4 80.5L335.8 98.9L339.2 82.3L342.6 131.0L346.0 124.8L349.4 145.6L352.8 121.2L356.2 99.4L359.6 127.4L363.0 101.5L366.4 114.6L369.8 132.7L373.2 148.3L376.6 130.7L380.0 71.1"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M40.0 61.0L43.4 58.0L46.8 55.4L50.2 53.2L53.6 51.3L57.0 56.5L60.4 54.1L63.8 59.6L67.2 64.3L70.6 68.0L74.0 77.9L77.4 79.3L80.8 73.7L84.2 68.9L87.6 71.9L91.0 67.3L94.4 70.5L97.8 66.2L101.2 62.5L104.6 73.9L108.0 69.0L111.4 64.9L114.8 68.9L118.2 64.7L121.6 61.2L125.0 58.2L128.4 63.1L131.8 59.8L135.2 57.0L138.6 54.6L142.0 59.6L145.4 56.8L148.8 69.0L152.2 72.4L155.6 67.8L159.0 63.8L162.4 60.4L165.8 57.5L169.2 61.8L172.6 66.2L176.0 69.6L179.4 65.3L182.8 61.7L186.2 65.4L189.6 61.8L193.0 58.7L196.4 56.0L199.8 53.7L203.2 51.8L206.6 50.1L210.0 55.4L213.4 67.8L216.8 85.3L220.2 93.4L223.6 107.2L227.0 119.0L230.4 121.6L233.8 110.0L237.2 114.6L240.6 111.1L244.0 107.7L247.4 105.2L250.8 103.0L254.2 94.0L257.6 93.8L261.0 107.5L264.4 97.9L267.8 89.7L271.2 96.8L274.6 103.0L278.0 115.4L281.4 111.4L284.8 108.4L288.2 105.4L291.6 110.7L295.0 114.5L298.4 118.1L301.8 114.1L305.2 110.7L308.6 122.0L312.0 124.2L315.4 126.4L318.8 121.2L322.2 117.2L325.6 120.0L329.0 108.6L332.4 106.0L335.8 104.1L339.2 101.7L342.6 107.5L346.0 111.8L349.4 116.2L352.8 112.8L356.2 109.5L359.6 113.9L363.0 110.5L366.4 114.3L369.8 118.0L373.2 121.5L376.6 123.8L380.0 111.8"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="6 4" d="M40 61H210V107.5H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M10 210H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="214" font-size="12">太線：α = 0.05。なめらかだが、</text>
+<text class="f-text" fill="#182f2b" x="48" y="230" font-size="12">話題が変わると追いつくまで十数ラウンド</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M10 250H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="254" font-size="12">細線：α = 0.3。速く追うが、上下に乱れる</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="6 4" d="M10 276H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="280" font-size="12">破線：真の受理率（コントローラには見えない）</text>
+</svg><figcaption>図 19-6　横軸はラウンド数（全 300 ラウンド）、縦軸は 1 個目のドラフトの受理率の推定です。α が小さいと、推定は安定しますが半拍遅れます。α が大きいと、反応は速いですが、ノイズに振り回されます。受理かどうかは、乱数によるシミュレーションです。<span class="ev ev-est">教育用の試算</span></figcaption></figure></div>
+<p>後ろの位置ほど、比較される機会は少なくなります。3 個目のドラフトは、最初の 2 個がどちらも受理されたときにだけ、記帳が 1 回あります。だから、深い位置の推定は、浅い位置より更新が遅くなります。トラッカーで話題が変わったあと、p₃ の曲線が p₁ よりはっきり鈍いのは、そのためです。<span class="ev ev-est">教育用の試算</span></p>
+
+<h2 id="sec-5">19.5 Strata が実際に動かしているのはどれか</h2>
+<p>ここまで説明してきたコントローラは、<code>src/spec/controller.cpp</code> にあります。これは <code>strata_spec</code> ライブラリにコンパイルされ、専用の単体テスト <code>controller_test</code> も持っています。<span class="ev ev-code">コード上の事実</span> ところが、生成のメインプログラム <code>generate.cpp</code>（実行ファイル <code>strata</code> のソースです）を開くと、読み込んでいるのは別のヘッダファイル <code>draft_policy.hpp</code> です。生成ループが呼ぶのは <code>DraftPolicy</code> です。この本で調べたエンジンのソースコードには、<code>Controller</code> を呼ぶ箇所は見つかりませんでした。<span class="ev ev-code">コード上の事実</span> 図 19-7 に、2 つを並べました。</p>
+<figure class="fig"><svg viewBox="0 0 400 268" role="img" aria-label="図 19-7：Controller は式のモデルでコストを見積もって MTP のウィンドウを決めるが、呼ばれるのは単体テストだけ。DraftPolicy は実測した時間で、検索ドラフトに切り替えるかどうかだけを決め、生成メインループから呼ばれる">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="185" height="200" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="32" font-size="13" font-weight="600">Controller</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="50" font-size="12">src/spec/controller.cpp</text>
+<text class="f-text" fill="#182f2b" x="22" y="76" font-size="12">MTP の推測数を決める</text>
+<text class="f-text" fill="#182f2b" x="22" y="100" font-size="12">検索ドラフトも比較</text>
+<text class="f-text" fill="#182f2b" x="22" y="124" font-size="12">コスト：式のモデル</text>
+<text class="f-text" fill="#182f2b" x="22" y="148" font-size="12">受理率：EMA、α = 0.05</text>
+<text class="f-text" fill="#182f2b" x="22" y="172" font-size="12">しきい値：5% 速ければ使う</text>
+<text class="f-warn" fill="#9e5d24" x="22" y="196" font-size="12">呼び出し元：単体テスト</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="10" width="185" height="200" rx="8"/>
+<text class="f-text" fill="#182f2b" x="217" y="32" font-size="13" font-weight="600">DraftPolicy</text>
+<text class="f-muted" fill="#5c6d66" x="217" y="50" font-size="12">src/spec/draft_policy.cpp</text>
+<text class="f-text" fill="#182f2b" x="217" y="76" font-size="12">MTP は --spec で固定</text>
+<text class="f-text" fill="#182f2b" x="217" y="100" font-size="12">決めるのは検索への切替だけ</text>
+<text class="f-text" fill="#182f2b" x="217" y="124" font-size="12">コスト：実測した所要時間</text>
+<text class="f-text" fill="#182f2b" x="217" y="148" font-size="12">MTP の出力：実測の平均</text>
+<text class="f-text" fill="#182f2b" x="217" y="172" font-size="12">しきい値：3% 速ければ切替</text>
+<text class="f-text" fill="#182f2b" x="217" y="196" font-size="12" font-weight="600">呼び出し元：生成ループ</text>
+<text class="f-text" fill="#182f2b" x="200" y="236" font-size="12" text-anchor="middle">どちらも目標は同じ：1 ミリ秒あたりの期待コミット数</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="256" font-size="12" text-anchor="middle">違いは分母：式で見積もるか、ストップウォッチで測るか</text>
+</svg><figcaption>図 19-7　同じ目的関数に、2 つの実装があります。生成ループの中で実際に判断しているのは、右側です。コストを式で推測するのをやめ、各ウィンドウが実際にどれだけかかったかを記録しています。</figcaption></figure>
+<p>まず MTP の側です。生成ループでは、MTP のウィンドウ長は、起動パラメータ <code>--spec</code> から決まります。最初のラウンドを除いて、毎ラウンド固定です。短くなるのは、<code>--spec-min-p</code> を設定したときだけです。ドラフト層があるドラフトに持つ確信が、このしきい値より低ければ、それ以上ウィンドウに加えません。<span class="ev ev-code">コード上の事実</span> 上流のドキュメントでは、MTP は一度に最大 3 個を推測する、と説明されています。<span class="ev ev-report">上流レポート</span>[S02]</p>
+<p><code>DraftPolicy</code> が受け持つのは、別のことです。<dfn>プロンプト検索</dfn>（prompt lookup）です。今書いている内容が、コンテキストにある一節を繰り返しているとします。たとえばコードの修正で、元の数行をそのままコピーするような場合です。すると、前回その一節の後ろに何が続いたかは、今回もたぶん同じです。それをそのままドラフトに使えます。検索ドラフトは最大 5 個で、実測した受理率とコストの両方が「お得」と言うときだけ使います。上流のレポートでは、コードの修正で 6〜11% 速くなり、ふつうの文章では変わりません。<span class="ev ev-report">上流レポート</span>[S02] 生成ループには、もう 1 つ前提があります。MTP が有効なとき、検索ドラフトの最初のトークンが MTP 自身の最初のドラフトと一致して初めて、<code>DraftPolicy</code> に判断を任せます。<span class="ev ev-code">コード上の事実</span></p>
+<p><code>DraftPolicy</code> のアルゴリズムは、この章の式のままです。検索の側は E(k) = 1 + q + q² + … + qᵏ で、q は「どれだけ長く一致したか」でバケット分けして統計した受理率です。MTP の側は、実測した 1 ラウンドあたりの平均出力をそのまま使います。分母はもう式ではなく、ウィンドウの長さごとに実測した 1 ラウンドの時間です。これを α = 0.1 の EMA でなめらかにします。まだ測っていない長さは、あらかじめ決めた形の曲線から、測った長さを使って換算します。検索ウィンドウは、MTP ウィンドウより 3% 以上速いときにだけ選ばれます。<span class="ev ev-code">コード上の事実</span></p>
+<p>これは、よい工学の教訓です。コストモデルをどんなに細かく作っても、直接測ることにはかないません。マシンが違えば、コンテキストの長さが違えば、1 ラウンドの時間は変わります。実測値は、自然にマシンに合わせて変わります。</p>
+
+<h2 id="sec-6">19.6 手を動かす：最良のウィンドウを自分で探す</h2>
+<p>この章のインタラクティブ実験「ドラフトは何トークン先まで推測する価値があるか」を開きます。もっと単純なコストの式を使います。基準の時間に、ドラフト 1 個ごとに固定の検証コストと推測コストを足し、どの位置にも同じ受理率 p を使います。k = 0 から 5 まで、期待トークン数、時間、正味の利益を比べます。</p>
+<ol>
+<li>p を 0 にします。どの k でも期待値は 1 で、ドラフトは時間を増やすだけです。最良の答えは k = 0 になるはずです。</li>
+<li>p を 1 にします。期待値はちょうど k + 1 です。いちばん長いウィンドウが、いつも勝つかどうか見てみましょう。</li>
+<li>p はそのままにして、ドラフトのコストを大きくします。最良の k が 0 に戻る点を探してください。</li>
+</ol>
+<p>終わったら、この章の 2 つのインタラクティブ図と見比べましょう。実験のコストは直線です。Strata のコストモデルでは、エキスパートの共有によって、CPU の部分は直線よりゆっくり増えます。一方、密な部分の倍率は、ウィンドウが 5 トークンになるところで大きく跳ね上がります。コスト曲線の形が違えば、山頂の位置も動きます。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>1 ラウンドの期待コミット数は E = 1 + p₁ + p₁p₂ + … です。1 個多く推測するたびに、貢献は受理率をもう 1 回掛けた分になり、利益は減っていきます。p = 0.86 のとき、無限に推測しても 7.1 個を超えません。</li>
+<li>最適化するのは、速度 = E ÷ 1 ラウンドの時間です。ウィンドウが広いほど検証は高くなるので、速度の曲線には山頂があります。しかも、推測なしよりひとまわり速くなければ、推測する価値はありません。</li>
+<li>受理率は、走りながら EMA で推定します。α が大きいと反応は速いが揺れ、α が小さいと安定するが遅くなります。比較されなかった位置は「見えていない」のであって、失敗と記録してはいけません。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「受理率が高いほど、速度はかならず速い。」</strong></p>
+<p>受理率は、分子の一部にすぎません。もっと賢いけれど遅いドラフト方式に替えたとします。1 ラウンドの期待値は 2 個から 2.5 個に増えましたが、1 ラウンドの時間は 10 ms から 15 ms に増えました。すると速度は、毎秒 200 個から約 167 個に落ちます。<span class="ev ev-est">教育用の試算</span> ドラフト方式がよいかどうかは、1 ミリ秒あたり何トークンをコミットできるかで判断します。どれだけ当たったかだけを見てはいけません。</p></div>
+
+<details class="deep"><summary>もう一歩深く：条件付き確率、打ち切り、探索、受け入れ基準</summary>
+<h3>期待値の公式に、独立の仮定は要らない</h3>
+<p>pᵢ は「最初の i − 1 個がすべて受理されたとき、i 番目も受理される条件付き確率」と定義しました。i 番目のドラフトが貢献するのは、最初の i 個がすべて受理されたときだけです。その確率は、条件付き確率の乗法公式から、そのまま p₁p₂…pᵢ になります。各位置が互いに独立だと主張する必要はありません。例：p = [0.8, 0.6, 0.5] のとき、E = 1 + 0.8 + 0.48 + 0.24 = 2.52 です。ドラフト作成と検証で 1 ラウンドが 18 ms なら、速度は約 140 token/s です。推測しない場合は 1 ラウンド 8 ms で、速度は 125 token/s、正味の利益は約 12% です。これらは教育用の例題で、Strata のベンチマークではありません。<span class="ev ev-est">教育用の試算</span></p>
+<p>ソースコードの <code>expected</code> には、2 通りの使い方があります。MTP は位置ごとの配列を使います。検索ドラフトは、どの位置にも同じ q を使うので、等比数列です。<span class="ev ev-code">コード上の事実</span>[S09]</p>
+<h3>コストモデルを項目ごとに</h3>
+<p><code>step_ms(k)</code> では、n = k + 1 で、1 から K_MAX + 1 の間に切り詰められます。密な部分 = <code>dense_ms × dense_ratio[n−1]</code>。CPU の部分 = (1 − ヒット率) × <code>cpu_all_miss_ms</code> × U × (1 + <code>extra_use_cost</code> × (n ÷ U − 1)) です。ここで U は、ウィンドウ内の異なるエキスパートの数が、1 トークンの場合の何倍かを表します。n ÷ U は、1 つのエキスパートを平均して何トークンが使うか、です。ドラフト作成の部分 = k × ドラフト 1 個あたりの時間。<span class="ev ev-code">コード上の事実</span>[S09] ヘッダファイルの既定値は次のとおりです。K_MAX = 8。<code>extra_use_cost</code> = 0.25 で、同じエキスパートを使うトークンが 1 個増えるごとに、読み込み 1 回ぶんの 25% しか増えない、という意味です。検索ドラフトは 1 個 0.01 ms で、ほぼ無料です。<span class="ev ev-code">コード上の事実</span></p>
+<p>「重みは 1 回だけ読む」という理想のケースを、すべてのドラフトに無条件に当てはめると、利益を見積もりすぎます。エキスパートの再利用をまったく考えないと、今度は見積もりが低くなります。U の具体的な値はルーティングで決まるので、測らなければなりません。</p>
+<h3>事前分布は物理定数ではない</h3>
+<p>MTP の初期受理率 0.86 と、検索ドラフトの一致長さ別バケットの事前分布 {0.35, 0.6, 0.8, 0.92} は、どちらも出発点にすぎません。コメントによると、前者は同じモデルでの測定から、後者はオフラインの再生から来ています。そのあとはどちらも、セッションの中で学習されます。<span class="ev ev-code">コード上の事実</span>[S09] 言語、量子化、タスクが変われば、ドラフトの品質もエキスパートの再利用も変わります。<code>DraftPolicy</code> の検索の事前分布は別物で、{0.75, 0.88, 0.93, 0.96} です。どの事前分布も 4 回の観測に相当し、数ラウンドの実データで上書きできます。古い観測は、毎ラウンド 0.97 を掛けて減衰させます。<span class="ev ev-code">コード上の事実</span></p>
+<h3>打ち切り、ウィンドウの外の位置、「探索」</h3>
+<p>最初のドラフトが拒否されると、後ろの位置は「先頭部分がすべて受理されている」という条件を満たしません。だから未観測です。それらを 0 と記録すると、自己強化が起きます。ウィンドウが短いほど深い位置は悪く見え、コントローラは長いウィンドウをますます試したがらなくなります。全部受理された場合は逆です。ウィンドウの外の位置は一度も試されていません。ソースコードは、それらを、観測済みのいちばん深い位置の推定のほうへ引き寄せます。そうしないと、ウィンドウは永遠に長くなりません。<span class="ev ev-code">コード上の事実</span>[S09]</p>
+<p><code>Controller</code> の 2 つの関数だけを見ると、もう 1 つ注意すべき境界があります。「推測しない」を選んだあと、<code>observe</code> はすぐに戻り、推定は更新されなくなります。<span class="ev ev-code">コード上の事実</span>[S09] ノイズが推定を一度しきい値より下に押し下げると、この 2 つの関数だけでは二度と学び直せません。呼び出し側が別に探索する必要があります。（この章のモジュールには、これを実演するテストが 1 つあります。）<code>DraftPolicy</code> には明示的な探索があります。所要時間をまだ測っていない検索ウィンドウは、受理率の推定が 0.85 以上なら、最初の 3 回は無条件に試されます。コメントによると、検証が出力の不変を保証しているので、賭けているのはそのラウンドの速度だけです。<span class="ev ev-code">コード上の事実</span></p>
+<h3>ドラフトのせいで出力が変わることはないか</h3>
+<p>原理的にはありません。コミットされるトークンは、どれもターゲットモデル自身の選択だからです。ただし、上流のドキュメントは、浮動小数点の水準での例外を指摘しています。IQ 量子化のモデルを使うと、CPU が 1 トークンぶんのエキスパートを計算するときと、複数トークンぶんを計算するときで、使うカーネルが違い、丸めが少し違います。そして 1 つのエキスパートを何トークンで共有するかは、検証ウィンドウ内のドラフトに左右されます。だから温度 0 でも、同じプロンプトが、同じくらいもっともらしい別の回答になることがあります。<code>STRATA_IQ_MT_MIN=1</code> を設定すると、すべてのグループが複数トークン用のカーネルを使い、答えはドラフトに依存しなくなります。<span class="ev ev-report">上流レポート</span>[S03]</p>
+<h3>受け入れ基準</h3>
+<p>ウィンドウコントローラを検査するときは、きれいな曲線より、境界のほうが説得力があります。</p>
+<ul>
+<li>ドラフトのコストが非常に高いとき、k = 0 に戻れること。</li>
+<li>p = 0 のとき、余分なドラフトが、見せかけの利益を生まないこと。</li>
+<li>p = 1 のとき、E がちょうど k + 1 になること。</li>
+<li>未観測の位置を失敗として数えないこと。全部受理のとき、ウィンドウの外の位置が引き上げられること。</li>
+<li>推測なしよりしきい値の分だけ速くならないときは、推測しないままでいること。</li>
+</ul>
+<p>この章のインタラクティブ図の計算モジュールは、これらの境界についてテストを書き、コスト関数もソースコードの既定値と 1 項ずつ照合しています。上流自身の <code>controller_test</code> が調べているのも、同じ種類の性質です。事前分布のもとでドラフトが 2〜5 個選ばれること。拒否され続けると投機が止まること。全部当たり続けるとウィンドウが広がること。<span class="ev ev-code">コード上の事実</span></p>
+</details>

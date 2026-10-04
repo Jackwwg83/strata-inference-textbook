@@ -1,0 +1,302 @@
+<div class="hook"><span class="eyebrow">2 枚なのに、なぜ 2 倍にならないのか</span>
+<p>Strata の README に、こんな一文があります。2〜3 枚の GPU（グラフィックスカード）でこのモデルをいっしょに動かせます。<span class="ev ev-report">上流レポート</span>[S01] 上流のドキュメントには実測値も載っています。RTX 5080 に RTX 3090 を足すと、長いプロンプトを読む速さは約 2 割上がります。ところが、答えを生成する速さは、5080 だけのときとほぼ同じです。</p>
+<p>24 GB の GPU をもう 1 枚挿したのに、答えは速くなりません。お金はどこへ消えたのでしょうか。この章では 3 つのことをはっきりさせます。2 枚の GPU がどう分担するのか。なぜ 1 つの token は速くならないのか。そして、2 枚の GPU のあいだで、実際にどれだけのデータをやり取りするのか。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>Strata は 48 層を前半と後半に切り、1 枚が 1 つの区間を担当します。1 つの token は、前の GPU を通ってから後ろの GPU を通ります。だから token 1 個あたりの速さは変わりません。本当の利点は 2 つです。2 枚ぶんで、エキスパートを 2 倍近くキャッシュできること。そして、プロンプトを読むとき、2 枚が流れ作業のように同時に働くことです。</p>
+
+<h2 id="sec-1">21.1 2 枚の GPU は、どう分担できるか</h2>
+<p>2 人で引っ越しをするところを想像してください。1 人が寝室、もう 1 人がリビングを運ぶ方法があります。2 人で大きなソファを 1 つ抱える方法もあります。それぞれが自分の家を運ぶ方法もあります。どれも「2 人でやる」ことですが、相談する回数はまったく違います。複数の GPU でも同じで、よくある分担は 3 種類あります。図 21-1 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 238" role="img" aria-label="図 21-1：複数 GPU の 3 つの分担。レイヤー分割は GPU ごとに何層かを担当し、テンソル並列は同じ層を分割して計算し、リクエスト並列は GPU ごとにモデル全体を持つ">
+<text class="f-text" fill="#182f2b" x="69" y="18" font-size="13" font-weight="600" text-anchor="middle">レイヤー分割</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="35" font-size="12" text-anchor="middle">パイプライン並列</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">テンソル並列</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="35" font-size="12" text-anchor="middle">同じ層を分割して計算</text>
+<text class="f-text" fill="#182f2b" x="331" y="18" font-size="13" font-weight="600" text-anchor="middle">リクエスト並列</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="35" font-size="12" text-anchor="middle">データ並列</text>
+<rect class="f-accent" fill="#136d5a" x="14" y="50" width="110" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="69" y="66" font-size="12" text-anchor="middle">GPU A</text>
+<text class="f-on" fill="#ffffff" x="69" y="82" font-size="12" text-anchor="middle">第 0–18 層</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M69 90V104"/>
+<rect class="f-soft" fill="#e5f1df" x="14" y="106" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="69" y="122" font-size="12" text-anchor="middle">GPU B</text>
+<text class="f-text" fill="#182f2b" x="69" y="138" font-size="12" text-anchor="middle">第 19–47 層</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="50" width="110" height="96" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="66" font-size="12" text-anchor="middle">同じ層の行列</text>
+<rect class="f-accent" fill="#136d5a" x="151" y="74" width="47" height="64" rx="4"/>
+<text class="f-on" fill="#ffffff" x="174.5" y="102" font-size="12" text-anchor="middle">A</text>
+<text class="f-on" fill="#ffffff" x="174.5" y="120" font-size="12" text-anchor="middle">左半分</text>
+<rect class="f-soft" fill="#e5f1df" x="202" y="74" width="47" height="64" rx="4"/>
+<text class="f-text" fill="#182f2b" x="225.5" y="102" font-size="12" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="225.5" y="120" font-size="12" text-anchor="middle">右半分</text>
+<rect class="f-accent" fill="#136d5a" x="276" y="46" width="110" height="52" rx="6"/>
+<text class="f-on" fill="#ffffff" x="331" y="62" font-size="12" text-anchor="middle">GPU A</text>
+<text class="f-on" fill="#ffffff" x="331" y="76" font-size="12" text-anchor="middle">モデル全体</text>
+<text class="f-on" fill="#ffffff" x="331" y="90" font-size="12" text-anchor="middle">リクエスト 1</text>
+<rect class="f-soft" fill="#e5f1df" x="276" y="104" width="110" height="52" rx="6"/>
+<text class="f-text" fill="#182f2b" x="331" y="120" font-size="12" text-anchor="middle">GPU B</text>
+<text class="f-text" fill="#182f2b" x="331" y="134" font-size="12" text-anchor="middle">モデル全体</text>
+<text class="f-text" fill="#182f2b" x="331" y="148" font-size="12" text-anchor="middle">リクエスト 2</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M134.5 8V230M265.5 8V230"/>
+<text class="f-text" fill="#182f2b" x="69" y="176" font-size="12" text-anchor="middle">GPU 間の通信：</text>
+<text class="f-text" fill="#182f2b" x="69" y="191" font-size="12" text-anchor="middle">1 ウィンドウに 1 回</text>
+<text class="f-text" fill="#182f2b" x="200" y="176" font-size="12" text-anchor="middle">GPU 間の通信：</text>
+<text class="f-text" fill="#182f2b" x="200" y="191" font-size="12" text-anchor="middle">1 層に 2 回</text>
+<text class="f-text" fill="#182f2b" x="331" y="176" font-size="12" text-anchor="middle">GPU 間の通信：</text>
+<text class="f-text" fill="#182f2b" x="331" y="191" font-size="12" text-anchor="middle">ほぼ不要</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="211" font-size="12" text-anchor="middle">節約するのは VRAM</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="211" font-size="12" text-anchor="middle">高速な接続が前提</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="211" font-size="12" text-anchor="middle">多人数の同時利用向け</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="229" font-size="12" text-anchor="middle">Strata はこれを採用</text>
+</svg><figcaption>図 21-1　3 つの分担の違いは「どれくらいの頻度で相談するか」です。レイヤー分割は、検証ウィンドウ 1 つにつき GPU 間の通信が 1 回だけです。テンソル並列は、層ごとに同期します。リクエスト並列はほとんど相談しませんが、どの GPU もモデル全体を収められる必要があります。</figcaption></figure>
+<p>Strata が使うのは 1 つ目の<dfn>レイヤー分割</dfn>です。モデルの層を順番に何区間かに切り、GPU ごとに連続した 1 区間を担当させます。上流のドキュメントははっきり書いています。これはパイプライン（層ごとの）並列であり、テンソル並列ではありません。1 つの token は、検証ウィンドウごとに 1 回だけ、ある GPU から次の GPU へ渡ります。層ごとに 2 回渡るわけではありません。<span class="ev ev-report">上流レポート</span></p>
+<p>コードでは、この仕組みは <code>set_stage</code> という関数にあります。各<dfn>ステージ</dfn>（stage、1 枚の GPU が担当する層の区間）は、<code>[layer_begin, layer_end)</code> の層だけを実行します。第 0 層から始まらないステージは、前の区間からデータを受け取ります。最後の層の手前で終わるステージは、データを次へ渡します。このとき出力ヘッドは持ちません。<span class="ev ev-code">コード上の事実</span>[S08]</p>
+<aside class="primer" id="c21-parallelism">
+<h3>パイプライン並列とテンソル並列</h3>
+<p>大きなモデルが 1 枚の GPU に収まらないとき、切り方は大きく 2 つあります。横に切って、層ごとに区間を分ける方法が<dfn>パイプライン並列</dfn>です。工場の流れ作業のように、第 1 工程が終わったら第 2 工程へ渡します。縦に切って、同じ層の大きな行列を何枚かに分ける方法が<dfn>テンソル並列</dfn>です。2 人でソファを抱えるように、一歩ごとに「せーの」と声をかけて合わせます。</p>
+<p>2 つの切り方は、コストのかかる場所が違います。パイプラインは、区間の境目で 1 回データを渡すだけです。ただし 1 つのデータは、前の区間を通り終えてからでないと次の区間に入れません。1 つのデータの待ち時間は、減らせません。テンソル並列では、同じ層を 2 枚の GPU が本当に同時に計算します。その代わり、層を計算するたびに、2 つの半分の結果を合わせる必要があります。古典的な Megatron-LM の方式では、Transformer の 1 層の順伝播で、この合わせる作業を 2 回します。48 層なら 96 回です。</p>
+<p>3 つ目は<dfn>データ並列</dfn>です（ここではリクエスト並列と呼びます）。各 GPU がモデル全体を持ち、別々のリクエストを処理します。GPU 間の相談はほとんど要りません。ただし、1 枚にモデル全体が収まることが前提です。</p>
+<p>Strata が向き合うのは「1 枚に収まらない」問題です。そして家庭用 PC の GPU 同士は、ふつう PCIe でつながっているだけで、専用の高速線はありません。そこで、相談がいちばん少ないレイヤー分割を選びました。</p>
+<p class="further">参考リンク：<a href="https://ja.wikipedia.org/wiki/パイプライン処理" target="_blank" rel="noopener noreferrer">Wikipedia：パイプライン処理</a> · <a href="https://ja.wikipedia.org/wiki/並列計算" target="_blank" rel="noopener noreferrer">Wikipedia：並列計算</a> · <a href="https://pytorch.org/docs/stable/distributed.pipelining.html" target="_blank" rel="noopener noreferrer">PyTorch ドキュメント：Pipeline Parallelism</a> · <a href="https://huggingface.co/docs/transformers/perf_train_gpu_many" target="_blank" rel="noopener noreferrer">Hugging Face：複数 GPU の並列方式の比較</a> · <a href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener noreferrer">Megatron-LM 論文</a></p>
+</aside>
+
+<h2 id="sec-2">21.2 1 つの token は、やはり層を順番に待つ</h2>
+<p>答えを生成するとき、token は 1 つずつ、第 0 層から第 47 層まで進みます。第 19 層は第 18 層の結果を使い、第 18 層は第 17 層の結果を使います。この依存の鎖は切れません。だから、前の GPU が前半を計算しているあいだ、後ろの GPU は待つしかありません。後ろの GPU が後半を計算しているあいだは、前の GPU も遊んでいます。図 21-2 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="図 21-2：1 つの token を生成するとき、GPU A が前半の層を計算し終えると、GPU B に渡して後半の層を計算する。2 枚は交互に働き、交互に待つ">
+<text class="f-muted" fill="#5c6d66" x="8" y="18" font-size="12">1 つの token を生成する時間軸（模式図、横軸は時間）</text>
+<text class="f-text" fill="#182f2b" x="8" y="56" font-size="12">GPU A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="40" width="330" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="40" width="130" height="24"/>
+<text class="f-on" fill="#ffffff" x="125" y="56" font-size="12" text-anchor="middle">第 0–18 層</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="56" font-size="12" text-anchor="middle">待機</text>
+<text class="f-text" fill="#182f2b" x="8" y="100" font-size="12">GPU B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="84" width="330" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="214" y="84" width="176" height="24"/>
+<text class="f-on" fill="#ffffff" x="302" y="100" font-size="12" text-anchor="middle">第 19–47 層 + 出力ヘッド</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="100" font-size="12" text-anchor="middle">待機</text>
+<rect class="f-warn" fill="#9e5d24" x="190" y="68" width="24" height="12"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M190 64L202 68M214 80L214 84"/>
+<text class="f-text" fill="#182f2b" x="8" y="130" font-size="12">受け渡し：token 1 個あたり 51,216 バイト、RAM 経由</text>
+<text class="f-text" fill="#182f2b" x="8" y="156" font-size="12" font-weight="600">同じ token は A を通ってから B。同時には動けない</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="178" font-size="12">層番号は上流ログの K = 19 の分割から。時間の長さは模式</text>
+</svg><figcaption>図 21-2　答えを生成するとき、1 つの token は、前の GPU の層を通り終えてから、後ろの GPU に入ります。2 枚は交互に働き、交互に待ちます。だから、1 つの token の時間は半分になりません。</figcaption></figure>
+<p>上流ドキュメントの実測も、これを裏づけています。RTX 5080 に RTX 3090 を足しても、生成速度は 5080 単体とほぼ同じです。コードを書かせたときは、少し速くなりました。<span class="ev ev-report">上流レポート</span>（Coder モデル、32K コンテキスト、CPU は Ryzen 9 9950X3D。物語の生成は、単体が毎秒 83〜87 token、2 枚の最良の分割が毎秒 84 token。コードの生成は、それぞれ 88〜105 と 110。ドキュメントにエンジンのバージョンは書かれておらず、結果ディレクトリの日付は 2026-09-29 です。）</p>
+<p>では、2 枚目の GPU は何のためにあるのでしょうか。狙いは<strong>容量</strong>です。第 10 章で見たとおり、VRAM に載らなかったエキスパートは CPU が RAM の上で計算します。CPU の計算は遅いのです。レイヤー分割をすると、各 GPU は自分が担当する層のエキスパートだけをキャッシュします。2 枚ぶんを合わせると、1 枚のときの約 2 倍のエキスパートをキャッシュできます。上流ドキュメントによると、Coder モデルでは、16 GB と 24 GB の 2 枚で、ほぼ全エキスパートが収まります。「速度はここから来る」のです。生成のあいだ、CPU はほとんど出番がありません。<span class="ev ev-report">上流レポート</span> 図 21-3 は、各 GPU に何を置くかを示します。</p>
+<figure class="fig"><svg viewBox="0 0 400 322" role="img" aria-label="図 21-3：レイヤー分割のあと、各 GPU は密な重みのコピー、自分のセッション状態、プロンプト用バッファ、自分の層のエキスパートキャッシュを持つ。最後の GPU には出力ヘッドとドラフト層が加わる。RAM のエキスパートは 1 部だけ">
+<text class="f-text" fill="#182f2b" x="102" y="22" font-size="13" font-weight="600" text-anchor="middle">GPU A（メインカード）</text>
+<text class="f-text" fill="#182f2b" x="297" y="22" font-size="13" font-weight="600" text-anchor="middle">GPU B（最後のカード）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="30" width="185" height="182" rx="8"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="30" width="185" height="182" rx="8"/>
+<rect class="f-soft" fill="#e5f1df" x="20" y="40" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="56" font-size="12" text-anchor="middle">密な重みのコピー 約 3.4 GB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="68" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="84" font-size="12" text-anchor="middle">自分の状態（KV 含む）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="96" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="112" font-size="12" text-anchor="middle">プロンプト用 約 1.5 GB</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="124" width="165" height="78" rx="4"/>
+<text class="f-on" fill="#ffffff" x="102.5" y="148" font-size="12" text-anchor="middle">第 0–18 層の</text>
+<text class="f-on" fill="#ffffff" x="102.5" y="166" font-size="12" text-anchor="middle">エキスパートキャッシュ</text>
+<text class="f-on" fill="#ffffff" x="102.5" y="184" font-size="12" text-anchor="middle">残りの VRAM をすべて充てる</text>
+<rect class="f-soft" fill="#e5f1df" x="215" y="40" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="56" font-size="12" text-anchor="middle">密な重みのコピー 約 3.4 GB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="68" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="84" font-size="12" text-anchor="middle">自分の状態（KV 含む）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="96" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="112" font-size="12" text-anchor="middle">プロンプト用 約 1.5 GB</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="215" y="124" width="165" height="36" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="140" font-size="12" text-anchor="middle">出力ヘッド + ドラフト層</text>
+<text class="f-text" fill="#182f2b" x="297.5" y="154" font-size="12" text-anchor="middle">約 0.8 GB</text>
+<rect class="f-accent" fill="#136d5a" x="215" y="164" width="165" height="38" rx="4"/>
+<text class="f-on" fill="#ffffff" x="297.5" y="180" font-size="12" text-anchor="middle">第 19–47 層の</text>
+<text class="f-on" fill="#ffffff" x="297.5" y="195" font-size="12" text-anchor="middle">エキスパートキャッシュ</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M102 212V232M297 212V232"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="232" width="380" height="50" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="252" font-size="12" text-anchor="middle">RAM：全エキスパートを 1 部だけ置き、2 枚で共有</text>
+<text class="f-text" fill="#182f2b" x="200" y="270" font-size="12" text-anchor="middle">誰もキャッシュしないエキスパートは CPU が計算</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="300" font-size="12" text-anchor="middle">GB の数字は、上流が Coder モデルに示した概数</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="316" font-size="12" text-anchor="middle">プロンプト用は、既定のチャンク 2048 で計算</text>
+</svg><figcaption>図 21-3　密な重みは、各 GPU に 1 部ずつ置きます。エキスパートキャッシュは、自分の層ぶんだけです。レイヤー分割で得られるのは、おもに「キャッシュできるエキスパートが 2 倍になること」です。</figcaption></figure>
+<p>代償にも注意してください。密な重みは、どの GPU にもコピーを置く必要があります。どの GPU にも、自分のセッション状態とプロンプト用バッファが要ります。だから上流は、VRAM が 8 GB に満たない GPU を一緒に使うことを勧めていません。<span class="ev ev-report">上流レポート</span></p>
+
+<h2 id="sec-3">21.3 プロンプトを読むときに、パイプラインが回り出す</h2>
+<p>プロンプトを読むときは事情が違います。長いプロンプトは、読む前から全部分かっています。Strata はそれを多くの<dfn>チャンク</dfn>（chunk）に切って、1 チャンクずつ読みます。分割については第 16 章で見ました。すると、2 枚の GPU は作業をずらせます。後ろの GPU が第 c チャンクを読んでいるとき、前の GPU はもう第 c+1 チャンクを読んでいます。prefill インターフェースのコメントが書いているのは、まさにこれです。最後の層の手前のステージは、データを<strong>2 つ</strong>のピン留めメモリのバッファにコピーします。別のスレッドで次のステージを起動します。「次のステージが第 c チャンクを読んでいるあいだ、このステージが第 c+1 チャンクを読めるように」です。<span class="ev ev-code">コード上の事実</span>[S12]</p>
+<p>洗濯にたとえましょう。洗濯機は 1 回分を洗うのに 4 分、乾燥機は 1 回分を乾かすのに 5 分かかるとします。洗濯物が 1 回分なら、どうやっても 9 分です。8 回分あるなら、1 回目が乾燥機に入ったとき、2 回目を洗濯機に入れられます。乾燥機がリズムを決めます。5 分ごとに 1 回分が出てきます。合計は、最初の 4 分に、乾燥 8 回ぶんの 40 分を足して、44 分です。全部を直列にやれば 8 × 9 = 72 分かかります。</p>
+<p>最初の「乾燥機が 1 回目を待っている」時間と、最後の「洗濯機にもう洗うものがない」時間を、<dfn>バブル</dfn>と呼びます。パイプラインのどこかの持ち場が、空いて待っている時間です。下のシミュレータは、2 枚の GPU を時間軸で描きます。各区間の時間、チャンク数、転送時間を変えて、バブルがどこにできるか見てみましょう。</p>
+<div class="viz" data-viz="layer-pipeline"><figure class="fig"><svg viewBox="0 0 400 244" role="img" aria-label="図 21-4：2 枚の GPU のパイプライン時間軸。a は 4 ミリ秒、b は 5 ミリ秒、4 チャンクで合計 24 ミリ秒。最初と最後に待ち時間がある">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="12">プロンプトを 4 チャンク読む：A は 1 チャンク 4 ms、</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="32" font-size="12">B は 1 チャンク 5 ms、転送は無視</text>
+<text class="f-text" fill="#182f2b" x="8" y="71" font-size="12">GPU A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="52" width="324" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="53" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="114" y="53" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="181.5" y="53" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="249" y="53" width="52.5" height="26"/>
+<text class="f-on" fill="#ffffff" x="86" y="71" font-size="12" text-anchor="middle">1</text>
+<text class="f-on" fill="#ffffff" x="140" y="71" font-size="12" text-anchor="middle">2</text>
+<text class="f-on" fill="#ffffff" x="207.5" y="71" font-size="12" text-anchor="middle">3</text>
+<text class="f-on" fill="#ffffff" x="275" y="71" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="343" y="71" font-size="12" text-anchor="middle">待機</text>
+<text class="f-text" fill="#182f2b" x="8" y="119" font-size="12">GPU B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="100" width="324" height="28"/>
+<text class="f-muted" fill="#5c6d66" x="87" y="119" font-size="12" text-anchor="middle">待機</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="114" y="101" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="181.5" y="101" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="249" y="101" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="316.5" y="101" width="66" height="26"/>
+<text class="f-text" fill="#182f2b" x="147" y="119" font-size="12" text-anchor="middle">1</text>
+<text class="f-text" fill="#182f2b" x="214.5" y="119" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="282" y="119" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="349.5" y="119" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="60" y="146" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="114" y="146" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="181.5" y="146" font-size="12" text-anchor="middle">9</text>
+<text class="f-muted" fill="#5c6d66" x="249" y="146" font-size="12" text-anchor="middle">14</text>
+<text class="f-muted" fill="#5c6d66" x="316.5" y="146" font-size="12" text-anchor="middle">19</text>
+<text class="f-muted" fill="#5c6d66" x="384" y="146" font-size="12" text-anchor="end">24 ms</text>
+<text class="f-text" fill="#182f2b" x="60" y="168" font-size="12">充填：B が、A の第 1 チャンクを待つ</text>
+<text class="f-text" fill="#182f2b" x="60" y="186" font-size="12">排出：A は読み終え、B が仕上げる</text>
+<text class="f-text" fill="#182f2b" x="10" y="212" font-size="12">4 チャンクで 24 ms = 5 × 4 + 4</text>
+<text class="f-text" fill="#182f2b" x="10" y="230" font-size="12">1 枚で直列なら 4 × 9 = 36 ms</text>
+</svg><figcaption>図 21-4　遅いほうの GPU がリズムを決めます。5 ミリ秒ごとに 1 チャンクが出ます。合計時間 = a + b + (N − 1) × max(a, b)。チャンクが多いほど、最初と最後のバブルの割合は小さくなります。</figcaption></figure></div>
+<p>シミュレータの結論を、上流の実測と照らし合わせましょう。同じ 5080 に 3090 を足した構成で、16K のプロンプトを読む速さは、単体の毎秒 1,726〜2,017 token から 2,039 token に上がりました。28K では 1,970 から 2,357 token に上がりました。ドキュメントは「各 GPU が自分の層を読み、そのあいだ、もう 1 枚が次のチャンクを読む」と説明しています。速度の向上は約 18%〜20% です。<span class="ev ev-report">上流レポート</span>（条件は前の節と同じ。）</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは、コンピュータ構成の授業で習う命令パイプラインと同じことです。5 段のパイプラインは、1 つの命令を速くしません。毎サイクルどれかの命令が完了するようにするだけです。スループットは、いちばん遅い段で決まります。最初の充填と、依存で止まる分がバブルです。レイヤー分割では、「段」が層の 1 区間で、「命令」がプロンプトの 1 チャンクです。</p>
+
+<h2 id="sec-4">21.4 受け渡す荷物の大きさと、道の広さ</h2>
+<p>2 枚の GPU が受け渡すとき、実際には何を渡すのでしょうか。直感では、層と層のあいだを流れるのは 2560 次元のベクトル、つまり 2560 個の数です。ところが Strata の受け渡しは、もっと大きいのです。<code>verify.hpp</code> は、受け渡しバッファに token ごとに 3 つのものを入れると定めています。残差 R（hc × n_embd 個の数）、前の層でまだ書き戻していないベクトル 1 本（n_embd 個の数）、そして hc 個の注入係数です。<span class="ev ev-code">コード上の事実</span>[S08] モデルの形状 hc = 4、n_embd = 2560 [S04] を代入します。</p>
+<div class="equation">4 × 2560 + 2560 + 4 = 12,804 個の float ＝ 51,216 バイト / token</div>
+<p>なぜ 2560 個では足りないのでしょうか。このモデルの残差は、もともと 2560 次元のベクトル 4 本です。しかも最後の層には、書き戻しが次の層の冒頭まで延期されているものがあります。次のステージが「分割していないときと同じように」続きを計算するには、これらがすべて必要です。コードのコメントによると、この分割は<strong>ビット単位で一致</strong>します（bit-exact）。分割してもしなくても、計算結果はまったく同じです。<span class="ev ev-code">コード上の事実</span>[S08]</p>
+<p>プロンプトを読むときに受け渡すのは、残差の部分です。token ごとに 4 × 2560 個の float で、40,960 バイトです。既定の 1 チャンクは 2048 token なので、2048 × 40,960 = 83,886,080 バイト、約 84 MB です。<span class="ev ev-code">コード上の事実</span>（<code>src/prefill/prefill.cpp</code>）<span class="ev ev-est">教育用の試算</span> 答えを生成するときは、ドキュメントによると、検証ウィンドウごとに 1 回受け渡し、「数百 KB、ピン留めメモリ経由」です。<span class="ev ev-report">上流レポート</span> token 1 個あたり 51,216 バイトで計算すると、5 token のウィンドウは約 256 KB で、ぴったり合います。</p>
+<p>荷物の大きさが分かりました。次は、道の広さです。次のコラムで、2 枚の GPU をつなぐ道を見ます。</p>
+<aside class="primer" id="c21-interconnect">
+<h3>インターコネクト帯域：PCIe と NVLink</h3>
+<p>GPU は、マザーボードの <dfn>PCIe</dfn> スロットに挿します。PCIe はシリアルバスで、何本かの<dfn>レーン</dfn>（lane）を並べてできています。何車線もある道路のようなものです。「×16」は 16 レーン、「×4」は 4 レーンです。PCIe は、世代が上がるたびに、1 レーンの速度が倍になります。</p>
+<p>片方向の理論ピークで言うと、PCIe 3.0 ×16 は約 15.8 GB/s、PCIe 4.0 ×16 は約 31.5 GB/s、PCIe 5.0 ×16 は約 63 GB/s です。×4 のスロットに挿すと、4 分の 1 になります。</p>
+<p><dfn>NVLink</dfn> は、NVIDIA が GPU 同士のあいだに引く専用の高速線です。データセンターの H100 には NVLink 4.0 のリンクが 18 本あります。両方向の合計が 900 GB/s で、片方向では約 450 GB/s です。PCIe 4.0 ×16 の十数倍にあたります。家庭用の 2 枚構成には、ふつうこれがなく、PCIe を使うしかありません。図 21-5 で、これらの道を並べて比べます。</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="図 21-5：よく使われるインターコネクトの片方向の理論帯域。PCIe 4.0 ×4 は約 7.9、PCIe 3.0 ×16 は約 15.8、PCIe 4.0 ×16 は約 31.5、PCIe 5.0 ×16 は約 63、NVLink 4.0 は約 450 GB/s">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">片方向の理論ピーク、GB/s（棒の長さは比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="46" font-size="12">PCIe 4.0 ×4</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="34" width="3.9" height="16"/>
+<text class="f-text" fill="#182f2b" x="130" y="47" font-size="12">7.9</text>
+<text class="f-text" fill="#182f2b" x="10" y="76" font-size="12">PCIe 3.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="64" width="7.7" height="16"/>
+<text class="f-text" fill="#182f2b" x="134" y="77" font-size="12">15.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="12">PCIe 4.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="94" width="15.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="142" y="107" font-size="12">31.5</text>
+<text class="f-text" fill="#182f2b" x="10" y="136" font-size="12">PCIe 5.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="124" width="30.8" height="16"/>
+<text class="f-text" fill="#182f2b" x="157" y="137" font-size="12">63</text>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="12">NVLink 4.0</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="154" width="220" height="16"/>
+<text class="f-text" fill="#182f2b" x="346" y="167" font-size="12">450</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="198" font-size="12">NVLink 4.0：H100 の 18 リンクの合計</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="214" font-size="12">家庭用の 2 枚構成は、ふつう PCIe だけ</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">PCIe は世代ごとに倍増。×16 はレーン 16 本を並列</text>
+</svg><figcaption>図 21-5　家庭用マザーボードの道は、ずっと狭いのです。テンソル並列は層ごとに同期するので、NVLink のような高速線がないと大きく損をします。レイヤー分割は、区間の境目で 1 回受け渡すだけなので、PCIe で足ります。</figcaption></figure>
+<p>帯域のほかに<dfn>レイテンシ</dfn>もあります。1 バイトだけ送るときでも、起動と同期の固定コストを払います。大きな荷物を 1 回送るなら、レイテンシは 1 回だけです。小さな荷物を 96 回送るなら、96 回払います。第 5 章で帯域とレイテンシを詳しく見ます。第 1 章の<a href="#chapter/01/c01-memory-hierarchy">「メモリ階層」</a>のコラムには、各層の帯域の比較があります。</p>
+<p class="further">参考リンク：<a href="https://ja.wikipedia.org/wiki/PCI_Express" target="_blank" rel="noopener noreferrer">Wikipedia：PCI Express</a> · <a href="https://ja.wikipedia.org/wiki/NVLink" target="_blank" rel="noopener noreferrer">Wikipedia：NVLink</a> · <a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/overview.html" target="_blank" rel="noopener noreferrer">NVIDIA NCCL ドキュメント：複数 GPU 通信の概要</a></p>
+</aside>
+<p>荷物と道を合わせて計算します。下の計算機は、2 つの分担方式の通信コストを、いろいろな接続で比べます。テンソル並列の行は、仮想の比較対象です。Strata はこうしません。</p>
+<div class="viz" data-viz="link-budget"><figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="図 21-6：PCIe 4.0 ×16 では、レイヤー分割は 1 ウィンドウあたり約 36 マイクロ秒、仮想のテンソル並列は約 1116 マイクロ秒。プロンプト 1 チャンクの受け渡しは約 5.3 ミリ秒">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">PCIe 4.0 ×16、GPU 間 1 回の固定遅延 10 µs、</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="32" font-size="12">ウィンドウ 5 token</text>
+<text class="f-text" fill="#182f2b" x="10" y="66" font-size="12">レイヤー分割</text>
+<rect class="f-accent" fill="#136d5a" x="136" y="54" width="7.5" height="16"/>
+<text class="f-text" fill="#182f2b" x="150" y="67" font-size="12">約 36 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="86" font-size="12">2 回 × (10 µs + 256 KB ÷ 31.5 GB/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="116" font-size="12">テンソル並列（仮）</text>
+<rect class="f-warn" fill="#9e5d24" x="136" y="104" width="230" height="16"/>
+<text class="f-on" fill="#ffffff" x="360" y="117" font-size="12" text-anchor="end">約 1116 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="136" font-size="12">96 回 × (10 µs + 51 KB ÷ 31.5 GB/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="12">プロンプト 1 チャンク（2048 token）の受け渡し：</text>
+<text class="f-text" fill="#182f2b" x="10" y="182" font-size="12">約 5.3 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="202" font-size="12">このチャンクを読む時間は約 1 秒</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="218" font-size="12">（上流の約 2,000 token/s で概算）</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="238" font-size="12">遅延は教育用の仮定。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="256" font-size="12">テンソル並列は比較用で、Strata の方式ではない</text>
+</svg><figcaption>図 21-6　レイヤー分割の通信コストは、無視できるほど小さいです。テンソル並列のコストは、おもに同期の回数から来ます。1 回ごとの固定遅延が、96 回ぶん掛かるのです。</figcaption></figure></div>
+<p>計算式は図に書いてあります。<span class="ev ev-est">教育用の試算</span> 結論は 2 つです。1 つ目。答えを生成するとき、レイヤー分割の受け渡しは、1 ウィンドウあたり数十マイクロ秒です。上流の実測で毎秒約 84 token とすると、1 token は約 12 ミリ秒です。受け渡しは、その 1% に届きません。2 つ目。プロンプトを読むとき、84 MB の 1 チャンクの受け渡しは、PCIe 4.0 ×16 で往復して約 5.3 ミリ秒です。このチャンクを読むこと自体には、1 秒近くかかります。だから上流のドキュメントは、「NVLink は要りません。GPU 同士の直接アクセスも要りません。×4 や ×1 のスロットに挿しても使えます」と言い切れるのです。<span class="ev ev-report">上流レポート</span></p>
+
+<h2 id="sec-5">21.5 各 GPU は、自分の層だけを担当する</h2>
+<p>層を切ったら、各 GPU は自分の「記憶」も持たなければなりません。各層の KV キャッシュや再帰状態です。初期のやり方では、どのステージも 48 層ぶんすべての状態を確保していました。実際に動かすのは、その一部の区間だけなのにです。<code>session.hpp</code> のコメントは、これを「モデル全体の大きさのバッファという、昔からの欠点」と呼んでいます。今は、各セッションが <code>[layer_lo, layer_hi)</code> の層の状態だけを持ちます。<span class="ev ev-code">コード上の事実</span>[S13]</p>
+<p>ここに、間違えやすい点があります。コードの中の層は、今も<strong>全体での</strong>通し番号で数えます。ところが配列には、自分の区間の数行しか入っていません。だから g 番目の GDN 層の状態を取るときは、まず、この区間の最初の GDN 層の番号 <code>gdn_ord0</code> を引かなければなりません。引き間違えると、別の層の状態を読んでしまいます。しかも、エラーは出ません。ある区間に QSA 層が 1 つもないときでも、コードは「主」の QSA 状態を 1 つ確保します。回転位置埋め込みのテーブルのように、モデル全体で共有するものを、そこから読むからです。<span class="ev ev-code">コード上の事実</span>[S13]</p>
+<p>どの層で切るかにも、工夫があります。ある区間の層が何バイト必要かを計算する関数 <code>session_bytes</code> は、純粋な算術です。だから、メモリを確保する前に、候補の切り方の「見積もり」を出せます。<span class="ev ev-code">コード上の事実</span>[S13] 上流のドキュメントによると、既定の自動モードは、2〜3 枚の GPU のすべての切り方を試します。そして、各 GPU のキャッシュにいちばん多くの「人気のエキスパート」が収まる切り方を選びます。起動ログに選択が表示されます。たとえば「K = 19、キャッシュは 12,288 個のプロファイル項目のうち 11,767 個を収められる」です。<span class="ev ev-report">上流レポート</span></p>
+<p>最後はセーブです。第 20 章でセッションのスナップショットを見ました。プロンプトを読んでいるとき、前の GPU は、後ろの GPU より 1 チャンク以上進んでいることがよくあります。ある瞬間に、2 枚の状態をそのままつなぎ合わせたらどうなるでしょう。「前半は第 3 チャンクまで読み、後半は第 2 チャンクまで読んだ」という、つぎはぎの怪物ができます。図 21-7 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 258" role="img" aria-label="図 21-7：プロンプトを読むとき、GPU A は GPU B より 1 チャンク先を進む。2 枚の現在の状態をそのまま結合すると、整合しないセーブになる。正しい方法は、各 GPU が同じチャンクを読み終えた時点で、それぞれ保存すること">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="12">ある時点での 2 枚の進み具合</text>
+<text class="f-text" fill="#182f2b" x="8" y="48" font-size="12">GPU A</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="30" width="80" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="148" y="30" width="80" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="232" y="30" width="80" height="26" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="316" y="30" width="80" height="26" rx="3"/>
+<text class="f-on" fill="#ffffff" x="104" y="48" font-size="12" text-anchor="middle">第 1 チャンク</text>
+<text class="f-on" fill="#ffffff" x="188" y="48" font-size="12" text-anchor="middle">第 2 チャンク</text>
+<text class="f-on" fill="#ffffff" x="272" y="48" font-size="12" text-anchor="middle">第 3 チャンク</text>
+<text class="f-text" fill="#182f2b" x="356" y="48" font-size="12" text-anchor="middle">第 4 チャンク</text>
+<text class="f-text" fill="#182f2b" x="8" y="92" font-size="12">GPU B</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="74" width="80" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="148" y="74" width="80" height="26" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="232" y="74" width="80" height="26" rx="3"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="316" y="74" width="80" height="26" rx="3"/>
+<text class="f-on" fill="#ffffff" x="104" y="92" font-size="12" text-anchor="middle">第 1 チャンク</text>
+<text class="f-on" fill="#ffffff" x="188" y="92" font-size="12" text-anchor="middle">第 2 チャンク</text>
+<text class="f-text" fill="#182f2b" x="272" y="92" font-size="12" text-anchor="middle">第 3 チャンク</text>
+<text class="f-muted" fill="#5c6d66" x="356" y="92" font-size="12" text-anchor="middle">第 4 チャンク</text>
+<text class="f-warn" fill="#9e5d24" x="8" y="128" font-size="12">誤り：いま単純に結合すると、A は第 3 チャンクの末尾、</text>
+<text class="f-warn" fill="#9e5d24" x="8" y="144" font-size="12">B は第 2 チャンクの末尾になる</text>
+<text class="f-text" fill="#182f2b" x="8" y="168" font-size="12">正しい：各 GPU が同じチャンクを読み終えた時点で、</text>
+<text class="f-text" fill="#182f2b" x="8" y="184" font-size="12">それぞれ自分の分を保存する</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="204" font-size="12">Strata は on_stage_chunk コールバックで、</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="220" font-size="12">この瞬間に状態を取る</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="244" font-size="12">濃色 = 読み終え、薄色 = 読み中、枠のみ = まだ順番が来ていない</text>
+</svg><figcaption>図 21-7　2 枚の GPU は、進み具合がそろっていません。セーブは、同じチャンクの末尾にそろえなければなりません。各 GPU は、そのチャンクを読み終えた時点で自分の分を保存します。ある瞬間の両方の「現在の状態」を、つなぎ合わせてはいけません。</figcaption></figure>
+<p>Strata は、各ステージにコールバック <code>on_stage_chunk</code> を持たせています。各 GPU が 1 チャンクを読み終え、自分の状態がちょうどそのチャンクの末尾に止まっているときに、呼び出します。コメントには、最後のステージが報告する時点で、前のステージは「すでに 1 チャンク以上先に進んでいる」と書かれています。だから、プロンプトの途中でセーブするときは、ここで各ステージの分を取るのです。<span class="ev ev-code">コード上の事実</span>[S12]</p>
+
+<h2 id="sec-6">21.6 手を動かす：バブルを探し、GPU を足すべきか考える</h2>
+<p>この章には、独立した実験ページがありません。2 つのインタラクティブ図が、実験台です。次のように遊んでみてください。</p>
+<ol>
+<li>「2 枚の GPU のパイプライン」で、a = 4、b = 5 に固定し、チャンク数を 1 から 8 まで増やします。そのたびに合計時間を記録して、5N + 4 を確かめます。次に、転送時間を 1 ms にして「token 1 個だけ計算」を押し、2 枚のほうがなぜ 1 枚より遅くなるのか見ます。</li>
+<li>a と b を大きくアンバランスにします（たとえば 2 と 8）。速いほうの GPU が、どれだけ待つか見ましょう。これが、上流が「いちばん速い GPU を先頭に置き、自動分割にキャッシュ能力で層を割り当てさせる」ことを勧める理由です。<span class="ev ev-report">上流レポート</span></li>
+<li>「受け渡し 1 回にかかる時間」で、接続を何種類か切り替え、遅延を変えます。テンソル並列とレイヤー分割の差は、おもにバイト数から来るのか、回数から来るのか見ましょう。</li>
+</ol>
+<p>上流のドキュメントには、実用的な経験則もいくつかあります。シミュレータの結論を使って理解できます。<span class="ev ev-report">上流レポート</span></p>
+<ul>
+<li><strong>ずっと遅い GPU を、数合わせで足さないこと。</strong>5080 と 3090 に、さらに RTX 2080 Ti を足すと、生成速度はかえって毎秒 68（物語）と 90（コード）token に下がりました。GPU が 1 枚増えるたびに、ウィンドウごとの受け渡しと待ちが 1 回ぶん増えます。</li>
+<li><strong>1 枚に収まるなら、分割しないこと。</strong>0.1.31 版に、オプションのスイッチが加わりました。1 枚目の GPU に、プロファイル済みのエキスパートとコンテキストがすべて収まるときは、その 1 枚だけを使います。R9700 32 GB に RX 9070 XT を足した構成で Coder モデルを動かすと、オンにしたとき、4K のプロンプトが毎秒 1,244 から 1,776 token に上がりました。生成は約 51 から約 60 に上がりました。一方、16K のプロンプトは約 5% 遅くなりました。</li>
+<li><strong>古い GPU は非対応です。</strong>どの GPU も、コンピュート能力 7.5 以上（RTX 20 シリーズ以降）が必要です。</li>
+</ul>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>複数 GPU の分担は 3 種類です。レイヤー分割（パイプライン並列）、テンソル並列、リクエスト並列。Strata はレイヤー分割を使います。GPU 間の相談がいちばん少なく、家庭用の PCIe で足りるからです。</li>
+<li>1 つの token の層は、順番に 1 層ずつ計算するしかなく、レイヤー分割はそれを速くしません。2 枚の GPU がもたらすのは、エキスパートを 2 倍キャッシュできることと、プロンプトを読むとき 2 枚が作業をずらせることです。合計時間 = a + b + (N − 1) × max(a, b)。</li>
+<li>受け渡すのは、数学的な状態の完全なセットです。生成時は token 1 個あたり 51,216 バイト、プロンプトを読むときは 1 チャンクあたり約 84 MB です。バイト数は多くなく、回数も少ないので、通信コストは小さくなります。セーブは、各 GPU が同じチャンクを読み終えた時点にそろえます。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「GPU を 2 枚挿せば、生成速度が 2 倍になる。」</strong></p>
+<p>同じ token の層には、前後の依存があります。2 枚は交互にしか計算できません。上流の実測では、5080 に 3090 を足しても、生成速度は 5080 単体とほぼ同じでした。さらに 2080 Ti を足すと、かえって遅くなりました。2 枚で速くなるのは、増えた VRAM のおかげで CPU が計算するエキスパートが減ることと、長いプロンプトを読むときのパイプラインのおかげです。「計算力が 2 倍に積み重なる」わけではありません。<span class="ev ev-report">上流レポート</span></p></div>
+
+<details class="deep"><summary>もう一歩深く：受け渡しの契約、ダブルバッファのプロトコル、2 枚の効果の評価方法</summary>
+<h3>受け渡しが、なぜ 12,804 個の数でなければならないか</h3>
+<p><code>Verifier::set_stage</code> のコメントには、受け渡しの token ごとに、残差 R（hc × n_embd）、最後の層でまだ書き戻していないベクトル bo（n_embd）、inject（hc）が入ると書かれています。次のステージは、最初の層を読むときにこの書き戻しを「折り込み」ます。分割しないウィンドウのやり方と完全に同じなので、分割はビット単位で一致します。2 つのポインタは、どちらもデバイスから見えるメモリでなければなりません（マップされたピン留めメモリ。2 つのステージが 2 枚の GPU にあるときは、portable でもあること）。<span class="ev ev-code">コード上の事実</span>[S08] 受け渡す浮動小数点数の個数は <code>handoff_floats</code> が返します。式は <code>hc*n_embd + n_embd + hc</code> そのものです。[S08]</p>
+<p>2560 次元の「隠れ状態」だけを渡すと、残りの 3 本の残差と、延期された書き戻しが失われます。結果はクラッシュしません。静かに計算が間違うだけです。教訓はこうです。デバイスをまたぐ通信の形式には、数学的な契約の全体を反映させなければなりません。「隠れ次元は 2560 だから」と、手軽に削ってはいけません。上流には、検査用のモードもあります。<code>--layer-split K --split-device 0</code> は、2 つのステージを同じ 1 枚の GPU で動かします。受け渡しがビット単位で一致することを確かめるためのもので、高速化モードではありません。<span class="ev ev-report">上流レポート</span></p>
+<h3>ダブルバッファの受け渡しプロトコル</h3>
+<p><code>prefill.cpp</code> では、前のステージが初期化のときに <code>cudaHostAlloc(..., cudaHostAllocPortable)</code> で、ピン留めメモリを 2 つ確保します。それぞれが、プロンプト 1 チャンクぶんの残差の行（chunk × D × 4 バイト、D = 4 × 2560）を収められます。<span class="ev ev-code">コード上の事実</span> 1 チャンクを読み終えるたびに、次の 4 つを順に行います。</p>
+<ol>
+<li>残差の行を VRAM から、現在の受け渡しバッファにコピーし、コピーの完了を待つ。</li>
+<li><code>on_stage_chunk</code> を呼ぶ。このとき、このステージの状態はちょうどこのチャンクの末尾に止まっている。</li>
+<li>次のステージが、前のチャンクを読み終えるのを待つ（上書きされる直前のバッファを、まだ読んでいる状態にしないため）。</li>
+<li>別のスレッドで、次のステージにこのチャンクを読ませ始め、もう一方のバッファに切り替えて、次のチャンクを読み続ける。</li>
+</ol>
+<p>前のステージの 1 チャンクあたりの所要時間を a′（コピー出しを含む）、後ろのステージのそれを b′（コピー入れを含む）とします。手順 3 の意味は、前のステージが第 c+1 チャンクを読み始める時刻が、後ろのステージが第 c チャンクを読み始める時刻に等しい、ということです。ここから導けます。後ろのステージの隣り合う 2 チャンクの開始時刻は、max(a′, b′) だけ離れています。第 1 チャンクは a′ の時点で始まり、最後のチャンクは開始から b′ で終わります。だから合計時間 = a′ + b′ + (N − 1) × max(a′, b′) です。a′ = 4、b′ = 5、N = 8 なら 44 ms で、チャンクごとの直列なら 72 ms です。<span class="ev ev-est">教育用の試算</span> この章のシミュレータは、このモデルを使っています。<code>tests/viz-21.test.cjs</code> では、チャンクごとに依存とバッファのルールを検査しています。</p>
+<p>チャンクごとの転送も、重要なリソースを使うなら、a′ か b′ に入れなければなりません。ないものとして扱ってはいけません。PCIe で 2 枚が直接アクセスできるか。RAM を経由する必要があるか。マザーボードのトポロジー。NUMA ノードをまたぐか。これらはどれも、この数字を変えます。Strata は、いちばん保守的な道を選びました。すべて RAM 経由で中継し、GPU 同士の直接アクセスに頼りません。</p>
+<h3>全体での通し番号と「QSA 層のない区間」</h3>
+<p>セッション状態のコメントには、こう書かれています。<code>qsa_states</code> と <code>gdn_state</code> は全体での通し番号を保ち、配列は行数が減るだけです。だから、各層の利用者は <code>gdn_ord0</code> を引く必要があります。以前は <code>qsa_states[0]</code> と書いていた、モデル全体にかかわる使い方（共有の RoPE テーブル、prefill の一時領域の識別、MTP が借りる rope）は、<code>qsa_states[primary]</code> を読むように変わりました。区間に QSA 層がないときも、主の状態を 1 つ確保します。既定の全範囲の確保は、昔のモデル全体の確保と、バイト単位で同一です。<span class="ev ev-code">コード上の事実</span>[S13] テストでは、「ある区間に QSA 層がない」「切れ目が第 1 層の近くに来る」といった境界ケースを、特に調べる必要があります。</p>
+<h3>セーブは、同じ境界に属していなければならない</h3>
+<p><code>on_stage_chunk</code> の契約はこうです。各ステージが 1 チャンクを読み終え、自分のストリームが同期済みで、状態がこのチャンクの末尾に止まっているときに呼ぶ。最後のステージでは、<code>on_chunk</code> の前に呼ぶ。そのステージ自身のスレッドで動き、現在のデバイスもそのステージの GPU である。<span class="ev ev-code">コード上の事実</span>[S12] 上流ドキュメントはこう補足しています。セッションのセーブは、各 GPU の状態を保存して復元します。プロンプトの途中のセーブは、各 GPU がそのチャンクを読み終えた時点で、それぞれ自分の部分を保存します。<span class="ev ev-report">上流レポート</span> 逆に言えば、最後の GPU が完了を報告してから、前の GPU の「現在の状態」を取りにいくと、もっと先のチャンクの状態が取れてしまいます。そのセーブは整合しません。</p>
+<h3>2 枚の何が速いのかの判断</h3>
+<p>「2 枚のほうが 1 枚より速い」ことから、そのまま「パイプラインの効率が高い」とは言えません。増えた VRAM がエキスパートのヒット率を上げ、CPU の計算を減らしている。そちらが主な利益かもしれません。切り分けて測ります。各 GPU のエキスパートのヒット率、CPU プールの仕事量、受け渡しの所要時間、各ステージの所要時間です。上流の自動分割自体も、重点を示しています。選ぶのは「キャッシュにいちばん多くの人気エキスパートが収まる」切り方です。均等に分けるときは、いちばん埋まった GPU に最大の空きを残します。<span class="ev ev-report">上流レポート</span></p>
+<h3>まだカバーしていない、または条件つきの場合</h3>
+<ul>
+<li>Windows と WSL2 の WDDM ドライバでは、エキスパート領域のうち 8 GiB だけをピン留めします。残りは、ピン留めのステージングリングを経由して流します。Linux のドライバには、この上限がありません。<span class="ev ev-report">上流レポート</span></li>
+<li>どの GPU にも、密な重みのコピーと自分のプロンプト用バッファを置きます（既定のチャンク 2048 では 1 枚あたり約 1.5 GB）。そのため、8 GB に満たない GPU を一緒に使うことは勧められません。NVIDIA と AMD の GPU の混在はサポートしません。<span class="ev ev-report">上流レポート</span></li>
+<li>Strata には、もう 1 つの 2 枚構成のモード <code>--peer-device</code> があります。2 枚目の GPU はエキスパートキャッシュとしてだけ使い、活性化と結果は、NVLink やほかの GPU 間アクセス経路で往復します。<code>--layer-split</code> とは排他で、どちらか一方しか選べません。<span class="ev ev-report">上流レポート</span></li>
+<li>受け入れテストは、理想的な 2 枚のトポロジーで 1 回通すだけでは足りません。リクエストのキャンセル、極端に短い最後のチャンク、2 枚目の GPU のエラー、GPU 間アクセスが使えない場合も試します。そして結果を、1 枚の場合とバイト単位で比べます。</li>
+</ul>
+</details>

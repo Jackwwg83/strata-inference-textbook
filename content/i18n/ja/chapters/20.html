@@ -1,0 +1,228 @@
+<div class="hook"><span class="eyebrow">こんな経験はありませんか</span>
+<p>長い文書をチャット AI に渡すと、最初の質問には答えが出るまでしばらく待たされます。ところが続けて質問すると、答えはほぼすぐに出てきます。Strata のドキュメントにも同じことが書いてあります。最初のメッセージのあと、エンジンはその会話を取っておき、新しく加わった部分だけを読むので、追加の質問は数秒で始まります。<span class="ev ev-report">上流レポート</span>[S02]</p>
+<p>エンジンが「取っておく」のは、いったい何でしょうか。2 つのリクエストが 1 文字違うとき、画像が 1 枚入れ替わったとき、それでも再利用してよいのでしょうか。出だしが同じで途中から分かれる 2 つの会話は、1 つを共有できるでしょうか。この章では、プレフィックスの再利用、スナップショット、コピーオンライトを扱います。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>Strata は読み終えたプレフィックスをチェックポイント（スナップショットの一種）として保存します。新しいリクエストのトークン、画像、steering モードがチェックポイントと一字一句同じなら、チェックポイントから続けて、増えた末尾だけを読みます。スナップショットは実行状態のすべてを入れる必要があります。KV キャッシュだけでは足りません。</p>
+
+<h2 id="sec-1">20.1 追加の質問が速い理由：読んだところは読み直さない</h2>
+<p>マルチターン会話には特徴があります。リクエストのたびに、これまでの履歴を丸ごと送り直します。第 5 ターンのリクエストは、先頭が第 1〜4 ターンの全内容で、いちばん最後に新しい質問が来ます。新しい内容はたいてい短く、前の長い部分が<dfn>プレフィックス</dfn>です。つまり、前回のリクエストと先頭がまったく同じ部分のことです。</p>
+<p>毎回最初のトークンから読むと、長い会話ほど遅くなります。賢いやり方は、本にしおりを挟むことに似ています。前回読んだところから、今回は続けます。この方法を<dfn>プレフィックスの再利用</dfn>と呼びます。エンジンの世界では prompt cache（プロンプトキャッシュ）とも呼ばれます。</p>
+<p>どれくらい節約できるのでしょうか。Strata が長い文章を読む速度は、毎秒 1,000 トークン以上です。<span class="ev ev-report">上流レポート</span>[S02] ソースコードのコメントには、こんな計算もあります。3 万トークンのシステムプロンプトを毎秒約 1,000 個の速さで読むと、約 30 秒かかります。<span class="ev ev-report">上流レポート</span> 図 20-1 で 2 つのやり方を並べて比べます。</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="図 20-1：プレフィックス 3 万トークン、新しい質問 500 トークン。最初から読むと約 30.5 秒、チェックポイントを再利用して増えた部分だけ読むと約 0.5 秒">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="12">リクエスト全体を読み終えるまでの時間</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="36" font-size="12">（バーの長さは比例、教育用の試算）</text>
+<text class="f-text" fill="#182f2b" x="20" y="64" font-size="12" font-weight="600">再利用なし：最初のトークンから読む</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="72" width="354" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="374" y="72" width="6" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="108" font-size="12">プレフィックス 30,000 トークン ＋ 新しい 500 トークン、</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="126" font-size="12">約 30.5 秒</text>
+<text class="f-text" fill="#182f2b" x="20" y="154" font-size="12" font-weight="600">チェックポイントを再利用：増えた部分だけ読む</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="20" y="162" width="354" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="374" y="162" width="6" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="198" font-size="12">プレフィックスはチェックポイントからそのままつながり、</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="216" font-size="12">新しい 500 トークンだけ読む。約 0.5 秒</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="232" font-size="12">毎秒約 1,000 トークンで計算：時間 = トークン数 ÷ 1,000</text>
+</svg><figcaption>図 20-1　プレフィックスが長いほど、再利用の価値は高まります。再利用しないと、30,000 ÷ 1,000 = 30 秒が読み直しに消えます。再利用すれば、新しい 500 トークンだけで約 0.5 秒です。<span class="ev ev-est">教育用の試算</span></figcaption></figure>
+<p>チェックポイントにつなぐこと自体にも、コストがあります。チェックポイントは RAM（メインメモリ）に置かれているので、GPU（グラフィックスカード）に運び戻さなければなりません。チェックポイント 1 個は約 118 MB です（理由は次の節で説明します）。第 10 章で使った PCIe 5.0 の理論帯域は約 63 GB/s なので、118 ÷ 63 ≈ 2 ミリ秒です。<span class="ev ev-est">教育用の試算</span> 30 秒と比べれば、無視できます。</p>
+<p>上流のドキュメントは、副作用についても注意しています。プロンプトキャッシュを使うと、同じリクエストでも末尾だけを読む計算経路になり、最初から読んだときとは回答が完全には一致しないことがあります。出力をバイト単位で同じにしたいときは、<code>--prompt-cache 0</code> などのオプションで機能をオフにします。<span class="ev ev-report">上流レポート</span>[S03]</p>
+
+<h2 id="sec-2">20.2 「同じプレフィックス」とは何か</h2>
+<p>再利用できる条件は、チェックポイントが表す履歴と新しいリクエストの先頭が<strong>完全に同じ</strong>ことです。「だいたい同じ」ではだめです。トークンが 1 個違うだけで、それ以降のすべての位置の計算結果が変わるからです。</p>
+<p>Strata はこの判定に <code>conversation_prefix</code> という関数を使い、さらにセッションキャッシュがチェックポイントを選ぶときの検査を 1 つ加えます。<span class="ev ev-code">コード上の事実</span>[S10] 合わせて 4 つのルールになります。</p>
+<ol>
+<li><strong>steering モードが同じ。</strong><dfn>steering</dfn> は、省略可能な「制御ベクトル」です。オンにすると、モデルの多くの層の途中結果が書き換わります。両者のモードが違うなら、チェックポイントの状態は別の方法で計算されたものなので、そのまま飛ばします。</li>
+<li><strong>チェックポイントがリクエストより短い。</strong>リクエストの最後のトークンは、次の検証ラウンドを始めるために、実際に読む必要があります。そのため、リクエストと同じ長さのチェックポイントは、かえって使えません。</li>
+<li><strong>プレフィックス内のトークン番号が 1 つずつ同じ。</strong></li>
+<li><strong>プレフィックス内の画像の正体が同じ。</strong>画像はトークン列の中ではプレースホルダが並んでいるだけで、同じプレースホルダがまったく別の画像に対応することがあります。そこでエンジンは、画像ごとに別の正体を記録します。開始位置と内容のハッシュです。<span class="ev ev-code">コード上の事実</span>[S10]</li>
+</ol>
+<div class="viz" data-viz="prefix-match"><figure class="fig"><svg viewBox="0 0 400 362" role="img" aria-label="図 20-2：チェックポイントを再利用できるかは 4 つの検査で決まる。steering モード、長さ、トークン、画像。すべて通れば再利用する">
+<rect class="f-soft" fill="#e5f1df" x="20" y="8" width="260" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="31" font-size="13" font-weight="600" text-anchor="middle">新しいリクエストが届く</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="64" width="260" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="87" font-size="13" text-anchor="middle">① steering モードは同じ？</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="120" width="260" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="143" font-size="13" text-anchor="middle">② チェックポイントの方が短い？</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="176" width="260" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="199" font-size="13" text-anchor="middle">③ 先頭のトークンがすべて同じ？</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="232" width="260" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="150" y="255" font-size="13" text-anchor="middle">④ 画像のハッシュも同じ？</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="292" width="260" height="38" rx="8"/>
+<text class="f-on" fill="#ffffff" x="150" y="316" font-size="13" font-weight="600" text-anchor="middle">すべて通過：新しい末尾だけ読む</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M150 44V62M150 100V118M150 156V174M150 212V230M150 268V290"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M280 82H298M280 138H298M280 194H298M280 250H298"/>
+<text class="f-warn" fill="#9e5d24" x="302" y="86" font-size="12">いいえ：飛ばす</text>
+<text class="f-warn" fill="#9e5d24" x="302" y="142" font-size="12">いいえ：不可</text>
+<text class="f-warn" fill="#9e5d24" x="302" y="198" font-size="12">いいえ：無効</text>
+<text class="f-warn" fill="#9e5d24" x="302" y="254" font-size="12">いいえ：無効</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="354" font-size="12">ルールは conversation_cache.hpp より</text>
+</svg><figcaption>図 20-2　4 つの検査のうち 1 つでも通らなければ、そのチェックポイントは使えません。エンジンは別のチェックポイントを試すか、最初から読みます。</figcaption></figure></div>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>「チェックポイントがリクエストのプレフィックスか」の判定は、文字列の前方一致そのものです。たくさんのチェックポイントから最長のプレフィックスを探すのは、トライ木（trie）や基数木（radix tree）の得意分野です。Strata のソースコードのコメントは、そのまま基数木にたとえています。20.4 節を見てください。</p>
+
+<h2 id="sec-3">20.3 スナップショットに何を入れるか：ノートは戻れるが、ホワイトボードは戻れない</h2>
+<p>チェックポイントは<dfn>スナップショット</dfn>の一種です。ある時点の状態をすべて撮っておけば、あとでその時点に戻れます。ゲームのセーブのようなものです。何を保存するかは、モデルが履歴を「覚える」方法で決まります。Strata が使うモデルの 48 層には 2 種類の層があり、履歴の覚え方がまったく違います。<span class="ev ev-code">コード上の事実</span>[S04]</p>
+<ul>
+<li><strong>12 個のアテンション層（QSA）は KV キャッシュを使います。</strong>トークンを 1 つ読むたびに、位置の順に 1 行ずつ後ろへ書き足します。<strong>ノート</strong>のようなものです。あるプレフィックスまで戻したいときは、後ろの数行を気にしなくて構いません。検証器の説明にははっきり書かれています。拒否された位置は、あとで処理し直すときに直接上書きされます。どのクエリがそこを読むよりも前にです。<span class="ev ev-code">コード上の事実</span>[S08]</li>
+<li><strong>36 個の GDN 層は再帰状態を使います。</strong>トークンを 1 つ読むたびに、固定サイズの状態ブロックを<strong>その場で</strong>丸ごと書き換えます。<strong>ホワイトボード</strong>のようなものです。<span class="ev ev-code">コード上の事実</span>[S17] 5 個目のトークンを読み終えると、4 個目のトークンのときの姿は消えていて、もう計算では戻せません。</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 296" role="img" aria-label="図 20-3：KV キャッシュはノートのように位置ごとに 1 行ずつ追記され、プレフィックスまで戻るには後ろの行を無視すればよい。再帰状態はホワイトボードのようにトークンごとに全体が書き換わり、戻すには事前にスナップショットを撮っておくしかない">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">KV キャッシュ：ノート</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="12" text-anchor="middle">1 トークンにつき 1 行、</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="54" font-size="12" text-anchor="middle">後ろに書き足すだけ</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="66" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="80" font-size="12">1 個目のトークン</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="90" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="104" font-size="12">2 個目のトークン</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="114" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="128" font-size="12">3 個目のトークン</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="138" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="152" font-size="12">4 個目のトークン</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="30" y="162" width="140" height="20" rx="3"/><text class="f-muted" fill="#5c6d66" x="40" y="176" font-size="12">5 個目（古い分岐）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="30" y="186" width="140" height="20" rx="3"/><text class="f-muted" fill="#5c6d66" x="40" y="200" font-size="12">6 個目（古い分岐）</text>
+<text class="f-text" fill="#182f2b" x="100" y="238" font-size="12" text-anchor="middle">前の 4 個まで戻る：後ろの 2 行は</text>
+<text class="f-text" fill="#182f2b" x="100" y="256" font-size="12" text-anchor="middle">放っておき、次に書くとき上書き</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 10V286"/>
+<text class="f-text" fill="#182f2b" x="300" y="20" font-size="13" font-weight="600" text-anchor="middle">再帰状態：ホワイトボード</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="38" font-size="12" text-anchor="middle">トークンごとに全体を</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="54" font-size="12" text-anchor="middle">その場で書き換える</text>
+<rect class="f-soft" fill="#e5f1df" x="225" y="66" width="150" height="100" rx="6"/>
+<text class="f-text" fill="#182f2b" x="300" y="110" font-size="12" text-anchor="middle">6 個目のトークンを</text>
+<text class="f-text" fill="#182f2b" x="300" y="130" font-size="12" text-anchor="middle">読み終えたあとの姿</text>
+<text class="f-warn" fill="#9e5d24" x="300" y="192" font-size="12" text-anchor="middle">4 個目に戻したい？</text>
+<text class="f-warn" fill="#9e5d24" x="300" y="210" font-size="12" text-anchor="middle">もう消えていて戻せない</text>
+<text class="f-text" fill="#182f2b" x="300" y="238" font-size="12" text-anchor="middle">事前に撮っておくしかない：</text>
+<text class="f-text" fill="#182f2b" x="300" y="256" font-size="12" text-anchor="middle">その記録がチェックポイント</text>
+</svg><figcaption>図 20-3　2 つの記憶は、戻り方も 2 通りです。ノートは「後ろの数行を書かなかったことにする」だけで戻れます。ホワイトボードは、事前に撮っておいた記録に頼るしかありません。</figcaption></figure>
+<p>ホワイトボードはどれくらいの大きさでしょうか。GDN 層 1 つの状態は 128 × 48 × 128 個の 32 ビット浮動小数点数で、36 層の合計は 36 × 128 × 48 × 128 × 4 バイト ≈ 113 MB です。<span class="ev ev-est">教育用の試算</span>[S04][S17] 会話がどれだけ長くなっても、このホワイトボードの大きさは変わりません。一方、KV のノートは書くほど厚くなります。1 つの数を 2 バイトで保存するとすると、12 層でトークン 1 個あたり 12 × 2 × 2 × 256 × 2 バイト ≈ 24.6 KB で、3 万トークンなら約 737 MB です。<span class="ev ev-est">教育用の試算</span></p>
+<p>そのため、Strata のチェックポイントが主に保存するのはホワイトボードです。GDN の再帰状態に加えて、PLE（層ごとの埋め込み）の履歴や、アテンションのインデクサの末尾など、いくつかの小さな状態です。さらに、このプレフィックスのトークン番号と画像の正体を記録します。<span class="ev ev-code">コード上の事実</span>[S10] 上流のドキュメントでは、チェックポイント 1 個が約 118 MB とされています。<span class="ev ev-report">上流レポート</span> ホワイトボードの 113 MB とよく合います。大部分はこれです。</p>
+
+<h2 id="sec-4">20.4 チェックポイントの鎖：根は固定し、残りは入れ替える</h2>
+<p>エンジンはいつチェックポイントを撮るのでしょうか。上流のドキュメントによると、新しいアシスタントのターンが始まるたびに 1 個撮り、長いプロンプトでは 16K トークン読むごとにさらに 1 個撮ります。メモリに残すのは最大 6 個です。<span class="ev ev-report">上流レポート</span></p>
+<p>これらのチェックポイントには、特別な形があります。GPU 上の KV キャッシュの領域は 1 つだけで、一度に入る履歴の分岐は 1 本です。そこで、残すチェックポイントはすべて現在の履歴のプレフィックスでなければなりません。長さの順に並べると、どれも次のもののプレフィックスになり、<dfn>鎖</dfn>のようにつながります。ソースコードのコメントは、これを基数木にたとえています。1 本の木を、セッションに収まる 1 本の枝にぺしゃんこにしたものです。<span class="ev ev-code">コード上の事実</span></p>
+<figure class="fig"><svg viewBox="0 0 400 310" role="img" aria-label="図 20-4：チェックポイントの鎖。どのチェックポイントも次のもののプレフィックスで、根はシステムプロンプトの末尾にあり固定される。新しいリクエストは最長の一致するチェックポイントから続きを読む">
+<text class="f-muted" fill="#5c6d66" x="20" y="16" font-size="12">ある会話のチェックポイント</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="32" font-size="12">（バーの長さ = プレフィックスの長さ、説明用）</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="44" width="110" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="30" y="61" font-size="12">根 · 固定</text>
+<text class="f-muted" fill="#5c6d66" x="138" y="61" font-size="12">システムプロンプトの末尾</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="76" width="170" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="93" font-size="12">第 2 ターンの開始</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="108" width="250" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="125" font-size="12">第 3 ターンの開始</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="140" width="320" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="157" font-size="12">第 4 ターンの開始（最長のチェックポイント）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M340 134V204"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="176" width="320" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="340" y="176" width="40" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="30" y="193" font-size="12">新しいリクエスト：第 4 ターンと一致</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="224" font-size="12">新しいリクエストは最長の一致するチェックポイントから</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="240" font-size="12">続きを読み、末尾のひと切れだけを読む</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="262" font-size="12">最大 6 個、1 個約 118 MB。満杯になったら</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="278" font-size="12">最も長く使われていないものを捨てる（根は除く）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="300" font-size="12">新しいチャット：根から続けてシステムプロンプトを丸ごと省く</text>
+</svg><figcaption>図 20-4　チェックポイントは鎖のようにつながり、どれも次のもののプレフィックスです。根は固定されているので、新しく始めたチャットでもシステムプロンプトを飛ばせます。</figcaption></figure>
+<p>鎖がいっぱいになったら、どれを捨てるのでしょうか。初期のやり方は先入れ先出しで、いちばん古いチェックポイントから捨てていました。ところが、いちばん古いものは、たいていシステムプロンプトの末尾です。同じクライアントが新しいチャットを始めるたびに必ず通る場所です。それを捨てると、新しいチャットのたびにシステムプロンプトを最初から読み直すことになります。<span class="ev ev-code">コード上の事実</span></p>
+<p>今のルールは、<strong>根を固定し、残りを最近最も使われていないもの（LRU）の順に入れ替える</strong>です。ソースコードの追い出し関数はわずか数行です。容量が 2 個に満たないときは固定を解除して最も古いものを捨て、そうでなければ 0 番目を飛ばして、残りの中から最も長く使われていないものを選びます。<span class="ev ev-code">コード上の事実</span> 上流のドキュメントには補足もあります。最初から読むプロンプトで、システムプロンプトが 2,048 トークン以上あるときは、システムプロンプトの末尾にも 1 個撮り、根が存在するようにします（エンジン 0.1.20 以降）。<span class="ev ev-report">上流レポート</span> LRU のようなキャッシュ置換の方針は、第 12 章で詳しく扱います。</p>
+
+<h2 id="sec-5">20.5 2 つの会話が出だしを共有する：コピーオンライト</h2>
+<p>もう少し難しい場面を見ましょう。会話 A と B は、出だしがまったく同じです（たとえば同じシステムプロンプトと同じ文書）。そのあと、それぞれ別のことを質問します。プレフィックスを共有して、違う部分にだけコストを払うことはできるでしょうか。OS やデータベースには、昔からの定番の答えがあります。</p>
+<aside class="primer" id="c20-copy-on-write">
+<h3>スナップショットとコピーオンライト</h3>
+<p>データの<dfn>スナップショット</dfn>を撮るいちばん素朴な方法は、全体をコピーすることです。データが 1 GB なら 1 GB をコピーするので、遅いうえに、領域も 2 倍必要です。でも、たいていの場合、スナップショットと元のデータは、その後ほんの数か所しか変わりません。</p>
+<p><dfn>コピーオンライト</dfn>（copy-on-write、略して COW）は発想を変えます。最初はコピーせず、両者で同じデータを共有します。各データブロックには<dfn>参照カウント</dfn>、つまり「何人が使っているか」を記録しておきます。共有ブロックに書き込む人が出たら、その人だけが<strong>そのブロック</strong>をコピーして、自分のコピーを書き換えます。誰も書かないブロックは、いつまでも 1 つのままです。図 20-5 は 3 ページの例です。</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="図 20-5：コピーオンライト。分岐直後は A と B が 3 ページを共有する。B が頁 2 を書き換えるとき、そのページだけをコピーし、残りの 2 ページは共有を続ける">
+<text class="f-text" fill="#182f2b" x="100" y="16" font-size="12" font-weight="600" text-anchor="middle">① 分岐直後：すべて共有</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="19" y="28" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102" y="44" font-size="12" text-anchor="middle">A のページテーブル</text>
+<rect class="f-soft" fill="#e5f1df" x="19" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="44" y="90" font-size="12" text-anchor="middle">頁1 ×2</text>
+<rect class="f-soft" fill="#e5f1df" x="77" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="102" y="90" font-size="12" text-anchor="middle">頁2 ×2</text>
+<rect class="f-soft" fill="#e5f1df" x="135" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="160" y="90" font-size="12" text-anchor="middle">頁3 ×2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="19" y="166" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102" y="182" font-size="12" text-anchor="middle">B のページテーブル</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 50V70M102 50V70M160 50V70M44 100V166M102 100V166M160 100V166"/>
+<text class="f-muted" fill="#5c6d66" x="102" y="214" font-size="12" text-anchor="middle">コピーは 0 ページ</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 8V222"/>
+<text class="f-text" fill="#182f2b" x="302" y="16" font-size="12" font-weight="600" text-anchor="middle">② B が頁 2 を書き換え</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="214" y="28" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297" y="44" font-size="12" text-anchor="middle">A のページテーブル</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="239" y="90" font-size="12" text-anchor="middle">頁1 ×2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="272" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="297" y="90" font-size="12" text-anchor="middle">頁2 ×1</text>
+<rect class="f-soft" fill="#e5f1df" x="330" y="70" width="50" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="355" y="90" font-size="12" text-anchor="middle">頁3 ×2</text>
+<rect class="f-accent" fill="#136d5a" x="272" y="118" width="50" height="30" rx="3"/><text class="f-on" fill="#ffffff" x="297" y="138" font-size="12" text-anchor="middle">頁2′</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="214" y="166" width="166" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297" y="182" font-size="12" text-anchor="middle">B のページテーブル</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M239 50V70M297 50V70M355 50V70M239 100V166M297 148V166M355 100V166"/>
+<text class="f-muted" fill="#5c6d66" x="297" y="214" font-size="12" text-anchor="middle">書き換えた 1 ページだけコピー</text>
+</svg><figcaption>図 20-5　コピーオンライト：まず共有し、書く人がコピーします。しかも、コピーするのは書かれたページだけです。「頁」はページのこと、「×2」は参照カウントです。</figcaption></figure>
+<p>いちばん有名な例は Linux の <code>fork()</code> です。子プロセスを作るとき、コピーするのはページテーブルだけです。親子は物理メモリのページをすべて共有し、それらを読み取り専用にします。どちらかがあるページに最初に書き込むと、ページフォールトが起き、カーネルはそのときになって初めてそのページをコピーします。だから、数 GB のメモリを使うプロセスを fork しても、ほとんど一瞬で終わります。ファイルシステムのスナップショットや、データベースの多版型同時実行制御（MVCC）も、同じ発想を使っています。</p>
+<p>この章に戻りましょう。2 つの会話に共通するプレフィックスは、「誰も書かないページ」です。プレフィックスの KV ページが読み取り専用である限り、安心して共有できます。次のシミュレータで、自分の手で試してみてください。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%82%B3%E3%83%94%E3%83%BC%E3%82%AA%E3%83%B3%E3%83%A9%E3%82%A4%E3%83%88" target="_blank" rel="noopener noreferrer">Wikipedia：コピーオンライト</a> · <a href="https://man7.org/linux/man-pages/man2/fork.2.html" target="_blank" rel="noopener noreferrer">Linux マニュアル：fork(2)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/" target="_blank" rel="noopener noreferrer">OSTEP（無料公開の OS 教科書、仮想メモリの各章）</a> · <a href="https://ja.wikipedia.org/wiki/MultiVersion_Concurrency_Control" target="_blank" rel="noopener noreferrer">Wikipedia：MultiVersion Concurrency Control</a></p>
+</aside>
+<div class="viz" data-viz="prefix-cow"><figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="図 20-6：プレフィックス 17 トークン、1 ページ 4 トークン、A と B が 3 個ずつ書く。最初の 4 ページは両方が共有し、5 ページ目は A がコピーして B はその場で書く。合計 6 ページで、全体コピーなら 10 ページ必要">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">プレフィックス 17 トークン、1 ページ 4 トークン</text>
+<text class="f-text" fill="#182f2b" x="20" y="68" font-size="13" font-weight="600">A</text>
+<text class="f-text" fill="#182f2b" x="20" y="148" font-size="13" font-weight="600">B</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="60" y="34" width="46" height="130" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="114" y="34" width="46" height="130" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="168" y="34" width="46" height="130" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#136d5a" stroke-width="2" x="222" y="34" width="46" height="130" rx="3"/>
+<g>
+<rect class="f-accent" fill="#136d5a" x="64" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="74" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="84" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="94" y="95" width="7" height="7"/>
+<rect class="f-accent" fill="#136d5a" x="118" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="128" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="138" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="148" y="95" width="7" height="7"/>
+<rect class="f-accent" fill="#136d5a" x="172" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="182" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="192" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="202" y="95" width="7" height="7"/>
+<rect class="f-accent" fill="#136d5a" x="226" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="236" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="246" y="95" width="7" height="7"/><rect class="f-accent" fill="#136d5a" x="256" y="95" width="7" height="7"/>
+</g>
+<text class="f-muted" fill="#5c6d66" x="83" y="156" font-size="12" text-anchor="middle">×2</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="156" font-size="12" text-anchor="middle">×2</text>
+<text class="f-muted" fill="#5c6d66" x="191" y="156" font-size="12" text-anchor="middle">×2</text>
+<text class="f-muted" fill="#5c6d66" x="245" y="156" font-size="12" text-anchor="middle">×2</text>
+<rect class="f-box" fill="#ffffff" stroke="#9e5d24" stroke-width="2" stroke-dasharray="4 3" x="276" y="34" width="56" height="50" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="281" y="46" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="292" y="46" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="303" y="46" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="314" y="46" width="7" height="7"/>
+<text class="f-warn" fill="#9e5d24" x="304" y="76" font-size="12" text-anchor="middle">複製</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="276" y="114" width="56" height="50" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="281" y="126" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="292" y="126" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="303" y="126" width="7" height="7"/><rect class="f-warn" fill="#9e5d24" x="314" y="126" width="7" height="7"/>
+<text class="f-muted" fill="#5c6d66" x="304" y="156" font-size="12" text-anchor="middle">直接</text>
+<text class="f-text" fill="#182f2b" x="10" y="190" font-size="12">コピーオンライトの合計は 6 ページ（コピーは 1 ページ）</text>
+<text class="f-text" fill="#182f2b" x="10" y="208" font-size="12">全体コピーなら 10 ページ必要</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="232" font-size="12">分岐後は A と B が 3 トークンずつ書く</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="250" font-size="12">5 ページ目は埋まっているのが 1 トークンだけ。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="268" font-size="12">先に書く A がそのページをコピーする</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="286" font-size="12">再帰状態は共有できず、B 用にまるごとコピー（約 113 MB）</text>
+</svg><figcaption>図 20-6　プレフィックスで埋まった 4 ページは両方が共有します。半分しか埋まっていない 5 ページ目は両方が書くので、先に書く A が 1 つコピーし、B はその場で書きます。メインカラーの小さな四角はプレフィックスのトークン、もう 1 つの色は分岐後に書いたトークンです。</figcaption></figure></div>
+<p>シミュレータから、2 つのことが分かります。1 つめ。KV ページは共有できますが、プレフィックスの最後の埋まりきらないページは両方が書くので、コピーが必要です。2 つめ。再帰状態（ホワイトボード）は、どうやっても共有できません。トークンごとに全体を書き換えるので、分岐のときは丸ごとコピーするしかないのです。</p>
+<p>では、Strata 自身はどうしているのでしょうか。2 つの会話のあいだでページを共有<strong>していません</strong>。ソースコードは、スナップショットのデータを置くバッファに、はっきり書いています。スナップショットと、保持された再利用用バッファの持ち主は 1 つだけなので、共有もコピーオンライトも要りません。<span class="ev ev-code">コード上の事実</span> 前に述べたとおり、GPU 上の KV 領域は一度に 1 本の履歴の分岐しか入れないので、1 本の鎖で足ります。ここでのコピーオンライトは教材としての拡張であり、Strata の実装ではありません。</p>
+<p>ただし、Strata には似たコスト節約の工夫があります。いくつかの会話をメモリに「駐車」させられます（この機能は初期状態でオフで、手動でオンにします）。駐車中の会話ごとに、実行状態、チェックポイント、使用中の KV ページ、ドラフト層の KV を含む完全なスナップショットを保存します。<span class="ev ev-report">上流レポート</span> 会話が復元されたあと、変更のなかった KV ページは残しておけるので、次に駐車するときはコピーし直さずにそのまま使えます。会話が長くなるときは後ろに足すだけで、既存のページは動かしません。ロールバックで書き換えられたページだけを、改めてコピーします。<span class="ev ev-report">上流レポート</span> これはコピーオンライトと同じ精神です。変わっていないものはコピーしません。</p>
+
+<h2 id="sec-6">20.6 手を動かす：保存、切り替え、復元、そして照合</h2>
+<p>スナップショットの復元には、鉄則があります。<strong>完全に戻すか、はっきり拒否するか</strong>です。半分だけ戻った状態がいちばん危険です。モデルは、一見自然に見えるのに中身はすべて間違っている文章を、平気で生成します。Strata は、まずすべての層、すべてのチェックポイントを検証し、全部合格してから書き込みを始めます。検証に通らないスナップショットは、GPU を操作する前に拒否されます。転送の途中でエラーが起きたら、インターフェースは、呼び出し側がそのセッションで推論を続けては<strong>いけない</strong>と定めています。<span class="ev ev-code">コード上の事実</span></p>
+<p class="bridge"><strong>データベースを学んだ人へ：</strong>これはトランザクションの原子性です。全部が反映されるか、何もなかったことになるかです。第 18 章で投機的デコーディングの「受理されたプレフィックスだけをコミットする」を見ました。ここでは同じ考え方をセッション復元に使っています。</p>
+<p>この章のインタラクティブ実験「受理された接頭辞だけをコミットする」を開いてください。おもちゃの再帰式 s ← 0.5s + t を使って、候補の状態とコミット済みの状態がなぜ違うのか、カウンタを巻き戻しただけでなぜ誤った状態が残るのかを見せます。2 つめのドラフトを「拒否」に設定して、「カウンタは戻ったのに状態は戻っていない」箇所を探してください。ホワイトボードが「書かなかったことにする」では戻せない理由が、まさにここにあります。</p>
+<p>もう一歩進めたい人は、GPU を使わないテストを自分で設計してみましょう。同じおもちゃの再帰式で会話 A を実行してスナップショットを保存し、会話 B に切り替えて実行し、A を復元して続けます。最後に、「A が一度も離れなかった」場合の結果とビット単位で比べます。両者はまったく同じでなければなりません。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>プレフィックスの再利用は「一字一句同じ」だけを認めます。トークン番号、画像の正体、steering モードがすべて同じで、チェックポイントがリクエストより短いときに、続きから読めます。</li>
+<li>KV キャッシュはノートのようなもので、戻るときは後ろの数行を無視すれば済みます。再帰状態はホワイトボードのようなもので、トークンごとに全体を書き換えるので、事前に撮ったチェックポイントでしか戻れません。Strata のチェックポイントの大部分は、約 113 MB の GDN 状態です。</li>
+<li>コピーオンライトは、誰も書かないページを複数の分岐で共有し、書かれたページだけをコピーします。Strata は「根を固定し、残りは LRU で入れ替える」チェックポイントの鎖を使い、駐車中の会話はそれぞれバッファを専有します。コピーオンライトは使っていません。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「KV キャッシュを保存すれば、会話全体を保存したことになる。」</strong></p>
+<p>Strata が使うモデルでは、これでは全然足りません。48 層のうち 36 層は再帰状態で履歴を覚えていて、それは KV キャッシュの中にありません。ほかにも、PLE の履歴、アテンションのインデクサの末尾、ドラフト層の KV、そしてこのプレフィックスのトークン番号と画像の正体があります。<span class="ev ev-code">コード上の事実</span>[S10] どれか 1 つでも保存し忘れると、復元された会話は気づかないうちに間違った計算をします。</p></div>
+
+<details class="deep"><summary>もう一歩深く：一致ルール、スナップショットの一覧、容量の計算、復元の約束事</summary>
+<h3>一致ルールのソースコードの詳細</h3>
+<p><code>conversation_prefix</code> はまず、チェックポイントが空でないこと、長さがリクエストの長さより厳密に小さいこと、先頭 n 個のトークン番号が 1 つずつ等しいことを要求し、満たさなければ 0 を返します。次に、リクエスト内の画像を順にたどります。開始位置がプレフィックスの外にあるものは飛ばします。プレフィックスの中にあるものは、チェックポイントに記録された画像と順番に等しくなければなりません（開始位置もハッシュも等しい）。最後に、チェックポイントに記録された画像もちょうど使い切られている必要があります。1 枚多くても、少なくても、差し替えられていても、0 を返します。<span class="ev ev-code">コード上の事実</span>[S10]</p>
+<p>セッションキャッシュがチェックポイントを選ぶときは、最近駐車したエントリから順にさかのぼり、steering モードが違うエントリはそのまま飛ばします。各エントリでは、現在の状態と各チェックポイントの両方を考慮し、一致が最長のものを採ります。長さが同じなら、最近駐車した分岐を優先します。呼び出し側は、同じ長さなら、自分が今使っている状態を優先します。<span class="ev ev-code">コード上の事実</span>[S10]</p>
+<h3>正体の一覧：上流が検査しているものと、この教材の提案</h3>
+<p>上流が検査するのは、トークン、画像の正体、steering モードです。スナップショットには、18 個の整数からなる <code>geometry</code> 配列もあります。ソースコードのコメントは、これは実行時の互換性検査にだけ使うもので、モデルの重みの正体ではなく、ディスク形式でもない、とはっきり述べています。<span class="ev ev-code">コード上の事実</span>[S10] 形状が同じで重みがまったく違う 2 つのモデルでも、geometry は同じになります。</p>
+<p>この仕組みを本番環境（スナップショットをディスクに保存し、プロセスをまたいで共有し、複数ユーザーで使う）に広げるなら、この教材は、正体のキーに少なくとも次を足すことを提案します。モデルの重みのバージョン、トークナイザとチャットテンプレート、RoPE の設定、量子化形式、デバイスの数値モード、そして権限の範囲（誰の会話を誰にだけ使わせるか）です。これは教材としての拡張リストであり、上流にすでにある検査ではありません。</p>
+<h3>1 つのスナップショットの完全な一覧</h3>
+<p>チェックポイント（<code>ConversationCheckpoint</code>）には、トークン番号、画像の正体、GDN 状態、PLE の履歴、インデクサの末尾（tails）、dead、block_pos などのバイトブロックと、レイヤー分割ランタイムの各デバイスのサブチェックポイント <code>stage_parts</code> が含まれます。KV の部分（<code>ConversationKv</code>）には、形式番号、セル数、ヘッド数、ヘッド次元、ページサイズ、インデクサの行数、K と V、それぞれの量子化スケール、pooled インデクサ行があります。会話全体のスナップショット（<code>SavedConversation</code>）には、さらに geometry、層の範囲 <code>layer_lo / layer_hi</code>、現在の状態、チェックポイントのリスト、メイン層とドラフト層の KV、steering のフラグが加わります。<span class="ev ev-code">コード上の事実</span>[S10]</p>
+<p>マルチ GPU の境界に注意してください。ソースコードのコメントによると、通常のレイヤー分割のチェックポイントは各デバイスの実行状態を保持しますが、会話全体の駐車は今のところ単一 GPU だけに対応していて、これらのサブチェックポイントを拒否します。<span class="ev ev-code">コード上の事実</span>[S10] 上流のドキュメントも、駐車をオンにして <code>--layer-split</code> を加えると、モデルをロードする前に拒否されると述べています。<span class="ev ev-report">上流レポート</span> 「マルチ GPU に対応している」から「すべてのキャッシュと復元の組み合わせがマルチ GPU に対応している」とは言えません。</p>
+<h3>容量の計算：capacity で数え、アンダーフローを防ぐ</h3>
+<p>スナップショットのバイト数は、各 vector の <code>size()</code> ではなく <code>capacity()</code> を足し合わせて求めます。確保したけれどまだ使い切っていない領域も数えるのです。<span class="ev ev-code">コード上の事実</span>[S10] 新しいスナップショットが入るかどうかの判定は <code>held &lt;= budget_ &amp;&amp; incoming &lt;= budget_ - held &amp;&amp; …</code> と書かれ、引き算のたびに、結果が負にならないことを先に確かめます。符号なし整数で負になる引き算をすると、巨大な正の数に回り込み、予算の検査が意味をなくします。再利用のために保持している KV も、同じ予算に数えます。<span class="ev ev-code">コード上の事実</span>[S10]</p>
+<p>空きを作るときは、まず再利用のために保持している KV を捨て、次に駐車した順に最も古いエントリを追い出します。<span class="ev ev-code">コード上の事実</span> 上流のドキュメントは、物理メモリに少なくとも <code>--conversation-cache-min-free-mib</code>（初期値 2560）の余裕を残すことも求めています。割り当ての前に 1 回、撮り終えたあとにもう 1 回確認し、メモリの情報が取れないときは駐車しません。<span class="ev ev-report">上流レポート</span> 対応する判定関数は、「取れなかった」と「0 だった」をはっきり区別していて、情報がないときはそのまま拒否します。<span class="ev ev-code">コード上の事実</span> 予算の初期値は 0、つまり無効です。ドキュメントの例は 8 GiB、4 スロットで、これは上限であって推奨値ではないと説明しています。<span class="ev ev-report">上流レポート</span></p>
+<h3>復元の約束事と永続化</h3>
+<p>スナップショットのインターフェースは、復元の結果を 3 種類に分けます。成功、スナップショットが無効、転送の失敗です。無効なスナップショットは、CUDA の呼び出しや書き込みの前に拒否されます。転送の失敗は半分だけの状態を残すかもしれないので、呼び出し側はそのセッションで推論を続けては<strong>いけません</strong>。<span class="ev ev-code">コード上の事実</span> 上流のドキュメントによると、転送や同期の失敗は致命的エラーとして扱われ、スナップショットは再起動後に残りません。<span class="ev ev-report">上流レポート</span></p>
+<p>スナップショットをディスクに保存したいときの堅実なやり方は、よくこうなります。まず一時ファイルに書き、書き終えてフラッシュし、チェックサムが通ったら、1 回のアトミックなリネームで「公開」し、ファイルに形式のバージョンを記録します。具体的な永続性の保証は、ファイルシステムにも左右されます。[R02] これは教材としての拡張で、Strata は今のところスナップショットを永続化しません。</p>
+<h3>KV ページ再利用の境界</h3>
+<p>スナップショットのインターフェースには、見落としやすいコメントが 1 つあります。トークン番号が同じでも、KV のバイトが変わっていないことの証明には<strong>なりません</strong>。「変更されていないトークン数」が有効なのは、本当にスナップショットからこのセッションに復元され、その後の書き換えのたびに差し引かれてきたストレージだけです。<span class="ev ev-code">コード上の事実</span> セッションキャッシュの対応する関数は、書き換えに出会うたびに「変更されていない長さ」を最初に汚れた位置まで縮め、0 になったらブロックごと捨てます。<span class="ev ev-code">コード上の事実</span>[S10]</p>
+<p>スナップショットのデータを置くバッファは、16 MiB のセグメントでできています。追記のときは既存のデータを動かさず、ごく小さなセグメント一覧だけが移動することがあります。<span class="ev ev-code">コード上の事実</span> これが、「長くなるときは追記だけで、既存のページをコピーしない」ことの土台です。</p>
+<h3>例題：同じプレフィックスから分岐すると、なぜ書き込みの分離が要るのか</h3>
+<p>会話 A と B が先頭の 1000 トークンを共有しているとします。そのあと、A がトークン a を、B が b を書き込みます。読み取り専用の共有プレフィックスはコピーしなくて構いませんが、1001 番目の位置と、変更可能な再帰状態は、それぞれ独立でなければなりません。2 つのセッションが書き込み可能な同じ状態を直接指していると、片方のリクエストが気づかないうちにもう片方を汚します。教材としての設計では、「不変なプレフィックスページ + 参照カウント + コピーオンライト」が使えます。GDN の再帰状態は、分岐点で丸ごとコピーします。</p>
+<h3>テストマトリクスと受け入れ基準</h3>
+<p>次の場合ごとに、「ヒットすべき / 拒否すべき」を書き出してください。トークンは同じで画像が違う場合。プレフィックスは同じで steering が違う場合。モデルのバージョンが違う場合。リクエストとチェックポイントがちょうど同じ長さの場合。表では、「上流がすでに検査しているもの」と「拡張で求めるもの」を 2 つの列に分けます。</p>
+<p>復元テストでは、「A → 保存 → B → A を復元 → 続行」を使い、結果を A が一度も離れなかった場合とビット単位で比べます。さらに、わざと途切れたスナップショット、間違った形式、足りない予算、終わっていないコミットを注入します。安全な失敗は 1 種類だけです。はっきり拒否して元の状態を残すことで、もっともらしく見える文章を生成し続けることではありません。</p>
+</details>
