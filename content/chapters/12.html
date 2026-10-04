@@ -1,18 +1,215 @@
-<h2 id="sec-1">12.1 缓存保存什么？</h2>
-<p>专家缓存通常以 <code>(layer, expert)</code> 为逻辑键，以显存 slot 为位置。命中后计算应读取对应专家的完整权重字节，未命中走另一个保证语义的路径。读到的 <code>ExpertCache</code> 提供 <code>slot_of</code>、<code>admit</code>、<code>fill_slot</code> 和 <code>verify_slot</code>，把存储机制与更高层决策区分开。[S05]</p>
-<p>一个 slot 标签正确而字节来自另一个专家，是最危险的“伪命中”：统计看起来更好，输出可能也通顺，模型却已经变了。内容校验是正确性的一部分，不是性能调试时可省略的装饰。</p>
-<h2 id="sec-2">12.2 例题：专家命中与整层命中不同</h2>
-<p>假设某层的 10 次专家访问各自独立，单专家命中概率 h=0.7。那么期望命中数为 7，但 10 个全部命中的概率为 <code>0.7¹⁰≈2.82%</code>。真实路由不一定独立，所以这只是教学计算；它足以说明两个指标不能互换。</p>
-<p>如果算法只在“整层全命中”时使用某个快路径，就不能用 70% 的单专家命中率估计它的触发率。统计分母应明确是 token、层-token 对、专家调用次数、唯一专家数，还是字节。</p>
-<h2 id="sec-3">12.3 为什么全局先到先得会偏向早层？</h2>
-<p>一个 token 总从早层向晚层前进。若缓存只接受最先出现的 S 个不同键、满了不换，初始访问可能让前几层占尽空间，后层长期没机会。这不是总容量不足，而是分配策略与执行顺序耦合。</p>
-<p><code>expert_cache.hpp</code> 包含按层切分 slot 区间的机制及其动机。[S05] 按层均分也不是最终最优：层的热点和 blob 大小可能不同。它只是避免一种结构性饥饿，真正策略还应在留出工作负载上比较。</p>
-<h2 id="sec-4">12.4 LRU、LFU 与热度衰减</h2>
-<p>LRU 偏好最近用过的项；LFU 偏好累计频率高的项；衰减热度在旧经验与新热点间折中。缓存实验实现的是教学 LRU、LFU、FIFO 与组相联轮换，不声称等同于上游自适应专家算法。</p>
-<p>对模型而言，语言、任务和对话阶段可能改变路由。一个静态 profile 在代码生成上不错，不代表在长中文分析上相同。训练 profile 与评估 trace 应分离，并报告切换热点后的适应时间和换入换出的流量。</p>
-<h2 id="sec-5">12.5 异步更新必须满足不变量</h2>
-<p>至少需要：一个有效标签只指向已填充完成的字节；正在计算的 slot 不被覆盖；替换后旧映射失效；不同尺寸的 blob 不越过 slot 边界；释放时不存在未完成使用。真实接口同时提供异步与阻塞填充，并解释 legacy stream 与 nonblocking stream 不能随意假设顺序。[S05]</p>
-<p>低内存 resident 模式又多一个约束：RAM 保存 GPU 缓存的补集。换入专家从 RAM 去 GPU 的同时，换出的专家必须回到相应 RAM 位置，不能只改映射不保存字节。[S06]</p>
-<h2 id="sec-6">12.6 阅读历史注释时保持警惕</h2>
-<p>缓存头文件开头保留早期阶段“还没接入计算”的描述，而当前验证器和专家来源接口已经暴露缓存消费路径。[S05][S06][S08] 因此本章不把旧开头当作当前产品结论，也不从某个存储类没有 eviction 就断言整个引擎没有自适应替换。</p>
-<p>课堂实验应把“策略选择”“slot 管理”“DMA 完成”“计算读者”画成四个独立角色，再标明每次状态改变的许可条件。这是操作系统与数据库一致性思维在 AI 系统里的直接应用。</p>
+<div class="hook"><span class="eyebrow">接着第 10 章往下问</span>
+<p>第 10 章说过：Strata 把最常被选中的专家放在显存里，其余的留在内存，由 CPU 就地计算；话题变了，显存里的专家也跟着换。听起来很顺。可真要写代码，问题一个接一个：开局先放谁？显存一共几千个位置，48 层怎么分？什么时候换、换谁？换到一半时，正好有 token 要用这个专家，怎么办？</p>
+<p>这些都是缓存的老问题。这一章用 Strata 的专家缓存，把它们一个个讲清楚。</p></div>
+<p class="tldr"><strong>一句话：</strong>专家缓存开局按历史频率填满，每层分一段槽位；之后每 4 轮按“衰减计数”换掉冷门、换进热门；换的时候先撤表项、等字节拷贝完，再登记，绝不让 GPU 读到半新半旧的槽位。</p>
+
+<h2 id="sec-1">12.1 命中率：先说清楚分母</h2>
+<p>缓存好不好，第一个看的数是<dfn>命中率</dfn>：要用的东西有多大比例已经在缓存里。对专家缓存来说，“命中”就是被选中的专家正好在显存里，GPU 直接算；“未命中”就要 CPU 从内存里读这个专家的 1.38 MB 来算。</p>
+<p>上游在开发这个缓存时测过：显存放 4,105 个专家时，单个专家的命中率是 0.6447，十折留出评估的区间是 0.6110 到 0.6750。<span class="ev ev-report">上游报告</span>[S05] 同一段注释还记了另一个数：一层的 10 个专家<strong>全部</strong>命中的比例，只有 0.0456。<span class="ev ev-report">上游报告</span>[S05] 两个数都叫“命中率”，差了十几倍，因为分母不同，见图 12-1。</p>
+<figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="图 12-1：同一次运行，单个专家命中率 64.5%，一层 10 个专家全部命中只有 4.6%，若各专家独立则只有约 1.2%">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">4,105 个槽位，留出法评估（上游开发期）</text>
+<text class="f-text" fill="#182f2b" x="20" y="52" font-size="14">单个专家命中</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="60" width="300" height="22"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="60" width="193" height="22"/>
+<text class="f-text" fill="#182f2b" x="328" y="77" font-size="14">64.5%</text>
+<text class="f-text" fill="#182f2b" x="20" y="114" font-size="14">一层 10 个全命中：实测</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="122" width="300" height="22"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="122" width="14" height="22"/>
+<text class="f-text" fill="#182f2b" x="328" y="139" font-size="14">4.6%</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="14">一层 10 个全命中：若各自独立</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="184" width="300" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="20" y="184" width="4" height="22"/>
+<text class="f-text" fill="#182f2b" x="328" y="201" font-size="14">1.2%</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="232" font-size="14">0.645¹⁰ ≈ 1.2%；实测更高，说明同一层</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="252" font-size="14">被选中的专家常常一起热、一起冷</text>
+</svg><figcaption>图 12-1　两个都叫“命中率”的数。按专家算是 64.5%，按“整层都命中”算只有 4.6%。报告命中率，必须先说分母是什么。</figcaption></figure>
+<p>这件事直接影响设计。如果只有“整层全命中”才能走某条快路径，那 64.5% 的专家命中率帮不上忙：这样的层只占 4.6%。上游注释据此得出结论：不能按“整层”分组设计 GPU 内核，要允许同一层里一部分专家在 GPU、一部分在 CPU。<span class="ev ev-code">代码事实</span>[S05]</p>
+<aside class="primer" id="c12-hit-rate">
+<h3>命中率与工作集</h3>
+<p><dfn>命中率</dfn> = 命中次数 ÷ 访问次数。看起来简单，难在“一次访问”怎么数：按 token 数、按“层 × token”数、按专家调用数、按去重后的专家数，还是按字节数？分母一换，数字可以差出一个数量级。报命中率时，还要写清缓存多大、冷启动还是预热后、在什么数据上测。</p>
+<p>一个有用的概念是<dfn>工作集</dfn>：最近一段时间里真正用到的东西的集合。比如最近 100 个 token 里，第 7 层一共选过 60 个不同的专家，这 60 个就是第 7 层此刻的工作集。缓存装得下工作集，命中率就高；装不下，就会刚换进来又被挤出去，反复搬运，这叫<dfn>颠簸</dfn>。</p>
+<p>工作集会随时间漂移。写代码时常用的专家，和写散文时常用的不一样。所以缓存要回答两个问题：现在的工作集是谁（统计），以及怎样跟上它的变化（替换策略，见 12.4）。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/工作集" target="_blank" rel="noopener noreferrer">维基百科：工作集</a> · <a href="https://en.wikipedia.org/wiki/Working_set" target="_blank" rel="noopener noreferrer">Wikipedia: Working set</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-beyondphys-policy.pdf" target="_blank" rel="noopener noreferrer">OSTEP 第 22 章：换页策略</a></p>
+</aside>
+
+<h2 id="sec-2">12.2 开局放谁：按历史频率排一张名单</h2>
+<p>最省事的开局是“先来先占”：运行起来以后，前几千个被选中的不同专家依次占位，满了就不再变。问题在于，开头碰到谁，全凭这次对话的第一段提示词。上游测过，这样的命中率只有 0.4864。<span class="ev ev-report">上游报告</span>[S05]</p>
+<p>Strata 的做法是事先准备一份<dfn>专家档案</dfn>（profile）：在一大段访问记录上统计每个（层，专家）被选中的频率，从高到低排成名单，开局照名单填满显存。同样 4,105 个槽位，留出评估的命中率是 0.6447。<span class="ev ev-report">上游报告</span>[S05] 见图 12-2。</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="图 12-2：开局先来先占的命中率是 0.4864，按频率名单填充是 0.6447">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">同样的槽位，两种开局（上游开发期测量）</text>
+<text class="f-text" fill="#182f2b" x="20" y="52" font-size="14">先来先占：前 S 个不同专家</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="60" width="300" height="24"/>
+<rect class="f-warn" fill="#9e5d24" x="20" y="60" width="146" height="24"/>
+<text class="f-text" fill="#182f2b" x="328" y="78" font-size="14">0.486</text>
+<text class="f-text" fill="#182f2b" x="20" y="116" font-size="14">按频率名单（profile）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="124" width="300" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="124" width="193" height="24"/>
+<text class="f-text" fill="#182f2b" x="328" y="142" font-size="14">0.645</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="180" font-size="14">CPU 要算的专家数和“1 − 命中率”成正比</text>
+</svg><figcaption>图 12-2　开局填谁，差别很大。名单来自一份访问记录的统计，评估要用另一份没见过的记录。</figcaption></figure>
+<p>注释特别强调了一点：名单从文件读入，好处是可以“用这份提示词做名单，在另一份提示词上打分”，这才知道它能不能推广。<span class="ev ev-code">代码事实</span>[S05] 用同一段记录既排名单又打分，等于开卷考试，分数偏高。注释提到，README 曾公布过 0.6573，那是“在样本内”测出来的数；0.6447 才是留出评估。<span class="ev ev-report">上游报告</span>[S05]</p>
+<p class="bridge"><strong>学过机器学习的同学：</strong>这就是训练集和测试集要分开。缓存策略里的“统计热门”也是一种拟合，同样会过拟合。</p>
+
+<h2 id="sec-3">12.3 别让前几层抢光：每层一段槽位</h2>
+<p>槽位怎么在 48 层之间分？上游踩过一个很有教学价值的坑。早期的准入规则是：所有层共用一个计数器，按到达顺序发槽位，发完为止。一个 token 从第 0 层往后走，每层选 10 个专家；256 个槽位，大约走到第 26 层就发光了。后面的层永远拿不到槽位，整个运行期间缓存只在前面几层起作用。<span class="ev ev-code">代码事实</span>[S05]</p>
+<figure class="fig"><svg viewBox="0 0 400 286" role="img" aria-label="图 12-3：全局先到先得时，256 个槽位被前 26 层占光，命中率 2.97%；按层分配时每层一段，同一记录上估算每层 8 槽可达 21.4%">
+<text class="f-text" fill="#182f2b" x="20" y="20" font-size="15" font-weight="600">全局先到先得</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="34" width="190" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="210" y="34" width="170" height="40"/>
+<text class="f-on" fill="#ffffff" x="115" y="59" font-size="14" text-anchor="middle">第 0–25 层占满</text>
+<text class="f-muted" fill="#5c6d66" x="295" y="59" font-size="14" text-anchor="middle">后面的层：0 个</text>
+<text class="f-text" fill="#182f2b" x="20" y="98" font-size="14">实测 256 槽：1,781 ÷ 60,000 ＝ 2.97%</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="15" font-weight="600">按层分：每层只能用自己那一段</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="160" width="360" height="40"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M65 160V200M110 160V200M155 160V200M200 160V200M245 160V200M290 160V200M335 160V200"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="222" font-size="14">第 0 层 ………………………………… 第 47 层</text>
+<text class="f-text" fill="#182f2b" x="20" y="250" font-size="14">同一记录上估算：每层 8 槽 → 21.4%</text>
+<text class="f-text" fill="#182f2b" x="20" y="274" font-size="14">每层 64 槽 → 70.4%</text>
+</svg><figcaption>图 12-3　缓存不缺容量，缺的是公平。全局先到先得把槽位全发给了最早出现的几层。</figcaption></figure>
+<p>注释里的数字很扎眼：用 256 个槽位跑，命中 1,781 次、访问 60,000 次，命中率 2.97%；而在同一份路由记录上估算，每层给 8 个槽就能到 21.4%，每层 64 个能到 70.4%。注释的结论是：缓存从来不缺容量，缺的是公平的分配。<span class="ev ev-report">上游报告</span>[S05]</p>
+<p>修法很直接：打开按层准入后，第 l 层只能用第 l·q 到 (l+1)·q 的槽位，q 是总槽位数除以层数，最后一层拿余数。<span class="ev ev-code">代码事实</span>[S05] 这条修复只改“谁能用哪个槽”，不改别的。这里的教训比修法更重要：命中率低，不一定是缓存太小；先看分配是不是和访问顺序缠在了一起。</p>
+
+<h2 id="sec-4">12.4 热门会变：LRU、LFU 和带衰减的计数</h2>
+<p>名单只管开局。聊着聊着，话题变了，热门专家也变了。缓存要跟上，就得决定“换谁出去”，这叫<dfn>替换策略</dfn>。先看几种经典做法。</p>
+<aside class="primer" id="c12-cache-replacement">
+<h3>缓存替换策略：LRU、LFU 及其他</h3>
+<p>缓存满了，新东西要进来，必须请一个旧的出去。请谁？</p>
+<ul>
+<li><dfn>OPT</dfn>（最优策略）：请“下一次被用到最晚”的那个出去。它是理论上的最好成绩，但要预知未来，只能拿来当参照。</li>
+<li><dfn>FIFO</dfn>（先进先出）：谁最早进来就请谁出去。简单，但会把常用的老东西也赶走。第 11 章的轮换指针就是每组一个 FIFO。</li>
+<li><dfn>LRU</dfn>（最近最少使用）：请最久没被用过的出去。理由是“最近用过的，很可能马上还要用”。它反应快，但怕“一次性扫过”：一串只用一次的冷门数据，就能把热门的全挤掉。</li>
+<li><dfn>LFU</dfn>（最不经常使用）：请累计次数最少的出去。它不怕偶尔的冷门数据，但记性太好：过去攒下大次数的老热门，换了话题也赖着不走。</li>
+<li><dfn>CLOCK</dfn>（第二次机会）：给每格一个“最近用过”标记，指针转一圈，碰到有标记的就清掉标记、放它一马，碰到没标记的才换掉。它用很小的开销近似 LRU，操作系统换页常用它。</li>
+</ul>
+<p>LFU 的毛病有个经典补丁：让次数随时间<dfn>衰减</dfn>，比如每隔一段时间所有次数乘 0.7。这样旧功劳会慢慢褪色，新热门有机会超过老热门。这类做法常叫“老化”（aging）。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/快取文件置換機制" target="_blank" rel="noopener noreferrer">维基百科：缓存文件置换机制</a> · <a href="https://en.wikipedia.org/wiki/Cache_replacement_policies" target="_blank" rel="noopener noreferrer">Wikipedia: Cache replacement policies</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-beyondphys-policy.pdf" target="_blank" rel="noopener noreferrer">OSTEP 第 22 章：换页策略</a></p>
+</aside>
+<p>Strata 的专家缓存选的正是“带衰减的计数”。规则藏在生成程序里，几个数字都能对上：<span class="ev ev-code">代码事实</span>（<code>src/program/generate.cpp</code>、<code>src/core/expert_source.cpp</code>）</p>
+<ol>
+<li><strong>记次数</strong>：每层每选中一个专家，它的计数加 1，不管它在不在显存里。</li>
+<li><strong>定期调整</strong>：默认每 4 轮调整一次。一轮就是大模型做一次前向，验证一批草稿，产出一个或几个 token。</li>
+<li><strong>够格才换</strong>：在同一层里，不在显存的专家计数至少到 2，才算候选；候选要比显存里最冷的那个多出 1.5 以上，才真的交换。一次调整最多换 96 个。</li>
+<li><strong>全体褪色</strong>：调整完，所有计数乘 0.7。</li>
+</ol>
+<p>乘 0.7 意味着什么？一个专家如果不再被选中，它的计数每调整约 2 次就减半（0.7² ≈ 0.49）。反过来，某一次的“被选中”，算上后面所有的褪色，总共贡献 1 + 0.7 + 0.49 + … = 1 ÷ (1 − 0.7) ≈ 3.3。源码注释正是用这个和来说明累计“热度”。<span class="ev ev-est">教学推演</span> 图 12-4 画出了褪色的过程。</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="图 12-4：一个专家不再被选中后，计数每次调整乘 0.7：10、7、4.9、3.4、2.4、1.7，第 5 次调整后降到 2 以下">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">一个不再被选中的专家，计数怎样褪色</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="4 3" d="M30 182H390"/>
+<text class="f-warn" fill="#9e5d24" x="390" y="44" font-size="14" text-anchor="end">虚线：资格线 2</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="86" width="40" height="120"/>
+<rect class="f-accent" fill="#136d5a" x="100" y="122" width="40" height="84"/>
+<rect class="f-accent" fill="#136d5a" x="160" y="147" width="40" height="59"/>
+<rect class="f-accent" fill="#136d5a" x="220" y="165" width="40" height="41"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="280" y="177" width="40" height="29"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="340" y="186" width="40" height="20"/>
+<text class="f-text" fill="#182f2b" x="60" y="78" font-size="14" text-anchor="middle">10</text>
+<text class="f-text" fill="#182f2b" x="120" y="114" font-size="14" text-anchor="middle">7</text>
+<text class="f-text" fill="#182f2b" x="180" y="139" font-size="14" text-anchor="middle">4.9</text>
+<text class="f-text" fill="#182f2b" x="240" y="157" font-size="14" text-anchor="middle">3.4</text>
+<text class="f-text" fill="#182f2b" x="300" y="169" font-size="14" text-anchor="middle">2.4</text>
+<text class="f-text" fill="#182f2b" x="360" y="168" font-size="14" text-anchor="middle">1.7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M30 206H390"/>
+<text class="f-muted" fill="#5c6d66" x="60" y="226" font-size="14" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="120" y="226" font-size="14" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="180" y="226" font-size="14" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="240" y="226" font-size="14" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="226" font-size="14" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="360" y="226" font-size="14" text-anchor="middle">5</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="246" font-size="14" text-anchor="middle">调整次数（默认每 4 轮一次）</text>
+</svg><figcaption>图 12-4　每次调整乘 0.7：约 2 次减半。旧热门会慢慢褪色，新热门才有机会超过它。<span class="ev ev-est">教学推演</span></figcaption></figure>
+<p>这套规则和 LRU、LFU 比，到底好在哪？下面的模拟器把一层缩小成 24 个专家、每个 token 选 4 个、显存只放 6 个，三种策略看同一串路由。第 30 个 token 起话题改变；你还可以插入一段“冷门插曲”。</p>
+<div class="viz" data-viz="cache-race"><figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="图 12-5：教学模型中三种策略的结果。总命中率 LRU 40%、LFU 37%、衰减计数 44%；换话题后前 15 个 token，LRU 命中 26 次、LFU 5 次、衰减计数 10 次">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">教学模型：60 个 token，第 30 个起换话题</text>
+<text class="f-text" fill="#182f2b" x="20" y="50" font-size="14" font-weight="600">总命中率</text>
+<text class="f-text" fill="#182f2b" x="20" y="78" font-size="14">LRU</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="64" width="160" height="18"/>
+<text class="f-text" fill="#182f2b" x="278" y="78" font-size="14">40%</text>
+<text class="f-text" fill="#182f2b" x="20" y="104" font-size="14">LFU</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="90" width="148" height="18"/>
+<text class="f-text" fill="#182f2b" x="266" y="104" font-size="14">37%</text>
+<text class="f-text" fill="#182f2b" x="20" y="130" font-size="14">衰减计数</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="116" width="176" height="18"/>
+<text class="f-text" fill="#182f2b" x="294" y="130" font-size="14">44%</text>
+<text class="f-text" fill="#182f2b" x="20" y="166" font-size="14" font-weight="600">换话题后前 15 个 token 的命中次数</text>
+<text class="f-text" fill="#182f2b" x="20" y="194" font-size="14">LRU</text>
+<rect class="f-warn" fill="#9e5d24" x="110" y="180" width="156" height="18"/>
+<text class="f-text" fill="#182f2b" x="274" y="194" font-size="14">26</text>
+<text class="f-text" fill="#182f2b" x="20" y="220" font-size="14">LFU</text>
+<rect class="f-warn" fill="#9e5d24" x="110" y="206" width="30" height="18"/>
+<text class="f-text" fill="#182f2b" x="148" y="220" font-size="14">5</text>
+<text class="f-text" fill="#182f2b" x="20" y="246" font-size="14">衰减计数</text>
+<rect class="f-warn" fill="#9e5d24" x="110" y="232" width="60" height="18"/>
+<text class="f-text" fill="#182f2b" x="178" y="246" font-size="14">10</text>
+</svg><figcaption>图 12-5　LRU 反应最快，LFU 被旧话题攒下的次数拖住，衰减计数慢几步跟上，总分最高。数字来自本书的教学模型，不是 Strata 实测。</figcaption></figure></div>
+<p>模拟器只有一层、24 个专家，数字不能直接搬到 Strata 上。它想让你看到的是性格：LRU 灵敏但容易被冷门数据冲乱；LFU 稳但不肯忘；衰减计数用“定期调整 ＋ 门槛 ＋ 褪色”在两者之间折中。为什么只在每 4 轮调整一次，而不是每次未命中就换？每次交换都要经 PCIe 搬 1.38 MB，频繁换进换出本身就有代价；设两道门槛（够 2 次、领先 1.5），也是为了不为一点点差距去搬运。<span class="ev ev-est">教学推演</span></p>
+<p>Strata 里其实有好几个缓存，各用各的策略，见图 12-6。</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="图 12-6：Strata 里的三个缓存和三种替换策略：PLE 行缓存用组内轮换，专家缓存用衰减计数，长上下文的 KV 页用 CLOCK">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="8" width="380" height="84" rx="9"/>
+<text class="f-text" fill="#182f2b" x="24" y="34" font-size="15" font-weight="600">PLE 行缓存（内存）</text>
+<text class="f-text" fill="#182f2b" x="24" y="58" font-size="14">策略：每组一个轮换指针</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="80" font-size="14">每行只有 90 字节，查找要快</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="102" width="380" height="84" rx="9"/>
+<text class="f-on" fill="#ffffff" x="24" y="128" font-size="15" font-weight="600">专家缓存（显存）</text>
+<text class="f-on" fill="#ffffff" x="24" y="152" font-size="14">策略：衰减计数，每 4 轮调整</text>
+<text class="f-on" fill="#ffffff" x="24" y="174" font-size="14">每次交换要搬 1.38 MB，不能乱换</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="196" width="380" height="84" rx="9"/>
+<text class="f-text" fill="#182f2b" x="24" y="222" font-size="15" font-weight="600">KV 页（显存，64K 以上的长上下文）</text>
+<text class="f-text" fill="#182f2b" x="24" y="246" font-size="14">策略：CLOCK（第二次机会）</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="268" font-size="14">每一步在 GPU 上直接挑要换的页</text>
+</svg><figcaption>图 12-6　同一个引擎里，三种缓存、三种策略。缓存的东西多大、多久变一次、在哪里做决定，决定了用哪种策略。</figcaption></figure>
+<p>长上下文的 KV 页缓存（第 17 章细讲）在显存里放一部分页，每一步由 GPU 上的一个线程块用 CLOCK 扫描挑出要换掉的槽位，再从锁页内存里把缺的页拷进来。<span class="ev ev-code">代码事实</span>（<code>include/strata/kernels/kv_stream.hpp</code>）上游文档说，上下文在 64K 及以上、内存又放得下时，安装程序会打开它。<span class="ev ev-report">上游报告</span>[S03]</p>
+
+<h2 id="sec-5">12.5 换的时候：先拷贝，再登记</h2>
+<p>决定了换谁，还要真的换。这一步最容易出“看起来没问题”的错。专家缓存有两样东西：一张<dfn>驻留表</dfn>，记录每个（层，专家）在哪个槽位，或者不在显存；还有槽位里真正的字节。GPU 只看表：表上说 #112 在槽位 5，它就去槽位 5 读。</p>
+<p>拷贝是<dfn>异步</dfn>的：发起拷贝的函数立刻返回，字节还在 PCIe 上走（第 14 章细讲）。如果先在表上登记“#112 在槽位 5”，再开始拷贝，这中间正好有 token 选中 #112，GPU 就会读到一半新、一半旧的字节。下面的模拟器把这一过程放慢了：</p>
+<div class="viz" data-viz="expert-swap"><figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="图 12-7：一次交换的正确顺序：先撤下换出专家的表项，再异步拷贝，等拷贝完成事件，最后登记换入的专家">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="8" width="360" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="36" y="31" font-size="15" font-weight="600">① 撤下 #331：表项改成“无”</text>
+<text class="f-muted" fill="#5c6d66" x="36" y="52" font-size="14">此后 #331 被选中，由 CPU 算</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="72" width="360" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="36" y="95" font-size="15" font-weight="600">② 异步拷贝 #112 → 槽位 5</text>
+<text class="f-muted" fill="#5c6d66" x="36" y="116" font-size="14">途中 #112 被选中，仍由 CPU 算</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="136" width="360" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="36" y="159" font-size="15" font-weight="600">③ 拷贝完成事件到达</text>
+<text class="f-muted" fill="#5c6d66" x="36" y="180" font-size="14">槽位 5 现在完整装着 #112</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="200" width="360" height="54" rx="9"/>
+<text class="f-on" fill="#ffffff" x="36" y="223" font-size="15" font-weight="600">④ 登记 #112 → 槽位 5</text>
+<text class="f-on" fill="#ffffff" x="36" y="244" font-size="14">此后 #112 被选中，由 GPU 算</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="284" font-size="14">顺序反了：拷贝途中 GPU 会读到半新半旧的字节</text>
+</svg><figcaption>图 12-7　表项只在字节到齐以后才指向槽位。换出的专家先撤表，换入的专家后登记。</figcaption></figure></div>
+<p>Strata 的自适应缓存就是这么做的：交换一发起，被换出的专家马上在表上标成“不在显存”，源码注释写着“此刻起被逐出：期间由 CPU 计算它”；被换入的专家先记在“待定”名单里，拷贝之后记录的完成事件到了，才写进表。<span class="ev ev-code">代码事实</span>（<code>src/program/generate.cpp</code>）</p>
+<p>还有一个更隐蔽的版本。上游曾用“非阻塞地查询一下拷贝完成没有”来决定是否登记：完成了就登记，没完成就下次再说。结果同一个专家这一轮由 GPU 算、下一轮由 CPU 算，全看拷贝快慢；而 GPU 和 CPU 的舍入方式不同，同一个提示词两次运行的答案就可能不一样。现在默认改成等拷贝落地再开始下一轮。<span class="ev ev-code">代码事实</span>（<code>src/program/generate.cpp</code>）上游文档也提醒：要得到逐字节相同的重复结果，需要关掉自适应交换等几个开关。<span class="ev ev-report">上游报告</span>[S03]</p>
+<p>低内存的“驻留”模式又多一层约束：内存里只存显卡没有的那些专家。换出的专家，字节要先从显存拷回内存里，占住换入专家腾出的位置，内存这份副本才能继续“恰好补齐”显卡缺的部分。<span class="ev ev-report">上游报告</span>[S03] 接口里专门有一个函数做这件事。<span class="ev ev-code">代码事实</span>[S06]</p>
+<p class="bridge"><strong>学过操作系统的同学：</strong>这和换页时“先把页表项设为无效、写回完成后再复用页框”是同一个道理：映射关系的每次改变，都要等它所依赖的数据真正到位。</p>
+<p>怎样证明槽位里装的就是表上说的那个专家？缓存提供了一个逐字节比对的函数：把槽位读回主机，和内存里的原件一字节一字节比。注释说，这是“唯一能证明缓存装着它声称的专家的东西”；表的索引对、字节错，会产出一个看似合理的 token，而这正是这个项目吃亏最多的一类错误。<span class="ev ev-code">代码事实</span>[S05]</p>
+
+<h2 id="sec-6">12.6 动手：让三种策略赛跑</h2>
+<p>先在「三种替换策略赛跑」里跑完 60 个 token，记下三条命中小格在第 30 个 token 之后的样子；再打开“冷门插曲”重跑，看谁的槽位被冲乱。然后到「一次换入换出」里，用错误顺序走一遍，体会“标签对、字节错”为什么最危险。</p>
+<p>最后打开本章的交互实验「缓存轨迹与冲突」。在同一串访问上比较 LRU、LFU、FIFO 和八路轮换。实验里的策略都是教科书版本，不是 Strata 的衰减计数；它让你练习的是：同一个容量，策略不同，命中率能差多少；以及怎样构造一串访问，专门让某种策略吃亏。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>命中率先说分母：按专家算 64.5%，按“整层全命中”算只有 4.6%。评估名单要用没见过的记录。</li>
+<li>开局按频率名单填满，每层分一段槽位；全局先到先得会让前几层抢光槽位，命中率掉到 3%。</li>
+<li>之后每 4 轮按衰减计数交换（够 2 次、领先 1.5、全体乘 0.7）。交换时先撤表项、等拷贝完成再登记。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“命中率低，说明缓存太小，加显存就好。”</strong></p>
+<p>不一定。上游的早期版本用 256 个槽位只命中 2.97%，同一份访问记录上，每层分 8 个槽就能到 21.4%。<span class="ev ev-report">上游报告</span>[S05] 容量没变多少，变的是“槽位给谁”。命中率低时，先查分配是否公平、策略是否和访问顺序纠缠、统计口径对不对，再谈加容量。</p></div>
+
+<details class="deep"><summary>深入一层：历史注释、正确性不变量与评估方法</summary>
+<h3>“缓存从不淘汰”和“缓存会换”怎么同时成立</h3>
+<p><code>expert_cache.hpp</code> 开头写着：这个文件只是槽位存储和驻留表，还不做任何计算，所以打开缓存只会更慢。<span class="ev ev-code">代码事实</span>[S05] 它的准入函数也明说“从不淘汰”，因为淘汰策略要靠实测决定，放一个占位策略会让下游所有设计都按错误的命中率来定。<span class="ev ev-code">代码事实</span>[S05] 这些注释写于开发早期。当前的引擎确实会换专家，但换的动作不在这个类里：生成程序按衰减计数挑出交换对，直接把新专家的字节拷进旧专家的槽位，再改驻留表。读代码时要分清“这个类不做什么”和“整个系统不做什么”。</p>
+<h3>一次交换必须保持的条件</h3>
+<ul>
+<li>表上任何一个有效项，都指向已经完整填好的槽位。</li>
+<li>正在被计算读取的槽位，不能被覆盖。</li>
+<li>换出后，旧的映射立即失效；换入的映射在字节落地后才生效。</li>
+<li>不同大小的专家块（有的量化格式每层不同），不能越过槽位边界；槽位一旦按某层的大小分好，就不挪给别的层。<span class="ev ev-code">代码事实</span>[S05]</li>
+<li>驻留模式下，换出专家的字节先拷回内存，内存副本才能继续“恰好补齐”显卡缺的部分。</li>
+</ul>
+<h3>同步还是异步：开机填充为什么要阻塞</h3>
+<p>平时的填充是异步的，因为拷贝和随后读它的内核排在同一条流上，顺序天然成立。开机按名单填充时没有这种保证：源数据在普通内存里，逐字节校验又在另一条“传统流”上读回，而传统流和非阻塞流之间没有顺序关系。第一版用了异步填充，结果校验报告“槽位 0 第 0 字节就和原件不同”，拒绝运行。注释说：这是校验在尽职。于是有了专门的阻塞版填充。<span class="ev ev-code">代码事实</span>[S05]</p>
+<h3>名单能存下来</h3>
+<p>上游文档说，引擎 0.1.36 起有一个可选功能：把自适应缓存学到的排名存成新名单，下次启动从这里开始。排序规则是：此刻在显存里的排前面，其次按这次运行累计的热度，再按原名单的位置。<span class="ev ev-code">代码事实</span>[S05] 写文件时先写到一个临时文件，写完再改名覆盖，所以进程崩溃也不会留下半个文件。<span class="ev ev-code">代码事实</span>[S05]</p>
+<h3>怎样公平地比较策略</h3>
+<p>报告一个缓存策略，至少写清：缓存总容量和每层分配、命中率的分母、冷启动还是预热后、访问记录从哪来、名单和评估是否用了不同的记录、换话题后多久恢复、每秒换入换出多少字节。只说一句“命中率 70%”，既不能复现，也不能拿来估算显存预算。</p>
+</details>
