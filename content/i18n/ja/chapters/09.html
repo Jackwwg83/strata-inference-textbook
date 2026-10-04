@@ -1,0 +1,219 @@
+<div class="hook"><span class="eyebrow">まずたとえ話から</span>
+<p>会議のメモの取り方は 2 通りあります。1 つは速記者のやり方です。発言をすべて書き留めるので、ノートは厚くなる一方で、何か探すときは前のページをめくり直します。もう 1 つはホワイトボードのやり方です。使うのは決まった大きさの板が 1 枚だけ。新しい内容が来たら、古い部分を少し消して、少し書き換えます。板の大きさは変わりません。</p>
+<p>第 8 章のアテンションは速記者です。この章はホワイトボードの話をします。Strata のモデルは 48 層のうち 36 層が <dfn>GDN</dfn>（ゲート付き DeltaNet）です。どの層も、ヘッドごとに 128 × 128 の「ホワイトボード」を 1 枚だけ持ちます。会話がどれだけ長くなっても、この板は大きくなりません。手計算できる小さな例を使って、この板をどう消し、どう書き、どう読むのかを見ていきましょう。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>GDN は履歴を、大きさの決まった状態行列に押し込みます。トークンが 1 つ来るたびに、まず全体を減衰させます。次に現在のキーで古い値を読み出します。そして「目標値 − 古い値」の差額だけを、外積 1 回で書き戻します。状態はコンテキストが長くなっても大きくなりません。ただし損失があります。しかも順番を 1 つ間違えると、結果が静かに変わってしまいます。</p>
+
+<h2 id="sec-1">9.1 2 種類の記憶：ノートをめくるか、ホワイトボードを書き換えるか</h2>
+<p>アテンションは、過去の位置ごとにキーと値を 1 組ずつ残し、必要になったら振り返って調べます。良い点は、何も失われないことです。代わりに、コンテキストが長くなるほど、保存する量が増え、調べるのも遅くなります（第 8 章）。GDN は別の道を選びます。1 件ずつの記録は残さず、大きさの決まった<strong>状態</strong>を 1 つ保ち、トークンが来るたびに 1 回更新します。図 9-1 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 254" role="img" aria-label="図 9-1：アテンションの KV キャッシュはコンテキストに比例して増え、262K で約 6 GiB になる。GDN の状態は常に約 112 MiB">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">記憶が占めるバイト数（コンテキスト長ごと）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M50 190H380M50 190V36"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M50 190L380 40"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" stroke-dasharray="7 4" d="M50 187.3H380"/>
+<text class="f-text" fill="#182f2b" x="62" y="62" font-size="12">アテンションの KV キャッシュ：</text>
+<text class="f-text" fill="#182f2b" x="62" y="80" font-size="12">1 トークンごとに 24 KiB 増える</text>
+<text class="f-text" fill="#182f2b" x="130" y="176" font-size="12">GDN の状態：ずっと約 112 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="46" y="44" font-size="12" text-anchor="end">6 GiB</text>
+<text class="f-muted" fill="#5c6d66" x="46" y="194" font-size="12" text-anchor="end">0</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="208" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="208" font-size="12" text-anchor="middle">128K</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="208" font-size="12" text-anchor="end">262K</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="230" font-size="12">KV は FP16・QSA 12 層で見積もり。</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="248" font-size="12">GDN は 36 層ぶんの畳み込み履歴を含む。</text>
+</svg><figcaption>図 9-1　KV キャッシュは上がり続けます。GDN の状態は、最初のトークンからずっと同じ大きさです。代わりに、決まった大きさのホワイトボードには、無限の細部は収まりません。</figcaption></figure>
+<aside class="primer" id="c09-rnn-state">
+<h3>回帰型ニューラルネットワークと「状態」</h3>
+<p>直感：羊を数えるとき、頭の中に覚えている数字は 1 つだけです。「いま何匹目か」。羊を 1 匹見るたびに、その数に 1 を足します。1 匹ずつの見た目を覚えていなくても、いつでも合計を答えられます。この「頭の中に覚えているもの」が<dfn>状態</dfn>です。</p>
+<p>定義：システムが毎ステップ「古い状態 + 新しい入力 → 新しい状態」と更新する形を、hₜ = f(hₜ₋₁, xₜ) と書きます。デジタル回路のカウンタや、コンパイラの教科書に出てくる<dfn>有限オートマトン</dfn>は、どれもこの形です。f を学習できるニューラルネットワークに置き換えたものが<dfn>回帰型ニューラルネットワーク</dfn>（RNN）です。</p>
+<p>大事な性質が 2 つあります。1 つ目。状態の大きさは固定です。だから 1 ステップあたりの仕事量は、これまで何ステップ進んだかに関係なく O(1) です。n 語の文章を読み終えるまでは O(n) で、アテンションの O(n²) より安く済みます。2 つ目。大きさが固定ということは、<strong>損失がある</strong>ということです。「羊を数える人」は合計を教えてくれますが、17 匹目の羊が何色だったかは答えられません。昔の RNN の難点は、まさに「遠い昔のことを覚えていられない」ことでした。GDN のような新しいモデルは、大きな行列の状態と賢い書き込み規則でこれを和らげます。ただし、損失があるという点は変わりません。</p>
+<p>工学上の帰結がもう 1 つあります。状態は前にしか進めません。第 t ステップの状態を手にしても、第 t − 2 ステップの状態は、たいてい<strong>逆算できません</strong>。書き込むときに、古い情報の一部をすでに消しているからです。戻したければ、前もってスナップショットを保存するか、最初からやり直す（再生する）しかありません。</p>
+<p>この章との関係：Strata の 36 個の GDN 層は、それぞれ自分専用の状態を 1 つ持っています。それをトークンごとに、1 つずつ前へ進めます。</p>
+<p class="further">参考リンク：<a href="https://ja.wikipedia.org/wiki/%E5%9B%9E%E5%B8%B0%E5%9E%8B%E3%83%8B%E3%83%A5%E3%83%BC%E3%83%A9%E3%83%AB%E3%83%8D%E3%83%83%E3%83%88%E3%83%AF%E3%83%BC%E3%82%AF" target="_blank" rel="noopener noreferrer">Wikipedia：回帰型ニューラルネットワーク</a> · <a href="https://ja.wikipedia.org/wiki/%E6%9C%89%E9%99%90%E3%82%AA%E3%83%BC%E3%83%88%E3%83%9E%E3%83%88%E3%83%B3" target="_blank" rel="noopener noreferrer">Wikipedia：有限オートマトン</a> · <a href="https://en.wikipedia.org/wiki/Recurrent_neural_network" target="_blank" rel="noopener noreferrer">Wikipedia: Recurrent neural network</a></p>
+</aside>
+<p>Strata では、48 層のうち 36 層が GDN です。<span class="ev ev-code">コード上の事実</span>[S04] セッションの状態は、GDN の層ごとに、再帰状態と畳み込み履歴を 1 組ずつ別々に保存します。中間計算に使う一時バッファは 36 層で 1 セットを共用します。ところが状態は 1 層に 1 つ必要です。「再帰」とは、まさにそういうことだからです。[S13]（<code>session.cpp</code> の 38–44 行目）新しい会話が始まるときは、状態がすべてゼロに戻ります。[S13] GDN 層には「位置」という引数すらありません。1 トークンぶんの入力は数値の並びだけです。トークンからトークンへ前に進んでいくのは、この状態です（<code>layer.hpp</code> の 513–515 行目）。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>GDN の 1 層は、1 台の状態機械と見なせます。状態は 128 × 128 の浮動小数点行列 48 枚です。入力は現在のトークンのベクトルです。遷移関数が、この章の漸化式です。『ディジタル論理回路』で習う順序回路と同じ抽象です。組み合わせ論理が次の状態を計算し、レジスタが現在の状態を保持します。</p>
+
+<h2 id="sec-2">9.2 外積：1 回で表全体を書き換える</h2>
+<p>ホワイトボードは行列です。では「キー k → 値 v」という対応を、どうやって書き込むのでしょうか。答えは外積です。</p>
+<aside class="primer" id="c09-outer-product">
+<h3>外積とランク 1 更新</h3>
+<p>第 3 章の内積は、2 つのベクトルを<strong>1 つの数</strong>にします：q · k = Σ qᵢkᵢ。<dfn>外積</dfn>はその逆で、2 つのベクトルを<strong>1 枚の表</strong>にします。k vᵀ の i 行 j 列は kᵢ × vⱼ です。k が 3 個、v が 2 個の数なら、外積は 3 × 2 の表になります。専用コラムの直後の図 9-2 を見てください。</p>
+<p>この表には特徴があります。どの行も v の定数倍です（i 行目 = kᵢ × v）。すべての行が「同じ方向」を向いています。線形代数では、これを<dfn>階数</dfn>（ランク）が 1 であると言います。だから、外積を行列に足す操作を<dfn>ランク 1 更新</dfn>（rank-one update）と呼びます：S ← S + k vᵀ。</p>
+<p>ランク 1 更新が、なぜ記憶に向いているのでしょうか。同じ k で「読む」と、ちょうど v が取り出せるからです。読み方は Sᵀk です。各列と k の内積を取ります。S = k vᵀ で k の長さが 1 なら、Sᵀk = v × (k · k) = v になります。キー同士が互いに直交している（内積が 0）なら、それぞれ書き込んだ内容は干渉しません。キーに重なりがあると、中身が混ざります。</p>
+<p>コストも直感的です。ランク 1 更新 1 回は、表のすべてのマスを触ります。S × S 回の積和です。ただし、いまの 1 組の k と v だけに依存し、過去を振り返る必要はありません。</p>
+<p>この章との関係：GDN は、トークンごとに、各バリューヘッドでランク 1 更新を 1 回行います。ホワイトボード 1 枚は 128 × 128 です。</p>
+<p class="further">参考リンク：<a href="https://en.wikipedia.org/wiki/Outer_product" target="_blank" rel="noopener noreferrer">Wikipedia: Outer product</a> · <a href="https://ja.wikipedia.org/wiki/%E8%A1%8C%E5%88%97%E3%81%AE%E9%9A%8E%E6%95%B0" target="_blank" rel="noopener noreferrer">Wikipedia：行列の階数</a> · <a href="https://ja.wikipedia.org/wiki/%E8%A1%8C%E5%88%97" target="_blank" rel="noopener noreferrer">Wikipedia：行列</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 234" role="img" aria-label="図 9-2：k が 1、0、2 で v が 2、3 のとき、外積は 3 行 2 列の表になり、どの行も v の倍数になる">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">v = [2, 3]</text>
+<rect class="f-soft" fill="#e5f1df" x="170" y="24" width="56" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="198" y="44" font-size="13" text-anchor="middle">2</text>
+<rect class="f-soft" fill="#e5f1df" x="230" y="24" width="56" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="258" y="44" font-size="13" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="120" y="44" font-size="12" text-anchor="middle">k</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="62" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="84" font-size="13" text-anchor="middle">1</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="100" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="138" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="160" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="170" y="62" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="198" y="84" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="62" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="258" y="84" font-size="13" text-anchor="middle">3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="100" width="56" height="34" rx="3"/><text class="f-muted" fill="#5c6d66" x="198" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="100" width="56" height="34" rx="3"/><text class="f-muted" fill="#5c6d66" x="258" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-accent" fill="#136d5a" x="170" y="138" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="198" y="160" font-size="13" text-anchor="middle">4</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="138" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="258" y="160" font-size="13" text-anchor="middle">6</text>
+<text class="f-text" fill="#182f2b" x="296" y="84" font-size="12">= 1 × v</text>
+<text class="f-text" fill="#182f2b" x="296" y="122" font-size="12">= 0 × v</text>
+<text class="f-text" fill="#182f2b" x="296" y="160" font-size="12">= 2 × v</text>
+<text class="f-text" fill="#182f2b" x="20" y="196" font-size="12">i 行 j 列 = kᵢ × vⱼ。どの行も v の倍数なので階数は 1</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="216" font-size="12">これを状態に足す：S ← S + k vᵀ が、ランク 1 更新</text>
+</svg><figcaption>図 9-2　外積は、2 つのベクトルを「織って」1 枚の表にします。表の中身は、実は k と v の 2 本の数列だけです。だからランク 1 と呼びます。</figcaption></figure>
+
+<h2 id="sec-3">9.3 Delta 則：先に古い値を読み、差額だけ書く</h2>
+<p>いちばん素朴な書き方は、毎回 k vᵀ を足すことです。問題は、同じキーを 2 回書くと、2 回ぶんの値が<strong>重なってしまう</strong>ことです。2 × 2 のホワイトボードで試してみましょう。まず「りんご」（キー [1, 0]）に [2, 3] を書きます。次に、りんごを [5, 1] に書き換えます。単純な足し算だと、ボードの 1 行目は [2, 3] + [5, 1] = [7, 4] になります。読み出しても [7, 4] です。どちらの値でもありません。</p>
+<p><dfn>Delta 則</dfn>のやり方はこうです。書く前に、そのキーで 1 回読みます。ボードに何が入っているかを確かめるのです（これを v̂ と書きます）。そのうえで「目標 − 古い値」の差額 δ = v − v̂ だけを書きます。りんごを 2 回目に書くとき、v̂ = [2, 3]、δ = [5, 1] − [2, 3] = [3, −2] です。足すと 1 行目は [5, 1] になり、読み出すとちょうど新しい値が返ります。図 9-3 を見てください。</p>
+<div class="viz" data-viz="delta-memory"><figure class="fig"><svg viewBox="0 0 400 234" role="img" aria-label="図 9-3：りんごに 2、3 を書いてから 5、1 に書き換える。単純な足し算では 7、4 が読み出され、Delta 則では 5、1 が読み出される">
+<text class="f-text" fill="#182f2b" x="200" y="16" font-size="12" text-anchor="middle">りんご → [2, 3] を書き、[5, 1] に書き換える</text>
+<text class="f-text" fill="#182f2b" x="100" y="42" font-size="13" font-weight="600" text-anchor="middle">単純な足し算</text>
+<rect class="f-warn" fill="#9e5d24" x="30" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="77" font-size="14" text-anchor="middle">7</text>
+<rect class="f-warn" fill="#9e5d24" x="104" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="137" y="77" font-size="14" text-anchor="middle">4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="30" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="63" y="121" font-size="14" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="104" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="137" y="121" font-size="14" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="100" y="156" font-size="12" text-anchor="middle">りんごを読む = [7, 4]</text>
+<text class="f-warn" fill="#9e5d24" x="100" y="173" font-size="12" text-anchor="middle">新旧が重なる</text>
+<text class="f-text" fill="#182f2b" x="300" y="42" font-size="13" font-weight="600" text-anchor="middle">Delta 則</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="77" font-size="14" text-anchor="middle">5</text>
+<rect class="f-accent" fill="#136d5a" x="304" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="337" y="77" font-size="14" text-anchor="middle">1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="263" y="121" font-size="14" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="304" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="337" y="121" font-size="14" text-anchor="middle">0</text>
+<text class="f-text" fill="#182f2b" x="300" y="156" font-size="12" text-anchor="middle">りんごを読む = [5, 1]</text>
+<text class="f-text" fill="#182f2b" x="300" y="173" font-size="12" text-anchor="middle">正しい値が戻る</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="196" font-size="12">Delta 則の 2 回目の書き込み：古い値 v̂ = [2, 3]</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="214" font-size="12">差額 δ = [5, 1] − [2, 3] = [3, −2]</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="230" font-size="12">1 行目が [5, 1] になる</text>
+</svg><figcaption>図 9-3　同じキーを 2 回書くと、単純な足し算は新旧の値を重ねてしまいます。Delta 則は古い値を引いてから書くので、読み出すと最新の値が返ります。</figcaption></figure></div>
+<p>実際の GDN には、ツマミがもう 1 つあります。書き込みの強さ β です。差額に β を掛けてから書きます：δ = β(v − v̂)。β = 1 なら「完全に新しい値に置き換える」。β = 0.25 なら「新しい値に向かって 4 分の 1 だけ寄せる」です。β は 0 から 1 の間に収まらなければいけません。そのため層が先に sigmoid を通します。カーネルはこの処理を担当しません（第 7 章で出てきた約束事です）。[S17]</p>
+<p>2 × 2 のホワイトボードには、数が 4 つしかありません。書くキーが増え、キー同士の重なりが大きいほど、互いの干渉はひどくなります。上のシミュレータで、りんご、バナナ、オレンジの順に書いてみてください。オレンジは正確に読めますが、りんごとバナナは変わってしまいます。実際のホワイトボードは 128 × 128 なので、干渉はずっと小さくなります。それでも「大きさが固定 = 損失がある」という理屈は同じです。</p>
+
+<h2 id="sec-4">9.4 ゲート付き減衰：順番を 1 つ間違えると、結果が変わる</h2>
+<p>ホワイトボードには「忘れる」仕組みも必要です。トークンが来るたびに、GDN はまずボード全体に減衰係数 α を掛けます。そのあとで Delta の書き込みをします。α が 1 に近ければ、古い記憶はほとんど薄れません。α が 0 に近ければ、ほぼ白紙から始めることになります。バリューヘッドごとに自分の α を持ちます。α は、現在のトークンからその場で計算されます：α = e<sup>gate</sup>。[S17]</p>
+<p>gate の計算式は softplus(…) × ssm_a です（<code>layer.hpp</code> の 14 行目）。softplus の出力は 0 以上です。ssm_a は、モデルがバリューヘッドごとに持つ係数です。ssm_a が負の数でありさえすれば、gate は 0 以下になり、α は 0 から 1 の間に収まります。「1 ステップごとに、古い記憶を少し割り引く」というわけです。</p>
+<p>バリューヘッド 1 つぶんの 1 ステップを、すべて書き出します。状態 S は「キー次元 × 値次元」の行列です <span class="ev ev-code">コード上の事実</span>[S17]：</p>
+<ol>
+<li>減衰：S̄ = α S</li>
+<li>古い値を読む：v̂ = S̄ᵀ k</li>
+<li>差額を計算：δ = β (v − v̂)</li>
+<li>書き込み：S′ = S̄ + k δᵀ</li>
+<li>出力：o = S′ᵀ q</li>
+</ol>
+<p>GDN のヘッダファイルは、減衰がランク 1 更新の<strong>前</strong>でなければならないと、わざわざ強調しています。この点を固定するテストもあります。[S17] なぜ順番がそれほど大事なのでしょうか。行列を 1 つの数に縮めて、手計算してみましょう。古い状態 S = 2、α = 0.5、k = 1、v = 3、β = 0.25、q = 1 とします。</p>
+<ul>
+<li><strong>先に減衰、あとで書き込み</strong>（約束どおり）：S̄ = 1。v̂ = 1。δ = 0.25 × (3 − 1) = 0.5。S′ = 1.5。出力は 1.5。</li>
+<li><strong>先に書き込み、あとで減衰</strong>（間違い）：v̂ = 2。δ = 0.25 × (3 − 2) = 0.25。書き込み後は 2.25。それに 0.5 を掛けて 1.125。</li>
+</ul>
+<p>どちらの結果ももっともらしく、有限で、範囲も外れていません。ただし、モデルの定義に合うのは片方だけです。間違った順番では、<strong>書いたばかりの新しい情報</strong>まで割り引かれます。「メモした瞬間に、少し忘れる」ようなものです。下のツールでパラメータを変えると、両方が同時に計算されます。</p>
+<div class="viz" data-viz="gdn-order"><figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="図 9-4：同じパラメータでも、先に減衰してから書くと 1.5、先に書いてから減衰すると 1.125 になる">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">S = 2、α = 0.5、k = 1、v = 3、β = 0.25、q = 1</text>
+<rect class="f-soft" fill="#e5f1df" x="8" y="26" width="188" height="170" rx="8"/>
+<text class="f-text" fill="#182f2b" x="102" y="48" font-size="13" font-weight="600" text-anchor="middle">減衰 → 書き込み（正）</text>
+<text class="f-text" fill="#182f2b" x="18" y="76" font-size="12">S̄ = 0.5 × 2 = 1</text>
+<text class="f-text" fill="#182f2b" x="18" y="100" font-size="12">v̂ = 1 × 1 = 1</text>
+<text class="f-text" fill="#182f2b" x="18" y="124" font-size="12">δ = 0.25 × (3 − 1) = 0.5</text>
+<text class="f-text" fill="#182f2b" x="18" y="148" font-size="12">S′ = 1 + 1 × 0.5 = 1.5</text>
+<text class="f-text" fill="#182f2b" x="18" y="178" font-size="13" font-weight="600">出力 o = 1.5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="204" y="26" width="188" height="170" rx="8"/>
+<text class="f-warn" fill="#9e5d24" x="298" y="48" font-size="13" font-weight="600" text-anchor="middle">書き込み → 減衰（誤）</text>
+<text class="f-text" fill="#182f2b" x="210" y="76" font-size="12">v̂ = 2 × 1 = 2</text>
+<text class="f-text" fill="#182f2b" x="210" y="100" font-size="12">δ = 0.25 × (3 − 2) = 0.25</text>
+<text class="f-text" fill="#182f2b" x="210" y="124" font-size="12">書き込み後 = 2 + 0.25 = 2.25</text>
+<text class="f-text" fill="#182f2b" x="210" y="148" font-size="12">S′ = 0.5 × 2.25 = 1.125</text>
+<text class="f-warn" fill="#9e5d24" x="210" y="178" font-size="13" font-weight="600">出力 o = 1.125</text>
+</svg><figcaption>図 9-4　順番が違えば、結果も違います。間違った順番では、書いたばかりの 0.25 まで半分にされてしまいます。</figcaption></figure></div>
+<p>この 1 次元の例は、テストを書く題材にもなります。3 つの境界条件が、それぞれ 1 つの事実を確かめます。α = 0 なら、古い記憶は全部消えます。β = 0 なら、何も書き込まれません。k = 0 なら、どのキーも書き換えられません。この 3 つの場合、2 つの順番の結果は、同じになるものもあれば、違うものもあります。だから、実装がこっそり順番を入れ替えていないかを確かめられます。</p>
+
+<h2 id="sec-5">9.5 なぜ並列にできて、なぜできないのか</h2>
+<p>先ほどの 5 ステップの式を見直すと、目立たない事実に気づきます。バリューヘッド h と値次元 j を固定すると、各ステップが触るのは、ボードの j 列目の数だけです。古い値の読み出しはキー次元 i に沿った総和です。書き込みも j 列目しか変えません。列と列の間には、やりとりがまったくありません。<span class="ev ev-code">コード上の事実</span>[S17] だから、スレッド 1 本が 1 列を専有して、最初から最後まで計算できます。再帰全体で、同期バリアは 1 つも要りません。図 9-5 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="図 9-5：同じトークンの中では、ホワイトボードの各列を別々のスレッドに任せて並列に計算できる。しかし隣り合うトークンの間は、順番に進めなければならない">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">同じトークンの中：列ごとにスレッド 1 本</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="94" y="26" width="30" height="120"/><rect class="f-accent" fill="#136d5a" x="128" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="162" y="26" width="30" height="120"/><rect class="f-accent" fill="#136d5a" x="196" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="230" y="26" width="30" height="120"/>
+<text class="f-muted" fill="#5c6d66" x="75" y="164" font-size="12" text-anchor="middle">j=0</text>
+<text class="f-muted" fill="#5c6d66" x="143" y="164" font-size="12" text-anchor="middle">j=2</text>
+<text class="f-muted" fill="#5c6d66" x="211" y="164" font-size="12" text-anchor="middle">j=4</text>
+<text class="f-muted" fill="#5c6d66" x="54" y="40" font-size="12" text-anchor="end">i=0</text>
+<text class="f-muted" fill="#5c6d66" x="54" y="140" font-size="12" text-anchor="end">i=S−1</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M276 30V142M270 134L276 144L282 134"/>
+<text class="f-text" fill="#182f2b" x="288" y="70" font-size="12">キー次元 i</text>
+<text class="f-text" fill="#182f2b" x="288" y="88" font-size="12">に沿って</text>
+<text class="f-text" fill="#182f2b" x="288" y="106" font-size="12">総和と</text>
+<text class="f-text" fill="#182f2b" x="288" y="124" font-size="12">書き込み</text>
+<text class="f-text" fill="#182f2b" x="20" y="192" font-size="12" font-weight="600">トークンの間：1 つずつ順番に</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="65" y="224" font-size="12" text-anchor="middle">状態 Sₜ</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="195" y="224" font-size="12" text-anchor="middle">状態 Sₜ₊₁</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="325" y="224" font-size="12" text-anchor="middle">状態 Sₜ₊₂</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M110 219H148M140 213L148 219L140 225M240 219H278M270 213L278 219L270 225"/>
+</svg><figcaption>図 9-5　並列にできるのは「列」の方向です。直列なのは「時間」の方向です。同じステップの中では 128 × 48 列を同時に計算できます。しかし第 t + 1 ステップは、第 t ステップの状態を待たなければなりません。</figcaption></figure>
+<p>並列に動くスレッドが、メモリを揃ったペースで読めるように、Strata は状態の並び順を変えました。参照実装の（キー次元, 値次元, ヘッド）から、（キー次元, ヘッド, 値次元）にしています。こうすると、隣り合うスレッドが隣り合うアドレスを読みます。状態は実行時のバッファであり、重みではありません。だからレイアウトは自由に選べます。ただしヘッダファイルは注意を促しています。2 つのレイアウトは、どちらも同じ 3 つの数を指す添字なので、混ぜて使ってもエラーにならないのです。[S17]</p>
+<p>ただし「列は並列にできる」は「トークンも並列にできる」という意味ではありません。第 t + 1 ステップの状態は第 t ステップに依存します。時間の方向は、いまも 1 本の鎖です。並列になるのは 1 ステップの中の仕事で、ステップとステップの間ではありません。</p>
+<p>ヘッドの組み合わせにも注意点があります。GDN には、キー／クエリのヘッドが 16 個、バリューのヘッドが 48 個あります。バリューヘッド h が組むのは、h % 16 番目のキーヘッドです（剰余）。[S17] 第 8 章の GQA は、整数の除算を使っていました。2 つのモジュールで約束事がちょうど逆です。「汎用のマルチヘッド対応関数」を作って、あちこちで使い回すと、かえって間違えます。</p>
+<p>最後に、勘定をしてみましょう。GDN 1 層ぶんの主状態は、128 × 128 × 48 個の FP32 の数です。つまり 3,145,728 バイトで、ちょうど 3 MiB です。36 層で 108 MiB になります。畳み込み履歴を足します（1 層あたり 10,240 チャネル × 3 列 × 4 バイト = 120 KiB）。合計で約 112.2 MiB です。<span class="ev ev-est">教育用の試算</span>（寸法は [S04]、1 層あたりの浮動小数点数の個数は <code>session.cpp</code> の 41–44 行目）この数は、最初のトークンから第 262,144 トークンまで変わりません。ただし、これはモデルの状態のすべてではありません。QSA 層の KV キャッシュは、いまもコンテキストとともに増えます。</p>
+<p>ついでに 1 つ。GDN のヘッダファイルの冒頭の説明には「48 層が GDN、12 層が QSA」と書いてあります。足すと 60 層で、実際の 36 + 12 = 48 と合いません。[S17] この本では、実行できる幾何的な定義と、セッションの状態の割り当てを基準にします。古くなったコメントを、モデルの事実とは見なしません。[S04][S13]</p>
+
+<h2 id="sec-6">9.6 手を動かす：1 次元の GDN と、「巻き戻し」の難しさ</h2>
+<p>この章のインタラクティブ実験「再帰の 1 回の更新」を開いてください。GDN をスカラーの状態 1 つに縮めて、正しい更新順序と間違った更新順序を並べて見せます。次の 3 つをやってみましょう。</p>
+<ol>
+<li>α = 0、β = 0、k = 0 に設定して、9.4 節で述べた 3 つの境界性質を 1 つずつ確かめます。</li>
+<li>2 つの順番の結果が同じになるパラメータの組を探します。そのうえで、一般には、なぜ違ってしまうのかを説明します。</li>
+<li>この章の「順番は本当に大事」に戻って、α を 1 まで引き上げます。2 つの順番は、まだ違うでしょうか。式を使って理由を説明してください。</li>
+</ol>
+<p>状態は前にしか進めません。これは投機的デコーディング（第 18、19 章）で、現実の問題になります。エンジンはまず安い方法で数語を推測します（Strata はモデルに付いている MTP 層を使います）。そのあと、完全な 48 層で一度に検証します。外れた分は巻き戻さなければなりません。[S02] KV キャッシュなら簡単です。推測が外れた位置のキーと値は、そのまま残しても構いません。次にその位置を処理するときに、上書きすればよいからです。ところが GDN の状態は、外れた語ですでに書き換えられています。位置カウンタを「戻す」だけでは済みません。Strata のやり方はこうです。検証ウィンドウは GDN の状態に<strong>触りません</strong>。前の n 語を受理すると決まってから、ウィンドウに保存しておいた入力を使って、その n 語を再生します。そして畳み込み履歴と再帰状態を進めます。<span class="ev ev-code">コード上の事実</span>[S08] 図 9-6 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 266" role="img" aria-label="図 9-6：ドラフトを棄却するとき、KV キャッシュは後で誤った位置を上書きするだけでよい。GDN の状態は動かさず、保存しておいた入力で受理された語を再生する">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">ドラフト 3 語を検証し、前の 2 語を受理する</text>
+<text class="f-text" fill="#182f2b" x="20" y="42" font-size="12">KV キャッシュ（位置ごとに保存）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="50" width="88" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="64" y="70" font-size="12" text-anchor="middle">コミット済み</text>
+<rect class="f-accent" fill="#136d5a" x="114" y="50" width="88" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="158" y="70" font-size="12" text-anchor="middle">ドラフト 1 ✓</text>
+<rect class="f-accent" fill="#136d5a" x="208" y="50" width="88" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="252" y="70" font-size="12" text-anchor="middle">ドラフト 2 ✓</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="302" y="50" width="88" height="30" rx="4"/><text class="f-warn" fill="#9e5d24" x="346" y="70" font-size="12" text-anchor="middle">ドラフト 3 ✗</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="102" font-size="12">✗ の位置はそのまま置いておく。</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="120" font-size="12">次にこの位置を処理するときに上書きする。</text>
+<text class="f-text" fill="#182f2b" x="20" y="150" font-size="12">GDN の状態（1 つだけ）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="158" width="108" height="34" rx="4"/><text class="f-text" fill="#182f2b" x="74" y="180" font-size="12" text-anchor="middle">検証中は不変</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M128 175H156M148 169L156 175L148 181"/>
+<rect class="f-soft" fill="#e5f1df" x="158" y="158" width="150" height="34" rx="4"/><text class="f-text" fill="#182f2b" x="233" y="180" font-size="12" text-anchor="middle">ドラフト 1、2 を再生</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M308 175H330M322 169L330 175L322 181"/>
+<rect class="f-accent" fill="#136d5a" x="332" y="158" width="58" height="34" rx="4"/><text class="f-on" fill="#ffffff" x="361" y="180" font-size="12" text-anchor="middle">新状態</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="218" font-size="12">再生には、検証ウィンドウに保存した入力を使う。</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="240" font-size="12">位置カウンタを戻すだけでは、状態に</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="258" font-size="12">ドラフト 3 の痕跡が残ったままになる。</text>
+</svg><figcaption>図 9-6　KV キャッシュは位置ごとに保存するので、間違っても上書きできます。GDN の状態は 1 つしかなく、間違えると消して戻せません。だから Strata はまず状態に触らず、受理が決まってから、受理された語を再生します。</figcaption></figure>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>GDN は、大きさの決まった状態行列で履歴を覚えます。1 層のバリューヘッドごとに 128 × 128 で、36 層の合計は約 112 MiB です。コンテキストが長くなっても増えません。代わりに損失があり、前にしか進めません。</li>
+<li>1 トークンぶんの 1 ステップは次のとおりです。まず減衰 S̄ = αS。次に古い値を読む v̂ = S̄ᵀk。差額 δ = β(v − v̂) を計算し、外積で書き込む S′ = S̄ + kδᵀ。先に減衰してから書き込むのが約束事で、逆にすると新しい情報まで割り引かれます。</li>
+<li>同じステップの中では、ホワイトボードの各列は互いに無関係です。1 列につきスレッド 1 本で並列にできます。トークンとトークンの間は、いまも直列の鎖です。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「GDN の状態は大きさが固定だから、モデル全体のメモリもコンテキストで増えない。しかも好きに巻き戻せる。」</strong></p>
+<p>固定なのは、36 個の GDN 層の状態だけです。12 個の QSA 層の KV キャッシュは、これまでどおりコンテキストとともに増えます。大きさが固定でも「逆算できる」わけではありません。書き込むときに古い情報の一部がすでに消えています。前の状態に戻りたければ、前もってスナップショットを保存するか、分かっている状態から再生するしかありません。</p></div>
+
+<details class="deep"><summary>もう一歩深く：テンソルの形の全体像、読み間違えやすい約束事、再帰をテストする方法</summary>
+<h3>GDN の再帰 1 回ぶんの完全な書き方</h3>
+<p><code>gdn.hpp</code> は、1 ステップを次の数行で説明しています（状態は参照実装の添字に合わせて st[i, j, h] と書きます）[S17]：</p>
+<ul>
+<li>dec = exp(gate)、バリューヘッドごとに 1 つの数。st = state × dec</li>
+<li>sk[h, j] = Σᵢ st[i, j, h] × k[idx[h]][i]（古い値の読み出し）</li>
+<li>d[h, j] = (v[h, j] − sk[h, j]) × beta[h]（差額）</li>
+<li>st[i, j, h] += k[idx[h]][i] × d[h, j]（ランク 1 書き込み）</li>
+<li>o[h, j] = Σᵢ st[i, j, h] × q[idx[h]][i]（読み出し）</li>
+</ul>
+<p>ここで idx[h] = h % h_k、h_k = 16、h_v = 48、S = 128 です。どの行も (j, h) の 1 列しか触りません。これが「1 列につきスレッド 1 本で、バリアは不要」という主張の根拠です。[S17]</p>
+<h3>読み間違えやすい入力の約束事 4 つ</h3>
+<ul>
+<li><strong>q と k は L2 正規化済みで、しかも q には 1/√S がすでに掛かっています。</strong>2 つの llama.cpp の経路は、この係数を別々の場所で掛けます。だから呼び出し側の責任です。[S17] L2 正規化の ε は二乗和に足します。幅で割ってはいけません。割ると √128 ≈ 11.3 倍ずれます（第 7 章）。[S17]</li>
+<li><strong>gate は、指数を取る前の値です。</strong>dec = exp(gate) は、カーネルの中で計算します。[S17]</li>
+<li><strong>beta は、層が先に sigmoid を通します。</strong>カーネルの約束事は d = (v − sk) × beta です。受け取るのは、すでにスコアになっている値でなければなりません。生の射影値をそのまま渡すと、書き込みの強さに上限がなくなり、正にも負にもなります。[S17]</li>
+<li><strong>v は正規化しません。</strong>正規化するのは q と k だけです（<code>layer.hpp</code> の 23 行目）。</li>
+</ul>
+<p>層の最後のステップは y = rms_norm(o) × ssm_norm × sigmoid(z) です。ヘッドごとに別々に RMS 正規化を行います。ここは sigmoid です。qwen3.5 が使っていた SiLU ではありません。[S17]</p>
+<h3>畳み込み履歴：もう 1 つの小さな状態</h3>
+<p>再帰の前に、10,240 チャネルが、長さ 4 の短い畳み込みを通ります。そのために、直前の 3 列の入力を覚えておく必要があります。並びは「いちばん古いものが先」です。畳み込みカーネルの 0 番目の係数が、いちばん古い列に掛かります。新しい入力は最後の列に入ります。重みは GGML のネイティブなレイアウトで保存されます。tap が最も速く変化する次元で、参照実装の行優先とは違います。[S17] この 3 列の履歴は、再帰状態と同じように、1 層に 1 つずつあり、トークンとともに前へ進む状態です。巻き戻すときは、これも同じように処理しなければなりません。[S08]</p>
+<h3>再帰をテストするには</h3>
+<p>1 つ目は境界テストです。α = 0 で忘却を、β = 0 で書き込みなしを、k = 0 でキー更新なしを確かめます。「先に減衰、あとで書き込み」の順序テストも入れます（GDN の参照実装には、これを固定する性質が専用に 1 つあります）。[S17]</p>
+<p>2 つ目は、スナップショットと再生のテストです。決まった列を処理し、第 t ステップの状態を保存します。さらに 2 ステップ進めてから、スナップショットを復元して、その 2 ステップを再生します。止めずに最後まで一気に計算した結果と、ビット単位で一致しなければなりません。投機的デコーディングのコミット処理は、まさにこの性質に頼っています。[S08]</p>
+<p>3 つ目は、ヘッドの対応づけのテストです。剰余と整数除算のどちらの組み合わせでも、形の正しい出力が得られてしまいます。だからテストでは、両者を区別できるデータを使わなければなりません。そうしないと、取り違えには永遠に気づけません。[S17]</p>
+<p>最終状態を、前の状態へ「逆算」しようとしてはいけません。減衰によって、ある方向がほぼ 0 まで縮められることがあります。Delta の書き込みは、古い値を上書きしています。必要な情報を保存していなければ、この逆演算は一般に存在しません。</p>
+</details>

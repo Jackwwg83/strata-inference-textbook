@@ -1,0 +1,202 @@
+<div class="hook"><span class="eyebrow">こんな不思議に気づいたかもしれません</span>
+<p>総パラメータ数が何千億もあるモデルが、普通の GPU（グラフィックスカード）1 枚で動くことがあります。一方で、数百億パラメータしかない普通のモデルが、同じ GPU に載らないこともあります。この「動く」巨大モデルの多くは <dfn>MoE</dfn>（Mixture of Experts、混合エキスパート）モデルです。</p>
+<p>秘密はここにあります。MoE モデルは、トークンを 1 つ生成するたびに、パラメータのごく一部だけを働かせます。残りは別の場所に置いたままで構いません。この章では 3 つのことを説明します。エキスパートとは何か。誰がエキスパートを選ぶのか。選ばれなかったエキスパートはどこに置くのか。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>Strata が使うモデルには、各層に 512 個のエキスパートがあります。各トークンは、層ごとにそのうち 10 個だけを選びます。パラメータは多くても、1 ステップで使うのは約 5% です。だから、めったに使わないエキスパートは RAM（メインメモリ）に置いておけます。全部を GPU に詰め込む必要はありません。</p>
+
+<h2 id="sec-1">10.1 エキスパートとは何か</h2>
+<p>病院を想像してください。普通のモデルは、1 人の総合医のようなものです。患者が来るたびに、その医師が持つ知識をすべて使います。MoE モデルは、専門医がたくさんいる病院のようなものです。患者はまず受付の振り分け窓口に行きます。窓口は、いちばん合う数人の医師だけを呼んで一緒に診てもらいます。ほかの医師はお茶を飲んでいます。図 10-1 で、2 種類のモデルを並べて比べます。</p>
+<figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="図 10-1：密なモデルは各トークンですべてのパラメータを使い、MoE モデルは各層で少数のエキスパートだけを起こす">
+<defs>
+<pattern id="c10-dense" width="17" height="17" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="14" height="14" rx="2"/></pattern>
+<pattern id="c10-sparse" width="17" height="17" patternUnits="userSpaceOnUse"><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x=".5" y=".5" width="13" height="13" rx="2"/></pattern>
+</defs>
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">密なモデル</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="12" text-anchor="middle">全パラメータを使う</text>
+<rect fill="url(#c10-dense)" x="17" y="52" width="167" height="167"/>
+<text class="f-text" fill="#182f2b" x="303" y="20" font-size="13" font-weight="600" text-anchor="middle">MoE モデル</text>
+<text class="f-muted" fill="#5c6d66" x="303" y="38" font-size="12" text-anchor="middle">各層で少数だけ起こす</text>
+<rect fill="url(#c10-sparse)" x="220" y="52" width="167" height="167"/>
+<rect class="f-accent" fill="#136d5a" x="271" y="86" width="14" height="14" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="339" y="154" width="14" height="14" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="100" y="242" font-size="12" text-anchor="middle">すべてが働く</text>
+<text class="f-muted" fill="#5c6d66" x="303" y="242" font-size="12" text-anchor="middle">各層 512 個から 10 個</text>
+<text class="f-muted" fill="#5c6d66" x="303" y="260" font-size="12" text-anchor="middle">（約 2%）</text>
+</svg><figcaption>図 10-1　密なモデルは、毎ステップですべてのパラメータを使います。MoE モデルは、毎ステップで少数のエキスパートだけを起こします。残りは、そのステップの計算に一切加わりません。</figcaption></figure>
+<p>モデルの中の<dfn>エキスパート</dfn>とは、1 つの計算変換を担当するパラメータの集まりです。意識を持った小さなモデルではありません。「数学の専門家」「国語の専門家」のように、人間が理解できる専門分野に対応しているとも限りません。どのエキスパートが何を得意とするかは、学習中に自然にできあがります。</p>
+<p>Strata が使うモデルは 48 層です。各層に、その層専用の 512 個のエキスパートがあります。それに加えて、毎回必ず参加する<dfn>共有エキスパート</dfn>が 1 つあります。<span class="ev ev-code">コード上の事実</span>[S04][S13] エキスパート 1 つの中身は、図 10-2 のとおりです。</p>
+<figure class="fig"><svg viewBox="0 0 400 330" role="img" aria-label="図 10-2：エキスパート 1 つは gate、up、down の 3 つの行列でできていて、パラメータは合計 491 万個">
+<rect class="f-soft" fill="#e5f1df" x="110" y="8" width="180" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">入力：2560 個の数</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V58H110V72M200 58H290V72"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="74" width="160" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="110" y="95" font-size="13" font-weight="600" text-anchor="middle">gate 行列</text>
+<text class="f-muted" fill="#5c6d66" x="110" y="113" font-size="12" text-anchor="middle">2560 → 640</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="74" width="160" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="290" y="95" font-size="13" font-weight="600" text-anchor="middle">up 行列</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="113" font-size="12" text-anchor="middle">2560 → 640</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M110 122V136H290V122M200 136V148"/>
+<rect class="f-accent" fill="#136d5a" x="50" y="150" width="300" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="175" font-size="12" text-anchor="middle">gate を活性化し、up と要素ごとに掛ける</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 190V214"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="120" y="216" width="160" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="237" font-size="13" font-weight="600" text-anchor="middle">down 行列</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="255" font-size="12" text-anchor="middle">640 → 2560</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 264V276"/>
+<text class="f-text" fill="#182f2b" x="200" y="292" font-size="12" text-anchor="middle">出力：2560 個の数</text>
+<text class="f-text" fill="#182f2b" x="200" y="320" font-size="12" font-weight="600" text-anchor="middle">パラメータ数：3 × 2560 × 640 ＝ 4,915,200</text>
+</svg><figcaption>図 10-2　エキスパート 1 つは 3 つの行列です。2560 次元の入力をまず 640 次元に縮め、それから 2560 次元に戻します。パラメータは 1 つのエキスパートあたり約 491 万個です。</figcaption></figure>
+<p>モデルの主な幅は 2560 で、エキスパート内部の幅は 640 です。<span class="ev ev-code">コード上の事実</span>[S04][S06] 3 つの行列を合わせると、エキスパート 1 つあたり約 491 万パラメータになります。この数は次の節で使うので、覚えておいてください。</p>
+
+<h2 id="sec-2">10.2 振り分け窓口はどうやってエキスパートを選ぶか</h2>
+<p>各層には<dfn>ルーター</dfn>があります。これが振り分け窓口です。ルーターは、いまのトークンのデータをひと目見て、その層の 512 個のエキスパートに 1 つずつ得点をつけ、得点が高い上位 10 個を選びます。この操作を <dfn>top-k 選択</dfn>と呼びます。ここでは k = 10 です。<span class="ev ev-code">コード上の事実</span>[S13]</p>
+<p>選ばれた 10 個のエキスパートが、それぞれ 1 つずつ結果を計算します。ルーターは得点を「発言力」、つまり重み係数に変えます。その重みで 10 個の結果を足し合わせ、共有エキスパートの結果も加えて、次の層に渡します。選ばれなかった 502 個は、このステップの計算にまったく加わりません。「計算するかどうかが入力で決まる」このやり方を<dfn>条件付き計算</dfn>と呼びます。</p>
+<p>文章だけではピンときません。次のシミュレーターは、この過程をゆっくり見せてくれます。<strong>ステップ</strong>ボタンで 1 歩ずつ進めてみましょう。</p>
+<div class="viz" data-viz="moe-router"><figure class="fig"><svg viewBox="0 0 400 420" role="img" aria-label="図 10-3：MoE 1 層の計算の流れ。ルーターが 512 個のエキスパートに得点をつけ、10 個を選び、得点で重みを付けて足し合わせ、共有エキスパートを加える">
+<defs><pattern id="c10-grid" width="10" height="10" patternUnits="userSpaceOnUse"><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-width=".6" x=".5" y=".5" width="8" height="8" rx="1.5"/></pattern></defs>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="6" width="280" height="38" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" font-weight="600" text-anchor="middle">この層の入力：現在のトークンのデータ</text>
+<rect class="f-soft" fill="#e5f1df" x="60" y="64" width="280" height="38" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="88" font-size="13" font-weight="600" text-anchor="middle">ルーター：512 個のエキスパートを採点</text>
+<rect fill="url(#c10-grid)" x="40" y="122" width="320" height="160"/>
+<rect class="f-accent" fill="#136d5a" x="70.5" y="132.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="210.5" y="142.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="320.5" y="162.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="120.5" y="182.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="260.5" y="192.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="160.5" y="212.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="340.5" y="222.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="90.5" y="242.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="230.5" y="252.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="300.5" y="272.5" width="8" height="8" rx="1.5"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="300" font-size="12" text-anchor="middle">1 マス = 1 エキスパート　濃い 10 個 = 選ばれたもの</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="318" width="280" height="38" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="342" font-size="13" font-weight="600" text-anchor="middle">選んだ 10 個が計算し、重みで合計</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="376" width="280" height="38" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="400" font-size="13" font-weight="600" text-anchor="middle">＋ 共有エキスパート → 次の層へ</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V62M200 102V120M200 304V316M200 356V374"/>
+</svg><figcaption>図 10-3　MoE 1 層の計算です。48 層すべてがこれを行うので、1 つのトークンは合計 48 × 10 = 480 回エキスパートを選びます。</figcaption></figure></div>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>512 個の得点から上位 10 個を見つけるのに、512 個すべてを整列する必要はありません。次のコラムで、3 つの方法とその計算量を説明します。</p>
+<aside class="primer" id="c10-top-k">
+<h3>top-k 選択：n 個の数から大きい方の k 個を探す</h3>
+<p>いちばん素直な方法は、n 個の数をすべて整列して、先頭の k 個を取ることです。計算量は O(n log n) です。でも、欲しいのは上位 10 個だけです。残り 502 個の順番はどうでもよいので、全体の整列は無駄な仕事が多すぎます。</p>
+<p>もっと省ける方法が、k 個だけを入れる<dfn>最小ヒープ</dfn>を使うやり方です。先頭から 1 回なめて、ヒープの先頭（いまの k 位）より大きい数が来たら、それと入れ替えます。ヒープの大きさは常に k です。1 回の調整は O(log k) で済むので、全体は O(n log k) です。n = 512、k = 10 なら、全体を整列する場合の約 3 分の 1 の仕事量です。</p>
+<p>もう 1 つ、<dfn>クイックセレクト</dfn>という方法があります。クイックソートの「分割」の考え方を借りて、平均 O(n) で済みます。GPU では、並列リダクションを使って、多くのスレッドが同時に比較する方法もあります。どれを選ぶかは、ハードウェアと k の大きさ次第です。Strata のカーネルがどれを使っているかは、この本では確認していません。</p>
+<p>どのアルゴリズムでも、<strong>得点が同じとき誰を選ぶか</strong>を決めておく必要があります。決めておかないと、同じ入力でも、実行のたびに違うエキスパートが選ばれるかもしれません。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E4%BA%8C%E5%88%86%E3%83%92%E3%83%BC%E3%83%97" target="_blank" rel="noopener noreferrer">Wikipedia：二分ヒープ</a> · <a href="https://ja.wikipedia.org/wiki/%E3%82%AF%E3%82%A4%E3%83%83%E3%82%AF%E3%82%BB%E3%83%AC%E3%82%AF%E3%83%88" target="_blank" rel="noopener noreferrer">Wikipedia：クイックセレクト（線形時間で k 番目を探す）</a> · <a href="https://ja.wikipedia.org/wiki/%E9%81%B8%E6%8A%9E%E3%82%A2%E3%83%AB%E3%82%B4%E3%83%AA%E3%82%BA%E3%83%A0" target="_blank" rel="noopener noreferrer">Wikipedia：選択アルゴリズム</a></p>
+</aside>
+
+<h2 id="sec-3">10.3 計算してみよう：1250 億パラメータのうち、1 トークンはいくつ使うか</h2>
+<p>「エキスパート 1 つが 491 万パラメータ」と「1 トークンが 480 回選ぶ」が分かれば、1 トークンが実際に動かすパラメータ数を計算できます。</p>
+<div class="table-wrap"><table><thead><tr><th>項目</th><th>式</th><th>結果</th></tr></thead><tbody>
+<tr><td>ルーティング対象の全エキスパートのパラメータ</td><td>4,915,200 × 24,576</td><td>約 1208 億</td></tr>
+<tr><td>モデルの総パラメータ（README）</td><td>—</td><td>約 1250 億 <span class="ev ev-report">上流レポート</span></td></tr>
+<tr><td>エキスパート以外のパラメータ</td><td>1250 億 − 1208 億</td><td>約 42 億 <span class="ev ev-est">教育用の試算</span></td></tr>
+<tr><td>1 トークンが使うエキスパートのパラメータ</td><td>4,915,200 × 480</td><td>約 24 億</td></tr>
+<tr><td>1 トークンが実際に動かすパラメータ</td><td>24 億 ＋ 約 42 億</td><td>約 66 億、総数の約 5% <span class="ev ev-est">教育用の試算</span></td></tr>
+</tbody></table></div>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="図 10-4：モデルのパラメータの 97% はルーティング対象のエキスパートにあり、1 トークンが使うのは約 5% だけ">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="12">パラメータの内訳（バーの長さは比率どおり）</text>
+<text class="f-text" fill="#182f2b" x="20" y="44" font-size="12" font-weight="600">モデルの全パラメータ：約 1250 億</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="52" width="347.9" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="367.9" y="52" width="12.1" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="88" font-size="12">緑：ルーティング対象のエキスパート 約 1208 億（97%）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="106" font-size="12">橙：それ以外 約 42 億（3%）</text>
+<text class="f-text" fill="#182f2b" x="20" y="140" font-size="12" font-weight="600">1 トークンが実際に使う量：約 66 億（5%）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="148" width="360" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="148" width="6.9" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="26.9" y="148" width="12.1" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="184" font-size="12">緑：選ばれたエキスパート 約 24 億</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="202" font-size="12">橙：毎ステップ使う部分 約 42 億</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="226" font-size="12">薄い部分：使わないパラメータ（RAM で待機）</text>
+</svg><figcaption>図 10-4　このモデルのパラメータの 97% はルーティング対象のエキスパートにあります。それでも、1 トークンが使うのは約 5% だけです。だから「めったに使わないエキスパートを別の場所に置ける」のです。</figcaption></figure>
+<p>「エキスパート以外のパラメータ」は、README の概数を引き算して出したものです。桁の感覚をつかむためだけに使います。<span class="ev ev-est">教育用の試算</span>[S01][S04]</p>
+<p>次にバイト数を見ます。ソースコードでは、標準フォーマットのエキスパート 1 つは 1,382,400 バイトです。<span class="ev ev-code">コード上の事実</span>[S06] 491 万パラメータで割ると、1 パラメータあたり約 2.25 bit です。元の 16 bit より 7 倍以上小さくなっています。この圧縮を<dfn>量子化</dfn>と呼びます。第 4 章で詳しく説明します。このフォーマットなら、24,576 個のエキスパートの合計は約 34 GB です。1 トークンが読む 480 個のエキスパートは約 664 MB です。<span class="ev ev-est">教育用の試算</span></p>
+
+<h2 id="sec-4">10.4 選ばれなかったエキスパートはどこに置く？</h2>
+<p>34 GB のエキスパートは、12 GB の GPU には入りません。Strata は、階層に分けて置きます。<span class="ev ev-report">上流レポート</span>[S02]</p>
+<ul>
+<li><strong>GPU</strong>には、まず毎トークン必要な部分を置きます。残りの VRAM はすべて、<strong>いちばんよく選ばれるエキスパート</strong>のキャッシュに使います。</li>
+<li><strong>RAM</strong>には、全エキスパートを置きます。選ばれたのに GPU にないエキスパートは「ミス」と呼びます。主に CPU が RAM の中でそのまま計算します。GPU の計算と同時に進みます。</li>
+</ul>
+<p>なぜ、ミスしたエキスパートを GPU に一時的に運んで計算しないのでしょうか。鍵は<dfn>帯域幅</dfn>、つまり 1 秒に運べるバイト数です。次の 4 か所で、同時にこの 664 MB を運んで、どこが先にゴールするか見てみましょう。</p>
+<div class="viz" data-viz="transfer-race"><figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="図 10-5：VRAM、RAM、PCIe、SSD から 664 MB を運ぶのに、それぞれ約 1.0、8.0、10.5、94.9 ミリ秒かかる">
+<text class="f-muted" fill="#5c6d66" x="10" y="14" font-size="12">664 MB を運ぶ時間（理論ピーク、バーは比率どおり）</text>
+<text class="f-text" fill="#182f2b" x="10" y="42" font-size="12">VRAM</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="30" width="2.3" height="16"/>
+<text class="f-text" fill="#182f2b" x="106" y="43" font-size="12">1.0 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="82" font-size="12">RAM</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="70" width="18.5" height="16"/>
+<text class="f-text" fill="#182f2b" x="122" y="83" font-size="12">8.0 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="122" font-size="12">PCIe 5.0</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="110" width="24.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="128" y="123" font-size="12">10.5 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="162" font-size="12">SSD</text>
+<rect class="f-warn" fill="#9e5d24" x="96" y="150" width="220" height="16"/>
+<text class="f-text" fill="#182f2b" x="322" y="163" font-size="12">94.9 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="12">時間 = 664 MB ÷ 帯域幅（672 / 83 / 63 / 7 GB/s）</text>
+</svg><figcaption>図 10-5　PCIe 経由で 1 回運ぶと 10.5 ミリ秒かかります。運ぶだけで、速度は毎秒 94 トークン以下に抑えられます。SSD から読むと 0.1 秒近くかかります。</figcaption></figure></div>
+<p>結論ははっきりしています。トークンのたびに PCIe 経由で運ぶことはできません。そこで Strata は、ミスしたエキスパートの大部分を、CPU が RAM の中でそのまま計算します。そのデータは、この細い道を通らずに済みます。上流のドキュメントによると、ミスしたエキスパートのごく一部は PCIe 経由で GPU に渡して計算させ、両側の仕事量を釣り合わせているそうです。<span class="ev ev-report">上流レポート</span>[S03]</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは、コンピュータアーキテクチャの授業で習う記憶階層の考え方そのものです。いちばんよく使うデータを、いちばん速い層に置きます。第 1 章のコラム「メモリ階層」に、各層の帯域幅の比較があります。</p>
+<p>GPU にどれだけのエキスパートをキャッシュできるかは、速度に直結します。図 10-6 は、上流のドキュメントにある実測の一例です。</p>
+<figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="図 10-6：24,576 個のエキスパートのうち GPU に置ける数。既定では 1,589 個。会話履歴を VRAM から出すと 3,872 個になり、速度は毎秒 50.9 から 62.6 トークンに上がる">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="13" font-weight="600">全 24,576 個のエキスパート（バーは比率どおり）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="54" font-size="12">既定の設定</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="62" width="360" height="22" rx="4"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="62" width="23.3" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="20" y="104" font-size="12">GPU 上に 1,589 個（約 6%）· 毎秒 50.9 トークン</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="138" font-size="12">会話履歴の大半を RAM に移した後</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="146" width="360" height="22" rx="4"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="146" width="56.7" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="20" y="188" font-size="12">GPU 上に 3,872 個（約 16%）· 毎秒 62.6 トークン</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="222" font-size="12">上流の実測：RTX 5070 12 GB、Q2_0、</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="240" font-size="12">262K コンテキスト、エンジン 0.1.5</text>
+</svg><figcaption>図 10-6　GPU にキャッシュされたエキスパートが多いほど、CPU が計算する分が減り、速くなります。データは上流のドキュメントによるものです。[S03]</figcaption></figure>
+<p>262K の長いコンテキストでは、会話履歴だけでかなりの VRAM を使います。その大部分を RAM に移すと、GPU に空きができて、エキスパートを 2,283 個多く置けました。生成速度は、毎秒 50.9 トークンから 62.6 トークンに上がりました。<span class="ev ev-report">上流レポート</span>[S03] ドキュメントには、VRAM が 1 GB 増えると、約 700 個多くのエキスパートを置けるとも書かれています。[S02] これはバイト数と合っています。1 GB ÷ 1,382,400 バイト ≈ 723 個です。</p>
+
+<h2 id="sec-5">10.5 人気のエキスパートは変わる：キャッシュは会話に合わせて動く</h2>
+<p>どのエキスパートが人気かは、何を話しているかで決まります。コードを書くときによく使うエキスパートと、日本語の散文を書くときによく使うエキスパートは、かなり違うかもしれません。そこで、Strata のエキスパートキャッシュは、一度決めたら終わりではありません。会話の途中で調整され続けます。最近よく選ばれたエキスパートを GPU に入れ、人気のないものを外に出します。<span class="ev ev-report">上流レポート</span>[S02] 図 10-7 は、その模式図です。</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="図 10-7：話題がコードから散文に変わると、VRAM のキャッシュから人気のない 2 つのエキスパートが外れ、人気の 2 つが入る。スロットの総数は変わらない">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">VRAM のエキスパートキャッシュ（模式図：8 スロットのみ）</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">コードの話</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="96" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="112.5" y="48" font-size="12" text-anchor="middle">#027</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="133" y="30" width="33" height="26" rx="3"/><text class="f-muted" fill="#5c6d66" x="149.5" y="48" font-size="12" text-anchor="middle">#331</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="170" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="186.5" y="48" font-size="12" text-anchor="middle">#045</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="207" y="30" width="33" height="26" rx="3"/><text class="f-muted" fill="#5c6d66" x="223.5" y="48" font-size="12" text-anchor="middle">#408</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="260.5" y="48" font-size="12" text-anchor="middle">#156</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="281" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="297.5" y="48" font-size="12" text-anchor="middle">#073</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="318" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="334.5" y="48" font-size="12" text-anchor="middle">#219</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="355" y="30" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="371.5" y="48" font-size="12" text-anchor="middle">#360</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M149.5 58V96M223.5 58V96"/>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="12">散文に変更</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="96" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="112.5" y="118" font-size="12" text-anchor="middle">#027</text>
+<rect class="f-accent" fill="#136d5a" x="133" y="100" width="33" height="26" rx="3"/><text class="f-on" fill="#ffffff" x="149.5" y="118" font-size="12" text-anchor="middle">#112</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="170" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="186.5" y="118" font-size="12" text-anchor="middle">#045</text>
+<rect class="f-accent" fill="#136d5a" x="207" y="100" width="33" height="26" rx="3"/><text class="f-on" fill="#ffffff" x="223.5" y="118" font-size="12" text-anchor="middle">#290</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="260.5" y="118" font-size="12" text-anchor="middle">#156</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="281" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="297.5" y="118" font-size="12" text-anchor="middle">#073</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="318" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="334.5" y="118" font-size="12" text-anchor="middle">#219</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="355" y="100" width="33" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="371.5" y="118" font-size="12" text-anchor="middle">#360</text>
+<text class="f-text" fill="#182f2b" x="10" y="156" font-size="12">外す：#331、#408（最近あまり選ばれず、RAM で待機）</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">入れる：#112、#290（最近よく選ばれ、VRAM へ移す）</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="202" font-size="12">スロットの総数は同じです。変わるのは</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">「VRAM に住む顔ぶれ」だけ。番号は例です。</text>
+</svg><figcaption>図 10-7　話題が変わると、人気のエキスパートも変わります。キャッシュは、人気のないエキスパートを外し、人気のあるエキスパートを入れます。VRAM の総量は変わりません。</figcaption></figure>
+<p>これは、キッチンの作業台を片づけるのと同じ考え方です。最近は毎日麻婆豆腐を作っているなら、山椒と唐辛子を手元に置きます。お菓子作りに変えたら、台の上のものも入れ替わります。台の広さは変わりません。何を置くかは、最近の使われ方で決まります。第 12 章で、このキャッシュが「誰を入れて誰を出すか」をどう決めるかを詳しく説明します。</p>
+<p>1 つ注意してください。キャッシュが変えるのは、エキスパートを<strong>どこで計算するか</strong>だけです。<strong>何を計算するか</strong>は変わりません。外に出されたエキスパートも RAM にあり、選ばれたときは CPU が計算します。モデルから、エキスパートは 1 つも減っていません。（第 26 章で説明しますが、CPU と GPU が同じエキスパートを計算すると、最後の数桁がわずかに違うことがあります。ただし、「エキスパートが消えた」わけではありません。）</p>
+
+<h2 id="sec-6">10.6 手を動かす：「人気」がもたらすヒット率を体験する</h2>
+<p>キャッシュがどれだけ役に立つかは、エキスパートが選ばれる頻度が均等かどうかで決まります。少数の人気エキスパートが仕事の大半を担っているなら、それらをキャッシュしておけば、GPU がたくさん働き、CPU の仕事は減ります。逆に、どのエキスパートも選ばれる確率がまったく同じなら、6% のエキスパートをキャッシュしても、ヒットするのはおよそ 6% だけです。</p>
+<p>この章のインタラクティブ実験「キャッシュ軌跡と衝突」を開いて、2 種類のアクセス記録を試してください。1 つは少数のキーに集中したもの、もう 1 つは均等に散らばったものです。スロット数が同じで、ヒット率がどれだけ違うかを見ます。アクセスが集中するほど、限られたキャッシュの価値が高くなります。実験で使う方針は、教科書に載っている一般的なアルゴリズムです。Strata が実際に使う適応型の方針ではありません。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>MoE モデルは、各層にたくさんのエキスパートを持ち、ルーターがトークンごとに少数を選びます。Strata が使うモデルは、各層 512 個から 10 個を選び、1 トークンで合計 480 回選びます。</li>
+<li>パラメータが多いことは、毎ステップたくさん使うことを意味しません。このモデルでは、1 トークンが動かすのは約 5% のパラメータだけです。</li>
+<li>人気のエキスパートは GPU にキャッシュし、全エキスパートは RAM に置きます。ミスしたものは主に CPU がその場で計算します。VRAM が大きいほどキャッシュが増え、速くなります。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「選ばれなかったエキスパートは役に立たないから、削除すれば容量を節約できる。」</strong></p>
+<p>このステップで選ばれなくても、次のトークンでは使われるかもしれません。エキスパートを削除すると、モデル自体が変わります。Strata が提供する Coder 版は、エキスパートを半分削除しています。作者によると、プログラミングのテスト SWE-bench Verified では元のモデルの 91% のスコアを保ちますが、中国語など、ほかの文章では明らかに弱くなります。そのため上流は、中国語を書くなら、エキスパートを全部残した版を選ぶよう勧めています。<span class="ev ev-report">上流レポート</span>[S01]</p></div>
+
+<details class="deep"><summary>もう一歩深く：top-k の境界、インターフェース契約、評価の方法</summary>
+<h3>top-k は不連続な境界</h3>
+<p>10 位と 11 位の得点は、とても近いことがあります。ごく小さな数値誤差でも、エキスパートがまるごと入れ替わります。その結果、出力の差は、得点の差よりずっと大きくなります。だから、「すべてのルーティング得点の誤差が 10⁻⁴ 未満」というだけでは、2 回の計算が同じエキスパートを選んだ証拠になりません。テストでは、選ばれたエキスパートの番号、それぞれの重み、合成後の出力を別々に記録します。さらに、境界ぎりぎりのサンプル、同点のサンプル、外れ値を、わざわざ作って試します。</p>
+<h3>アドレスが同じでも、中身が同じとは限らない</h3>
+<p><code>expert_source.hpp</code> は、インターフェース契約を 1 つずつ警告の形で書いています。[S06] 1 つ目はこうです。各層がエキスパートプールに渡す入力 <code>x_f</code> は、<strong>同じ</strong>ピン留めメモリの領域を使います。アドレスは変わりませんが、中身は層ごとに違います。もし誰かがアドレスをキーにして量子化結果をキャッシュすると、第 0 層のデータを、あとの 47 層でも使い回してしまいます。結果は、有限で、もっともらしく見えるのに、完全に間違ったトークンです。</p>
+<p>これは、データ構造でいう「キーの設計」の問題です。オブジェクトがどこにあるかは、そのオブジェクトがどの版かを意味しません。実装では、明示的な世代（generation）、層番号、内容の識別子、あるいは限定されたライフタイムを使います。ポインタが等しいかどうかだけで、データが等しいと判断してはいけません。</p>
+<h3>ルーティング重みは 1 回だけ掛ける</h3>
+<p>同じファイルの 2 つ目の契約はこうです。エキスパートプールはルーティング重みを掛ける責任を<strong>負いません</strong>。重みを掛けるのは、デバイス側の合成ステップがまとめて行います。<span class="ev ev-code">コード上の事実</span>[S06] プールも 1 回掛けてしまうと、1 層だけ見てもほとんど気づけません。しかし、48 層重なるうちに誤差が拡大していきます。3 つ目はこうです。エキスパートの幾何サイズ（2560、640、1,382,400 バイト）はモデルファイルで固定されていて、サイズが合わないときは無理に読まず、拒否します。間違った幅で読むと、隣のエキスパートのバイトを黙って読んでしまうからです。しかも、エラーは出ません。</p>
+<h3>パラメータの式と実際のバイト数が合わないのはなぜか</h3>
+<p>「1 パラメータ 2 bit」で計算すると、エキスパート 1 つは 4,915,200 × 2 ÷ 8 = 1,228,800 バイトで済むはずです。実際のフォーマットは 1,382,400 バイトで、多い 153,600 バイト（約 11%）は、量子化に必要なスケールなどのメタデータです。量子化パックの種類が違えば、レコードの長さも違います。[S06] 簡略化したパラメータの式を、どんなフォーマットにも通用する実際のサイズだと思ってはいけません。</p>
+<h3>キャッシュの方針を公平に評価するには</h3>
+<p>あるアクセス記録で人気のエキスパートを選び、同じ記録でヒット率を報告すると、結果は高く出すぎます。方針が「試験問題を先に見てしまっている」からです。正しい方法は、リクエストやタスクごとに保留データを分け、見ていない記録で測ることです。同じ長い会話を似た断片に切って両側に振り分けるのも避けてください。情報が漏れてしまいます。ヒット率を報告するときは、キャッシュ容量、層ごとの割り当て、ヒット数を数えるときの分母、コールドスタートかウォームアップ後か、アクセス記録の出どころも書いてください。「ヒット率 70%」の一言だけでは、容量の予算を決める助けになりません。</p>
+</details>

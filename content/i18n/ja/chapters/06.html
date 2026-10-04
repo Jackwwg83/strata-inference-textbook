@@ -1,0 +1,213 @@
+<div class="hook"><span class="eyebrow">気づいたことはありませんか</span>
+<p>大きなファイルは、初めて開くときはしばらく待たされるのに、2 回目はほぼ一瞬で開きます。もっと不思議なこともあります。<code>mmap</code> で 30 GB のモデルファイルを「開く」と、関数は一瞬で戻ってきます。ところがその時点では、SSD から 1 バイトも読み出されていません。</p>
+<p>モデルファイルは、巨大なバイト列です。エンジンが欲しいのは、形もデータ型も合っているテンソルです。この章では、その間の道のりを説明します。ファイルには何が入っているのか。「開く」と「メモリに読み込む」はなぜ別のことなのか。そして、読み込んだバイトが本当に期待どおりのバイトだと、エンジンはどう証明するのか。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>モデルファイルは、3 つの関門を越えて、初めて使えるテンソルになります。目録を読み解く。すべてのテンソルがファイルの中に完全に収まっていると証明する。バイトを実際にメモリへ載せる。どの関門でも、エラーは「音もなく」起こり得ます。だから Strata は関門ごとに自分から検査し、間違ったバイトで計算を始めるくらいなら、起動を断ります。</p>
+
+<h2 id="sec-1">6.1 モデルファイルには何が入っているか</h2>
+<p>モデルファイルを 1 冊の本だと考えてください。表紙にはタイトルと版が書かれています。次に目次があり、各章が何ページ目から始まるかを教えてくれます。最後に本文が来ます。Strata が読む <dfn>GGUF</dfn> 形式は、llama.cpp のエコシステムでよく使われるモデルファイル形式で、まさにこの構造をしています（図 6-1）。</p>
+<figure class="fig"><svg viewBox="0 0 400 318" role="img" aria-label="図 6-1：GGUF ファイルは先頭から順に、マジックとバージョン、個数、メタデータ、テンソルディレクトリ、アライメント用パディング、データ領域が並ぶ">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="320" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">① 先頭 4 バイト「GGUF」＋バージョン 3</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="50" width="320" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="72" font-size="13" text-anchor="middle">② テンソルの数とメタデータの数</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="92" width="320" height="50" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="112" font-size="13" font-weight="600" text-anchor="middle">③ メタデータ：「キー = 値」の並び</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="131" font-size="12" text-anchor="middle">general.architecture = qwen4exp、層数 = 48 …</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="150" width="320" height="50" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="170" font-size="13" font-weight="600" text-anchor="middle">④ テンソルディレクトリ：1 テンソル 1 行</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="189" font-size="12" text-anchor="middle">名前 · 次元数 · 形状 · データ型 · オフセット</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="40" y="208" width="320" height="28" rx="8"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="226" font-size="12" text-anchor="middle">⑤ 境界までパディング（既定は 32 バイト）</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="244" width="320" height="64" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="270" font-size="13" font-weight="600" text-anchor="middle">⑥ データ領域：全テンソルのバイト</text>
+<text class="f-on" fill="#ffffff" x="200" y="291" font-size="12" text-anchor="middle">ディレクトリの「オフセット」はここから数える</text>
+</svg><figcaption>図 6-1　GGUF ファイルは、先にディレクトリを置き、そのあとにデータを置きます。エンジンはまずディレクトリを読み解き、その指示どおりにデータ領域からバイトを取り出します。ディレクトリ自体が間違っていることもあるので、どの項目も照合が必要です。</figcaption></figure>
+<p><dfn>メタデータ</dfn>は「データについてのデータ」です。たとえば、モデルのアーキテクチャ名や層の数です。<dfn>テンソルディレクトリ</dfn>には、テンソルごとに 5 つの項目が登録されています。名前、次元数、各次元の長さ、保存に使うデータ型、そしてデータ領域の何バイト目から始まるかです。</p>
+<p>Strata の GGUF リーダーは、ファイルを開いた直後から照合を始めます。<span class="ev ev-code">コード上の事実</span> 先頭 4 バイトは「GGUF」でなければならず、バージョンは 3 でなければなりません。メタデータのアーキテクチャは <code>qwen4exp</code> でなければならず、層数 48、幅 2560、アテンションヘッド 24、KV ヘッド 2 も一致する必要があります。1 つでも合わなければ、どのキーで、何を期待し、実際はいくつだったかを報告して、実行を断ります（<code>gguf_reader.hpp</code> 第 423–427、573–603 行）。このエンジンは 1 つのモデルのためだけに作られています。「だいたい動く」は、すぐエラーになるより危険です。</p>
+<p>形状とデータ型が分かれば、テンソル 1 つが何バイトになるかを計算できます。Strata の主力形式 Q2_0 は、64 個の数を 18 バイトにまとめます。1 つの数あたり 2.25 bit です。<span class="ev ev-code">コード上の事実</span>（<code>gguf_reader.hpp</code> 第 120–121、213–216 行）2560 × 640 のエキスパート行列には 1,638,400 個の数があります。つまり 25,600 ブロックで、25,600 × 18 = 460,800 バイトです。1 つのエキスパートにはこの行列が 3 つあり、合計は 1,382,400 バイトになります。ソースコードに固定値として書かれているエキスパートのサイズと、ちょうど一致します。<span class="ev ev-est">教育用の試算</span>[S06]</p>
+
+<h2 id="sec-2">6.2 「開く」は「読み込む」ではない：mmap とページキャッシュ</h2>
+<p>ファイルの読み方には 2 つの考え方があります。1 つ目は「コピー」です。<code>read</code> を呼ぶと、OS が指定したバイトを、あなたが用意したメモリへコピーします。2 つ目は「貸出カード」です。<code>mmap</code> を呼ぶと、OS がアドレスの範囲を渡して、「この範囲があのファイルを表します」と言います。バイトが実際に SSD から上がってくるのは、使うときになってからです。</p>
+<aside class="primer" id="c06-mmap-page-cache">
+<h3>ファイル、メモリマップ、ページキャッシュ</h3>
+<p><dfn>ファイル</dfn>は、SSD 上にある名前付きのバイト列です。プログラムは SSD の上で直接、足し算や掛け算はできません。データはまずメモリに入る必要があります。OS がメモリを管理する単位を<dfn>ページ</dfn>といい、よくあるサイズは 4 KiB です。</p>
+<p><dfn>メモリマップ</dfn>（mmap）は、ファイルをプロセスのアドレス空間に「貼り付け」ます。アドレス base + i が、ファイルの i バイト目に対応します。マップを作った時点では、OS は対応関係を登録するだけで、データは読みません。プログラムがあるページに初めてアクセスすると、ハードウェアが「このページはまだメモリにない」と気づいて、<dfn>ページフォールト</dfn>を起こします。OS が処理を引き継ぎ、SSD からそのページを読み込んで、プログラムを再開させます。プログラム自身はこの一時停止に気づきません。その一瞬が遅くなるだけです。</p>
+<p>読み込まれたページはすぐには捨てられず、<dfn>ページキャッシュ</dfn>に残ります。同じファイルにもう一度アクセスすると、メモリから直接取れます。これが「2 回目はずっと速い」理由です。メモリが足りなくなると、OS はしばらく使われていないきれいなページを回収します。必要になったら、また SSD から読みます。コラムのあとの図 6-2 に、この 3 層の関係を描きました。</p>
+<p>この章との関係：Strata が GGUF のヘッダーを読むときと、低メモリモードでエキスパートを読むときは、どちらも mmap を使います。つまり「マップ成功」が意味するのは、アドレスの準備ができたことだけです。データがすでにメモリにあるとは限りません。あとからのアクセスが SSD 待ちで止まらない保証もありません。</p>
+<p class="further">参考リンク：<a href="https://ja.wikipedia.org/wiki/メモリマップトファイル" target="_blank" rel="noopener noreferrer">Wikipedia：メモリマップトファイル</a> · <a href="https://ja.wikipedia.org/wiki/ページフォールト" target="_blank" rel="noopener noreferrer">Wikipedia：ページフォールト</a> · <a href="https://en.wikipedia.org/wiki/Page_cache" target="_blank" rel="noopener noreferrer">Wikipedia: Page cache</a> · <a href="https://man7.org/linux/man-pages/man2/mmap.2.html" target="_blank" rel="noopener noreferrer">Linux マニュアル：mmap(2)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-beyondphys.pdf" target="_blank" rel="noopener noreferrer">OSTEP 第 21 章（英語）：物理メモリを超えて</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 244" role="img" aria-label="図 6-2：mmap の後は 8 ページすべてにアドレスがあるが、メモリにあるのはアクセス済みのページだけ。まだ読んでいないページにアクセスするとページフォールトが起き、SSD から読み込まれる">
+<text class="f-text" fill="#182f2b" x="20" y="18" font-size="12" font-weight="600">プロセスのアドレス空間（P0〜P7 = ページ 0〜7）</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="26" width="40" height="28" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="45" font-size="12" text-anchor="middle">P0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="65" y="26" width="40" height="28" rx="3"/><text class="f-muted" fill="#5c6d66" x="85" y="45" font-size="12" text-anchor="middle">P1</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="26" width="40" height="28" rx="3"/><text class="f-on" fill="#ffffff" x="130" y="45" font-size="12" text-anchor="middle">P2</text>
+<rect class="f-warn" fill="#9e5d24" x="155" y="26" width="40" height="28" rx="3"/><text class="f-on" fill="#ffffff" x="175" y="45" font-size="12" text-anchor="middle">P3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="26" width="40" height="28" rx="3"/><text class="f-muted" fill="#5c6d66" x="220" y="45" font-size="12" text-anchor="middle">P4</text>
+<rect class="f-accent" fill="#136d5a" x="245" y="26" width="40" height="28" rx="3"/><text class="f-on" fill="#ffffff" x="265" y="45" font-size="12" text-anchor="middle">P5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="26" width="40" height="28" rx="3"/><text class="f-muted" fill="#5c6d66" x="310" y="45" font-size="12" text-anchor="middle">P6</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="335" y="26" width="40" height="28" rx="3"/><text class="f-muted" fill="#5c6d66" x="355" y="45" font-size="12" text-anchor="middle">P7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M175 124V60M169 68L175 58L181 68"/>
+<text class="f-text" fill="#182f2b" x="186" y="86" font-size="12">P3 にアクセス → ページフォールト</text>
+<text class="f-text" fill="#182f2b" x="186" y="102" font-size="12">OS が SSD から読み込む</text>
+<text class="f-text" fill="#182f2b" x="20" y="120" font-size="12" font-weight="600">SSD 上のモデルファイル</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="128" width="355" height="28" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="197" y="147" font-size="12" text-anchor="middle">ページ 0 … ページ 7（1 ページ 4 KiB）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="180" font-size="12">濃い色：すでにメモリ上（ページキャッシュ）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="198" font-size="12">警告色：今まさにページフォールト</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="216" font-size="12">薄い色：アドレスはあるが、まだ読み込んでいない</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="234" font-size="12">読んだページはキャッシュに残り、次回はヒットする</text>
+</svg><figcaption>図 6-2　mmap が出すのは「貸出カード」だけで、本は運びません。バイトは初めてアクセスされたときに SSD から読み込まれ、そのあとはページキャッシュに残ります。メモリが足りなくなって回収されるまでです。</figcaption></figure>
+<p>Strata の GGUF リーダーは、Linux では <code>mmap</code> を使って、ファイル全体を読み取り専用でマップします。Windows では対応する <code>MapViewOfFile</code> を使います。そのうえで、マップされたアドレスの上でファイルヘッダーを解析します。<span class="ev ev-code">コード上の事実</span>（<code>gguf_reader.hpp</code> 第 376–408 行）</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは『オペレーティングシステム』で習うデマンドページング（demand paging）です。mmap は「ファイル I/O」を「メモリアクセス」に変えます。ページフォールトのハンドラが、あなたの代わりに <code>read</code> をしてくれます。仮想メモリとページテーブルの詳細は第 14 章で扱います。</p>
+<p>ページキャッシュは頼れる助手です。ただし、どのページを残し、どのページを捨てるかは、自分のルールで決めます。そのルールとアクセスの仕方が噛み合わないと、何が起きるのでしょうか。Strata のソースコードには、実際の教訓が残っています。<span class="ev ev-code">コード上の事実</span> 初期のバージョンは、Windows でエキスパートファイルを開くときに、OS へ「ランダムアクセス」のヒントを渡していました。このヒントを受けた OS は、先読みを止め、読み終えたページを早く捨てます。理由は「大きなファイルをランダムに読むなら、読んだ部分は二度と読まれない」からです。ところがエキスパートファイルは逆でした。トークンごとに選ばれるエキスパートはランダムに見えても、読んだバイトは次のトークンでほぼ必ずもう一度読まれます。結果として、速度は 1.93 GB/s まで落ち、1 トークンに 344 ms かかりました。25 トークン動かしても温まりませんでした。ページが、読み込まれるのと同じ速さで追い出されていたからです。コメントの結論はこうです。正しいヒントは「ヒントなし」であり、ページを残せるかどうかが肝心である（<code>expert_source.cpp</code> 第 381–391 行）。</p>
+<p>次のシミュレーターは、これをファイル 16 区間に縮めたものです。トークンごとに、同じ先頭 W 区間を順に読みます。ページキャッシュは「いちばん長く使われていないものから追い出す」方式（LRU）で場所を空けます。</p>
+<div class="viz" data-viz="page-cache"><figure class="fig"><svg viewBox="0 0 400 196" role="img" aria-label="図 6-3：各トークンが 6 区間を順に読む。ページキャッシュのスロットが 8 個ならページフォールトは最初のトークンだけ。スロットが 5 個だと毎回ページフォールトになる">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12" font-weight="600">各トークンが 6 区間を順に読む（W = 6）、LRU で追い出す</text>
+<text class="f-muted" fill="#5c6d66" x="185" y="38" font-size="12" text-anchor="middle">トークン 1</text>
+<text class="f-muted" fill="#5c6d66" x="259" y="38" font-size="12" text-anchor="middle">トークン 2</text>
+<text class="f-muted" fill="#5c6d66" x="333" y="38" font-size="12" text-anchor="middle">トークン 3</text>
+<text class="f-text" fill="#182f2b" x="10" y="61" font-size="12">C = 8：全部入る</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="48" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="163" y="48" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="174" y="48" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="185" y="48" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="196" y="48" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="207" y="48" width="10" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="226" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="237" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="248" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="259" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="270" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="281" y="48" width="10" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="300" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="311" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="322" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="333" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="344" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="355" y="48" width="10" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="99" font-size="12">C = 5：1 つ足りない</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="163" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="174" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="185" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="196" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="207" y="86" width="10" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="226" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="237" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="248" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="259" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="270" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="281" y="86" width="10" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="300" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="311" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="322" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="333" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="344" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="355" y="86" width="10" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="128" font-size="12">C = 8：2 番目のトークンからヒット率 100%</text>
+<text class="f-text" fill="#182f2b" x="10" y="146" font-size="12">C = 5：ヒット率はずっと 0%</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="168" font-size="12">濃い色のマス：ヒット（メモリ上のページをそのまま使う）</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="186" font-size="12">警告色のマス：ページフォールト</text>
+</svg><figcaption>図 6-3　ワーキングセットが収まれば、ページフォールトは最初の 1 周だけです。キャッシュより 1 区間でも多いと、順番にぐるぐる読むたびにページフォールトになります。キャッシュの効果は、よく「全か無か」になります。</figcaption></figure></div>
+<p>この「全か無か」という現象は、第 12 章でキャッシュの入れ替えを扱うときにも、もう一度出てきます。記憶階層ごとの帯域幅の差は、第 1 章のコラム<a href="#chapter/01/c01-memory-hierarchy">「記憶階層」</a>を見てください。</p>
+
+<h2 id="sec-3">6.3 Strata はバイトをどこに置くか：コピー、マップ、直接読み</h2>
+<p>同じエンジンが、データの種類ごとに 3 つのまったく違う置き方をしています（図 6-4）。どれを選ぶかは、2 つの質問で決まります。このデータは、トークンごとに何度も読むか。メモリに収まるか。</p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="図 6-4：Strata の 3 つの置き方。通常モードはエキスパートを RAM にコピーしてピン留めする。低メモリモードは mmap でページキャッシュに任せる。n-gram 表はページキャッシュを通さず SSD から直接読む">
+<rect class="f-accent" fill="#136d5a" x="8" y="8" width="122" height="34" rx="6"/>
+<text class="f-on" fill="#ffffff" x="69" y="30" font-size="13" font-weight="600" text-anchor="middle">通常：コピー</text>
+<rect class="f-accent" fill="#136d5a" x="139" y="8" width="122" height="34" rx="6"/>
+<text class="f-on" fill="#ffffff" x="200" y="30" font-size="13" font-weight="600" text-anchor="middle">低メモリ：マップ</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="8" width="122" height="34" rx="6"/>
+<text class="f-on" fill="#ffffff" x="331" y="30" font-size="13" font-weight="600" text-anchor="middle">n-gram：直接読み</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="50" width="122" height="104" rx="6"/>
+<text class="f-text" fill="#182f2b" x="69" y="68" font-size="12" text-anchor="middle">全エキスパートを</text>
+<text class="f-text" fill="#182f2b" x="69" y="86" font-size="12" text-anchor="middle">RAM にコピーして</text>
+<text class="f-text" fill="#182f2b" x="69" y="104" font-size="12" text-anchor="middle">ピン留めする</text>
+<text class="f-text" fill="#182f2b" x="69" y="122" font-size="12" text-anchor="middle">追い出されない</text>
+<text class="f-text" fill="#182f2b" x="69" y="140" font-size="12" text-anchor="middle">GPU から DMA 可</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="139" y="50" width="122" height="104" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="68" font-size="12" text-anchor="middle">experts.bin を</text>
+<text class="f-text" fill="#182f2b" x="200" y="86" font-size="12" text-anchor="middle">mmap でマップ</text>
+<text class="f-text" fill="#182f2b" x="200" y="104" font-size="12" text-anchor="middle">キャッシュ任せで</text>
+<text class="f-text" fill="#182f2b" x="200" y="122" font-size="12" text-anchor="middle">必要時に読み込み</text>
+<text class="f-text" fill="#182f2b" x="200" y="140" font-size="12" text-anchor="middle">不足時は返却可</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="270" y="50" width="122" height="104" rx="6"/>
+<text class="f-text" fill="#182f2b" x="331" y="68" font-size="12" text-anchor="middle">28.8 GB の表は</text>
+<text class="f-text" fill="#182f2b" x="331" y="86" font-size="12" text-anchor="middle">ずっと SSD 上に</text>
+<text class="f-text" fill="#182f2b" x="331" y="104" font-size="12" text-anchor="middle">キャッシュを迂回</text>
+<text class="f-text" fill="#182f2b" x="331" y="122" font-size="12" text-anchor="middle">して直接読む</text>
+<text class="f-text" fill="#182f2b" x="331" y="140" font-size="12" text-anchor="middle">4 KiB 単位で整列</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="162" width="122" height="44" rx="6"/>
+<text class="f-warn" fill="#9e5d24" x="69" y="179" font-size="12" text-anchor="middle">RAM を占有</text>
+<text class="f-warn" fill="#9e5d24" x="69" y="196" font-size="12" text-anchor="middle">23〜50 GB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="139" y="162" width="122" height="44" rx="6"/>
+<text class="f-warn" fill="#9e5d24" x="200" y="179" font-size="12" text-anchor="middle">GPU が小さいと</text>
+<text class="f-warn" fill="#9e5d24" x="200" y="196" font-size="12" text-anchor="middle">SSD 読みが増える</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="162" width="122" height="44" rx="6"/>
+<text class="f-warn" fill="#9e5d24" x="331" y="179" font-size="12" text-anchor="middle">1 トークンあたり</text>
+<text class="f-warn" fill="#9e5d24" x="331" y="196" font-size="12" text-anchor="middle">16 行を読む</text>
+</svg><figcaption>図 6-4　3 つの置き方には、それぞれ違うコストがあります。何度も読まれてメモリに収まるものは、コピーして固定します。収まらないものは、ページキャッシュに任せます。とても大きくて、1 回に数行しか読まないものは、そもそもメモリに入れません。</figcaption></figure>
+<p><strong>通常モード：コピーして、固定する。</strong>メモリが十分に大きいときは、全エキスパート（量子化バージョンによって 23–50 GB）を RAM にコピーして、<dfn>ピン留め</dfn>します。<span class="ev ev-report">上流レポート</span>[S03] ピン留めとは、OS に「これらのページは SSD へ追い出さないで」と伝えることです。固定しておけば、GPU は DMA でこのメモリから直接データを取れます。CPU がいったん受け取って渡す必要がありません。[S06] プラットフォーム層のピン留め関数は、Linux では <code>mlock</code>、Windows では <code>VirtualLock</code> を呼びます。一部しか固定できなかったときは、成功したふりをせず、正直に報告します。<span class="ev ev-code">コード上の事実</span>（<code>platform/memory.hpp</code> 第 1–24 行）</p>
+<p><strong>低メモリモード：マップして、ページキャッシュに任せる。</strong>全エキスパートがメモリに入らないときは（エンジン 0.1.26 以降）、インストーラーがモデルディレクトリの <code>experts.bin</code> をマップします。GPU にキャッシュされていないエキスパートは、OS のファイルキャッシュが面倒を見て、メモリが足りなくなれば返せます。上流レポートによると、Coder 版エンジンのコミット済みメモリは 36 GB から約 13 GB に下がり、回答は変わりませんでした。ただし GPU が小さいと、ほとんどのエキスパートを SSD から読むことになり、かなり遅くなります。<span class="ev ev-report">上流レポート</span>[S03]</p>
+<p><strong>n-gram 表：メモリに入れず、SSD から直接読む。</strong>この表は 320,001,536 行あり、IQ4_NL 形式では 1 行 90 バイトなので、合計は約 28.8 GB（26.8 GiB）です。<span class="ev ev-code">コード上の事実</span> リーダーの設計では、これを<strong>決してメモリに置かない</strong>ことが求められています。ページキャッシュにも置きません。どの行も、バッファリングなしの 4 KiB 読み出しで SSD から直接取ります。1 トークンあたり 16 行を、16 個の別々のページから読みます（<code>ple_reader.hpp</code> 第 1–5 行）。下層の直接読みモジュールには、理由が書かれています。メモリマップでは「ページキャッシュに入れない」という約束を守れないが、バッファリングなしの読み出しなら守れる。代わりに、オフセット、長さ、バッファのアドレスがすべて 4096 の倍数でなければならない（<code>direct_file.hpp</code> 第 3–9 行）。この表が何に使われるかは、第 11 章で詳しく説明します。</p>
+
+<h2 id="sec-4">6.4 すべてのテンソルが保安検査を受ける</h2>
+<p>ディレクトリは言います。「テンソル X はオフセット o から始まり、長さは n バイト」。エンジンはこれを信じてよいのでしょうか。ファイルのダウンロードが途中で切れたのかもしれません。別のツールに書き壊されたのかもしれません。そもそも別のモデルのファイルかもしれません。エンジンはテンソルを読む前に、区間 [o, o+n) がファイルの中に完全に収まっていると証明しなければなりません。</p>
+<p>いちばん手軽な書き方は <code>o + n ≤ F</code> です（F はデータ領域の長さ）。ところが、コンピュータの整数は桁数が決まっています。<dfn>符号なし整数</dfn>は、計算結果が上限を超えると、黙って小さな数に「巻き戻り」ます。これを<dfn>オーバーフロー</dfn>といいます。ディレクトリの o が壊れて非常に大きな数になっていると、o + n が巻き戻って小さな数になり、検査をすり抜けてしまいます。</p>
+<p>Strata が使うのは、オーバーフローしない書き方です。まず <code>o ≤ F</code> を確認し、次に <code>n ≤ F − o</code> を確認します。1 つ目の確認で、引き算が負にならないことが保証されます。2 つ目では、もう足し算をしません。<span class="ev ev-code">コード上の事実</span>（<code>gguf_reader.hpp</code> 第 530–536 行）次のシミュレーターは、整数を 8 ビットまで縮めて、オーバーフローを目に見えるようにします。</p>
+<div class="viz" data-viz="range-check"><figure class="fig"><svg viewBox="0 0 400 224" role="img" aria-label="図 6-5：8 ビット整数では 200 + 100 が 44 に巻き戻る。書き方 A は範囲外のテンソルを正しいと誤判定し、書き方 B は先にオフセットを確認して正しく拒否する">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">8 ビット符号なし整数：F = 128、o = 200、n = 100</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="36" width="120" height="18"/>
+<text class="f-text" fill="#182f2b" x="26" y="49" font-size="12">ファイル [0, 128)</text>
+<rect class="f-warn" fill="#9e5d24" x="207.5" y="62" width="93.8" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="207" y="96" font-size="12">テンソルの主張 [200, 300)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="4 3" d="M260 36V112"/>
+<text class="f-muted" fill="#5c6d66" x="264" y="48" font-size="12">上限 255</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" stroke-dasharray="2 2" d="M61.3 62V112"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 116H380M20 112V120M140 112V120M260 112V120M380 112V120"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="134" font-size="12" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="61.3" y="134" font-size="12" text-anchor="middle">44</text>
+<text class="f-muted" fill="#5c6d66" x="140" y="134" font-size="12" text-anchor="middle">128</text>
+<text class="f-muted" fill="#5c6d66" x="260" y="134" font-size="12" text-anchor="middle">256</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="134" font-size="12" text-anchor="middle">384</text>
+<text class="f-text" fill="#182f2b" x="20" y="156" font-size="12">200 + 100 = 300。8 ビットでは</text>
+<text class="f-text" fill="#182f2b" x="20" y="172" font-size="12">300 − 256 = 44 に巻き戻る</text>
+<text class="f-text" fill="#182f2b" x="20" y="194" font-size="12">書き方 A：44 ≤ 128 → 通過（誤り）</text>
+<text class="f-text" fill="#182f2b" x="20" y="214" font-size="12">書き方 B：先に 200 ≤ 128 を確認、不成立 → 拒否（正しい）</text>
+</svg><figcaption>図 6-5　同じ範囲外のテンソルでも、2 つの書き方は正反対の結論を出します。先にオフセットを確認してから引き算をする書き方は、オーバーフローしないので、だまされません。</figcaption></figure></div>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>C/C++ では、符号なし整数のオーバーフローは「きちんと定義」されています。2<sup>64</sup> を法として計算され、エラーにもクラッシュにもなりません。静かだからこそ危険なのです。符号付き整数のオーバーフローは未定義動作で、コンパイラがあなたの検査を最適化で消してしまうこともあります。</p>
+<p>バイト数を計算するときの掛け算も、オーバーフローします。テンソルの要素数は、各次元の長さの積です。4 次元分を掛けると、64 ビットを超えるのは簡単です。Strata は、次元 d を 1 つ掛けるたびに、先に「現在の積 ≤ 上限 ÷ d」を確認します。満たさなければ 0 を返します。「この形状では正当なサイズを計算できない」という意味です。<span class="ev ev-code">コード上の事実</span>（<code>gguf_reader.hpp</code> 第 475–488 行）</p>
+<p>これは保安検査の一部にすぎません。同じリーダーは、次のようなファイルも拒否します。2 つのテンソルが同じ名前（そうでないと、検索のとき先に並んだ方が勝ち、間違ったテンソルを黙って使ってしまう）。次元数が 0、または 4 を超える。メタデータの配列長が 2<sup>24</sup> を超える。データ領域の開始位置がファイルの末尾より後ろにある。<span class="ev ev-code">コード上の事実</span>（<code>gguf_reader.hpp</code> 第 326、437–446、458 行）エキスパートファイルをマップする前にも、エンジンはファイルサイズがエキスパートのレイアウトが要求するバイト数と<strong>ぴったり</strong>等しいかを確認します。1 バイトでも違えば拒否します（<code>expert_source.cpp</code> 第 436–446 行）。</p>
+<p>バイト範囲が合っていても、形状も合っている必要があります。<code>layout.hpp</code> は、ロード時に層ごとにすべてのテンソルの形状を照合します。その名前のテンソルは、カーネルが想定している形状か、という確認です。ヘッダーファイルには、その目的が書かれています。4000 個目のトークンで、行列積の中の間違った数として現れるのではなく、<strong>ロード時</strong>に、テンソル名、実際の形状、要求される形状を報告することです。<span class="ev ev-code">コード上の事実</span>[S04]</p>
+
+<h2 id="sec-5">6.5 バイトは正しいか：チェックサムとハッシュ</h2>
+<p>範囲検査が答えるのは、「バイトがファイルの中にあるか」です。答えられない問いが、もう 1 つあります。このバイトは、元のバイトそのものか。ダウンロード中に 1 バイトが壊れても、ファイルサイズは変わらないので、範囲検査は通ってしまいます。この問いに答えるには、データの「指紋」を計算する必要があります。</p>
+<aside class="primer" id="c06-checksum-hash">
+<h3>チェックサムとハッシュ</h3>
+<p>イメージ：本を詰めた大きな箱を送るとき、途中で抜かれたり、すり替えられたりしていないか、どうやって確かめますか。先に総ページ数を数えて箱に書いておき、受け取った側がもう一度数えます。この「総ページ数」が、いちばん素朴な<dfn>チェックサム</dfn>です。短い 1 つの数で大きなデータをまとめ、両側で比べれば、変わったかどうかが分かります。</p>
+<p>いちばん簡単なチェックサムは、全バイトを足し合わせることです。「あるバイトが変わった」ことは見つけられますが、「2 つのバイトの位置が入れ替わった」ことは見つけられません。足し算は順序を気にしないからです。もっと良い検査アルゴリズムとして、たとえば <dfn>CRC</dfn>（巡回冗長検査）があります。順序に敏感で、通信や保存で起きるランダムな誤りの検出によく使われます。</p>
+<p><dfn>暗号学的ハッシュ</dfn>は、さらに一歩進みます。たとえば SHA-256 は、任意の長さのデータを 256 ビットのダイジェストに変えます。性質は 2 つあります。入力を 1 ビット変えるだけで、ダイジェストのおよそ半分のビットが変わります（<dfn>雪崩効果</dfn>）。そして、同じダイジェストになる別々のファイルを意図的に作ることは、現在の計算能力ではできません。だから偶然の破損だけでなく、誰かがわざと差し替えたことも見つけられます。コラムのあとの図 6-6 に小さな例があります。</p>
+<p>この章との関係：数十 GB のモデルファイルは、ファイル名とサイズだけでは「だいたい同じ大きさのファイルがある」ことしか証明できません。ハッシュを 1 回計算して初めて、「まさにそのファイルだ」と証明できます。</p>
+<p class="further">参考リンク：<a href="https://ja.wikipedia.org/wiki/チェックサム" target="_blank" rel="noopener noreferrer">Wikipedia：チェックサム</a> · <a href="https://ja.wikipedia.org/wiki/ハッシュ関数" target="_blank" rel="noopener noreferrer">Wikipedia：ハッシュ関数</a> · <a href="https://ja.wikipedia.org/wiki/SHA-2" target="_blank" rel="noopener noreferrer">Wikipedia：SHA-2</a> · <a href="https://ja.wikipedia.org/wiki/巡回冗長検査" target="_blank" rel="noopener noreferrer">Wikipedia：巡回冗長検査</a> · <a href="https://developer.mozilla.org/ja/docs/Web/API/SubtleCrypto/digest" target="_blank" rel="noopener noreferrer">MDN：ブラウザーで SHA-256 を計算する</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/file-integrity.pdf" target="_blank" rel="noopener noreferrer">OSTEP 第 45 章（英語）：データの完全性</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 178" role="img" aria-label="図 6-6：2 つのバイトを入れ替えても、バイト和は変わらないが、SHA-256 のダイジェストはまったく別物になる">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="12">入力</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="18" font-size="12">バイト和</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="18" font-size="12">SHA-256 の先頭 16 桁（16 進）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="26" width="376" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="49" font-size="13">「AB」</text>
+<text class="f-text" fill="#182f2b" x="70" y="49" font-size="13">65 + 66 = 131</text>
+<text class="f-text" fill="#182f2b" x="190" y="49" font-size="13">38164fbd17603d73</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="70" width="376" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="93" font-size="13">「BA」</text>
+<text class="f-text" fill="#182f2b" x="70" y="93" font-size="13">66 + 65 = 131</text>
+<text class="f-text" fill="#182f2b" x="190" y="93" font-size="13">296d71a7f66e75b7</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="134" font-size="12">バイト和：どちらも 131 で、変化に気づけない</text>
+<text class="f-text" fill="#182f2b" x="20" y="152" font-size="12">SHA-256：2 バイトの順序が違うだけで、</text>
+<text class="f-text" fill="#182f2b" x="20" y="170" font-size="12">ダイジェストは別物になる</text>
+</svg><figcaption>図 6-6　素朴なチェックサムは「位置の入れ替え」を見逃します。暗号学的ハッシュは、どんな変更にも非常に敏感です。</figcaption></figure>
+<p>Strata のインストールスクリプトは、実験的な Unsloth モデルファイルに対して、完全なハッシュ照合を行います。<span class="ev ev-code">コード上の事実</span> 各分割ファイルのバイト数と SHA-256 は、スクリプトに固定値として書かれています。ダウンロードが終わると、まずバイト数を比べ、違えばすぐエラーにします。次に、ファイル全体を 16 MiB のブロックずつ読んで SHA-256 を計算します。一致しなければファイルを削除し、再ダウンロードを促します。111 GB の計算には約 5 分かかるので、結果は「完了マーク」のファイルに記録し、次回の起動では再計算しません（<code>setup.py</code> 第 132–133、921–943 行）。そのほかのモデルファイルにはハッシュをかけません。インストールスクリプトがテンソルディレクトリを読んで、照合します（同じ箇所のコメント）。</p>
+<p>ハッシュが見るのは「ファイルが正しいか」です。バイトがメモリから VRAM へ移ったあとにも、もう一度確認が必要です。エキスパートキャッシュには <code>verify_slot</code> という関数があります。VRAM のあるスロットのバイトを読み戻し、メモリにある原本とバイト単位で比べます。コメントによると、これは「キャッシュに入っているものが、まさにそれが名乗るエキスパートだと証明できる唯一のもの」です。スロット番号が正しくてバイトが間違っていると、一見もっともらしい、間違ったトークンが出てくるからです。[S05] この関数は、実際に問題を捕まえたこともあります。最初のバージョンでは、起動時の書き込みに非同期コピーを使っていて、読み戻しの検査とは実行順序が揃っていませんでした。検査は実行全体を拒否し、「slot 0 differs from the arena at byte 0」と報告しました。コメントの評価は、これこそ検査が自分の務めを果たしている、というものです。<span class="ev ev-code">コード上の事実</span>[S05]</p>
+
+<h2 id="sec-6">6.6 手を動かす：モデルをダウンロードしなくてもローダーを練習できる</h2>
+<p>この章には独立した実験ページがありません。上の 2 つのインタラクティブな図が、そのまま実験です。次の順番で遊んでみてください。</p>
+<ol>
+<li>「ページキャッシュシミュレーター」で、まず C ≥ W にして 10 トークン動かします。次に C を W − 1 にします。2 回のヒット率を記録して、スロットが 1 つ足りないだけで、ほぼ 100% から 0% に落ちる理由を、一文で説明してください。</li>
+<li>「範囲検査」で n を 100 に固定し、o = 150 から上へ動かします。書き方 A が初めてだまされる o の値を見つけて、o + n − 256 で答えを確かめてください。</li>
+</ol>
+<p>発展課題：128 バイトの偽の GGUF ファイルを自分で設計して、ディレクトリに 3 つのテンソルを書いてみましょう。次の場合を順にテストします。正しい範囲。ちょうど末尾まで。1 バイトの範囲外。極端に大きなオフセット。次元の掛け算のオーバーフロー。2 つのテンソルの名前の重複。合格基準は「壊れたファイルでクラッシュする」ことではありません。<strong>どんな計算が始まるより前に、人間が読んで分かる拒否の理由を 1 文で出す</strong>ことです。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>mmap が作るのは「アドレス ↔ ファイル」の対応関係だけです。バイトは、初めてアクセスされたときにページフォールトで SSD から読み込まれ、そのあとページキャッシュに残ります。マップが成功しても、データがすでにメモリにあるとは限りません。</li>
+<li>Strata は、アクセスの仕方に合わせて置き方を選びます。何度も読まれて収まるエキスパートは、メモリにコピーしてピン留めします。収まらないときは、ページキャッシュに任せます。28.8 GB の n-gram 表は、ページキャッシュを通さず SSD から直接読みます。</li>
+<li>すべてのテンソルが保安検査を受けます。範囲検査は <code>o ≤ F かつ n ≤ F − o</code> と書くとオーバーフローしません。形状はロード時に照合します。ファイル全体は、SHA-256 のようなハッシュで「まさにそのファイルだ」と証明します。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「mmap が成功したなら、モデルはもうメモリの中にある。」</strong></p>
+<p>mmap が戻った時点で、OS は対応関係を登録しただけで、1 ページも読んでいないかもしれません。実際の読み込みは初めてのアクセスで起こります。しかも、読み込まれたページは、メモリが足りなくなれば回収され、次のアクセスでまた SSD から読まれることがあります。Strata のソースコードにも、ページが読み込まれるのと同じ速さで追い出されると、速度が SSD の水準まで落ちた、という記録があります。</p></div>
+
+<details class="deep"><summary>もう一歩深く：一致は正しさではない、所有権とライフタイム、ドキュメントとコードが食い違うとき誰を信じるか</summary>
+<h3>2 つのツールが一致しても、一緒に間違うことがある</h3>
+<p><code>layer.cpp</code> には、とても価値のある障害の記録が 2 つ残っています。[S14] 1 つ目：ある関数が、量子化テンソルの 3 つのデータ（コード、スケール係数、オフセット）のサイズを自分で導き直していて、スケール係数は 1 つ 4 バイトだと仮定していました。ところが 303 個の量子化テンソルのうち 90 個は、スケール係数が 2 バイトの fp16 でした。Q2_0 のエキスパートテンソル 58 個は、すべてそうです。その結果、計算したスケール係数のブロックは 2 倍の大きさになり、3 つのブロックの合計がテンソル全体のサイズと合いませんでした。最初は、一覧にあるグループサイズの書き間違いを疑いました。303 個のテンソルをすべて監査すると、グループサイズは正しいと分かりました。<strong>見落とされていた入力は、スケール係数の幅でした</strong>。</p>
+<p>2 つ目：2 つのパッキングツールが、どちらも <code>mins</code> という名前のデータブロックを探していましたが、本当のキー名は <code>offsets</code> でした。2 つのツールは「そろって」、54 個の Q4_K/Q5_K テンソルのオフセットブロックを見落としました。メモリ予算は 136 MiB 少なく見積もられ、そのバイトもコピーされませんでした。コメントの結論はこうです。2 つのツールが一致しても、それが証拠になるのは、同じ間違った前提を共有していないときだけである。今の <code>plane_ptrs</code> は自分で導き直さず、ローダーが記録した 3 つのブロックサイズの合計がテンソル全体のバイト数に等しいか、そして「オフセットブロックがあるか」のフラグがオフセットブロックのサイズと一致するかだけを照合します。合わなければ拒否します。<span class="ev ev-code">コード上の事実</span>[S14]</p>
+<p>テスト設計への教訓：2 つの oracle（正誤を判定する参照実装）は、本当に独立させてください。1 つはフォーマット仕様どおりに順番に解析し、もう 1 つは手で作ってバイト単位で確認した固定サンプルを使います。2 つに同じレイアウト導出関数を共有させて、「結果が同じ」を強い証拠だと思ってはいけません。</p>
+<h3>ヘッダーカーソルの中の足し算</h3>
+<p>ファイルヘッダーを読む <code>Cursor::need</code> は、<code>pos_ + n &gt; size_</code> と書かれています（<code>gguf_reader.hpp</code> 第 240–242 行）。まさに 6.4 節で説明した足し算の書き方です。ヘッダーの固定長フィールドはとても小さいので、これで問題ありません。しかし文字列の長さ n は、ファイルから読み出した値です。練習問題：n が 2<sup>64</sup> に近い値に書き換えられたら、この比較は巻き戻りにだまされるでしょうか。ヒント：だまされたとしても、次の行で n を使って <code>std::string</code> を作るとき、長さが上限を超えていれば例外が投げられるので、ファイルはやはり拒否されます。ただし、エラーメッセージは正確な「unexpected end of file」ではなくなります。安全はたいてい多層の防御で守られていますが、どの層も正しく書く価値がある、ということです。</p>
+<h3>RAII が管理できるものと、できないもの</h3>
+<p>C++ の <dfn>RAII</dfn>（Resource Acquisition Is Initialization、資源取得は初期化）は、オブジェクトが破棄されるときに資源を自動で解放します。GGUF リーダーは、構築の途中で失敗すると、まずマップを解除し、ファイルを閉じてから、例外を投げます（<code>gguf_reader.hpp</code> 第 342–345、410–419 行）。しかし推論エンジンの資源は、メモリとファイルハンドルだけではありません。VRAM、ピン留めメモリ、CUDA stream、event もあります。スマートポインタが知っているのは、教えられた所有権だけです。非同期コピーの完了を待ってくれることは<strong>ありません</strong>。</p>
+<p>だからインターフェースの契約は、「アドレスを渡す」ではなく、「コピー完了イベントが確認されるまで、呼び出し側がこのバッファを保持する」と書きます。<code>expert_source.hpp</code> は、ポインタの寿命をはっきり書いています。通常のソースが返すポインタは、次の <code>blob()</code> 呼び出しまでしか有効であることが保証されません。キャッシュ付きのソースは、キャッシュ自体を指すポインタを返さなければなりません。再利用されるステージング領域を指してはいけません。さもないと、CPU がこのエキスパートを計算しているときに、読んでいるのはもう次のエキスパートのバイトかもしれません。GGUF の分割ファイルからその場で組み立てた「一時的な」エキスパートブロックは、現在の層とその 1〜2 層あとまでしか有効であることが保証されません。もっと長く残したいなら、<code>copy_blob</code> でコピーを作る必要があります。[S06] セッションのメモリを解放する前に、<code>session_release</code> は、ほかのモジュールが登録した外部ポインタ（たとえば回転位置埋め込みの角度テーブル）を、先に取り消します。新しいセッションが、解放済みのアドレスを持って計算しないようにするためです。[S13]</p>
+<h3>ドキュメントとコードの言うことが違うとき、誰を信じるか</h3>
+<p>Strata の説明ドキュメントは、n-gram 表を「OS のキャッシュ経由で数行を読む」と書いています（<code>docs/HOW_IT_WORKS.md</code> 第 31 行）。一方、リーダーのヘッダーファイルは「決してメモリに置かない。どの行もバッファリングなしの 4 KiB 読み出しで読む」と書いています（<code>ple_reader.hpp</code> 第 3–4 行）。この本は、固定したコミットのソースコードに従って説明し、こうした食い違いもそのまま指摘します。オープンソースを読むときは、ドキュメントは作者の意図、コードは実際の挙動です。両者が食い違うときは、実行できて、テストできる方を基準にします。同時に食い違いを書き留めて、どちらかの肩を持って丸く収めようとしないでください。</p>
+<h3>なぜ「非同期の戻り」を「コピー完了」と見なしてはいけないのか</h3>
+<p>非同期コピー関数が戻ったことが意味するのは、タスクがキューに入ったことだけです。DMA エンジンは、まだコピー元のバッファを読んでいないかもしれません。このときコピー元のバッファを再利用したり解放したりすると、コピーされるのは、半分が古く、半分が新しいバイトかもしれません。再利用の正しい許可は、同じ stream 上の完了イベント、または契約に明記された同期ポイントです。<code>expert_cache.hpp</code> で起きた "slot 0 differs" の失敗は、本質的には、2 つの実行順序が揃っていなかったことが原因です。[S05]</p>
+</details>

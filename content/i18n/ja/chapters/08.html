@@ -1,0 +1,210 @@
+<div class="hook"><span class="eyebrow">きっとこう聞いたことがありますよね</span>
+<p>長いコードを貼りつけて、こう聞いたとします。「3 行目の変数は、あとでどこで書き換えられた？」モデルが答えるには、前の文章を見返す必要があります。しかも、どこを見るべきかを知っていなければなりません。1 万字の文章を、1 字ずつ同じ力で見ることはできないのです。</p>
+<p>「質問を持って見返し、関係が深い場所ほどよく見る」。これが<dfn>アテンション</dfn>（attention、注意）です。この章ではまず、手で計算できる小さな例でアテンションの計算を説明します。次に、コンテキストが長くなるほどアテンションが高くつく理由を見ます。最後に、Strata のモデルが手間を減らす 2 つの工夫を見ます。1 つは、24 個のクエリヘッドが 2 セットのノートを共有すること。もう 1 つは、毎回最大 2051 個の位置だけを見ることです。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>アテンション = 現在の単語の「クエリ」で、前の文章の各位置にスコアをつける。ソフトマックスで重みにする。その重みで各位置の「値」を混ぜる。完全なアテンションの仕事量は、長さの 2 乗で増える。Strata のモデルでアテンションを使うのは 12 層だけ。24 個のクエリヘッドが 2 組のキーと値を共有し、毎回、選んだ最大 2051 個の位置だけを見る。</p>
+
+<h2 id="sec-1">8.1 アテンション：質問を持って本を見返す</h2>
+<p>図書館で資料を探す場面を想像してください。頭の中に質問があります。これが<dfn>クエリ</dfn>（query、q と書く）です。どの本にも背表紙にラベルが貼ってあります。これが<dfn>キー</dfn>（key、k）です。本の中身が<dfn>値</dfn>（value、v）です。質問を各ラベルと見比べて、関係が深い本ほど丁寧に読みます。最後に、読んだ内容を「どれだけ丁寧に読んだか」の割合で混ぜて、答えにします。</p>
+<aside class="primer" id="c08-attention">
+<h3>アテンション機構：Q、K、V</h3>
+<p>モデルの中では、前の文章の各位置にベクトルが 1 本あります。アテンション層は、学習で得た 3 つの行列を使って、これを 3 つに変えます。キー k（「私は何か」）、値 v（「私が差し出せるもの」）、そして現在の位置ならクエリ q（「私は何を探しているか」）です。計算は 4 ステップです。</p>
+<ol>
+<li><strong>スコアをつける</strong>：クエリと各キーの<dfn>内積</dfn>（ドット積）を取ります。sᵢ = q · kᵢ = q₁kᵢ₁ + q₂kᵢ₂ + …。2 つのベクトルの向きが近いほど、内積は大きくなります。</li>
+<li><strong>スケーリング</strong>：各スコアを √d で割ります。d はベクトルの長さ（次元数）です。次元数が大きいほど、内積は自然に大きくなります。割らないと、次のソフトマックスが極端になり、1 か所だけをほぼ見つめてしまいます。</li>
+<li><strong>ソフトマックス</strong>（softmax）：wᵢ = e<sup>sᵢ</sup> ÷ Σⱼ e<sup>sⱼ</sup>。スコアが重みに変わります。どれも正の数で、合計は 1 です。</li>
+<li><strong>重み付き和</strong>：出力 = Σ wᵢ · vᵢ。</li>
+</ol>
+<p>いちばん小さい例を手で計算してみましょう。前の文章には位置が 2 つだけあり、値はそれぞれ [2, 0] と [0, 4] です。スケーリング後のスコアがどちらも 0 なら、重みは e⁰ ÷ (e⁰ + e⁰) = ½ と ½ です。出力は ½ × [2, 0] + ½ × [0, 4] = [1, 2] になります。1 つ目のスコアを ln 3 ≈ 1.10 に上げると、重みは 3 ÷ (3 + 1) = ¾ と ¼ になり、出力は [1.5, 1] になります。</p>
+<p>2 点に注意してください。1 つ目。出力は<strong>混ぜて</strong>作った新しいベクトルです。前の文章の一文をそのまま「コピー」したものではありません。2 つ目。k は「どこを見るか」を決め、v は「何が見えるか」を決めます。役割が違うので、入れ替えても普通は同じ結果になりません。</p>
+<p>実際のモデルは、q、k、v の組を何組も同時に用意します。これを<dfn>マルチヘッドアテンション</dfn>と呼びます。各「ヘッド」が自分の気になるものを探し、最後に結果をまとめます。</p>
+<p>この章との関係：Strata のモデルでは、QSA 層ごとにクエリヘッドが 24 個あり、各ヘッドは 256 次元です。だからスケーリングでは √256 = 16 で割ります。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%82%A2%E3%83%86%E3%83%B3%E3%82%B7%E3%83%A7%E3%83%B3_%28%E6%A9%9F%E6%A2%B0%E5%AD%A6%E7%BF%92%29" target="_blank" rel="noopener noreferrer">Wikipedia：アテンション (機械学習)</a> · <a href="https://ja.wikipedia.org/wiki/%E3%82%BD%E3%83%95%E3%83%88%E3%83%9E%E3%83%83%E3%82%AF%E3%82%B9%E9%96%A2%E6%95%B0" target="_blank" rel="noopener noreferrer">Wikipedia：ソフトマックス関数</a> · <a href="https://www.3blue1brown.com/lessons/attention" target="_blank" rel="noopener noreferrer">3Blue1Brown：アテンション（アニメ解説）</a> · <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener noreferrer">The Illustrated Transformer</a> · <a href="https://arxiv.org/abs/1706.03762" target="_blank" rel="noopener noreferrer">Attention Is All You Need（原論文）</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 312" role="img" aria-label="図 8-1：アテンションの 4 ステップ。現在の単語がクエリを出し、前の文章がキーと値を出す。スコア、スケーリング、ソフトマックス、重み付き和">
+<rect class="f-soft" fill="#e5f1df" x="10" y="8" width="180" height="50" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="29" font-size="13" font-weight="600" text-anchor="middle">現在の単語</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="48" font-size="12" text-anchor="middle">クエリ q を作る：何を探す？</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="8" width="180" height="50" rx="8"/>
+<text class="f-text" fill="#182f2b" x="300" y="29" font-size="13" font-weight="600" text-anchor="middle">前の文章の各位置</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="48" font-size="12" text-anchor="middle">キー k と値 v を持つ</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 58V70H200V80M300 58V70H200"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="82" width="280" height="38" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="106" font-size="13" text-anchor="middle">① スコア：q と各 k の内積</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="136" width="280" height="38" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="160" font-size="13" text-anchor="middle">② スケーリング：√d で割る（d は次元数）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="190" width="280" height="38" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="214" font-size="13" text-anchor="middle">③ ソフトマックス：スコアを重みに（合計 1）</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="244" width="280" height="56" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="268" font-size="13" font-weight="600" text-anchor="middle">④ 重み付き和：Σ 重み × v</text>
+<text class="f-on" fill="#ffffff" x="200" y="289" font-size="12" text-anchor="middle">このヘッドの出力ベクトルになる</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 120V134M200 174V188M200 228V242"/>
+</svg><figcaption>図 8-1　アテンションの 4 ステップ。前半の 2 つが「どこを見るか」を決め、3 つ目が「どれだけ見るか」を割合にし、最後が割合どおりに中身を取り出す。</figcaption></figure>
+<p>下のシミュレーターは、ベクトルを 2 次元に縮めてあります。内積を平面上で「見る」ためです。クエリの矢印がどのキーの矢印に近い向きかで、その単語のアテンションが増えます。</p>
+<div class="viz" data-viz="attention-step"><figure class="fig"><svg viewBox="0 0 400 284" role="img" aria-label="図 8-2：2 次元のおもちゃの例。クエリは子猫と毛糸玉の間を指し、2 つがそれぞれ約半分の重みを受け取る。出力はそれらの値の混合">
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M30 110H190M110 30V190"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" d="M110 110L171.6 110M110 110L93.2 59.6M110 110L140.8 62.4M110 110L65.2 126.8"/>
+<circle class="f-muted" fill="#5c6d66" cx="171.6" cy="110" r="3.5"/><circle class="f-muted" fill="#5c6d66" cx="93.2" cy="59.6" r="3.5"/><circle class="f-muted" fill="#5c6d66" cx="140.8" cy="62.4" r="3.5"/><circle class="f-muted" fill="#5c6d66" cx="65.2" cy="126.8" r="3.5"/>
+<text class="f-text" fill="#182f2b" x="178" y="122" font-size="12">子猫</text>
+<text class="f-text" fill="#182f2b" x="88" y="52" font-size="12" text-anchor="end">追う</text>
+<text class="f-text" fill="#182f2b" x="122" y="48" font-size="12">毛糸玉</text>
+<text class="f-text" fill="#182f2b" x="60" y="144" font-size="12" text-anchor="end">走る</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3.5" d="M110 110L181.2 65.5"/>
+<circle class="f-accent" fill="#136d5a" cx="181.2" cy="65.5" r="5"/>
+<text class="f-accent" fill="#136d5a" x="188" y="72" font-size="13" font-weight="600">q</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="24" font-size="12">アテンションの重み</text>
+<text class="f-text" fill="#182f2b" x="220" y="52" font-size="12">子猫</text><rect class="f-accent" fill="#136d5a" x="270" y="41" width="50" height="14"/><text class="f-text" fill="#182f2b" x="390" y="52" font-size="12" text-anchor="end">0.50</text>
+<text class="f-text" fill="#182f2b" x="220" y="86" font-size="12">追う</text><rect class="f-accent" fill="#136d5a" x="270" y="75" width="2" height="14"/><text class="f-text" fill="#182f2b" x="390" y="86" font-size="12" text-anchor="end">0.02</text>
+<text class="f-text" fill="#182f2b" x="220" y="120" font-size="12">毛糸玉</text><rect class="f-accent" fill="#136d5a" x="270" y="109" width="47" height="14"/><text class="f-text" fill="#182f2b" x="390" y="120" font-size="12" text-anchor="end">0.47</text>
+<text class="f-text" fill="#182f2b" x="220" y="154" font-size="12">走る</text><rect class="f-accent" fill="#136d5a" x="270" y="143" width="0.5" height="14"/><text class="f-text" fill="#182f2b" x="390" y="154" font-size="12" text-anchor="end">0.00</text>
+<text class="f-text" fill="#182f2b" x="10" y="220" font-size="12">q は「子猫」と「毛糸玉」の間を指し、約半分ずつ受け取る</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="242" font-size="12">値：子猫 [3, 0]、毛糸玉 [1, 3]。残り 2 語はほぼ無関係</text>
+<text class="f-text" fill="#182f2b" x="10" y="266" font-size="12">出力 ≈ 0.50×[3, 0] + 0.47×[1, 3] + … ≈ [1.98, 1.46]</text>
+</svg><figcaption>図 8-2　クエリが 2 つのキーの間にあると、アテンションは 2 つの値を割合どおりに混ぜる。クエリがどちらへ向くかで、混ぜる割合も偏る。</figcaption></figure></div>
+<p>QSA 層の q、k、v は、3 つの射影行列 <code>attn_q</code>、<code>attn_k</code>、<code>attn_v</code> から作られます。<span class="ev ev-code">コード上の事実</span>[S18] キーはキャッシュに書き込む前に、その位置に応じて「回転」されます。これを<dfn>回転位置埋め込み</dfn>（RoPE）と呼びます。同じ単語でも位置が違えばキーが少し変わるので、モデルは前後の順序を知れます。値は回転しません（<code>qsa.hpp</code> の 180 行目）。アテンションの計算が終わると、結果にシグモイドの出力ゲートを掛けてから、後ろの射影に渡します。[S18]</p>
+
+<h2 id="sec-2">8.2 1 語増えるごとに、見る相手も 1 つ増える：O(n²)</h2>
+<p>アテンションには鉄則があります。t 番目の単語を作るとき、見てよいのは 1 番目から t 番目までの位置だけです。後ろをのぞいてはいけません。これを<dfn>因果マスク</dfn>と呼びます。「未来」の位置を隠すのです（図 8-3）。答えを生成している間は、後ろの単語はまだ存在しないので、隠すかどうかは関係ありません。ところが問題を読む段階（プリフィル、第 1 章）では、質問全体をまとめて計算します。後ろの単語はすでにメモリにあります。そこで各行は、自分より右の位置をはっきり隠す必要があります。隠さないと、モデルが自分で「ネタバレ」してしまいます。</p>
+<figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="図 8-3：6 語の因果マスク。第 i 行は第 1 列から第 i 列までしか見られない。右上はすべて隠され、見られるマスは全部で 21 個">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">列：見られる位置（キー）</text>
+<text class="f-text" fill="#182f2b" x="125" y="36" font-size="12" text-anchor="middle">猫</text><text class="f-text" fill="#182f2b" x="155" y="36" font-size="12" text-anchor="middle">が</text><text class="f-text" fill="#182f2b" x="185" y="36" font-size="12" text-anchor="middle">毛</text><text class="f-text" fill="#182f2b" x="215" y="36" font-size="12" text-anchor="middle">糸</text><text class="f-text" fill="#182f2b" x="245" y="36" font-size="12" text-anchor="middle">玉</text><text class="f-text" fill="#182f2b" x="275" y="36" font-size="12" text-anchor="middle">を</text>
+<text class="f-text" fill="#182f2b" x="100" y="61" font-size="12" text-anchor="end">猫</text><text class="f-text" fill="#182f2b" x="100" y="91" font-size="12" text-anchor="end">が</text><text class="f-text" fill="#182f2b" x="100" y="121" font-size="12" text-anchor="end">毛</text><text class="f-text" fill="#182f2b" x="100" y="151" font-size="12" text-anchor="end">糸</text><text class="f-text" fill="#182f2b" x="100" y="181" font-size="12" text-anchor="end">玉</text><text class="f-text" fill="#182f2b" x="100" y="211" font-size="12" text-anchor="end">を</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="136" font-size="12">行：</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="152" font-size="12">クエリ</text>
+<rect class="f-accent" fill="#136d5a" x="111" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="141" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="171" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="231" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="41" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="71" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="71" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="171" y="71" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="71" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="231" y="71" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="71" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="101" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="101" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="171" y="101" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="101" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="231" y="101" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="101" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="131" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="131" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="171" y="131" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="201" y="131" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="231" y="131" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="131" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="161" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="161" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="171" y="161" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="201" y="161" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="231" y="161" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="161" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="171" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="201" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="231" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="261" y="191" width="28" height="28"/>
+<text class="f-text" fill="#182f2b" x="304" y="80" font-size="12">濃い：見られる</text>
+<text class="f-text" fill="#182f2b" x="304" y="100" font-size="12">薄い：未来。</text>
+<text class="f-text" fill="#182f2b" x="304" y="118" font-size="12">必ず隠す</text>
+<text class="f-text" fill="#182f2b" x="20" y="242" font-size="12">見られるマス：1 + 2 + … + 6 = 6 × 7 ÷ 2 = 21</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="262" font-size="12">n 語なら n(n+1)/2 マス：長さ 2 倍でマスは約 4 倍</text>
+</svg><figcaption>図 8-3　因果マスクは下三角の形をしている。見られるマスの数はおよそ n²/2。これが、アテンションが「長いほど高くつく」理由である。</figcaption></figure>
+<aside class="primer" id="c08-complexity">
+<h3>計算量と O(n²)</h3>
+<p>アルゴリズムが「どれだけ遅いか」を見積もるとき、秒数は数えません。入力が大きくなると、仕事量がどう増えるかを考えます。これを<dfn>時間計算量</dfn>と呼び、<dfn>ランダウの記号（O 記法）</dfn>で書きます。O(n) は、仕事量が n に比例するという意味です。入力が 2 倍なら仕事量も 2 倍です。O(n²) は、n の 2 乗に比例するという意味です。入力が 2 倍なら仕事量は 4 倍、入力が 10 倍なら仕事量は 100 倍です。</p>
+<p>O 記法が見るのは、増え方の「形」だけです。定数と低次の項は無視します。n(n+1)/2 = n²/2 + n/2 で、n が大きいと n/2 は無視できます。定数 ½ も形を変えません。だからこれは O(n²) です。</p>
+<p>アテンションで計算してみましょう。n 語の質問を読むとき、因果マスクのもとでは n(n+1)/2 組の「クエリ-位置」のペアを計算します。n = 1,000 なら約 50 万組です。n = 262,144（Strata が対応する最長のコンテキスト）なら約 344 億組になります。しかも、これを各層・各ヘッドで繰り返します。O(n²) は短い文章では目立ちません。長い文章では、ほかのすべてを押しつぶします。</p>
+<p>この章との関係：計算量を減らす方法は 2 種類しかありません。1 つはペア 1 組あたりのコストを減らすこと（定数が小さくなるだけで、形は変わりません）。もう 1 つは計算するペアの数を減らすこと（形が変わります）。8.4 節の選択は後者です。第 9 章の GDN はさらに進んで、「履歴を見返す」ことを O(1) の状態更新に変えます。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E8%A8%88%E7%AE%97%E8%A4%87%E9%9B%91%E6%80%A7%E7%90%86%E8%AB%96" target="_blank" rel="noopener noreferrer">Wikipedia：計算複雑性理論</a> · <a href="https://ja.wikipedia.org/wiki/%E3%83%A9%E3%83%B3%E3%83%80%E3%82%A6%E3%81%AE%E8%A8%98%E5%8F%B7" target="_blank" rel="noopener noreferrer">Wikipedia：ランダウの記号</a> · <a href="https://ja.wikipedia.org/wiki/%E3%82%A2%E3%83%AB%E3%82%B4%E3%83%AA%E3%82%BA%E3%83%A0%E8%A7%A3%E6%9E%90" target="_blank" rel="noopener noreferrer">Wikipedia：アルゴリズム解析</a></p>
+</aside>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>プリフィル段階のアテンションは、二重ループそのものです。<code>for i in 1..n: for j in 1..i: score(q[i], k[j])</code>。バブルソートと同じで、仕事量は三角形になります。生成段階では、新しい単語ごとに 1 行だけ計算するので O(n) です。ただし m 語を生成すると、合計はまた O(n·m) に戻ります。</p>
+<p>下のスライダーを動かしてください。コンテキストを 1K から 262K まで伸ばすと、完全なアテンションと「毎回最大 2051 位置」の QSA が、それぞれ何組のペアを計算するかが分かります。</p>
+<div class="viz" data-viz="attention-cost"><figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="図 8-4：コンテキスト 262K のとき、最後のトークンは完全なアテンションなら 262,144 位置、QSA なら 2051 位置を見る。全体を読むペア数は、完全なアテンションが約 344 億、QSA が約 5.4 億">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12">最後のトークンが見る位置の数：完全なアテンション</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="22" width="144.3" height="16"/><text class="f-text" fill="#182f2b" x="160" y="35" font-size="12">262,144</text>
+<text class="f-text" fill="#182f2b" x="10" y="64" font-size="12">最後のトークンが見る位置の数：QSA</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="70" width="55.4" height="16"/><text class="f-text" fill="#182f2b" x="71" y="83" font-size="12">2,051</text>
+<text class="f-text" fill="#182f2b" x="10" y="112" font-size="12">質問全体を読むペア数：完全なアテンション</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="118" width="360.4" height="16"/><text class="f-on" fill="#ffffff" x="364" y="131" font-size="12" text-anchor="end">約 344 億</text>
+<text class="f-text" fill="#182f2b" x="10" y="160" font-size="12">質問全体を読むペア数：QSA</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="166" width="284.1" height="16"/><text class="f-on" fill="#ffffff" x="288" y="179" font-size="12" text-anchor="end">約 5.4 億</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 196H390M10 192V200M136.7 192V200M263.3 192V200M390 192V200"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="214" font-size="12">10²</text>
+<text class="f-muted" fill="#5c6d66" x="136.7" y="214" font-size="12" text-anchor="middle">10⁵</text>
+<text class="f-muted" fill="#5c6d66" x="263.3" y="214" font-size="12" text-anchor="middle">10⁸</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="214" font-size="12" text-anchor="end">10¹¹</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="234" font-size="12">n = 262,144。対数目盛り：3 目盛りごとに 1000 倍</text>
+</svg><figcaption>図 8-4　コンテキスト 262K のとき、「毎回最大 2051 位置」にすると、全体を読むペア数が約 64 分の 1 になる。横軸が対数目盛りであることに注意。</figcaption></figure></div>
+<p>この数字が数えたのはアテンション自体のペアだけです。「位置を選ぶ」手間は入っていません。選択もタダではありませんが、ずっと安く済みます。くわしくは 8.4 節で説明します。</p>
+
+<h2 id="sec-3">8.3 GQA：24 人の質問者が 2 冊のノートを共有する</h2>
+<p>アテンションは前の文章を見返すので、各位置の k と v を保存しておく必要があります。これが <dfn>KV キャッシュ</dfn>です（ページ単位の管理は第 17 章で説明します）。コンテキストが長いほど、KV キャッシュは大きくなります。容量を節約する 1 つ目の工夫は、複数のクエリヘッドが同じキーと値の組を<strong>共有</strong>することです。これを<dfn>グループ化クエリアテンション</dfn>（GQA）と呼びます。</p>
+<p>Strata のモデルは、QSA 層ごとにクエリヘッドが 24 個あり、KV ヘッドは 2 個だけです。各ヘッドは 256 次元です。<span class="ev ev-code">コード上の事実</span>[S04] 24 個のクエリヘッドは 2 グループに分かれます。0–11 番は 0 番目の KV ヘッドを使い、12–23 番は 1 番目を使います（図 8-5）。ソースコードは、対応づけが<strong>整数除算</strong> h ÷ 12 であり、剰余 h % 2 ではないと特に強調しています。どちらの書き方でも「形は正しい」結果が出ます。しかし、このモデルと一致するのは片方だけです。[S18]</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="図 8-5：24 個のクエリヘッドが 2 グループに分かれ、各グループの 12 個が 1 つの KV ヘッドを共有する。1 トークン・1 層で保存するキーと値は 24 組ではなく 2 組">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="12" text-anchor="middle">24 個のクエリヘッド（番号 0–23）</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="34" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="48" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="62" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="76" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="90" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="104" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="118" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="132" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="146" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="160" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="174" y="28" width="12" height="24"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="214" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="228" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="242" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="256" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="284" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="298" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="312" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="326" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="340" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="354" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="368" y="28" width="12" height="24"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M20 58V64H186V58M103 64V84M214 58V64H380V58M297 64V84"/>
+<text class="f-muted" fill="#5c6d66" x="103" y="76" font-size="12" text-anchor="end">0–11 番</text>
+<text class="f-muted" fill="#5c6d66" x="297" y="76" font-size="12" text-anchor="end">12–23 番</text>
+<rect class="f-accent" fill="#136d5a" x="38" y="86" width="130" height="36" rx="6"/>
+<text class="f-on" fill="#ffffff" x="103" y="109" font-size="13" text-anchor="middle">KV ヘッド 0</text>
+<rect class="f-accent" fill="#136d5a" x="232" y="86" width="130" height="36" rx="6"/>
+<text class="f-on" fill="#ffffff" x="297" y="109" font-size="13" text-anchor="middle">KV ヘッド 1</text>
+<text class="f-text" fill="#182f2b" x="20" y="150" font-size="12">h 番のクエリヘッド → KV ヘッド ⌊h ÷ 12⌋（整数除算）</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="12">1 トークン・1 層で保存するキーと値：</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="186" width="25" height="16"/>
+<text class="f-text" fill="#182f2b" x="52" y="199" font-size="12">GQA：2 × 256 × 2 × 2 バイト = 2 KiB</text>
+<rect class="f-warn" fill="#9e5d24" x="20" y="212" width="300" height="16"/>
+<text class="f-text" fill="#182f2b" x="20" y="246" font-size="12">24 ヘッドが別々に保存すると：24 KiB（GQA の 12 倍）</text>
+</svg><figcaption>図 8-5　24 個のクエリヘッドに KV ヘッドは 2 個だけ。質問はそれぞれ自分でして、ノートは 2 つのグループで共有する。KV キャッシュは 12 分の 1 になる。</figcaption></figure>
+<p>計算してみましょう。1 トークン・1 QSA 層あたりに保存するのは、2 個の KV ヘッド × 256 次元 × 2（K と V で 1 つずつ）× 2 バイト（FP16）= 2,048 バイトです。QSA 層は 12 層なので、合計 24,576 バイトです。32K（32,768 トークン）のコンテキストなら 805,306,368 バイトで、ちょうど 768 MiB になります。<span class="ev ev-est">教育用の試算</span></p>
+<p>おもしろいことに、<code>qsa.hpp</code> のコメントは、この量を「805 MiB」と書いています。[S18] 805,306,368 ÷ 2<sup>20</sup> = 768 です。805 は、バイト数を 10<sup>6</sup> で割った 10 進の MB です。MB と MiB は 4.9% ずれます。小さな数なら気になりません。しかし数十 GB の予算では、数 GB の差になります。この本では、項目ごとに計算した 768 MiB を使います。</p>
+<p>もし 48 層すべてがアテンションで、24 ヘッドがそれぞれ K/V を持つなら、1 トークンあたり 48 倍のバイト数を保存することになります。262K のコンテキストでは、約 288 GiB と約 6 GiB の差です。<span class="ev ev-est">教育用の試算</span> 実際の実行では、Strata は 4K を超えると既定で 8 ビット KV を使います。64K からは、KV の大部分を RAM（メインメモリ）に置き、VRAM にはアテンションがよく読む部分だけを残します。上流の説明によると、これでアテンションが読む数値は変わりません。変わるのは KV の置き場所だけです。<span class="ev ev-report">上流レポート</span>[S03]</p>
+
+<h2 id="sec-4">8.4 QSA：選んだ 2051 個の位置だけを見る</h2>
+<p>GQA が減らすのは保存量です。計算を減らす 2 つ目の工夫は、もっと直接的です。<strong>全部は見ず、選んだ位置だけを見る</strong>。Strata の QSA 層は、トークンを 1 つ生成するたびに、まず安上がりな<dfn>indexer（インデクサ）</dfn>で前の文章のすべての位置にスコアをつけます。そのうち最大 2051 個を選び、その位置だけで本物のアテンションを計算します。全体の流れは図 8-6 です。</p>
+<figure class="fig"><svg viewBox="0 0 400 344" role="img" aria-label="図 8-6：QSA の 1 ステップにある 6 つの段階。キーと値の追加、indexer のスコア付け、上位 2051 個の選択、ページテーブルによる収集、選んだ位置だけでのアテンション、出力ゲートの乗算">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="4" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="22" font-size="13" font-weight="600" text-anchor="middle">① K、V を追加</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="40" font-size="12" text-anchor="middle">新しいトークンのキーと値を、ページ化した KV キャッシュに書く</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="60" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="78" font-size="13" font-weight="600" text-anchor="middle">② indexer がスコアをつける</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="96" font-size="12" text-anchor="middle">4 位置ごとに 128 次元の小さなキーを 1 つ作る</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="116" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="134" font-size="13" font-weight="600" text-anchor="middle">③ スコア上位 2051 位置を選ぶ</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="152" font-size="12" text-anchor="middle">コンテキストが 2051 未満なら全部選ぶ</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="172" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="190" font-size="13" font-weight="600" text-anchor="middle">④ ページテーブルで集める</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="208" font-size="12" text-anchor="middle">選んだ位置の K、V を連続した作業領域にコピーする</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="228" width="360" height="44" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="246" font-size="13" font-weight="600" text-anchor="middle">⑤ アテンション</text>
+<text class="f-on" fill="#ffffff" x="200" y="264" font-size="12" text-anchor="middle">24 個のクエリヘッドが、選んだ位置だけでソフトマックスを計算</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="284" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="302" font-size="13" font-weight="600" text-anchor="middle">⑥ 出力ゲート</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="320" font-size="12" text-anchor="middle">結果に sigmoid(gate) を掛けて出力射影へ渡す</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 48V58M200 104V114M200 160V170M200 216V226M200 272V282"/>
+</svg><figcaption>図 8-6　QSA の 1 ステップ。② と ③ は「どの位置を見るか」を決める。これはモデルのアルゴリズムである。④ は「どこから取るか」を決める。これはシステムの実装である。2 種類の変更は、正しさを別々に論証する。</figcaption></figure>
+<p>大事な細部をいくつか挙げます。すべて <code>qsa.hpp</code> に書かれています。</p>
+<ul>
+<li><strong>2051 の由来。</strong>選択幅は min(n_kv, 2048 + 4 − 1) です。n_kv はキャッシュ済みの位置数です。2048 は「ブロック単位で選ぶ」予算で、1 ブロックは 4 位置です。余分な 3 は、ブロックが満たされていない端数のぶんです。コンテキストが 2051 以下なら、選択は「全部選ぶ」になります。しかも全選択と<strong>完全に同じ</strong>でなければならず、近似は許されません。<span class="ev ev-code">コード上の事実</span>[S18]</li>
+<li><strong>indexer は安い。</strong>4 位置ごとに 128 次元のキーを 1 つだけ保存します（元の 4 つのキーの平均を取り、正規化して回転したもの）。<span class="ev ev-code">コード上の事実</span>[S18] スコアをつけるときは、4 つのインデックスヘッドがそれぞれ内積を計算し、それぞれ ReLU を通して足し合わせます。ソフトマックスは<strong>なく</strong>、√d で割る処理も<strong>ありません</strong>（<code>qsa.hpp</code> の 252–265 行目）。本物のアテンション（1 位置あたり 256 次元の KV ヘッド 2 個、クエリヘッド 24 個）と比べると、触るデータがずっと少なくて済みます。</li>
+<li><strong>上位 k 件を選ぶ。同点は番号順。</strong>選択は、スコアが最も高い位置を返します。スコアが同じなら番号が小さい方が先で、結果は番号の昇順に並びます。[S18] n 個の数から上位 k 件を選ぶアルゴリズムは、第 10 章の<a href="#chapter/10/c10-top-k">「top-k 選択」</a>コラムを見てください。</li>
+<li><strong>選ばれなかった位置は存在しないのと同じ。</strong>集められなかった位置は、アテンションでの重みが<strong>ちょうど 0</strong> になります。本来のスコアが最も高くてもです。ソースコードは、これらの位置のマスクをマイナス無限大にします。e<sup>−∞</sup> = 0 だからです。[S18]</li>
+</ul>
+<p>これは、よく聞く FlashAttention とは別物です。FlashAttention は、ブロック分割、再計算、VRAM の読み書きの工夫によって、完全なアテンションを<strong>正確に</strong>計算します。速くなるだけです。[R03] QSA の選択は、計算に参加する位置の集合を変えます。計算しているのは、すでに別の関数です。1 つのエンジンが両方を使うこともできます。先に選び、選んだ部分を効率のよいカーネルで計算するのです。ただし、2 つの最適化は、正しさを別々に論証する必要があります。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは「近似検索 + 正確な計算」の 2 段階方式です。データベースで、まずインデックスで候補行を粗く絞り、そのあと元の表に戻って正確に比べるのと同じ考え方です。違いは次の点です。データベースのインデックスによる絞り込みは、正しい結果を落としません。ここでの選択は、ある位置を取りこぼすことがあります。だから選択は、モデルが定める計算の一部です。エンジンはそのまま実装しなければならず、「だいたい同じ」別の選び方に勝手に替えてはいけません。</p>
+
+<h2 id="sec-5">8.5 変わったのは位置か、集合か？</h2>
+<p>推論エンジンには 2 種類の最適化があります。どちらも「KV を読む量を減らす」ように聞こえますが、性質はまったく違います。</p>
+<ul>
+<li><strong>位置だけを変える</strong>：同じ KV のバイト列を、VRAM から RAM に移す。あるいは、ページのレイアウトを変える。アテンションが読む数値は変わらず、結果はビット単位で一致するはずです。Strata の KV ストリーミング配置はこちらです。上流は「アテンションが読む数値はまったく同じで、KV の置き場所だけが変わる」と明記しています。<span class="ev ev-report">上流レポート</span>[S03]</li>
+<li><strong>集合を変える</strong>：履歴の位置の一部を捨てる。あるいは、選択ルールを替える。これはモデルへの入力を変えるので、品質を別に評価する必要があります。</li>
+</ul>
+<p>QSA の選択は、モデル自身のルールです。そして「各ステップで見るのは 2051 個」は、「2051 個だけ保存すればよい」と<strong>同じ意味ではありません</strong>。次のトークンは、まったく別の古い位置を選ぶかもしれません。だから KV はすべて残す必要があります。変えられるのは、どの階層のストレージに置くかだけです。</p>
+<p>選択の境界はとても敏感です。2051 位と 2052 位のスコアの差は、ほんのわずかかもしれません。ごく小さな数値誤差で位置が入れ替わり、入れ替わるのはアテンションへの入力 1 つぶんです。そこで Strata は indexer のキーを、省スペースな FP16 ではなく FP32 で保存します。コメントによる計算では、FP16 だとスコアごとに約 2<sup>−11</sup> の相対的なゆらぎが出ます。選択の境界は、このゆらぎが最も致命的になる場所です。FP32 のコストは、12 個の QSA 層で 1 トークンあたり合計 1.5 KiB です。[S18] 計画中の 8 ビット indexer キーは、まず「選択の反転率」の実測データで自分を証明しなければなりません。[S18]</p>
+<p>因果マスクも、段階ごとに見る必要があります。<code>qsa.hpp</code> は、自分が「生成段階だけを担当する」と明記しています。生成時には、キャッシュ内のどの位置も、自然に現在のクエリより前にあります。マスクの中身は、端数の対応づけだけです。問題を読む段階のマスクは行ごとです。クエリ i が見られるのは、最後の位置が i 以下の完全なブロックと、端数の位置だけです。これは別のコードパスです。[S18] 1 トークンのテストを通るコードが、複数行のプリフィルの因果テストも通るとは限りません。</p>
+
+<h2 id="sec-6">8.6 手を動かす：長いコンテキストの予算を計算する</h2>
+<p>この章のインタラクティブ実験「履歴状態バジェッター」を開いてください。この章のジオメトリ（QSA 12 層、KV ヘッド 2 個、256 次元）を使って、KV キャッシュ、VRAM に常駐するウィンドウ、第 9 章で扱う GDN の状態を計算します。おすすめの課題です。</p>
+<ol>
+<li>コンテキストを 32K から 128K に変えます。メイン KV がちょうど 4 倍になることを確認します。次にバイト数を GiB に換算し、GB と GiB を混ぜていないか確かめます。</li>
+<li>同時に動く会話を 1 件から 5 件に変えます。どの量が 5 倍になり、どの量が変わらないかを見ます。</li>
+</ol>
+<p>この章の 2 つのインタラクティブ図にも戻ってみましょう。「アテンションの 1 ステップ」で、q を「子猫」から「毛糸玉」へゆっくり回し、2 つの重みが等しくなる角度を記録します。「見返すのにかかる手間」では、QSA が完全なアテンションより楽になり始めるコンテキスト長を探し、2051 を使って説明します。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>アテンション = クエリと各キーの内積 → √d で割る → ソフトマックスで重みにする → 重みで値を混ぜる。出力は混ぜて作ったもので、コピーしたものではありません。</li>
+<li>完全なアテンションの仕事量は O(n²) です。n 語の質問を読むには n(n+1)/2 組を計算します。Strata のモデルでアテンションを使うのは 12 層だけで、24 個のクエリヘッドが 2 個の KV ヘッドを共有します。そのため KV キャッシュは 48 分の 1 になります。</li>
+<li>QSA は毎ステップ、選んだ最大 2051 個の位置だけを見ます（それ未満なら全部見ます）。選ばれなかった位置の重みはちょうど 0 です。それでも KV は全部残す必要があります。次のステップで、どの古い位置が選ばれるか分からないからです。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「スパースアテンションは毎回 2000 個くらいの位置しか見ないから、KV キャッシュは 2000 トークンぶんだけ保存すればよい。」</strong></p>
+<p>各ステップで見るのは「ワーキングセット」であり、「全体」ではありません。次のトークンのクエリは違うので、選ばれる位置もまったく違うかもしれません。だから KV キャッシュは、履歴のすべての位置に 1 つずつ残す必要があります。あまり読まれない部分を RAM に移すことはできます。でも、捨ててはいけません。捨てると、モデルが見られる情報が変わってしまいます。</p></div>
+
+<details class="deep"><summary>もう一歩深く：凍結されるパラメータ、ページテーブル入れ替えテスト、選択境界の検収方法</summary>
+<h3>CUDA Graph は「トークンごとに変わるパラメータ」を凍結する</h3>
+<p>数十回のカーネル起動のオーバーヘッドを省くため、Strata は各層を 1 つの CUDA Graph として記録します（第 15 章で説明します）。その後は、トークンごとにこの Graph を再生します。落とし穴は、Graph が記録時にカーネルの<strong>パラメータ値</strong>まで一緒に記録してしまうことです。<code>qsa.hpp</code> はこの問題を監査し、5 つのエントリポイントにある 6 個のパラメータが、トークンごとに変わることを見つけました。新しい位置 pos、キャッシュ済みの位置数 n_kv、完成したブロック数、選択幅などです。[S18]</p>
+<p>そのまま記録すると、クラッシュよりひどい結果になります。<code>kv_append</code> はどのトークンも 0 番目の位置に書き込みます。スコア付けと選択は常に 1 つの位置しか見ません。アテンションは会話全体を通して 1 マスしか見なくなります。出力は有限で、もっともらしい数字のままです。症状は「モデルがコンテキストを使っていない」のとそっくりで、KV キャッシュ、選択、重みの問題だと誤診しやすいのです。[S18]</p>
+<p>修正は、VRAM に置く「ステップ状態」です。トークンごとに [pos, n_kv = pos + 1, 完成したブロック数, 選択幅] を 1 回だけ書き込みます。すべてのカーネルがここから読むので、パラメータリストはトークン間で変わりません。4 つの数は、同じ関数が pos から計算します。呼び出し側が、そのうち 1 つだけを更新することはできません。[S18]</p>
+<h3>ページテーブル入れ替えテスト：レイアウトを結果に漏らさない</h3>
+<p>KV キャッシュはページ単位で置かれます。論理位置 t の h 番目のヘッドは、物理的には <code>(table[t / page_size] × n_head_kv + h) × page_size + t % page_size</code> にあります。同じページの中では、1 つのヘッドの連続した位置が隣り合います。アテンションがいちばん望むアクセスの形です。レイアウトが結果に影響しないことを保証するため、テストではページサイズ 1、4、512 で同じデータを走らせ、ページテーブルをランダムに並べ替えます。そして、アテンションの出力が<strong>完全に同じ</strong>であることを求めます。[S18] これが「位置だけを変える」最適化の合格基準です。</p>
+<h3>端数の位置は必ず選ばれる</h3>
+<p>まだ 1 ブロックに満たない最後の数位置には、自分用のプーリングキーがありません。indexer はそれらに 10<sup>9</sup> のスコアを足し、必ず選ばれるようにします。これは、llama.cpp が生成段階で使う因果入力と一致しています（<code>qsa.hpp</code> の 258–261 行目）。選択幅が 2048 + 3 になる理由も、これで分かります。端数の位置は最大 3 個で、それに完全なブロックの予算を足すのです。</p>
+<h3>選択の実装をどう検収するか</h3>
+<p>「すべてのスコア誤差が 10<sup>−4</sup> 未満」では、2 回の計算が同じ位置を選んだ証拠になりません。検収は 3 層で比べます。選ばれた位置の番号が一致するか（厳密に比較）。集めた K、V のデータが一致するか。最後のアテンション出力が許容誤差内か。さらに、スコアがとても近いサンプルを特別に作り、わずかなゆらぎがいつ top-k の境界を変えるかを観察します。スコアが同点のサンプルも作り、「番号が小さい方が先」というルールを確かめます。3 つの問題を「誤差は小さい」の一言にまとめると、本当の違いが隠れてしまいます。</p>
+<h3>「ロスレス」は、どの種類かをはっきり言う</h3>
+<p>データの位置、レイアウト、ブロック分割を変えるだけなら、通常はビット単位で同じにできます。計算に参加する集合や数値精度を変える場合は、品質への影響を別に説明する必要があります。たとえば上流の 4 ビット KV キャッシュは、VRAM を半分に減らせます。しかし長い文書ではパープレキシティが 8%–12% 上がるので、既定は 8 ビットのままです。<span class="ev ev-report">上流レポート</span>[S03] すべての高速化を、ひとまとめに「ロスレス」とは言えません。</p>
+</details>

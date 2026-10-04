@@ -1,0 +1,254 @@
+<div class="hook"><span class="eyebrow">まずたとえ話から</span>
+<p>原稿が 48 人の編集者の手を渡っていきます。もし全員が全文を最初からコピーしてから直すとしたら、48 回目には、元の文章はすっかり変わってしまうでしょう。もっと賢いやり方があります。各自が余白に付箋を貼って修正案だけを書き、原稿はそのまま残すのです。</p>
+<p>Strata が動かすモデルはちょうど 48 層で、1 層が 1 人の編集者にあたります。この章では 1 つの層を分解して、何を読み、何を計算し、結果をどうやって「貼り戻す」のかを見ます。そのあとで、形は完全に合っているのに、意味だけが静かに間違ってしまうインターフェースをいくつか紹介します。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>1 層は 2 つの半層でできています。まず「履歴を混ぜる」（36 層は GDN、12 層は QSA アテンション）。次に「エキスパートが加工する」（MoE）。どちらの半層も「残差を読む → 正規化する → 小さな修正を計算する → 残差に加え戻す」という流れです。Strata の残差は 1 本のベクトルではなく、4 本が並んだ「レーン」です。</p>
+
+<h2 id="sec-1">7.1 1 層は何をしているのか：数が入って、数が出る</h2>
+<p>モデルから見ると、トークンは層と層のあいだでは数の列にすぎません。Strata が使うモデルでは、この列は 2560 個の数でできていて、<dfn>隠れベクトル</dfn>（hidden vector）と呼びます。<span class="ev ev-code">コード上の事実</span>[S04] 各層は 2560 個の数を読み込み、同じ長さの数の列を出して、次の層に渡します。層から層へ渡されるのは、この数の列の中で少しずつ豊かになっていく「理解」です。</p>
+<aside class="primer" id="c07-layer-activation">
+<h3>ニューラルネットワークの層と活性化関数</h3>
+<p>イメージ：ニューラルネットワークの 1 層は、ミキサー卓が並んだ棚のようなものです。出力のつまみは、どれも入力を別々の比率で混ぜたものです。この操作は第 3 章の行列積そのもので、出力 = 重み行列 × 入力です。重み行列の中の数が、訓練で学習される「パラメータ」です。</p>
+<p>行列積だけでは足りません。行列積を 2 回つなげても、結局は 1 回の行列積と同じだからです。A(Bx) = (AB)x。100 層重ねても 1 層分の力しかなく、入り組んだ規則は学べません。そこで、行列積のたびに<dfn>活性化関数</dfn>を通します。1 つ 1 つの数に別々に作用する非線形関数で、直線を「曲げる」役目です。よく使われるのは次の 3 つです。曲線はコラムのあとの図 7-2 にあります。</p>
+<ul>
+<li><dfn>ReLU</dfn>：負の数は 0 にして、正の数はそのまま通します。いちばん単純です。</li>
+<li><dfn>sigmoid</dfn>（σ）：σ(z) = 1 ÷ (1 + e<sup>−z</sup>)。どんな数も 0 から 1 のあいだに押し込めます。そのため「スイッチ」や「ゲート」としてよく使われます。0 は閉、1 は全開です。</li>
+<li><dfn>SiLU</dfn>：SiLU(z) = z × σ(z)。ReLU をなめらかにした形で、負の領域では少しだけ沈みます。</li>
+</ul>
+<p>この章との関係：Strata の各層では、sigmoid と SiLU が別々の場所に出てきます。どちらもまとめて「ゲート」と呼ばれがちですが、片方を取り違えると数値がすべて変わってしまいます。7.5 節で見ます。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%83%8B%E3%83%A5%E3%83%BC%E3%83%A9%E3%83%AB%E3%83%8D%E3%83%83%E3%83%88%E3%83%AF%E3%83%BC%E3%82%AF_%28%E6%A9%9F%E6%A2%B0%E5%AD%A6%E7%BF%92%29" target="_blank" rel="noopener noreferrer">Wikipedia：ニューラルネットワーク（機械学習）</a> · <a href="https://ja.wikipedia.org/wiki/%E6%B4%BB%E6%80%A7%E5%8C%96%E9%96%A2%E6%95%B0" target="_blank" rel="noopener noreferrer">Wikipedia：活性化関数</a> · <a href="https://ja.wikipedia.org/wiki/%E3%82%B7%E3%82%B0%E3%83%A2%E3%82%A4%E3%83%89%E9%96%A2%E6%95%B0" target="_blank" rel="noopener noreferrer">Wikipedia：シグモイド関数</a> · <a href="https://pytorch.org/docs/stable/generated/torch.nn.SiLU.html" target="_blank" rel="noopener noreferrer">PyTorch ドキュメント：SiLU</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="図 7-2：ReLU、sigmoid、SiLU の 3 本の活性化関数の曲線。sigmoid は 0 から 1 のあいだに収まっている">
+<text class="f-text" fill="#182f2b" x="20" y="18" font-size="12" font-weight="600">3 つの活性化関数（横軸 z は −4 から 4）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 196H360M200 60V214"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.6" stroke-dasharray="2 3" d="M40 164H360"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="232" font-size="12" text-anchor="middle">−4</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="232" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="360" y="232" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="168" font-size="12" text-anchor="end">1</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="72" font-size="12" text-anchor="end">4</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M40 196L200 196L360 68"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" stroke-dasharray="6 3" d="M40.0 198.3L50.0 198.8L60.0 199.3L70.0 199.9L80.0 200.6L90.0 201.3L100.0 202.1L110.0 202.9L120.0 203.6L130.0 204.3L140.0 204.8L150.0 204.9L160.0 204.6L170.0 203.7L180.0 202.0L190.0 199.5L200.0 196.0L210.0 191.5L220.0 186.0L230.0 179.7L240.0 172.6L250.0 164.9L260.0 156.8L270.0 148.3L280.0 139.6L290.0 130.9L300.0 122.1L310.0 113.3L320.0 104.6L330.0 95.9L340.0 87.3L350.0 78.8L360.0 70.3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" stroke-dasharray="1 3" d="M40.0 195.4L50.0 195.3L60.0 195.1L70.0 194.8L80.0 194.5L90.0 194.1L100.0 193.6L110.0 192.9L120.0 192.2L130.0 191.3L140.0 190.2L150.0 188.9L160.0 187.4L170.0 185.7L180.0 183.9L190.0 182.0L200.0 180.0L210.0 178.0L220.0 176.1L230.0 174.3L240.0 172.6L250.0 171.1L260.0 169.8L270.0 168.7L280.0 167.8L290.0 167.1L300.0 166.4L310.0 165.9L320.0 165.5L330.0 165.2L340.0 164.9L350.0 164.7L360.0 164.6"/>
+<text class="f-text" fill="#182f2b" x="300" y="98" font-size="12">ReLU（実線）</text>
+<text class="f-text" fill="#182f2b" x="232" y="136" font-size="12">SiLU（破線）</text>
+<text class="f-text" fill="#182f2b" x="270" y="156" font-size="12">sigmoid（点線）</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="246" font-size="12">sigmoid は常に 0 から 1 のあいだ。「ゲート」に向いている</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="264" font-size="12">SiLU と ReLU には、この上限がない</text>
+<figcaption>図 7-2　3 本の活性化関数の曲線。どれも直線を曲げられますが、値の範囲が違うので、気軽には入れ替えられません。</figcaption></figure>
+<p>Strata の GDN 層では、活性化関数の位置がはっきり決まっています。畳み込みのあとで、10240 個の数の<strong>全体</strong>に SiLU をかけ、それから q、k、v に切り分けます。書き込み強度 β は、先に sigmoid を通します。最後の出力に掛けるのは sigmoid(z) です。<span class="ev ev-code">コード上の事実</span>（<code>layer.hpp</code> 10–22 行目）この 3 か所のどれかで順番や関数を取り違えても、結果は普通の数の列のままです。ただし、間違っています。</p>
+
+<h2 id="sec-2">7.2 48 層はすべて同じではない：GDN 36 層 + QSA 12 層</h2>
+<p>各層の前半では、必ず「履歴を振り返り」ます。いまのトークンが、前の文脈から関係のある情報を探すのです。Strata のモデルには、振り返り方が 2 種類あります。<dfn>QSA</dfn> はアテンションの一種です。前の文脈の各位置の記録をすべて残しておき、必要なときに関係のあるものを選んで見ます（第 8 章）。<dfn>GDN</dfn> は、前の文脈を固定サイズの「ホワイトボード」に圧縮し、トークンが来るたびに書き換えます（第 9 章）。</p>
+<p>どの層がどちらを使うかは、1 つの規則で決まります。層番号を 4 で割って余りが 3 なら QSA、それ以外は GDN です。<span class="ev ev-code">コード上の事実</span>[S04] 層番号は 0 から数えるので、QSA 層は 3、7、11 … 47 の 12 層で、残りの 36 層が GDN です。図 7-3 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="図 7-3：48 層を番号順に 2 行に並べた図。4 層ごとの最後の層が QSA アテンション層で全 12 層、残りの 36 層は GDN">
+<text class="f-text" fill="#182f2b" x="20" y="18" font-size="12" font-weight="600">48 層の役割分担（1 マス 1 層、番号順）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="35" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="50" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="65" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="95" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="110" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="125" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="155" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="185" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="245" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="260" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="275" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="305" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="320" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="335" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="365" y="30" width="13" height="26"/>
+<text class="f-muted" fill="#5c6d66" x="26.5" y="72" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="71.5" y="72" font-size="12" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="131.5" y="72" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="371.5" y="72" font-size="12" text-anchor="middle">23</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="35" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="50" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="65" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="95" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="110" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="125" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="155" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="185" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="245" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="260" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="275" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="305" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="320" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="335" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="365" y="84" width="13" height="26"/>
+<text class="f-muted" fill="#5c6d66" x="26.5" y="126" font-size="12" text-anchor="middle">24</text>
+<text class="f-muted" fill="#5c6d66" x="371.5" y="126" font-size="12" text-anchor="middle">47</text>
+<text class="f-text" fill="#182f2b" x="20" y="152" font-size="12">濃い色：QSA アテンション層（全 12 層）</text>
+<text class="f-text" fill="#182f2b" x="20" y="170" font-size="12">　　0 始まりの番号で 3、7、11 … 47</text>
+<text class="f-text" fill="#182f2b" x="20" y="188" font-size="12">薄い色：GDN 層（全 36 層）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="206" font-size="12">規則：層番号 % 4 == 3 なら QSA、それ以外は GDN</text>
+</svg><figcaption>図 7-3　4 層ごとの最後の層が QSA です。0 始まりの 3 番は、人間の数え方では「4 層目」です。規則は「4 層に 1 回」で、「3 層に 1 回」ではありません。</figcaption></figure>
+<p>前半でどちらのミキサーを使っても、1 層の骨組みは同じです。ソースコードは、1 層の操作の順序を 2 行で書いています。<span class="ev ev-code">コード上の事実</span>（<code>layer.hpp</code> 508–515 行目）</p>
+<ul>
+<li>前半の層：残差を読む → ミキサー（GDN または QSA）→ 残差に書き戻す</li>
+<li>後半の層：残差を読む → MoE（第 10 章のエキスパート）→ 残差に書き戻す</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 364" role="img" aria-label="図 7-1：1 層の 6 つのステップ。前半の層は残差を読み、ミキサーを通し、書き戻す。後半の層は残差を読み、MoE を通し、書き戻す。これを 48 層くり返す">
+<rect class="f-soft" fill="#e5f1df" x="80" y="8" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">残差：4 本のレーン × 2560 個の数</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="58" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="80" font-size="13" text-anchor="middle">① 残差を読む：正規化して合成</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="108" width="240" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="128" font-size="13" font-weight="600" text-anchor="middle">② ミキサー：履歴を振り返る</text>
+<text class="f-on" fill="#ffffff" x="200" y="146" font-size="12" text-anchor="middle">GDN（36 層）または QSA（12 層）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="170" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="192" font-size="13" text-anchor="middle">③ 書き戻し：修正を各レーンに加算</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="220" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="242" font-size="13" text-anchor="middle">④ もう一度残差を読む</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="270" width="240" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="290" font-size="13" font-weight="600" text-anchor="middle">⑤ MoE：エキスパートが加工</text>
+<text class="f-on" fill="#ffffff" x="200" y="308" font-size="12" text-anchor="middle">エキスパート 10 個を選び、重み付きで足す</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="322" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="344" font-size="13" text-anchor="middle">⑥ 書き戻し → 次の層へ</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V56M200 92V106M200 154V168M200 204V218M200 254V268M200 316V320"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M70 58V204M70 220V356"/>
+<text class="f-muted" fill="#5c6d66" x="14" y="136" font-size="12">前半層</text>
+<text class="f-muted" fill="#5c6d66" x="14" y="292" font-size="12">後半層</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="4 3" d="M320 339H346V25H320"/>
+<text class="f-muted" fill="#5c6d66" x="352" y="186" font-size="12">× 48</text>
+</svg><figcaption>図 7-1　1 層の骨組み：「読む → 計算する → 書き戻す」を 2 回くり返す半層が 2 つ。ミキサーは「前の文脈を見る」役、MoE は「いまのトークンを加工する」役です。48 層すべてがこの骨組みです。</figcaption></figure>
+<p>見落としやすい違いがもう 1 つあります。QSA 層はいまのトークンの位置を知る必要がありますが、GDN 層には位置のパラメータがそもそもありません。GDN が 1 トークンごとに受け取る入力は、この数の列だけです。トークンからトークンへ引き継がれていくのは、ホワイトボードの状態です。<span class="ev ev-code">コード上の事実</span>（<code>layer.hpp</code> 513–515 行目）</p>
+
+<h2 id="sec-3">7.3 正規化：まず音量をそろえる</h2>
+<p>48 層のあいだ、数は足されたり引かれたりして、どんどん大きくなるものもあれば、どんどん小さくなるものもあります。放っておくと、次の層の行列積は、あるときは「ささやき」を、あるときは「怒鳴り声」を受け取ることになり、うまく学べません。そのため、ほとんどの計算の前に、まずベクトルを「標準の音量」にそろえます。</p>
+<aside class="primer" id="c07-normalization">
+<h3>正規化：L2 と RMS</h3>
+<p><dfn>正規化</dfn>とは、ベクトルをその「大きさ」で割って、向きだけを残すことです。問題は、「大きさ」をどう測るかです。よく使う 2 通りの測り方は、割り算 1 つの違いしかありません。</p>
+<ul>
+<li><dfn>L2 ノルム</dfn>：‖x‖ = √(x₁² + x₂² + … + x_d²)。ベクトルの幾何学的な長さです。L2 正規化をすると、ベクトルの長さが 1 になります。</li>
+<li><dfn>二乗平均平方根</dfn>（RMS）：√((x₁² + … + x_d²) ÷ d)。二乗の<strong>平均</strong>を先に求めてから平方根を取ります。RMS 正規化をすると、各成分の「平均の音量」が 1 になります。</li>
+</ul>
+<p>例：x = [3, 4]。L2 の長さは √(9 + 16) = 5 なので、正規化すると [0.6, 0.8] です。RMS は √(25 ÷ 2) ≈ 3.54 なので、正規化すると約 [0.85, 1.13] です。2 つの結果は向きが同じで、大きさが √2 倍違います。一般に、d 次元のベクトルでは、2 つの結果は √d 倍違います。</p>
+<p>実際の式には、ごく小さな数 ε（イプシロン）がもう 1 つあります。ε は根号の<strong>中</strong>に足して、ベクトルがすべて 0 のときに 0 で割ってしまうのを防ぎます。<dfn>RMSNorm</dfn> は、さらに学習された係数を掛けて、各成分が自分の音量を持てるようにします。</p>
+<p>この章との関係：Strata では両方を使いますが、使う場所が違います。取り違えてもエラーにはならず、√d 倍だけずれます。</p>
+<p class="further">さらに読む：<a href="https://en.wikipedia.org/wiki/Normalization_(machine_learning)" target="_blank" rel="noopener noreferrer">Wikipedia（英語）：Normalization (machine learning)</a> · <a href="https://arxiv.org/abs/1910.07467" target="_blank" rel="noopener noreferrer">RMSNorm の原論文</a> · <a href="https://pytorch.org/docs/stable/generated/torch.nn.RMSNorm.html" target="_blank" rel="noopener noreferrer">PyTorch ドキュメント：RMSNorm</a> · <a href="https://ja.wikipedia.org/wiki/%E3%83%8E%E3%83%AB%E3%83%A0" target="_blank" rel="noopener noreferrer">Wikipedia：ノルム</a></p>
+</aside>
+<p>Strata では、残差を読み出すたびに、各レーンが別々に RMS 正規化されます。GDN 層は q と k に L2 正規化をかけ、v にはかけません。<span class="ev ev-code">コード上の事実</span>（<code>gr.hpp</code> 81 行目、<code>layer.hpp</code> 12、23 行目）GDN のヘッダーファイルは、わざわざ注意書きを付けています。ε は<strong>二乗和</strong>に付ける下限で、平均に付けるものではありません。だから幅で割ってはいけません。もし「平均二乗」と読み違えると、1 ヘッド 128 次元なので、結果は √128 ≈ 11.3 倍ずれます。[S17] このモデルの RMS 正規化の ε は 10<sup>−6</sup> です。[S14][S18]</p>
+<p>下の小さなツールで計算してみましょう。入力を変えて、2 種類の正規化を比べます。</p>
+<div class="viz" data-viz="norm-compare"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="図 7-5：入力が 3 と 4 のとき、L2 正規化は 0.6 と 0.8、RMS 正規化は 0.85 と 1.13 になり、2 つは √2 倍違う">
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">入力 x</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="28" width="180" height="14"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="46" width="240" height="14"/>
+<text class="f-text" fill="#182f2b" x="286" y="40" font-size="12">3</text>
+<text class="f-text" fill="#182f2b" x="346" y="58" font-size="12">4</text>
+<text class="f-text" fill="#182f2b" x="10" y="104" font-size="12">L2 正規化</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="88" width="36" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="100" y="106" width="48" height="14"/>
+<text class="f-text" fill="#182f2b" x="142" y="100" font-size="12">0.60</text>
+<text class="f-text" fill="#182f2b" x="154" y="118" font-size="12">0.80</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">RMS 正規化</text>
+<rect class="f-warn" fill="#9e5d24" x="100" y="148" width="50.9" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="100" y="166" width="67.9" height="14"/>
+<text class="f-text" fill="#182f2b" x="157" y="160" font-size="12">0.85</text>
+<text class="f-text" fill="#182f2b" x="174" y="178" font-size="12">1.13</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="208" font-size="12">L2：√(9 + 16) = 5 で割る　RMS：√(25 ÷ 2) ≈ 3.54 で割る</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">向きは同じで、大きさは √2 ≈ 1.41 倍違う。d 次元なら √d 倍</text>
+</svg><figcaption>図 7-5　同じ入力でも、2 種類の正規化の違いは「d で割るかどうか」だけです。d = 128 のとき、この差は 11.3 倍になります。</figcaption></figure></div>
+
+<h2 id="sec-4">7.4 残差：各層は「修正案」だけを書く</h2>
+<p>冒頭の編集者のたとえに戻りましょう。各層は、この数の列を書き直しません。「修正」だけを計算して、元の列に足し戻します。「原文はずっと残り、修正が積み重なっていく」この通り道を、残差と呼びます。</p>
+<aside class="primer" id="c07-residual">
+<h3>残差接続</h3>
+<p><dfn>残差接続</dfn>は、1 層を x′ = x + f(x) と書きます。出力は、入力に、この層が計算した修正 f(x) を足したものです。ある層に「直すところがない」なら、f(x) を 0 に近づけるだけで、入力はそのまま通り抜けます。</p>
+<p>これがなぜ大事なのでしょうか。残差がないと、情報は各層の行列積と活性化関数をすべて通り抜けなければならず、層が多くなると、元の信号が伝言ゲームのようにゆがんでいきます。訓練のときも、誤差の信号が逆向きに伝わるうちに弱くなります。残差があると「直通レーン」が 1 本できます。第 1 層の情報はほぼそのまま第 48 層に届き、誤差の信号もこのレーンを通って戻れます。2015 年の ResNet はこの発想で、画像ネットワークを百層以上まで安定して訓練しました。</p>
+<p>現代の言語モデルでは、たいてい x′ = x + f(norm(x)) と書きます。先に正規化し、次に計算し、最後に元の x に足し戻します。足し戻すのは、正規化<strong>していない</strong> x だという点に注意してください。</p>
+<p>この章との関係：Strata のモデルは、この直通レーンを 4 本に増やしています。足し戻すときには、学習できる重みも掛けます。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E6%AE%8B%E5%B7%AE%E3%83%8D%E3%83%83%E3%83%88%E3%83%AF%E3%83%BC%E3%82%AF" target="_blank" rel="noopener noreferrer">Wikipedia：残差ネットワーク</a> · <a href="https://arxiv.org/abs/1512.03385" target="_blank" rel="noopener noreferrer">ResNet の原論文</a> · <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener noreferrer">The Illustrated Transformer（図解。残差と正規化を含む）</a></p>
+</aside>
+<p>Strata の残差は、4 本の並列レーンで、各レーンは 2560 個の数です。<span class="ev ev-code">コード上の事実</span>[S04][S13] 読むときは、4 本のレーンを別々に正規化し、1 本のベクトルにまとめて、ミキサーまたは MoE に渡します。書き戻すときは、同じ修正を<strong>すべての</strong>レーンに加えます。違うのは、レーンごとに掛ける重みだけです。重みは w = 2 × sigmoid(inject ÷ 4) で、inject は残差を読むときについでに計算される数です。（<code>gr.hpp</code> 6–8、114–120 行目）</p>
+<p>この「2 倍の sigmoid」は、うまい設計です。sigmoid(0) = 0.5 なので、inject = 0 のとき w はちょうど 1 になり、書き戻しは、ふつうの残差の足し算に戻ります。ソースコードのコメントもこの点を指摘していて、テストでも断言（assert）しています。重みは 0 から 2 のあいだで動けるので、モデルは各レーンに「もっと聞く」か「あまり聞かない」かを自分で決められます。図 7-4 を見てください。</p>
+<div class="viz" data-viz="layer-walk"><figure class="fig"><svg viewBox="0 0 400 266" role="img" aria-label="図 7-4：4 本の残差レーンから 1 本のベクトルを読み出し、修正 Δ を計算して、Δ にそれぞれの重みを掛けて各レーンに加え戻す">
+<text class="f-text" fill="#182f2b" x="8" y="43" font-size="12">レーン 0</text>
+<text class="f-text" fill="#182f2b" x="8" y="73" font-size="12">レーン 1</text>
+<text class="f-text" fill="#182f2b" x="8" y="103" font-size="12">レーン 2</text>
+<text class="f-text" fill="#182f2b" x="8" y="133" font-size="12">レーン 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="31" width="320" height="14" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="61" width="320" height="14" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="91" width="320" height="14" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="121" width="320" height="14" rx="3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 38V160"/>
+<circle class="f-text" fill="#182f2b" cx="100" cy="38" r="3"/><circle class="f-text" fill="#182f2b" cx="100" cy="68" r="3"/><circle class="f-text" fill="#182f2b" cx="100" cy="98" r="3"/><circle class="f-text" fill="#182f2b" cx="100" cy="128" r="3"/>
+<text class="f-muted" fill="#5c6d66" x="106" y="154" font-size="12">① 読み出し</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="162" width="160" height="36" rx="8"/>
+<text class="f-on" fill="#ffffff" x="140" y="185" font-size="12" text-anchor="middle">② 修正 Δ を計算</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M220 180H320V38"/>
+<circle class="f-text" fill="#182f2b" cx="320" cy="38" r="3"/><circle class="f-text" fill="#182f2b" cx="320" cy="68" r="3"/><circle class="f-text" fill="#182f2b" cx="320" cy="98" r="3"/><circle class="f-text" fill="#182f2b" cx="320" cy="128" r="3"/>
+<text class="f-text" fill="#182f2b" x="328" y="28" font-size="12">+Δ×w₀</text>
+<text class="f-text" fill="#182f2b" x="328" y="58" font-size="12">+Δ×w₁</text>
+<text class="f-text" fill="#182f2b" x="328" y="88" font-size="12">+Δ×w₂</text>
+<text class="f-text" fill="#182f2b" x="328" y="118" font-size="12">+Δ×w₃</text>
+<text class="f-muted" fill="#5c6d66" x="236" y="174" font-size="12">③ 書き戻し</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="222" font-size="12">書き込み重み w = 2 × sigmoid(inject ÷ 4)</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="240" font-size="12">inject = 0 なら w = 1。ふつうの足し算と同じ</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="258" font-size="12">同じ修正 Δ を全レーンに加える。違うのは重みだけ</text>
+</svg><figcaption>図 7-4　Strata の残差は 4 本のレーンです。読み出すときは 1 本のベクトルにまとめます。書き戻すときは、同じ修正にそれぞれの重みを掛けて、すべてのレーンに加えます。</figcaption></figure></div>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>残差接続は、バージョン管理の「パッチ」に少し似ています。各層はファイル全体を書き直さず、diff を 1 つコミットします。48 個のパッチを順に当てても、元の内容は常に残ります。代償もあります。どれか 1 層のパッチが間違っていると、その誤りは直通レーンを通って最後まで伝わり、「薄まる」ことがありません。</p>
+
+<h2 id="sec-5">7.5 形が合っていても、意味も合わせる：モジュールの契約</h2>
+<p>1 層は十数個の小さなステップでできています。1 つ 1 つを単独でテストして正しくても、組み合わせると間違うことがあります。いちばん危険なのは、<strong>形がまったく正しく、数値もまったく普通</strong>な間違いです。クラッシュせず、NaN も出ず、静かに別の答えを計算します。Strata のソースコードには、こうした「契約」がいくつも書き残されています。図 7-6 では 4 つを選びました。</p>
+<figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="図 7-6：4 つのモジュール契約。どれも間違って書いても、結果は正常な数のままになる">
+<text class="f-muted" fill="#5c6d66" x="14" y="18" font-size="12">契約</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="18" font-size="12">正しい</text>
+<text class="f-muted" fill="#5c6d66" x="252" y="18" font-size="12">誤り（数は正常）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="28" width="84" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="14" y="47" font-size="12">β 書き込み</text>
+<text class="f-text" fill="#182f2b" x="14" y="66" font-size="12">ゲート</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="96" y="28" width="146" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102" y="47" font-size="12">先に sigmoid を通す</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="66" font-size="12">0 から 1 の範囲</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="246" y="28" width="146" height="48" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="252" y="47" font-size="12">sigmoid を忘れる</text>
+<text class="f-muted" fill="#5c6d66" x="252" y="66" font-size="12">強度が無界、負にも</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="82" width="84" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="14" y="101" font-size="12">出力</text>
+<text class="f-text" fill="#182f2b" x="14" y="120" font-size="12">ゲート</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="96" y="82" width="146" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102" y="101" font-size="12">sigmoid(z) を掛ける</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="120" font-size="12">このモデルの書き方</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="246" y="82" width="146" height="48" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="252" y="101" font-size="12">qwen3.5 の SiLU</text>
+<text class="f-muted" fill="#5c6d66" x="252" y="120" font-size="12">形は同じ、値は別物</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="136" width="84" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="14" y="155" font-size="12">ルーティング</text>
+<text class="f-text" fill="#182f2b" x="14" y="174" font-size="12">の重み</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="96" y="136" width="146" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102" y="155" font-size="12">合成で 1 回だけ掛ける</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="174" font-size="12">係数 0.2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="246" y="136" width="146" height="48" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="252" y="155" font-size="12">プール側でも掛ける</text>
+<text class="f-muted" fill="#5c6d66" x="252" y="174" font-size="12">0.2 × 0.2 = 0.04</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="190" width="84" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="14" y="209" font-size="12">エキスパート</text>
+<text class="f-text" fill="#182f2b" x="14" y="228" font-size="12">の出力</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="96" y="190" width="146" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102" y="209" font-size="12">この層で選ばれた</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="228" font-size="12">この層の重みと組む</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="246" y="190" width="146" height="48" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="252" y="209" font-size="12">前の層で選ばれた</text>
+<text class="f-muted" fill="#5c6d66" x="252" y="228" font-size="12">この層の重みと組む</text>
+</svg><figcaption>図 7-6　4 つの契約と、「一見まったく正常」な 4 通りの間違い方。どれもプログラムをクラッシュさせず、モデルに別の言葉をしゃべらせるだけです。</figcaption></figure>
+<ul>
+<li><strong>β は先に sigmoid を通します。しかも、それは層の仕事です。</strong>GDN の 1 ステップ用カーネルはこの処理をしません。カーネルの契約は「受け取る β はすでに 0 から 1 のあいだの値」です。ヘッダーファイルには大文字で、カーネルはやらない、層がやらなければならない、と書かれています。[S17]</li>
+<li><strong>出力ゲートは sigmoid で、SiLU ではありません。</strong>qwen3.5 モデルはここで SiLU を使いますが、このモデルは違います。[S17] どちらの関数も名前が「ゲート」と結びついていて、形は似ていますが、数値はまったく違います。</li>
+<li><strong>ルーティングの重みは 1 回だけ掛けます。</strong>エキスパートプールはルーティングの重みを掛け<strong>ません</strong>。重みを掛けるのは、GPU 上の合成ステップがまとめて行います。両方で掛けてしまうと、1 層だけではほとんど気づけませんが、48 層重なると誤差がどんどん雪だるま式に大きくなります。[S06]</li>
+<li><strong>エキスパートの出力には、その層の重みを組み合わせます。</strong>CPU がエキスパートを計算するのと GPU の作業を同時に進めるため、初期のバージョンでは、第 l 層のエキスパートの結果を第 l+1 層に渡して合成していました。その結果、第 l+1 層の重みを使ってしまいました。コメントによると、これが生んだのは「有限で、なめらかで、決定的だが、このモデルのものではないトークン」です。修正の方法は、1 層を 2 つのグラフに分けることです。ルーティングが終わったらまず CPU に計算させ、終わってから、その層の重みで合成します。<span class="ev ev-code">コード上の事実</span>（<code>layer.hpp</code> 146–165、174–176 行目）</li>
+</ul>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは、『ソフトウェア工学』の「インターフェース契約」と「結合テスト」の生きた教材です。関数ごとのユニットテストがすべて通っても、組み合わせて正しいとは限りません。契約には「誰が何を担当するか」（誰が sigmoid を通すのか、誰が重みを掛けるのか）をはっきり書きます。結合テストでは、層全体、トークン全体の出力を、参照実装と比べます。</p>
+
+<h2 id="sec-6">7.6 手を動かす：1 層がどう読み、計算し、書き戻すかを見る</h2>
+<p>この章には独立した実験ページはありません。2 つのインタラクティブな図が、そのまま実験です。</p>
+<ol>
+<li>「1 層を歩いてみる」で、第 0 層から 6 回続けてステップを押します。レーンの数が毎回ほんの少ししか変わらないのを見てください。次に開始層を 3 にして、ミキサーが QSA に変わったことを確かめます。最後に、レーン 0 の inject 値を 0 にして、書き戻しの重みがちょうど 1 になることを確かめます。</li>
+<li>「L2 と RMS」で、[3, 4] と 128 次元を順に押し、2 回の比の値を書き留めて、それが √d に等しいことを確かめます。</li>
+</ol>
+<p>紙とペンの練習：2 人のエキスパートの出力が [2, 0] と [0, 4]、ルーティングの重みが 0.25 と 0.75 とします。正しい合成結果は 0.25 × [2, 0] + 0.75 × [0, 4] = [0.5, 3] です。もしエキスパートプールがすでに重みを 1 回掛けていて、合成でもう 1 回掛けたら、結果はいくつになるでしょうか。また、この種の間違いが「出力が正常かどうかを見る」だけでは見つけにくいのはなぜでしょうか。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>1 層 = 2 つの半層。残差を読む → ミキサー（GDN が 36 層、QSA が 12 層。規則は層番号 % 4 == 3 なら QSA）→ 書き戻す。残差を読む → MoE → 書き戻す。</li>
+<li>正規化は、ベクトルを標準の大きさにそろえます。L2 は二乗和の平方根で割り、RMS は二乗平均の平方根で割るので、2 つは √d 倍違います。GDN の q と k は L2 です。取り違えると 11.3 倍ずれます。</li>
+<li>残差のおかげで、各層は「修正」だけを書けばよくなります。Strata の残差は 4 本のレーンで、書き戻しの重みは w = 2 × sigmoid(inject ÷ 4) です。inject = 0 なら、ふつうの足し算です。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「演算子を 1 つ 1 つテストしたのだから、組み上げた層も正しいはずだ。」</strong></p>
+<p>演算子がそれぞれ正しくても、組み立てるときに、別の層のものを渡す、sigmoid を 1 回通し忘れる、重みを 1 回余分に掛ける、正規化の分母を取り違える、といった間違いは起こりえます。どれも正常な数を出すので、ユニットテストには見えません。層全体、トークン全体の出力を参照実装と比べて、はじめて捕まえられます。</p></div>
+
+<details class="deep"><summary>もう一歩深く：マルチレーン残差の本当の式、型で選ぶ活性化フォーマット、どの層が間違っているのかを突き止める方法</summary>
+<h3>教育用の式 x′ = x + f(norm(x)) は、Strata の式そのものではありません</h3>
+<p>本文では、1 本のベクトルの残差の式で直感をつかみました。本物のモデルの形状には <code>hc = 4</code> があり、セッション状態の残差 R は 4 × 2560 のマルチレーン構造です。[S04][S13] これをふつうの 1 本のベクトルの残差に置き換えると、別のモデルになってしまいます。</p>
+<p>残差の読み出し（<code>gr_read</code>）の完全な手順は次のとおりです。各レーンが別々に RMS 正規化されて xn になります（正規化の係数は、保存のときから 1 + w の形で書かれています）。4 本のレーンをつなげ、320 次元の「ボトルネック」を通します。lo = SiLU((xn の BF16 版 × w_down) ÷ hc)。hc で割るのは SiLU の<strong>中</strong>です。見落としやすく、結果を実質的に変えます。そのあと mixed = 各レーンの xn × sigmoid(lo × w_up) の平均、inject = xn × w_inject です。最後の層のあとの「最終ミックス」には inject がありません。そのあとに書き戻しがないからです。（<code>gr.hpp</code> 79–91 行目）</p>
+<p>書き戻し（<code>gr_write</code>）は R_out[c] = R[c] + block_out × w[c]、w[c] = 2 × sigmoid(inject[c] ÷ hc) です。（<code>gr.hpp</code> 114–120 行目）</p>
+<p>これらのレーンの重みは BF16 形式です。パックファイルは、デコードを単純にするため、これを 32 ビットに広げて保存しています。エンジンは読み込み時に 16 ビットに戻します。精度は何も失われず、稠密な重み 5.305 GiB のうち 1.374 GiB を節約できます。コメントによると、これが「稠密な重みがエキスパートキャッシュと一緒に VRAM に収まる」か「収まらない」かの分かれ目です。（<code>gr.hpp</code> 10–14 行目）</p>
+<h3>活性化フォーマットは、名前ではなくテンソルの型に従う</h3>
+<p>量子化された重みで行列積をする前に、入力ベクトルも、合ったフォーマットに変換しなければなりません。<code>layer.cpp</code> には、教訓が 1 つ記録されています。同じ名前のテンソルでも、層によって量子化の型が違うことがあるのです。たとえば 36 個の GDN 層の <code>attn_qkv</code> は、13 層が IQ4_XS、18 層が Q3_K、4 層が Q4_K、1 層が Q2_0 です。規則は<strong>型</strong>で決まります。2 ビット符号には Q8_0 形式の入力、それ以外の量子化型には Q8_K を組み合わせます。フォーマットを間違えると、行列積が 0.6%–1.4% ずれます。出てくるのは、壊れたベクトルではなく、「もっともらしく見える」ベクトルです。[S14]</p>
+<h3>どの層の、どのステップが間違っているかを知るには</h3>
+<p>Strata には 2 段階の「照合表」があります。層ごとの残差記録（residual ladder）は、<strong>どの層から</strong>参照実装と食い違い始めたかを教えてくれます。半層レベルの記録は、各層をさらに「アテンション半層の出力」「MoE 半層の出力」と 2 組の inject に分け、<strong>どのステップか</strong>を教えてくれます。これらのコピー自体が、各層の CUDA Graph に記録されていて、層と一緒に再生されます。オフのときのオーバーヘッドはまったくありません。（<code>layer.hpp</code> 445–453 行目）</p>
+<p>もう 1 つ、デバッグ用のスイッチ <code>--sync-every-layer</code> があります。各層のあとに、同期とエラーチェックを 1 回入れます。「あるカーネルが、後ろの層が書くはずのバッファを読んでしまう」といった、ふだんは見えない間違いを捕まえられます。代償として、高速パスの「同期は禁止」という要件にちょうど反します。だから、デフォルトの動作ではなく、実行時のパラメータになっています。[S13]</p>
+<h3>なぜ組み合わせテストが欠かせないのか</h3>
+<p>モジュールのあいだでは、別の層の活性化を渡す、正規化を二重にかける、重みを二重に掛ける、レイアウトや状態を間違える、といったことが起こりえます。どれも、それぞれのユニットテストは通ります。正しいやり方は、入力と履歴を固定して、層全体の出力や半層の出力といった中間チェックポイントを、独立した参照実装と 1 項目ずつ比べることです。最後のトークンが合っているかだけを比べるのでは、たいてい遅すぎて、粗すぎます。</p>
+</details>
