@@ -31,6 +31,27 @@
   const LANGS = ['zh', 'en', 'ja', 'ko', 'es', 'ar'];
   const pageLang = () => { const l = (root.document && document.documentElement.lang || 'zh').slice(0, 2).toLowerCase(); return LANGS.includes(l) ? l : 'zh'; };
 
+  // On narrow screens a wide widget chart would shrink its text below reading size.
+  // Give such a chart a readable width and let it scroll sideways inside the widget.
+  function fitWide(el) {
+    el.querySelectorAll('svg[viewBox]').forEach(svg => {
+      if (svg.closest('.viz-scroll') || svg.closest('figure')) return;
+      const vb = svg.viewBox.baseVal;
+      if (!vb || vb.width <= 420) return;
+      const need = Math.round(vb.width * 0.9);
+      if (svg.parentElement.clientWidth >= need) return;
+      const wrap = document.createElement('div');
+      wrap.className = 'viz-scroll';
+      svg.parentNode.insertBefore(wrap, svg);
+      wrap.appendChild(svg);
+      svg.style.width = need + 'px';
+      svg.style.maxWidth = 'none';
+      wrap.style.maxWidth = '100%';
+      // Grid and flex items default to min-width:auto and would grow to the chart's width.
+      for (let p = wrap.parentElement; p && p !== el; p = p.parentElement) p.style.minWidth = '0';
+    });
+  }
+
   const Viz = {
     esc,
     LANGS,
@@ -55,6 +76,7 @@
           el.classList.add('viz-live');
           const cleanup = def.mount(el, ctx);
           if (typeof cleanup === 'function') ctx.cleanup = cleanup;
+          fitWide(el);
           ctxs.push(ctx);
         } catch (err) {
           ctx.dispose();
