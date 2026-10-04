@@ -73,7 +73,7 @@ test('visitor id is a daily salted hash and never contains the IP', () => {
 });
 
 test('event validation accepts known shapes and rejects the rest', () => {
-  assert.deepEqual(a.sanitizeEvent({ type: 'pageview', route: 'chapter/17' }), { type: 'pageview', route: 'chapter/17', chapter: '17', lab: null, detail: null, ref: null, lang: null });
+  assert.deepEqual(a.sanitizeEvent({ type: 'pageview', route: 'chapter/17' }), { type: 'pageview', route: 'chapter/17', chapter: '17', lab: null, detail: null, ref: null, lang: null, site: 'zh' });
   assert.equal(a.sanitizeEvent({ type: 'pageview', route: 'lab/spec' }).lab, 'spec');
   assert.equal(a.sanitizeEvent({ type: 'pageview', route: 'home', lang: 'zh-CN', ref: 'https://x.com/' }).lang, 'zh-CN');
   assert.equal(a.sanitizeEvent({ type: 'quiz_answer', route: 'chapter/02', detail: '1:correct' }).detail, '1:correct');
@@ -197,4 +197,27 @@ test('unknown browser, malformed geo header and Buffer body are handled', async 
   assert.equal(rows[0].city, '%E4%B8');
   assert.equal((await a.handleCollect(collectReq({ type: 'pageview', route: 'home', ref: 'x'.repeat(3000) }), { db, salt: SALT, now: NOW })).status, 413);
   assert.equal((await a.handleCollect(collectReq(''), { db, salt: SALT, now: NOW })).status, 400);
+});
+
+test('events record which language edition was read', async () => {
+  assert.equal(a.sanitizeEvent({ type: 'pageview', route: 'home', site: 'en' }).site, 'en');
+  assert.equal(a.sanitizeEvent({ type: 'pageview', route: 'home' }).site, 'zh');
+  assert.equal(a.sanitizeEvent({ type: 'pageview', route: 'home', site: 'xx' }), null);
+  const db = await freshDb();
+  const send = (body, ip) => a.handleCollect(collectReq(JSON.stringify(body), { 'x-forwarded-for': ip }), { db, salt: SALT, now: NOW });
+  await send({ type: 'pageview', route: 'home', site: 'en' }, '1.1.1.1');
+  await send({ type: 'pageview', route: 'chapter/01', site: 'en' }, '1.1.1.1');
+  await send({ type: 'pageview', route: 'home' }, '2.2.2.2');
+  assert.deepEqual((await db.query('select site from events order by id')).map(r => r.site), ['en', 'en', 'zh']);
+  const s = (await a.handleStats({ method: 'GET', headers: { authorization: 'Bearer ' + TOKEN }, query: { days: '7' } }, { db, token: TOKEN, now: NOW })).body;
+  assert.deepEqual(s.sites, [{ site: 'en', visitors: 1, pageviews: 2 }, { site: 'zh', visitors: 1, pageviews: 1 }]);
+});
+
+test('an existing events table gains the site column', async () => {
+  const db = await freshDb();
+  await db.query(`CREATE TABLE events (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ NOT NULL, type TEXT NOT NULL, route TEXT NOT NULL, chapter TEXT, lab TEXT, detail TEXT, visitor TEXT NOT NULL, referrer_host TEXT, country TEXT, region TEXT, city TEXT, device TEXT NOT NULL, browser TEXT NOT NULL, lang TEXT)`);
+  await db.query(`INSERT INTO events (ts,type,route,visitor,device,browser) VALUES (now(),'pageview','home','v','desktop','Chrome')`);
+  const r = await a.handleCollect(collectReq(JSON.stringify({ type: 'pageview', route: 'home', site: 'en' })), { db, salt: SALT, now: NOW });
+  assert.equal(r.status, 204);
+  assert.deepEqual((await db.query('select site from events order by id')).map(x => x.site), [null, 'en']);
 });

@@ -31,7 +31,7 @@ function footer(){return `<footer class="footer"><span>${U.footerBook}<br>v${Boo
 // Anonymous same-origin analytics. Skipped on localhost and file://, with Do Not Track / GPC, or after opt-out.
 const trackOn=/^https?:$/.test(location.protocol)&&!/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);let trackFirst=true,lastRoute='';
 function trackOff(){if(navigator.doNotTrack==='1'||navigator.globalPrivacyControl)return true;try{return localStorage.getItem('strata-no-track')==='1';}catch{return false;}}
-function track(type,route,detail){if(!trackOn||trackOff()||!navigator.sendBeacon)return;const body={type,route,lang:navigator.language};if(detail)body.detail=detail;if(trackFirst){body.ref=document.referrer;trackFirst=false;}try{navigator.sendBeacon('/api/collect',new Blob([JSON.stringify(body)],{type:'application/json'}));}catch{}}
+function track(type,route,detail){if(!trackOn||trackOff()||!navigator.sendBeacon)return;const body={type,route,lang:navigator.language,site:Book.lang};if(detail)body.detail=detail;if(trackFirst){body.ref=document.referrer;trackFirst=false;}try{navigator.sendBeacon('/api/collect',new Blob([JSON.stringify(body)],{type:'application/json'}));}catch{}}
 let disposeViz=null;
 function readProgress(){const h=document.documentElement,p=Math.max(0,Math.min(1,h.scrollTop/Math.max(1,h.scrollHeight-h.clientHeight))),bar=$('#read-progress'),pct=$('#read-pct');if(bar)bar.style.width=(p*100)+'%';if(pct)pct.textContent=String(Math.round(p*100)).padStart(2,'0')+'%';}
 addEventListener('scroll',readProgress,{passive:true});
