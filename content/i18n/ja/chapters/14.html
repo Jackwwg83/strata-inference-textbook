@@ -1,0 +1,185 @@
+<div class="hook"><span class="eyebrow">こんな経験はありませんか</span>
+<p>初めて Strata を起動すると、パソコンが 1～2 分ほど重くなります。マウスの動きまでもたつくほどです。README は先に断っています。モデルの起動時に 35–55 GB をメインメモリへ読み込み、その一部を GPU 用に「ロック」します。この間、パソコンが遅くなったり応答しなくなったりしますが、正常な動作です。待てば終わります。<span class="ev ev-report">上流レポート</span>[S01]</p>
+<p>メモリをなぜ「ロック」するのでしょう。ロックすると GPU は何ができるようになり、ロックしないと何が起きるのでしょう。この章は OS のいちばん基本的な仕掛けから始めます。あなたのプログラムが見ているメモリのアドレスは、実は「うそ」なのです。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>OS はメモリのページをいつでも動かします。ところが GPU の DMA エンジンは、作業の開始時にもらった物理アドレスしか信じません。だから転送するメモリは、先にピン留め（ページのロック）する必要があります。転送は非同期です。関数が戻っても、データが届いたとは限りません。完了の合図を待つ必要があります。2 つのバッファを交互に使えば、「片方を転送しながら、もう片方を計算する」ことができ、転送時間を隠せます。ただし条件があります。上書きする前に、毎回「使い終わった」合図を待つことです。</p>
+
+<h2 id="sec-1">14.1 見えているメモリのアドレスは「うそ」</h2>
+<p>プログラムの中のポインタ、たとえば <code>0x7f3a_0000_1000</code> は、メモリチップ上の本当の場所ではありません。これは<dfn>仮想アドレス</dfn>です。OS と CPU が一緒に、仮想アドレスを<dfn>物理アドレス</dfn>に翻訳して、はじめてメモリチップを読みます。この翻訳のおかげで、どのプログラムも「連続した広いメモリを自分だけが使っている」と思えます。OS も、裏で自由にやりくりできます。</p>
+<aside class="primer" id="c14-virtual-memory">
+<h3>仮想メモリとページング</h3>
+<p>OS はメモリを固定サイズのブロックに切ります。これを<dfn>ページ</dfn>と呼びます。いちばん多いサイズは 4 KiB です。プログラムの仮想アドレス空間もページ単位で切ります。物理メモリも同じサイズに切り、こちらは<dfn>ページフレーム</dfn>と呼びます。プログラムごとに 1 枚の<dfn>ページテーブル</dfn>があり、「仮想ページ → 物理ページフレーム」を記録しています。CPU はメモリにアクセスするたびに、まずこの表を引きます。図 14-1 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 322" role="img" aria-label="図 14-1：プログラムの 4 つの仮想ページが、ページテーブルを通って、ばらばらの物理ページフレームに対応づけられている。1 ページは一時的にディスクへ退避されている">
+<text class="f-text" fill="#182f2b" x="70" y="20" font-size="15" font-weight="600" text-anchor="middle">仮想ページ</text>
+<text class="f-text" fill="#182f2b" x="320" y="20" font-size="15" font-weight="600" text-anchor="middle">物理フレーム</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="32" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="54" font-size="14" text-anchor="middle">ページ 0</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="72" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="94" font-size="14" text-anchor="middle">ページ 1</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="112" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="134" font-size="14" text-anchor="middle">ページ 2</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="152" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="174" font-size="14" text-anchor="middle">ページ 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="32" width="100" height="22"/><text class="f-muted" fill="#5c6d66" x="320" y="48" font-size="14" text-anchor="middle">フレーム 0</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="56" width="100" height="22"/><text class="f-on" fill="#ffffff" x="320" y="72" font-size="14" text-anchor="middle">フレーム 1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="80" width="100" height="22"/><text class="f-muted" fill="#5c6d66" x="320" y="96" font-size="14" text-anchor="middle">フレーム 2</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="104" width="100" height="22"/><text class="f-on" fill="#ffffff" x="320" y="120" font-size="14" text-anchor="middle">フレーム 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="128" width="100" height="22"/><text class="f-muted" fill="#5c6d66" x="320" y="144" font-size="14" text-anchor="middle">フレーム 4</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="152" width="100" height="22"/><text class="f-on" fill="#ffffff" x="320" y="168" font-size="14" text-anchor="middle">フレーム 5</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M120 49L268 115M120 89L268 67M120 169L268 163M120 129L200 214"/>
+<rect class="f-warn" fill="#9e5d24" x="145" y="214" width="140" height="30" rx="5"/>
+<text class="f-on" fill="#ffffff" x="215" y="234" font-size="14" text-anchor="middle">ディスクへ退避</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="268" font-size="14">プログラムからは連続した 4 ページに見えるが、</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="288" font-size="14">本当の置き場所はばらばら。</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="308" font-size="14">ページ 2 は今メモリになく、使うときに読み戻す</text>
+</svg><figcaption>図 14-1　ページテーブルは、仮想ページを物理ページフレームに翻訳します。OS はこの表をいつでも書き換えられます。ページを別のフレームへ動かしたり、ディスクへ退避したりします。</figcaption></figure>
+<p>これには 3 つの利点があります。プログラム同士が互いに隔離されます。メモリが足りないときは、あまり使わないページを<dfn>スワップアウト</dfn>（ディスクへ退避）しておき、必要になったら読み戻せます。物理メモリを細切れに割り当てても、プログラムには連続したアドレスに見えます。代わりに代償があります。同じ仮想ページが今どのフレームにあるかは、OS が決めます。しかも、いつでも変わります。</p>
+<p>アクセスのたびにページテーブルを引くと遅すぎます。そこで CPU の中に、翻訳結果だけを覚えておく小さな部品があります。<dfn>TLB</dfn>（変換索引バッファ）です。入るのは数千件だけです。Strata のソースコードに、こんな計算があります。33.97 GB のエキスパートの重みを 4 KB ページで切ると、約 830 万ページになります。これはどんな TLB にも入りません。エキスパートを 1 つ読むたびに、表を引き続けることになります。2 MB のラージページに替えれば、1 万 6 千ページ余りで済みます。<span class="ev ev-code">コード上の事実</span>（<code>include/strata/core/pinned.hpp</code>）ところが Windows では、一般のユーザーアカウントはデフォルトでラージページを使う権限を持っていません。そのため普通のページが一般的で、エンジンは起動時にどちらを取れたかを報告します。<span class="ev ev-code">コード上の事実</span>（<code>pinned.hpp</code>）</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E4%BB%AE%E6%83%B3%E8%A8%98%E6%86%B6" target="_blank" rel="noopener noreferrer">Wikipedia：仮想記憶</a> · <a href="https://ja.wikipedia.org/wiki/%E3%83%9A%E3%83%BC%E3%82%B8%E3%83%B3%E3%82%B0%E6%96%B9%E5%BC%8F" target="_blank" rel="noopener noreferrer">Wikipedia：ページング方式</a> · <a href="https://ja.wikipedia.org/wiki/%E3%83%88%E3%83%A9%E3%83%B3%E3%82%B9%E3%83%AC%E3%83%BC%E3%82%B7%E3%83%A7%E3%83%B3%E3%83%BB%E3%83%AB%E3%83%83%E3%82%AF%E3%82%A2%E3%82%B5%E3%82%A4%E3%83%89%E3%83%BB%E3%83%90%E3%83%83%E3%83%95%E3%82%A1" target="_blank" rel="noopener noreferrer">Wikipedia：トランスレーション・ルックアサイド・バッファ（TLB）</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-paging.pdf" target="_blank" rel="noopener noreferrer">OSTEP 第 18 章：ページング</a></p>
+</aside>
+<p class="bridge"><strong>OS を学んだ人へ：</strong>これは「ページテーブル ＋ TLB ＋ ページフォールト」の一式そのものです。この章が注目するのは、その副作用です。ページテーブルはいつでも書き換わります。しかし外部のデバイスは、それを知りません。</p>
+
+<h2 id="sec-2">14.2 GPU に自分で運ばせる：DMA とピン留め</h2>
+<p>データをメインメモリから GPU へ送るのに、CPU が 1 バイトずつ運ぶ必要はありません。GPU には専用の<dfn>コピーエンジン</dfn>があります。CPU は「どこから、どれだけ、どこへ」とだけ伝えます。あとはコピーエンジンが、PCIe バスを通してデータを引き取ります。このように「デバイスがメモリを直接読み書きする」方式を <dfn>DMA</dfn>（Direct Memory Access）と呼びます。</p>
+<aside class="primer" id="c14-dma">
+<h3>DMA：デバイスがメモリに直接アクセスする</h3>
+<p>DMA がないと、CPU が自分でメモリから 1 バイトずつ読み出し、デバイスへ書き込みます。その間、ほかの仕事は何もできません。DMA があれば、CPU は「転送指示書」を 1 枚出すだけです。デバイスの DMA エンジンが指示どおりに運び、終わったら CPU に知らせます。ディスクもネットワークカードも GPU も、この仕組みで動いています。</p>
+<p>ポイントはここです。DMA エンジンは CPU のページテーブルを通りません。信じるのは<strong>物理アドレス</strong>だけです。ドライバは作業の開始前に仮想アドレスを翻訳し、物理ページフレームの番号の列を DMA エンジンに渡します。もし転送の途中で OS がどれかのページを動かしても、DMA エンジンは気づきません。元のフレームを読み続けます。そこには、いまは別のプログラムのデータが入っているかもしれません。</p>
+<p>だから DMA に使うメモリは、先に<dfn>ピン留め</dfn>（「ページロック」「固定」とも言う）する必要があります。OS に「このページは、解除するまで動かさない、スワップアウトもしない」と伝えるのです。CUDA では、ピン留めメモリを直接確保することも、既存のメモリを「登録」してピン留めメモリにすることもできます。普通の（ページング可能な）メモリをコピーするときは、ドライバがたいてい、まず自前のピン留めした中継領域へデータをコピーし、それから DMA に運ばせます。コピーが 1 回余分に増えます。[R01]</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/Direct_Memory_Access" target="_blank" rel="noopener noreferrer">Wikipedia：Direct Memory Access</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA CUDA Programming Guide</a> · <a href="https://man7.org/linux/man-pages/man2/mlock.2.html" target="_blank" rel="noopener noreferrer">Linux マニュアル：mlock</a></p>
+</aside>
+<p>文章だけでは、「ページが動かされる」という話が少し抽象的です。次のシミュレータは、1 回の転送をゆっくり再生します。「転送の途中でメモリが足りなくなる」場面を、自分の手で起こせます。</p>
+<div class="viz" data-viz="pin-dma"><figure class="fig"><svg viewBox="0 0 400 336" role="img" aria-label="図 14-2：ピン留めしていないと、DMA の開始後に OS がページ 2 をフレーム 3 からフレーム 6 へ動かす。DMA は古い番号のままフレーム 3 を読み、別のプログラムのデータを読んでしまう">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="8" width="380" height="72" rx="8"/>
+<text class="f-text" fill="#182f2b" x="24" y="32" font-size="15" font-weight="600">① 開始：ページ 2 はフレーム 3 にある</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="56" font-size="14">DMA はフレーム番号 2、5、3、7 を控える</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="90" width="380" height="72" rx="8"/>
+<text class="f-text" fill="#182f2b" x="24" y="114" font-size="15" font-weight="600">② 転送の途中でメモリが足りなくなる</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="138" font-size="14">OS がページ 2 をフレーム 6 へ動かし、</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="156" font-size="14">フレーム 3 を別のプログラムに渡す</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="172" width="380" height="72" rx="8"/>
+<text class="f-on" fill="#ffffff" x="24" y="196" font-size="15" font-weight="600">③ DMA は古い番号のままフレーム 3 を読む</text>
+<text class="f-on" fill="#ffffff" x="24" y="220" font-size="14">読めるのは別のプログラムのデータ。</text>
+<text class="f-on" fill="#ffffff" x="24" y="238" font-size="14">しかも、エラーは出ない</text>
+<text class="f-text" fill="#182f2b" x="10" y="274" font-size="14">ピン留めすると、転送が終わるまで OS は</text>
+<text class="f-text" fill="#182f2b" x="10" y="296" font-size="14">これらのページを動かさない。DMA が開始時の</text>
+<text class="f-text" fill="#182f2b" x="10" y="318" font-size="14">番号どおりに読み書きしても安全になる。</text>
+</svg><figcaption>図 14-2　DMA はページテーブルを見ません。使っているメモリを OS が動かすと、読めるのは他人のデータになります。</figcaption></figure></div>
+<p>Strata のエキスパートの重みは、すべてピン留めメモリに置かれます。<span class="ev ev-report">上流レポート</span>[S02] ソースコードの説明はもっとはっきりしています。この「エキスパート領域」こそがエンジンの本当のワーキングセットです。ピン留めしないと、コピーエンジンが帯域を使い切れません。<span class="ev ev-code">コード上の事実</span>（<code>pinned.hpp</code>）具体的なやり方はこうです。まず大きなメモリを予約します。そのページのどれかに触れる前に、全体を CUDA のピン留めメモリとして一括登録し、GPU のアドレス空間にマップします。一括登録に失敗したときは、区間ごとに登録します。残りは OS の「常駐」ロックに切り替えます。少なくともスワップアウトはされません。<span class="ev ev-code">コード上の事実</span>（<code>src/core/pinned.cu</code>）上流のトラブルシューティング表にもあります。Windows では、ログに一括登録の「メモリ不足」が出ても正常です。エンジンは層ごとの分割ロックに切り替えます。</p>
+<p>ピン留めすれば、データが GPU へ上がる道は 3 本になります。図 14-3 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 322" role="img" aria-label="図 14-3：GPU へ上がる 3 本の道。普通のメモリは、CPU が中継領域へコピーしてから DMA で送る。ピン留めメモリは直接 DMA で送れる。GPU のアドレス空間にマップしたピン留めメモリは、GPU カーネルが PCIe 越しに直接読める">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">① 普通のメモリ</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="34" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="56" font-size="14" text-anchor="middle">元データ</text>
+<rect class="f-soft" fill="#e5f1df" x="150" y="34" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="200" y="56" font-size="14" text-anchor="middle">中継領域</text>
+<rect class="f-accent" fill="#136d5a" x="280" y="34" width="100" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="330" y="56" font-size="14" text-anchor="middle">VRAM</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M120 51H146M250 51H276"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="90" font-size="14">CPU がいったんコピーしてから DMA で転送</text>
+<text class="f-text" fill="#182f2b" x="20" y="126" font-size="15" font-weight="600">② ピン留めメモリ</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="138" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="160" font-size="14" text-anchor="middle">ピン留め領域</text>
+<rect class="f-accent" fill="#136d5a" x="280" y="138" width="100" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="330" y="160" font-size="14" text-anchor="middle">VRAM</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M120 155H276"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="194" font-size="14">コピーエンジンが直接転送。CPU は関わらない</text>
+<text class="f-text" fill="#182f2b" x="20" y="230" font-size="15" font-weight="600">③ マップしたピン留めメモリ</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="242" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="264" font-size="14" text-anchor="middle">ピン留め領域</text>
+<rect class="f-accent" fill="#136d5a" x="280" y="242" width="100" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="330" y="264" font-size="14" text-anchor="middle">GPU カーネル</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="5 4" d="M120 259H276"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="296" font-size="14">GPU は計算中に PCIe 越しに直接読む。</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="316" font-size="14">先に VRAM へコピーすることはない</text>
+</svg><figcaption>図 14-3　ピン留めのおかげで、② の道が使えます。マップすると、③ の道も開けます。③ はコピーを省けますが、読むたびに PCIe を通ります。</figcaption></figure>
+<p>Strata のエキスパート供給元インターフェースは、後ろの 2 本の道を表に出しています。<code>pinned()</code> は「このエキスパートは、ピン留めして登録済みのメモリにあるか。あれば、CPU が先にコピーしなくても直接 DMA できる」に答えます。<code>device_alias()</code> は、このエキスパートが GPU のアドレス空間のどこにあるかを返します。GPU は PCIe 越しに直接読めます。<span class="ev ev-code">コード上の事実</span>[S06] 注意してください。「GPU が読める」ことは、「もう VRAM にある」ことではありません。③ の道では、読むたびに PCIe を通ります。バスの帯域幅の制約を受けます。</p>
+<p>ピン留めできなかったエキスパートはどうするのでしょう。長いプロンプトを読むとき、エンジンは補助スレッドを何本か使います。補助スレッドがあらかじめ、それらをピン留めバッファの組にコピーしておき、それからコピーエンジンに渡します。<span class="ev ev-report">上流レポート</span>[S03] ソースコードのコメントによると、以前はコピーを発行したスレッドがついでにコピーしていました。1 回およそ 2 MB のコピーの間、GPU には待機中の仕事がありませんでした。IQ3_S で 32K のプロンプトを読むと、この待ちだけで約 15 秒も無駄になっていました。<span class="ev ev-report">上流レポート</span>（<code>src/prefill/prefill.cpp</code> のコメント）</p>
+
+<h2 id="sec-3">14.3 「投入した」は「終わった」ではない</h2>
+<p>コピーエンジンに運ばせるとき、CPU は横に立って終わるまで待つべきでしょうか。待ってもいいし、待たなくてもいいのです。これが 2 つの呼び出し方です。</p>
+<aside class="primer" id="c14-async">
+<h3>同期と非同期</h3>
+<p><dfn>同期</dfn>呼び出し：関数が戻ったとき、仕事はもう終わっています。窓口で手続きをして、終わるまでその場で待つのに似ています。<dfn>非同期</dfn>呼び出し：関数は仕事を「投入」するだけで、すぐ戻ります。仕事は裏で進みます。ネットで注文するのに似ています。注文したら別のことをして、荷物が着けば通知が来ます。</p>
+<p>非同期の利点は、じっと待たなくてよいことです。図 14-4 を見てください。代償もあります。関数が戻っても、仕事が終わったとは考えられません。結果を使いたければ、はっきりした<dfn>完了の合図</dfn>を待つ必要があります。CUDA では、同じ<dfn>ストリーム</dfn>（stream）に投入した仕事は順番に実行されます。ストリームをまたぐとき、またはホストが結果を読むときは、<dfn>イベント</dfn>（event）に頼ります。ストリーム上にイベントを記録します。イベントが「完了」すれば、その前に投入した仕事はすべて終わっています。[R01]</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="図 14-4：同期呼び出しはコピーが終わるまで戻らない。非同期呼び出しはすぐ戻り、コピーは裏で進む。結果を使う前に完了イベントを待つ">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">同期</text>
+<text class="f-text" fill="#182f2b" x="20" y="54" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="70" y="38" width="160" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="150" y="55" font-size="14" text-anchor="middle">転送を待つだけ</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="38" width="150" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="305" y="55" font-size="14" text-anchor="middle">別の仕事</text>
+<text class="f-text" fill="#182f2b" x="20" y="108" font-size="15" font-weight="600">非同期</text>
+<text class="f-text" fill="#182f2b" x="20" y="140" font-size="14">CPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="124" width="200" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="170" y="141" font-size="14" text-anchor="middle">投入後すぐ別の仕事</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="14">コピー</text>
+<rect class="f-soft" fill="#e5f1df" x="70" y="160" width="160" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="150" y="177" font-size="14" text-anchor="middle">裏で転送</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M230 156V196"/>
+<text class="f-muted" fill="#5c6d66" x="380" y="214" font-size="14" text-anchor="end">完了イベントを待ってから使う</text>
+</svg><figcaption>図 14-4　非同期呼び出しは、待ち時間を裏に隠します。ただし、「戻った」と「終わった」は別のことです。</figcaption></figure>
+<p class="further">さらに読む：<a href="https://en.wikipedia.org/wiki/Asynchronous_I/O" target="_blank" rel="noopener noreferrer">Wikipedia: Asynchronous I/O</a> · <a href="https://en.wikipedia.org/wiki/Producer%E2%80%93consumer_problem" target="_blank" rel="noopener noreferrer">Wikipedia: Producer–consumer problem</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/threads-cv.pdf" target="_blank" rel="noopener noreferrer">OSTEP 第 30 章：条件変数（プロデューサとコンシューマ）</a></p>
+</aside>
+<p>Strata のソースコードには、「戻ったことは終わったことではない」という注意があちこちにあります。</p>
+<ul>
+<li><strong>エキスパートキャッシュの充填</strong>は、ふだんは非同期です。コピーと、それを読む計算が同じストリームに並んでいるので、順序は自然に保たれます。起動時にリストを見てキャッシュを埋めるときは、この保証がありません。最初の版は非同期の充填を使い、バイト単位の検証がすぐエラーを出しました。「スロット 0 の 0 バイト目から違う」というエラーです。そこでブロッキング版を別に作りました。<span class="ev ev-code">コード上の事実</span>[S05]</li>
+<li><strong>検証ウィンドウのコミット</strong>は、計算グラフが走り終わるのを待たずに戻れます。そのぶん、次のドラフト生成を同時に進められます。ただし、別のストリームやホストからセッション状態を読み書きするコード（新しいリクエスト、保存、スナップショットなど）は、必ず先に <code>wait_commit()</code> を呼ばなければなりません。<span class="ev ev-code">コード上の事実</span>[S08]</li>
+<li><strong>層ごとのメインループ</strong>は、「ストリーム全体が終わるまで待つ」関数を呼びません。イベントを問い合わせます。ソースコードのコメントには、落とし穴も書いてあります。トークンごとにピン留めバッファを解放していました。ピン留めメモリの解放は、暗黙のうちにデバイス全体を同期させます。その結果、トークンの終わりごとに、デバイス全体を待つ処理が 1 回余分に入っていました。直し方は、セッションの開始時に一度だけ確保して、繰り返し使うことです。<span class="ev ev-code">コード上の事実</span>（<code>include/strata/core/session.hpp</code>）</li>
+</ul>
+<p>第 11 章のディスク読み込みも同じ考え方です。トークンが決まるとすぐ 16 件の読み込みリクエストを投入し、第 1 層で使う直前になってから結果を受け取ります。</p>
+
+<h2 id="sec-4">14.4 ダブルバッファ：転送しながら計算する</h2>
+<p>非同期転送のいちばん多い使い方は、転送と計算を重ねることです。データのブロックが続けて来るとします。各ブロックは、まず GPU へ転送し（3 ミリ秒）、それから計算します（5 ミリ秒）。バッファが 1 つしかないと、「転送が終わってから計算し、計算が終わってから転送する」しかできません。2 つあれば、片方を計算している間に、もう片方へ次のデータを同時に転送できます。これが<dfn>ダブルバッファ</dfn>です。</p>
+<p>計算してみましょう。データは 4 ブロックです。直列なら 4 × (3 ＋ 5) = 32 ミリ秒です。ダブルバッファなら、最初のブロックの転送と、最後のブロックの計算は重ねられません。その間の各ステップは、遅いほうの時間で進みます。3 ＋ (4 − 1) × max(3, 5) ＋ 5 = 23 ミリ秒です。この式が成り立つ前提は、コピーエンジンと計算ユニットが本当に別々の資源であることです。</p>
+<div class="viz" data-viz="double-buffer"><figure class="fig"><svg viewBox="0 0 400 242" role="img" aria-label="図 14-5：4 ブロックのデータ。コピー 3 ミリ秒、計算 5 ミリ秒。バッファが 1 つだと直列で 32 ミリ秒。バッファが 2 つだと重なって 23 ミリ秒">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">バッファ 1 つ：32 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="54" font-size="14">コピー</text>
+<rect class="f-accent" fill="#136d5a" x="74" y="38" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="154" y="38" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="234" y="38" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="314" y="38" width="30" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="88" font-size="14">計算</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="72" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="184" y="72" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="264" y="72" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="344" y="72" width="50" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="134" font-size="15" font-weight="600">バッファ 2 つ：23 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="166" font-size="14">コピー</text>
+<rect class="f-accent" fill="#136d5a" x="74" y="150" width="30" height="24"/><rect class="f-warn" fill="#9e5d24" x="104" y="150" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="154" y="150" width="30" height="24"/><rect class="f-warn" fill="#9e5d24" x="204" y="150" width="30" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="200" font-size="14">計算</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="184" width="50" height="24"/><rect class="f-warn" fill="#9e5d24" x="154" y="184" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="204" y="184" width="50" height="24"/><rect class="f-warn" fill="#9e5d24" x="254" y="184" width="50" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="234" font-size="14">2 色 ＝ 2 つのバッファ。交互に使う</text>
+</svg><figcaption>図 14-5　ダブルバッファは、転送を計算の裏に隠します。注意してください。3 番目のブロックは、1 番目のブロックの計算が終わってバッファが空くまで、転送を始められません。</figcaption></figure></div>
+<p>シミュレータでいちばん見てほしいのは、「合図を待たずに上書きする」瞬間です。ダブルバッファが正しく動くのは、「メモリを 2 つ確保したから」ではありません。2 つの合図があるからです。<strong>コピーが終わってから読む</strong>。<strong>使い終わってから書く</strong>。バッファ 1 つ 1 つが小さな状態機械です。図 14-6 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="図 14-6：バッファのライフサイクル。空きの間は書ける。コピー完了イベントのあとで読める。計算の使用完了イベントのあとで、空きに戻れる">
+<rect class="f-soft" fill="#e5f1df" x="130" y="8" width="140" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="33" font-size="15" font-weight="600" text-anchor="middle">空き</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="260" y="104" width="130" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="325" y="129" font-size="15" font-weight="600" text-anchor="middle">コピー中</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="196" width="140" height="40" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="221" font-size="15" font-weight="600" text-anchor="middle">計算中</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="104" width="130" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="75" y="129" font-size="15" font-weight="600" text-anchor="middle">回収待ち</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M270 36Q330 50 326 100M326 146Q320 196 274 214M128 214Q80 196 76 148M76 102Q80 50 128 36"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="72" font-size="14" text-anchor="end">コピー投入</text>
+<text class="f-warn" fill="#9e5d24" x="298" y="178" font-size="14" text-anchor="end">コピー完了</text>
+<text class="f-warn" fill="#9e5d24" x="96" y="178" font-size="14">使用完了</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="72" font-size="14">再利用できる</text>
+<text class="f-text" fill="#182f2b" x="200" y="264" font-size="14" text-anchor="middle">「使用完了」イベントがないと、空きには戻れない</text>
+</svg><figcaption>図 14-6　バッファの一生。2 つのイベントが 4 つの状態をつなぎます。どちらかが欠けると、まだ届いていないデータを読んだり、まだ使っているデータを上書きしたりするかもしれません。</figcaption></figure>
+<p>Strata は長いプロンプトを読むとき、まさにこのリングバッファを使います。VRAM にないエキスパートは、ピン留めしたリング状のスロットを通り、専用のコピーストリームで GPU へ送られます。<span class="ev ev-code">コード上の事実</span>[S12] スロットごとにイベントが 2 つあります。1 つは「コピー完了」、もう 1 つは「使用完了」です。<span class="ev ev-code">コード上の事実</span>（<code>prefill.cpp</code>）先ほど出てきた補助コピースレッドも、同じ決まりを守ります。j 番目のタスクは、j mod 16 番目のピン留めバッファに書き込みます（デフォルトは 16 本）。書き込む前に、j − 16 番目のタスクがこのバッファから発行した DMA の完了を、必ず待ちます。<span class="ev ev-code">コード上の事実</span>（<code>prefill.cpp</code>）</p>
+<p>リングの大きさにも工夫が要ります。ソースコードのコメントに、1 回の測定が残っています（Q2_0、1 ブロック 8192 トークン）。リングのスロットを 96 個から 384 個に増やすと、プロンプトの読み込み速度は毎秒 1,153 トークンから 1,294 トークンに上がりました。次の層のエキスパートが、今の層のアテンション計算の間に届くからです。逆に、多くのエキスパートをホストのコピーに頼る場合は、大きなリングのほうが遅くなりました。ボトルネックはホストのコピーです。増えたスロットは、キャッシュの場所を取るだけでした。<span class="ev ev-report">上流レポート</span>（<code>prefill.cpp</code> のコメント）複数 GPU でレイヤー分割するときは、各段にピン留めした受け渡しバッファが 2 つあります。次の段が c 番目のブロックを読んでいる間に、この段はもう c ＋ 1 番目のブロックを処理しています。<span class="ev ev-code">コード上の事実</span>[S12] これがダブルバッファです。</p>
+
+<h2 id="sec-5">14.5 ピン留めはタダではない</h2>
+<p>ピン留めがこんなに良いなら、メモリを全部ピン留めしてはどうでしょう。だめです。ピン留めしたページは、OS が動かせず、スワップアウトもできません。メモリが足りなくなっても回収できません。たくさん固定するほど、OS や他のプログラム、ファイルキャッシュに残る余裕が減ります。[R02]</p>
+<p>Strata はここをとても慎重に扱っています。メモリ少なめの「常駐」モードでは、システム用に 4 GB の空きメモリを残します。<span class="ev ev-report">上流レポート</span>[S03] Windows では、GPU にマップしたピン留めメモリが、「共有 VRAM」の予算にも数えられます。ソースコードには、63 GB のパソコンでの記録があります。ドライバが拒否するまで区間ごとにロックし続けて、28 GiB をロックしました。その結果、その予算が満杯になり、以降は VRAM を確保するたびに「メモリ不足」になりました。そこでエンジンには、任意の上限設定があります。ただしデフォルトではありません。64 GB のパソコンでは、多めにロックしても問題ないことが実測で分かったからです。上限を付けると、プロンプトの読み込みが約 20% 遅くなります。<span class="ev ev-code">コード上の事実</span>（<code>pinned.cu</code>）このトレードオフに、どこでも通用する答えはありません。マシンごとに測るしかありません。</p>
+<p>もう 1 つ、おもしろい対比があります。長いコンテキストの KV ページキャッシュです（第 12 章で触れました）。KV データの全体は、ピン留めして GPU にマップしたメモリに置きます。VRAM に置くのは、ページの一部だけです。そして「ページ番号 → VRAM スロット」の表で、どのページが VRAM にあるかを記録します。<span class="ev ev-code">コード上の事実</span>（<code>include/strata/kernels/kv_stream.hpp</code>）これはほとんど、小さな仮想メモリそのものです。ページテーブル、ページフォールト、置き換えを、すべて GPU 自身が行います。</p>
+
+<h2 id="sec-6">14.6 手を動かす：競合状態を必ず再現する</h2>
+<p>この章に単独のインタラクティブ実験はありません。2 つのシミュレータが実験台です。「ダブルバッファ」で、まずバッファ 1 つ、2 つ、3 つで 1 回ずつ再生し、合計時間を記録します。次に 2 つへ戻して「合図を待たずに上書き」を入れ、どのブロックに ✗ が付くか見ます。それからコピーを遅く、計算を速くしてもう一度試します。今度は、なぜ「たまたま」エラーが出なかったのでしょう。「ときどき正しく、ときどき間違う」バグは、いちばん調べにくいのです。</p>
+<p>「DMA とピン留め」では、「ピン留め」をオフとオンにして、1 回ずつ通して見ます。第 4 ステップと第 5 ステップで、ページテーブルと、DMA が持つフレーム番号を見比べます。</p>
+<p>最後は、紙の上の実験です。2 つの配列でダブルバッファを模擬します。テストを書き、わざとプロデューサにコンシューマの読み終わる前に配列を上書きさせます。テストが失敗することを確かめます。次に「使用完了」の合図を足し、テストが通ることを確かめます。最後に「完了イベント」を人為的に数ステップ遅らせます。システムが待っていて、新旧が半分ずつ混ざったデータをこっそり読んではいないことを確かめます。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>プログラムのアドレスは仮想で、OS はいつでもページを動かせます。DMA は物理アドレスしか信じません。だから DMA に使うメモリはピン留めが必要です。Strata のエキスパート領域は、すべてピン留めして GPU にマップします。</li>
+<li>非同期呼び出しの「戻った」は「終わった」ではありません。結果を使うなら完了イベントを待ちます。バッファを再利用するなら「使用完了」イベントを待ちます。</li>
+<li>ダブルバッファは、転送を計算の裏に隠せます。合計時間 ≈ 最初の転送 ＋ (ブロック数 − 1) × 遅いほうの時間 ＋ 最後の計算。ピン留めには代償があります。システムに余裕を残してください。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「非同期コピー関数が戻ったら、データは届いている。コピー元のバッファもすぐ書き換えてよい。」</strong></p>
+<p>関数が戻ったことが示すのは、仕事が投入されたことだけです。コピーはまだ始まってもいないかもしれません。このときコピー元を書き換えると、GPU が受け取るのは新旧が混ざったデータかもしれません。解放すれば、コピーがすでに他人のものになったメモリを読むかもしれません。再利用してよいかどうかは、完了の合図だけで決まります。間に「0.1 秒待つ」を入れても、直したことになりません。遅いマシンでは、やはり間違います。速いマシンでは、ただ無駄に遅くなります。</p></div>
+
+<details class="deep"><summary>もう一歩深く：プロデューサ・コンシューマのプロトコル、ストリームの順序の境界、メモリ予算</summary>
+<h3>最小のプロデューサ・コンシューマのプロトコル</h3>
+<p>プロデューサはまずバイトを埋め、それから「準備完了」を公開します。コンシューマは「準備完了」を見てから読み、読み終わったら「使用完了」を公開します。プロデューサは「使用完了」を見てはじめて上書きできます。教育用の状態機械は、空き → 書き込み中 → 準備完了 → 読み取り中 → 空き です。「準備完了」から直接「空き」へ戻ってはいけません。デバイスをまたぐ順序の保証を、普通の変数や <code>volatile</code> で代用することもできません。どのフェンス、イベント、ストリームの意味づけを使うかは、対象プラットフォームの規則に従います。[R01]</p>
+<h3>ストリームの順序は、保証される範囲でしか成り立たない</h3>
+<p>同じストリームに順番に投入した操作には、自然に先後関係があります。別々のストリームの間や、ホストの読み取りとデフォルトストリームの間では、順序を勝手に仮定できません。エキスパートキャッシュの起動時の充填は、まさにここでつまずきました。データはノンブロッキングのストリームでコピーし、検証はレガシーのストリームで読みました。2 つの間に順序がなく、検証が、まだコピーされていないスロットを読みました。<span class="ev ev-code">コード上の事実</span>[S05] 検証ウィンドウの非同期コミットも同じです。呼び出し側は待ちを飛ばせます。条件は、後続の仕事が同じストリームにあり、ドラフト生成がそれの書いたものを読まないことです。別のストリームやホストがセッション状態を読むなら、先に待たなければなりません。<span class="ev ev-code">コード上の事実</span>[S08]</p>
+<h3>同じ並行処理の教訓を、2 回使う</h3>
+<p>補助コピースレッドがタスクを受け取るときは、「バッチ番号 | タスク数 | 通し番号」を詰めたアトミック変数を使います。バッチ番号が合うときだけタスクを受け取れます。遅れて来たスレッドが、次のバッチのタスクを取ることはありません。ソースコードのコメントによると、これは CPU エキスパートプールのハング（issue #29）の教訓です。<span class="ev ev-code">コード上の事実</span>（<code>prefill.cpp</code>）第 13 章で、そのハングの経緯を説明しました。</p>
+<h3>メモリ予算は二重に数えない</h3>
+<p>堅実なメモリ予算では、いくつかの量を区別します。予約済み（アドレスは占めたが、まだ本当には割り当てていない）。コミット済み（OS が用意すると約束した）。常駐（今、物理メモリにある）。ロック済み（スワップアウトされない）。GPU 側にも別のコピーがある。これらの量は、同じ物理ページを指していることがあります。単純に足すと、二重に数えます。まず重なっているかどうかをはっきりさせてから、合計を出します。[R02] ホストには、サービスのプロセス、ファイルキャッシュ、ページテーブル、入力バッファ、復元できるセッション状態もあります。物理メモリの全部をエキスパートに割り当てるわけにはいきません。</p>
+<h3>検収：まれなエラーを必ず再現する</h3>
+<p>テストは、うまくいく道だけを通ってはいけません。次の場面を意図的に作ります。コンシューマが「使用完了」をなかなか返さないと、プロデューサは 1 周回って来て上書きしてしまうか。完了イベントを人為的に遅らせると、システムは待つか、できかけのものを読むか。毎回のデータに増える世代番号を付けて、コンシューマが読んだ世代番号が期待どおりであるか。タイムアウトのあとは、このバッファを再利用してはいけません。第 11 章のディスクリーダは、「読み込みごとに人為的に遅延させる」フォールトインジェクションを最初から備えています。こうした検収のためです。</p>
+</details>

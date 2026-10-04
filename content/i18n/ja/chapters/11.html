@@ -1,0 +1,261 @@
+<div class="hook"><span class="eyebrow">こんな経験はありませんか</span>
+<p>スマホのキーボードは「続きの言葉」を当てるのが上手です。「今日の天気」と打つと、すぐに「は晴れ」「はどう」と候補が出ます。天気を理解しているわけではありません。どの言葉がよく隣り合って出てくるかを覚えているだけです。</p>
+<p>Strata が動かすモデルの中にも、こんな「フレーズ記憶」があります。しかも驚くほど大きく、28.8 GB の表が SSD の上に置かれています。<span class="ev ev-report">上流レポート</span>[S02] モデルは token を 1 つ生成するたびに、この表から 16 行を取り出します。この章では 3 つの問いに答えます。行番号はどう計算するのか。SSD から速く、無駄なく読むにはどうするのか。読んだ行を次回に使い回すにはどうするのか。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>モデルは直近 2 個と直近 3 個の token をハッシュして、16 個の行番号を出します。1 行は 90 バイトしかありませんが、SSD からは 4 KiB のページ単位で読みます。読んだ行は 8 ウェイセットアソシアティブの行キャッシュに入れ、セットが満杯になったら、ローテーションするポインタの位置の行を置き換えます。</p>
+
+<h2 id="sec-1">11.1 モデルの中の「フレーズ記憶」</h2>
+<p>まず、この表に何が入っているかを説明します。表は <dfn>n-gram</dfn>（「連続して並ぶ n 個の token」のこと）で引きます。直近 2 個の token を 2-gram（バイグラム）、直近 3 個を 3-gram（トライグラム）と呼びます。たとえば文脈が「私 好き 猫」なら、2-gram は「好き 猫」、3-gram は「私 好き 猫」です。</p>
+<p>Strata のソースコードで、この表を使うモジュールは PLE といいます。モデルの第 1 層（0 から数えます）で働きます。<span class="ev ev-code">コード上の事実</span>[S13] token 1 つあたりの流れは図 11-1 のとおりです。2-gram と 3-gram にそれぞれ 8 個の「ヘッド」があり、各ヘッドが行番号を 1 つ出すので、合計 16 個です。1 行には 160 個の数が入っていて、16 行をつなげるとちょうど 2560 個になります。これがモデルの主な幅です。<span class="ev ev-code">コード上の事実</span>（<code>include/strata/kernels/ngram.hpp</code>）</p>
+<figure class="fig"><svg viewBox="0 0 400 378" role="img" aria-label="図 11-1：直近 3 つの token を 2-gram と 3-gram に分け、それぞれ 8 個のヘッドで 8 個の行番号を出し、合計 16 行を取得する。1 行は 160 個の数で、つなげた 2560 個の数を第 1 層へ渡す">
+<rect class="f-soft" fill="#e5f1df" x="40" y="6" width="320" height="52" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="28" font-size="15" font-weight="600" text-anchor="middle">直近 3 つの token：私 好き 猫</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="49" font-size="14" text-anchor="middle">古い順に並べる</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 58V68H102V80M200 68H298V80"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="82" width="185" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="102" y="104" font-size="15" font-weight="600" text-anchor="middle">2-gram：好き 猫</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="125" font-size="14" text-anchor="middle">8 ヘッド → 8 行番号</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="82" width="185" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="298" y="104" font-size="15" font-weight="600" text-anchor="middle">3-gram：私 好き 猫</text>
+<text class="f-muted" fill="#5c6d66" x="298" y="125" font-size="14" text-anchor="middle">8 ヘッド → 8 行番号</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M102 136V148H298V136M200 148V160"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="162" width="360" height="54" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="185" font-size="15" font-weight="600" text-anchor="middle">16 個の行番号 → SSD 上の大きな表</text>
+<text class="f-on" fill="#ffffff" x="200" y="206" font-size="14" text-anchor="middle">320,001,536 行、1 行 90 バイト、計 28.8 GB</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 216V240"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="242" width="320" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="265" font-size="15" font-weight="600" text-anchor="middle">16 行を取得（1 行 160 個の数）</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="286" font-size="14" text-anchor="middle">つなげると 16 × 160 ＝ 2560 個の数</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 296V320"/>
+<rect class="f-soft" fill="#e5f1df" x="40" y="322" width="320" height="48" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="351" font-size="15" font-weight="600" text-anchor="middle">第 1 層の PLE へ渡し、本線に混ぜる</text>
+</svg><figcaption>図 11-1　token 1 つあたりの表引きの流れ。3 つの token を 2 種類の n-gram に分け、それぞれ 8 個の行番号を出します。取得した 16 行は、モデルと同じ幅の 1 本のベクトルにつなげます。</figcaption></figure>
+<p>この表はモデルのパラメータの一部で、名前は <code>per_layer_token_embd</code>、全部で 320,001,536 行あります。1 行 90 バイトで計算すると、表全体は 28.8 GB（26.8 GiB）です。<span class="ev ev-code">コード上の事実</span>（<code>ple_reader.hpp</code>）12 GB の VRAM よりずっと大きく、RAM にも載せません。SSD に置いたままにします。</p>
+<aside class="primer" id="c11-ngram">
+<h3>n-gram 言語モデル</h3>
+<p>次の単語を当てるいちばん素朴な方法は、「直前の数語を見る」ことです。コーパスの中で「私 好き」の後ろが 30% は「猫」、20% は「君」なら、その比率で予想します。直前の n−1 語だけを見て n 語目を当てるのが <dfn>n-gram 言語モデル</dfn>です。n = 2 ならバイグラムモデル、n = 3 ならトライグラムモデルです。</p>
+<p>困るのは、組み合わせが多すぎることです。語彙が V 個なら、3-gram は V³ 通りあります。V を 10 万にすると 10¹⁵ 通りです。ほとんどの組み合わせは一生に一度も現れません。全部を 1 つずつ保存するのは無理です。</p>
+<p>Strata のモデルは n-gram の考え方を借りていますが、やり方は違います。「次の単語の確率」は保存しません。代わりに、n-gram ごとに学習済みの短い数列を持たせ、ニューラルネットワークに使わせます。また、組み合わせごとに専用の行を用意するのではなく、ハッシュで天文学的な数の組み合わせを 3.2 億行に押し込みます（次の節）。だからこの表は完全な言語モデルではなく、「フレーズのメモ帳」に近いものです。</p>
+<p class="further">さらに読む：<a href="https://en.wikipedia.org/wiki/N-gram" target="_blank" rel="noopener noreferrer">Wikipedia（英語）：N-gram</a> · <a href="https://en.wikipedia.org/wiki/Word_n-gram_language_model" target="_blank" rel="noopener noreferrer">Wikipedia（英語）：Word n-gram language model</a></p>
+</aside>
+
+<h2 id="sec-2">11.2 3 つの token が 16 個の行番号になるまで</h2>
+<p>表の中に「私 好き 猫」という文字はありません。あるのは行番号だけです。token から行番号を作るのが<dfn>ハッシュ</dfn>です。どんな入力でも、一見ばらばらだけれど毎回同じ数に混ぜ合わせます。Strata のハッシュは 3 ステップです。<span class="ev ev-code">コード上の事実</span>（<code>ngram.hpp</code>、<code>src/kernels/ngram.cpp</code>）</p>
+<ol>
+<li><strong>掛け算</strong>：各 token の番号に、大きな固定の定数を掛けます。3 つの位置にそれぞれ別の定数を使います。</li>
+<li><strong>XOR</strong>：その積を 2 進数のビットごとに XOR（排他的論理和）します。同じなら 0、違えば 1 です。結果を<dfn>混合値</dfn>と呼びます。2-gram は 2 つの数を、3-gram は 3 つの数を混ぜます。</li>
+<li><strong>剰余</strong>：ヘッドごとに、混合値を自分の法（割る数）で割って余りを取り、そのヘッドが大きな表の中で始まる位置を足します。どのヘッドの法も 2000 万前後で、2 のべき乗ではありません。たとえば 20000003、20000023、20000033 です。</li>
+</ol>
+<p>覚えておきたい細部が 2 つあります。1 つめ。文の先頭で前の文脈がない位置は −1 と記録します。「会話終了」の token が出たら、それより前の履歴はすべて切り捨てます。この 2 つの token の履歴は系列状態の一部で、「古いものが先」の順に保存します。<span class="ev ev-code">コード上の事実</span>[S13] 2 つめ。このハッシュは CPU で計算します。64 ビット整数の掛け算と XOR が必要です。ソースのコメントは参照実装の説明を引いて、GPU 計算フレームワークの ggml にはこの 2 つの演算がないと述べています。<span class="ev ev-code">コード上の事実</span>（<code>ngram.hpp</code>）</p>
+<p>下のシミュレーターは、小さな数でこの 3 ステップを再現します。掛ける数は 31、17、7、法は 11 から 37、各 n-gram のヘッドは 4 個だけです。ルールは Strata と同じで、数が小さいので手計算もできます。</p>
+<div class="viz" data-viz="ngram-hash"><figure class="fig"><svg viewBox="0 0 400 322" role="img" aria-label="図 11-2：おもちゃのハッシュ。私、好き、猫の 3 つの token から、2-gram の混合値 626 と 3-gram の混合値 593 を出し、8 個の法で割った余りから 8 個の行番号を得る">
+<text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="14" text-anchor="middle">文脈（古い → 新しい）、カッコ内はおもちゃの番号</text>
+<rect class="f-soft" fill="#e5f1df" x="30" y="28" width="100" height="36" rx="7"/><text class="f-text" fill="#182f2b" x="80" y="51" font-size="14" text-anchor="middle">私（5）</text>
+<rect class="f-soft" fill="#e5f1df" x="150" y="28" width="100" height="36" rx="7"/><text class="f-text" fill="#182f2b" x="200" y="51" font-size="14" text-anchor="middle">好き（11）</text>
+<rect class="f-soft" fill="#e5f1df" x="270" y="28" width="100" height="36" rx="7"/><text class="f-text" fill="#182f2b" x="320" y="51" font-size="14" text-anchor="middle">猫（23）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="78" width="380" height="36" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="101" font-size="14" text-anchor="middle">2-gram：23×31 ⊕ 11×17 ＝ 713 ⊕ 187 ＝ 626</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="122" width="380" height="36" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="145" font-size="14" text-anchor="middle">3-gram：713 ⊕ 187 ⊕ 5×7 ＝ 593</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="182" font-size="14">おもちゃの大表：8 ヘッドを連結、計 180 行</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="192" width="26" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="192" width="34" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="192" width="38" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="118" y="192" width="46" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="164" y="192" width="22" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="186" y="192" width="58" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="192" width="62" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="306" y="192" width="74" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="24" y="192" width="3" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="74" y="192" width="3" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="116" y="192" width="3" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="128" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="184" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="212" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="252" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="308" y="192" width="3" height="40"/>
+<text class="f-text" fill="#182f2b" x="33" y="252" font-size="14" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="63" y="252" font-size="14" text-anchor="middle">27</text>
+<text class="f-text" fill="#182f2b" x="99" y="252" font-size="14" text-anchor="middle">48</text>
+<text class="f-text" fill="#182f2b" x="141" y="252" font-size="14" text-anchor="middle">54</text>
+<text class="f-text" fill="#182f2b" x="175" y="252" font-size="14" text-anchor="middle">82</text>
+<text class="f-text" fill="#182f2b" x="215" y="252" font-size="14" text-anchor="middle">96</text>
+<text class="f-text" fill="#182f2b" x="275" y="252" font-size="14" text-anchor="middle">116</text>
+<text class="f-text" fill="#182f2b" x="343" y="252" font-size="14" text-anchor="middle">144</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="282" font-size="14">左 4 ヘッドは 626、右 4 ヘッドは 593 を使う</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="306" font-size="14">例：626 ÷ 13 の余り 2 ＋ 起点 0 → 行 2</text>
+</svg><figcaption>図 11-2　おもちゃのハッシュ：掛け算、XOR、剰余。同じ文脈は必ず同じ行に着きます。行番号を見ても、元がどの単語だったかは分かりません。</figcaption></figure></div>
+<p>ハッシュには避けられない結果があります。<dfn>衝突</dfn>です。2 つの異なる n-gram が同じ行番号になることを指します。計算してみましょう。このモデルの token 番号は、少なくとも 248,046 まであります（会話終了の token がこの番号です）。<span class="ev ev-code">コード上の事実</span>（<code>src/program/generate.cpp</code>）すると 2-gram だけで 248,046² ≈ 615 億通りもあるのに、1 つのヘッドは約 2000 万行しかありません。平均すると、1 行が 3000 通り以上の 2-gram を引き受けることになります。<span class="ev ev-est">教育用の試算</span> 衝突は、設計の段階で受け入れています。</p>
+<p>それでも使えるのはなぜでしょうか。1 つの考え方はこうです。ヘッドごとに法が違うので、2 つの n-gram があるヘッドで衝突しても、ほかのヘッドではたいてい別々の行に行きます。モデルが受け取る 16 行が全部同じになることは、まずありません。<span class="ev ev-est">教育用の試算</span> シミュレーターでいくつか文脈を試すと、これを自分の目で確かめられます。</p>
+<aside class="primer" id="c11-hash">
+<h3>ハッシュテーブルとハッシュ関数</h3>
+<p>図書館に 100 万冊の本があるとします。書名を 1 冊ずつ探すのは遅すぎます。そこで 1 万個の棚を用意し、書名を「かき混ぜて」0 から 9999 のどれかの数に変え、その番号の棚に本を置きます。探すときも同じようにかき混ぜて、その棚へ直行します。この「かき混ぜる」規則が<dfn>ハッシュ関数</dfn>、それで区切って保存する仕組みが<dfn>ハッシュテーブル</dfn>、1 つ 1 つの区画が<dfn>バケット</dfn>です。</p>
+<p>よいハッシュ関数には 2 つの条件があります。同じ入力は必ず同じバケットに行くこと。違う入力はなるべく均等に散らばること。よくある書き方は「かき混ぜてから余りを取る」です。<code>バケット番号 = h(キー) mod バケット数</code>。バケット数を素数にすると、余りはキーのすべてのビットの影響を受けます。2 のべき乗にすると、余りは下位の数ビットしか見ないので、上位ビットの違いが全部捨てられます。</p>
+<p>区画がキーより少なければ、2 つのキーが同じバケットに入る場面が必ず出ます。これが<dfn>ハッシュ衝突</dfn>です（鳩の巣原理：10 羽の鳩が 9 つの巣に入れば、必ず 2 羽以上入る巣ができます）。普通のハッシュテーブルはキーも保存し、衝突したら 1 つずつ比べたり別の場所に置いたりして、正しく引けるようにします。Strata の n-gram 表はキーを保存しません。衝突は衝突のままにして、複数のヘッドで互いに補います。「値だけ保存し、キーは保存せず、複数のハッシュ関数を使う」というこの考え方は、データ構造の count-min sketch によく似ています。</p>
+<p>小さな落とし穴もあります。混ぜるときに、足し算ではなく XOR を使うのはなぜでしょうか。ソースのコメントが指摘しています。等しい 2 つの積を XOR すると 0 になり、足すと 2 倍になります。結果はまったく違うのに、どちらの書き方でも「もっともらしい」行番号が出てしまいます。<span class="ev ev-code">コード上の事実</span>（<code>ngram.hpp</code>）</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%83%8F%E3%83%83%E3%82%B7%E3%83%A5%E3%83%86%E3%83%BC%E3%83%96%E3%83%AB" target="_blank" rel="noopener noreferrer">Wikipedia：ハッシュテーブル</a> · <a href="https://ja.wikipedia.org/wiki/%E3%83%8F%E3%83%83%E3%82%B7%E3%83%A5%E9%96%A2%E6%95%B0" target="_blank" rel="noopener noreferrer">Wikipedia：ハッシュ関数</a> · <a href="https://ja.wikipedia.org/wiki/%E9%B3%A9%E3%81%AE%E5%B7%A3%E5%8E%9F%E7%90%86" target="_blank" rel="noopener noreferrer">Wikipedia：鳩の巣原理</a> · <a href="https://en.wikipedia.org/wiki/Count%E2%80%93min_sketch" target="_blank" rel="noopener noreferrer">Wikipedia（英語）：Count–min sketch</a></p>
+</aside>
+
+<h2 id="sec-3">11.3 1 行は 90 バイトなのに、なぜ 4 KiB 読むのか</h2>
+<p>行番号が決まったら、次は SSD から取り出します。ここで問題が出ます。SSD はバイト単位ではなく、<dfn>ページ</dfn>単位で読みます。Strata がこの表を読むときは、OS のキャッシュを通さない「ダイレクト読み込み」を使います。読み込みの開始位置、長さ、メモリ上のアドレスは、どれも 4096 バイトの整数倍でなければなりません。<span class="ev ev-code">コード上の事実</span>（<code>include/strata/platform/direct_file.hpp</code>）90 バイトの 1 行がほしいなら、その行がある 4096 バイトのページをまるごと読み込むことになります。図 11-3 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 316" role="img" aria-label="図 11-3：行が 1 ページに収まれば 1 ページ、ページの境界をまたぐと 2 ページ読む。1 つの token で 16 行を取ると、役に立つのは 1440 バイトだけなのに 64 KiB を読む">
+<text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="14" text-anchor="middle">4 KiB ごとにページ分割（図解、行は幅広に描画）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="30" width="180" height="44"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="30" width="180" height="44"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="36" width="30" height="32"/>
+<text class="f-on" fill="#ffffff" x="85" y="57" font-size="14" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="186" y="36" width="30" height="32"/>
+<text class="f-on" fill="#ffffff" x="201" y="57" font-size="14" text-anchor="middle">B</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M200 24V82"/>
+<text class="f-muted" fill="#5c6d66" x="110" y="96" font-size="14" text-anchor="middle">第 k ページ（4096 B）</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="96" font-size="14" text-anchor="middle">第 k+1 ページ（4096 B）</text>
+<text class="f-text" fill="#182f2b" x="20" y="124" font-size="14">行 A：行全体が 1 ページに収まる → 1 ページ読む</text>
+<text class="f-text" fill="#182f2b" x="20" y="148" font-size="14">行 B：ページ境界をまたぐ → 2 ページ読む</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="172" font-size="14">ページ末尾 89 バイト内で始まる行がまたぐ：約 2.2%</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="186" width="380" height="122" rx="9"/>
+<text class="f-text" fill="#182f2b" x="24" y="211" font-size="14" font-weight="600">1 つの token の 16 行がすべてキャッシュにないとき：</text>
+<text class="f-text" fill="#182f2b" x="24" y="236" font-size="14">役に立つバイト数：16 × 90 ＝ 1,440</text>
+<text class="f-text" fill="#182f2b" x="24" y="261" font-size="14">実際の読み込み：16 ページ × 4,096 ＝ 65,536</text>
+<text class="f-warn" fill="#9e5d24" x="24" y="290" font-size="15" font-weight="600">読み込み増幅：65,536 ÷ 1,440 ≈ 45 倍</text>
+</svg><figcaption>図 11-3　ページ単位で読むコスト。1 行は 90 バイトしかないのに、最低でも 1 ページまるごと読みます。ページをまたぐ行は 2 ページ読みます。</figcaption></figure>
+<p>ソースを見ると、1 回の読み込み要求の長さは 2 種類だけです。1 ページか、2 ページ（行がページ境界をまたぐとき）です。<span class="ev ev-code">コード上の事実</span>[S11] またぐ割合は手計算できます。4096 = 45 × 90 + 46 なので、行があるページの最後の 89 バイトのどこかで始まれば、次のページにはみ出します。行の開始位置はページ内でほぼ均等に分布するので、89 ÷ 4096 ≈ 2.2% の行が 2 ページ読みになります。<span class="ev ev-est">教育用の試算</span></p>
+<p>1 つの token の 16 行は、16 個の別々のページに落ちます。<span class="ev ev-code">コード上の事実</span>（<code>ple_reader.hpp</code>）キャッシュがなければ、16 × 4 KiB = 64 KiB を読むのに、本当に役に立つのは 1,440 バイトだけです。読み込み増幅は約 45 倍です。<span class="ev ev-est">教育用の試算</span> 長いプロンプトを読むときは、多くの行が同じページに集まることがあります。Strata は同じページへの要求を 1 回にまとめ、ファイル上の位置順に並べてから読みます。SSD にはなるべく連続読みに近い形で読ませるためです。<span class="ev ev-code">コード上の事実</span>（<code>src/ngram/ple_reader.cpp</code>）</p>
+<p>64 KiB は大した量に聞こえません。本当に困るのは<dfn>レイテンシ</dfn>です。ランダムな小さい読み込みが 16 回あり、そのたびに SSD の応答を待ちます。ソースのコメントには、開発中の測定が残っています（コメントにハードウェアの記載はありません）。初期のメモリマップ方式では、16 行が 16 回の「ページフォールト」になり、1 つずつ順番に待つので、token あたり 2.10〜2.61 ミリ秒かかりました。ダイレクト読み込みに替えて 16 個の要求を一度に出すと、約 311 マイクロ秒になりました。<span class="ev ev-report">上流レポート</span>（<code>ngram.hpp</code> のコメント）同じコメントは、こうも警告しています。プロセス内のどこかでこのファイルがまだメモリマップされていると、ダイレクト読み込みが遅くなり、token あたり 1,575 マイクロ秒まで落ちます。</p>
+
+<h2 id="sec-4">11.4 読んだ行はコピーを残す：8 ウェイセットアソシアティブの行キャッシュ</h2>
+<p>同じ行は何度も使われがちです。「私 好き」のような組み合わせは、1 つの会話に何回も出てきます。上流は固定のコーパスで測定しました。100 万行をキャッシュすると（コメントでは約 95 MB）、読み込みを最大で約 82% 減らせます。長いプロンプトの内部だけでも、20%〜34% の行が重複して現れます。<span class="ev ev-report">上流レポート</span>（<code>ple_reader.hpp</code> のコメント）</p>
+<p>そこで Strata はメモリの中に<dfn>行キャッシュ</dfn>を置いています。既定は 1,048,576 行で、1 行 90 バイトで計算すると約 94 MB です。<span class="ev ev-code">コード上の事実</span>（<code>ngram.hpp</code>）構造は <dfn>8 ウェイセットアソシアティブ</dfn>です。<span class="ev ev-code">コード上の事実</span>[S11]</p>
+<ul>
+<li>キャッシュをたくさんの<strong>セット</strong>に分け、各セットに 8 個の場所（8 <strong>ウェイ</strong>）を置きます。既定の大きさなら 1,048,576 ÷ 8 = 131,072 セットです。</li>
+<li>行番号は、まず 1 回かき混ぜます（固定の大きな奇数を掛け、シフトして XOR します）。そのあとセット数で割った余りを取り、どのセットに属するかを決めます。その行は、このセットの 8 個の場所にしか住めません。</li>
+<li>検索するときは、このセットの 8 個の場所だけを比べます。</li>
+<li>見つからなければ SSD から読みます。読んだ行は、このセットの<dfn>置換ポインタ</dfn>が指す場所に書き込みます。ポインタは 1 つ先に進み、8 番目まで来たら 1 番目に戻ります。</li>
+</ul>
+<p>この「ローテーションするポインタ」は手軽です。各セットに小さなカウンターが 1 つあるだけで、誰が最近使われたかを記録する必要がありません。代わりに、どれがよく使われているかは見ません。ポインタが指した行が追い出されます。これが損になるのはどんなときでしょうか。下のシミュレーターに、いちばん悪い例があります。</p>
+<div class="viz" data-viz="row-cache"><figure class="fig"><svg viewBox="0 0 400 306" role="img" aria-label="図 11-4：2 セット、8 ウェイの行キャッシュ。奇数の行番号 9 個がすべて第 1 セットに集中し、ローテーションするポインタが毎回すぐ使う行を追い出すため、ヒット率は 0。同じ 16 マスの全連想 LRU のヒット率は 75%">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="14">2 セット × 8 ウェイ；セット番号 ＝ 行番号 mod 2（図解）</text>
+<text class="f-text" fill="#182f2b" x="12" y="44" font-size="14">第 0 セット：空のまま</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="59" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="106" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="153" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="247" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="294" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="341" y="52" width="44" height="30" rx="3"/>
+<text class="f-text" fill="#182f2b" x="12" y="108" font-size="14">第 1 セット：奇数行 9 個がここに集中</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="34" y="136" font-size="14" text-anchor="middle">#11</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="59" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="81" y="136" font-size="14" text-anchor="middle">#13</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="106" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="128" y="136" font-size="14" text-anchor="middle">#15</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="153" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="175" y="136" font-size="14" text-anchor="middle">#17</text>
+<rect class="f-accent" fill="#136d5a" x="200" y="116" width="44" height="30" rx="3"/><text class="f-on" fill="#ffffff" x="222" y="136" font-size="14" text-anchor="middle">#03</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="247" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="269" y="136" font-size="14" text-anchor="middle">#05</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="294" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="316" y="136" font-size="14" text-anchor="middle">#07</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="341" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="363" y="136" font-size="14" text-anchor="middle">#09</text>
+<path class="f-warn" fill="#9e5d24" d="M222 150l6 9h-12z"/>
+<text class="f-warn" fill="#9e5d24" x="222" y="176" font-size="14" text-anchor="middle">置換ポインタ</text>
+<text class="f-text" fill="#182f2b" x="12" y="204" font-size="14">アクセス：#01 #03 … #17 を 4 周</text>
+<text class="f-text" fill="#182f2b" x="12" y="226" font-size="14">次の #01 はセットにない →</text>
+<text class="f-text" fill="#182f2b" x="12" y="246" font-size="14">ポインタ位置の #03 を追い出す。</text>
+<text class="f-text" fill="#182f2b" x="12" y="266" font-size="14">その #03 が、まさに次に使う行。</text>
+<text class="f-warn" fill="#9e5d24" x="12" y="294" font-size="14" font-weight="600">ローテーション 0 回ヒット；全連想 LRU 27 回（75%）</text>
+</svg><figcaption>図 11-4　競合ミス。合計 16 マスあれば 9 行は入ります。しかし 9 行とも同じセットに割り当てられ、そのセットは 8 マスしかありません。</figcaption></figure></div>
+<p>この例は、わざと作ったものです。実際の行番号は、かき混ぜてからセットに分けるので、こんなにきれいに 1 つのセットに固まることはまずありません。シミュレーターの「ホットスポット」アクセスも示すように、アクセスが少数の行に集中していれば、ローテーションと LRU のヒット率はほぼ同じです。いちばん単純な方針を選ぶと、検索は毎回 8 マスを見るだけで済み、メモリ使用量も増えません。これは得な取引です。<span class="ev ev-est">教育用の試算</span></p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは「コンピュータアーキテクチャ」で習う CPU キャッシュのセットアソシアティブ構造そのものです。「行番号 → セット番号」はアドレスのセットインデックスのビットに、8 か所の比較は 8 個のタグの比較に当たります。違いは、ここがソフトウェアによる実装で、キャッシュするのが SSD 上の表の行であり、1 マスに 90 バイトが入ることです。</p>
+<aside class="primer" id="c11-set-assoc">
+<h3>ダイレクトマップ、セットアソシアティブ、フルアソシアティブ</h3>
+<p>キャッシュのマスは、キャッシュしたいものの数よりずっと少ないので、先に決まりが必要です。1 つのものは、どのマスに置いてよいのでしょうか。答えは 3 通りあります。図 11-5 を見てください。</p>
+<ul>
+<li><dfn>ダイレクトマップ（直接マップ）</dfn>：1 つのものに、決まったマスが 1 つだけあります。いちばん速く引けます。見るのは 1 マスだけだからです。ただし、よく使う 2 つが同じマスを取り合うと、お互いに追い出し合います。</li>
+<li><dfn>フルアソシアティブ（全連想）</dfn>：どのマスに置いてもかまいません。いちばん柔軟ですが、検索のたびに全部のマスを比べるので、マスが増えると遅すぎます。</li>
+<li><dfn>セットアソシアティブ（セット連想）</dfn>：その中間です。まず規則でセットに分け、セットの中ではどのマスでもかまいません。1 セットが W マスなら、W ウェイセットアソシアティブといいます。</li>
+</ul>
+<p>3 つの構造に対応して、ミスにも 3 種類あります。初めて見るものは必ずキャッシュにありません。これが<strong>強制ミス</strong>です。キャッシュ全体が小さすぎて入り切らないのが<strong>容量ミス</strong>です。全体なら入るのに、1 つのセットの中で入り切らないのが<strong>競合ミス</strong>です。図 11-4 の例は、純粋な競合ミスです。</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="図 11-5：同じ 8 マスの 3 つの整理のしかた。ダイレクトマップは置き場所が 1 つ、2 ウェイのセットアソシアティブは 1 セットに 2 か所、フルアソシアティブは 8 か所のどこでもよい">
+<text class="f-text" fill="#182f2b" x="66" y="18" font-size="15" font-weight="600" text-anchor="middle">直接マップ</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="15" font-weight="600" text-anchor="middle">2 ウェイ・セット連想</text>
+<text class="f-text" fill="#182f2b" x="334" y="18" font-size="15" font-weight="600" text-anchor="middle">全連想</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="30" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="47" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="64" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="81" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="98" width="40" height="15"/>
+<rect class="f-accent" fill="#136d5a" x="46" y="115" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="132" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="149" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="176" y="30" width="23" height="32"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="30" width="23" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="176" y="64" width="23" height="32"/><rect class="f-accent" fill="#136d5a" x="201" y="64" width="23" height="32"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="176" y="98" width="23" height="32"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="98" width="23" height="32"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="176" y="132" width="23" height="32"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="132" width="23" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="30" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="30" width="42" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="64" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="64" width="42" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="98" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="98" width="42" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="132" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="132" width="42" height="32"/>
+<text class="f-muted" fill="#5c6d66" x="66" y="190" font-size="14" text-anchor="middle">13 mod 8 ＝ 5</text>
+<text class="f-muted" fill="#5c6d66" x="66" y="214" font-size="14" text-anchor="middle">5 番のマスだけ</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="190" font-size="14" text-anchor="middle">13 mod 4 ＝ 1</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="214" font-size="14" text-anchor="middle">セット 1 の 2 マス</text>
+<text class="f-muted" fill="#5c6d66" x="334" y="190" font-size="14" text-anchor="middle">計算は不要</text>
+<text class="f-muted" fill="#5c6d66" x="334" y="214" font-size="14" text-anchor="middle">8 マスのどこでも</text>
+</svg><figcaption>図 11-5　同じ 8 マスでも、置き方は 3 通りあります。色の濃い部分が、行番号 13 の住める場所です。Strata の行キャッシュは 131,072 セット × 8 ウェイです。</figcaption></figure>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%82%AD%E3%83%A3%E3%83%83%E3%82%B7%E3%83%A5%E3%83%A1%E3%83%A2%E3%83%AA" target="_blank" rel="noopener noreferrer">Wikipedia：キャッシュメモリ</a> · <a href="https://en.wikipedia.org/wiki/CPU_cache" target="_blank" rel="noopener noreferrer">Wikipedia（英語）：CPU cache</a> · <a href="https://en.wikipedia.org/wiki/Cache_placement_policies" target="_blank" rel="noopener noreferrer">Wikipedia（英語）：Cache placement policies</a> · <a href="https://csapp.cs.cmu.edu/" target="_blank" rel="noopener noreferrer">『Computer Systems: A Programmer's Perspective』（CS:APP）第 6 章</a></p>
+</aside>
+
+<h2 id="sec-5">11.5 モデルを待たせない：早めに要求を出し、別のスレッドで受け取る</h2>
+<p>まだ問題が残っています。311 マイクロ秒で済むとしても、モデルは止まって待ちたくありません。幸い、16 個の行番号は token そのものだけで決まります。token が確定すれば、すぐに行番号を計算できます。そして、この 16 行を使うのは第 1 層に入ってからです。その間には 2 つの仕事があります。token をベクトルに変える処理（埋め込み）と、第 0 層の計算です。この時間が、SSD 読み込みを「隠せる」窓になります。<span class="ev ev-code">コード上の事実</span>（<code>ple_reader.hpp</code>）</p>
+<p>そこで読み込みのインターフェースは 2 つに分かれています。token が出たらすぐ <code>issue</code>（要求を出す）を呼び、すぐに戻ります。第 1 層が使う直前に <code>collect</code>（結果を受け取る）を呼びます。待つ可能性があるのはこのときです。図 11-6 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 274" role="img" aria-label="図 11-6：token が確定したらすぐ 16 個の読み込み要求を出し、埋め込みと第 0 層は普段どおり計算し、第 1 層の前に結果を受け取る。読み込みが十分速ければ待たず、遅ければ差の分だけ待つ">
+<text class="f-muted" fill="#5c6d66" x="8" y="18" font-size="14">時間 →（図解、縮尺は不正確）</text>
+<text class="f-text" fill="#182f2b" x="8" y="52" font-size="14">計算</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="56" y="32" width="70" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="91" y="52" font-size="14" text-anchor="middle">埋め込み</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="126" y="32" width="110" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="181" y="52" font-size="14" text-anchor="middle">第 0 層</text>
+<rect class="f-accent" fill="#136d5a" x="236" y="32" width="156" height="30" rx="4"/>
+<text class="f-on" fill="#ffffff" x="314" y="52" font-size="14" text-anchor="middle">第 1 層：16 行を使う</text>
+<text class="f-text" fill="#182f2b" x="8" y="102" font-size="14">SSD</text>
+<rect class="f-soft" fill="#e5f1df" x="56" y="82" width="180" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="146" y="102" font-size="14" text-anchor="middle">16 個の読込が進行中</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M56 26V120M236 26V120"/>
+<text class="f-muted" fill="#5c6d66" x="56" y="138" font-size="14" text-anchor="middle">issue</text>
+<text class="f-muted" fill="#5c6d66" x="236" y="138" font-size="14" text-anchor="middle">collect</text>
+<text class="f-text" fill="#182f2b" x="8" y="170" font-size="14" font-weight="600">読み込みが遅いとき：</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="56" y="182" width="70" height="26" rx="4"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="126" y="182" width="110" height="26" rx="4"/>
+<rect class="f-warn" fill="#9e5d24" x="236" y="182" width="56" height="26" rx="4"/>
+<text class="f-on" fill="#ffffff" x="264" y="200" font-size="14" text-anchor="middle">待ち</text>
+<rect class="f-accent" fill="#136d5a" x="292" y="182" width="100" height="26" rx="4"/>
+<rect class="f-soft" fill="#e5f1df" x="56" y="214" width="236" height="26" rx="4"/>
+<text class="f-text" fill="#182f2b" x="174" y="232" font-size="14" text-anchor="middle">読込がこの窓より長い</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="264" font-size="14">窓を超えた分だけが待ち時間になる</text>
+</svg><figcaption>図 11-6　先に要求を出し、あとで結果を受け取ります。SSD の読み込みと計算が同時に進み、読み込み時間は埋め込みと第 0 層の裏に「隠れ」ます。窓より遅いときは、差の分だけ待ちます。</figcaption></figure>
+<p>では、誰が SSD とやり取りするのでしょうか。既定では専用の I/O スレッドが 1 本あります。読み込み要求を提出し、「読み終わった」という通知を受け取るのは、このスレッドです。<code>issue</code> を呼ぶ側は、要求をキューに入れて、スレッドを起こすだけです。ソースのコメントによると、こうすれば、ファイルを 1 回読むたびにかかる約 11 マイクロ秒のシステムコールの負担が、メインループにのしかかりません。キューと状態は 1 つのミューテックスで守ります。<span class="ev ev-code">コード上の事実</span>[S11] 同時に飛ばせる読み込み要求は、既定で最大 256 個です。生成のときは token ごとに 16 個で済み、大きなプロンプトのかたまりを読むときに初めて使い切ります。<span class="ev ev-code">コード上の事実</span>（<code>ngram.hpp</code>）</p>
+<p>思わずニヤリとする細部もあります。一部の SSD は、約 250 ミリ秒アイドルが続くと省電力状態に入り、次の読み込みで 50〜150 ミリ秒余計に待たされます。生成中に何ラウンドも続けて行キャッシュにヒットすると、SSD が「眠って」しまうことがあります。そこでリーダーには「起こしておく」機能があります。しばらく読み込み要求がなければ、表のページを適当に 1 つ読んで、SSD を眠らせません。生成プログラムは、既定でこれをオンにします。<span class="ev ev-code">コード上の事実</span>（<code>ple_reader.hpp</code>）この「先に出して、あとで受け取る」非同期の考え方は、第 14 章でしっかり扱います。</p>
+
+<h2 id="sec-6">11.6 手を動かす：自分の手で衝突を起こす</h2>
+<p>この章の 2 つのシミュレーターは役割が違います。「n-gram ハッシュ」では、行番号がどう作られ、衝突がどう起きるかを確かめます。「行キャッシュ」では、セットアソシアティブと置換ポインタの動きを確かめます。まず「行キャッシュ」で「競合」を最後まで走らせ、2 つのヒット率をメモしてください。そのあと「ホットスポット」に替えて比べましょう。</p>
+<p>次に、この章のインタラクティブ実験「キャッシュトレースと競合」を開きます。16 スロット、同じセットに入る 9 個の奇数キーで、「全連想 LRU」と「8 ウェイのローテーション」を比べます。アクセス記録を自分で作ることもできます。先にヒット率を予想してから、実行して確かめましょう。なお、実験もシミュレーターも「行番号の剰余」でセットを決めます。衝突を起こしやすくするためです。Strata は実際には行番号をかき混ぜてからセットに分けるので、こんなに簡単には固まりません。</p>
+<p>終わったら 1 つ考えてみてください。8 ウェイを 1 ウェイ（ダイレクトマップ）に変えたら、同じ「ホットスポット」アクセスでヒット率はどう変わるでしょうか。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>token ごとに、直近 2 個と 3 個の token をハッシュ（掛け算、XOR、剰余）して 16 個の行番号を出し、28.8 GB の表から 16 行を取り出して、2560 個の数につなげます。表にキーは保存しないので、衝突は許されています。</li>
+<li>SSD は 4 KiB のページ単位で読みます。90 バイトの 1 行でもページをまるごと読み、ページをまたぐ行は 2 ページ読みます。本当に難しいのは、ランダム読み 16 回のレイテンシです。帯域幅ではありません。</li>
+<li>読んだ行は 8 ウェイセットアソシアティブの行キャッシュに入り、セットが満杯になったら置換ポインタの位置の行を置き換えます。全体の容量が足りていても、1 つのセットに行が固まると競合ミスが起きます。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「28.8 GB の表が SSD にあるなら、SSD の帯域幅が必ずボトルネックだ。」</strong></p>
+<p>token 1 つが使うのは 1,440 バイトだけです。16 行がすべてキャッシュになく、1 行ごとにページをまるごと読んだとしても、毎秒 90 token を生成して読むのは 64 KiB × 90 ≈ 5.9 MB です。一般的な SSD の毎秒数 GB という連続読みの速度には、3 桁足りません。<span class="ev ev-est">教育用の試算</span> 本当に対処すべきなのはレイテンシです。16 回の小さな読み込みにどれだけ待たされるか、それを計算と重ねられるか、という問題です。ソースのコメントははっきり書いています。これはレイテンシの問題で、帯域幅の問題ではありません。<span class="ev ev-code">コード上の事実</span>（<code>ngram.hpp</code>）</p></div>
+
+<details class="deep"><summary>もう一歩深く：3 種類の「検索」、ドキュメントとコードのずれ、ハッシュの落とし穴、受け入れ指標</summary>
+<h3>3 種類の検索を、1 つの箱に描いてはいけない</h3>
+<p>Strata には、名前に「検索」や「キャッシュ」が付くものが少なくとも 3 つあります。正しさの条件は、まったく違います。<strong>n-gram 表の検索</strong>は、モデルの数値計算の一部です。系列の履歴に依存し、学習済みの表の行を読みます。1 行でも取り違えれば、計算が間違います。<strong>prompt lookup のドラフト</strong>は、すでに出てきた文章から、続く数個の token（最大 5 個）を当てます。当たったかどうかは、最後に大きなモデルが検証します。<span class="ev ev-report">上流レポート</span>[S02] <strong>エキスパートキャッシュ</strong>が決めるのは、あるエキスパートの重みが今 VRAM にあるかどうかだけです。何を計算するかは変えません（第 12 章）。3 つは名前が似ていますが、壊れたときの結果はまったく違います。1 つめが壊れると出力が間違い、2 つめが壊れると遅くなるだけです。3 つめが壊れると「正しく見えて、実は間違い」になるかもしれません。</p>
+<p>PLE が使う 2 つの履歴 token は系列状態の一部で、畳み込み風の履歴バッファもあります。<span class="ev ev-code">コード上の事実</span>[S13] これらは会話とともに保存・復元されます。捨ててよいログではありません。</p>
+<h3>コメント、ドキュメント、コードが合わないところ</h3>
+<p><code>ple_reader.hpp</code> の冒頭のコメントは、行キャッシュが「clock 方式の追い出し」だと述べています。一方、<code>ple_reader.cpp</code> に書いてあるのは、セットごとに 1 つのローテーションポインタです。clock アルゴリズムに必要な「最近使った」ビットはありません。<span class="ev ev-code">コード上の事実</span>[S11] ビットのない clock は順番に回すだけになるので、効果は同じです。それでも、コードを読むときは実装を基準にします。</p>
+<p>もう 1 つ。上流のドキュメントは、この表を「OS のキャッシュ経由で読む」と述べています。<span class="ev ev-report">上流レポート</span>[S02] しかし現在のコードの既定はダイレクト読み込みです。コメントは、この表がメモリを占めてはならないと明記しています。OS のファイルキャッシュも含みます。メモリマップは比較用に残してあるだけです。別に、表全体をメモリにロックするオプションもあります。<span class="ev ev-code">コード上の事実</span>（<code>ngram.hpp</code>、<code>direct_file.hpp</code>）ドキュメントはコードより遅れがちです。こういうずれに出会ったら、既定の設定と呼び出し経路まで追って確かめましょう。</p>
+<h3>ハッシュの間違いは、どれも「正しく見える」</h3>
+<p><code>ngram.hpp</code> のコメントは、落とし穴を並べています。XOR の代わりに足し算を使う。剰余の代わりに「2 のべき乗 − 1 とのビット AND」を使う（法は 2 のべき乗ではないので、別の関数になります）。「会話終了」token による切り捨てを、もっと前の位置まで伝える。欠けた前の文脈は −1 で、番号 0 は本物の token である。現在の token 自身が終了 token のときは、自分の文脈は切り捨てない。前の文脈の配列は「古いものが先」なので、向きを逆に読んでも、もっともらしい行番号が出てしまう。<span class="ev ev-code">コード上の事実</span>（<code>ngram.hpp</code>、<code>src/kernels/ngram.cpp</code>）どれを書き間違えても、行番号は有効な範囲に収まります。範囲チェックでは捕まりません。独立に実装した「正解」と 1 項目ずつ突き合わせるしかありません。</p>
+<p>オフセットの落とし穴もあります。表のデータは、ファイルの 0 バイト目から始まるわけではありません。前にファイルヘッダーがあります。0 から読むと、「ヘッダー ＋ ずれた行」を読むことになり、デコードしても、もっともらしい数が出てきます。そこでリーダーは、実際に解析したファイルヘッダーからオフセットを取り、この表がファイルの残りをちょうど埋めていることも確かめます。<span class="ev ev-code">コード上の事実</span>（<code>ngram.hpp</code>）</p>
+<h3>スレッドを増やしても速くなるとは限らない</h3>
+<p>システムコールを I/O スレッドに移すと、メインループの「提出時間」は短くなります。しかし要求そのものが速くなるとは限りません。モデルがすぐその行のデータを使うなら、待ち時間は場所が変わっただけです。見るべきは 3 つの時刻です。いつ提出したか、いつ完了したか、いつ消費されたか。提出と消費の間に独立した仕事があって、初めて本当の効果が出ます。</p>
+<h3>受け入れでは、どの数を見るか</h3>
+<p>リーダーの統計には、次の項目があります。要求した行数、行キャッシュのヒット数、同じページでまとめた行数、発行した読み込み要求数、読み込んだバイト数、<code>collect</code> がブロックした時間、1 回ごとの読み込みレイテンシ（直近 65,536 回を保持し、パーセンタイルの計算に使います）。<span class="ev ev-code">コード上の事実</span>（<code>ple_reader.hpp</code>）変更を評価するときは、少なくとも次を報告します。行のヒット率、読み込んだページ数、有効バイトと実際に読んだバイトの比、token ごとの待ち時間の p50 と p95。連続読みの帯域幅だけを報告しても、疎でランダムな表引きの性能は説明できません。リーダーは「わざと各読み込みを遅らせる」障害注入にも対応しています。遅い SSD で、システムが待つことを確かめるためです。読み終わっていないデータを、こっそり使っていないかを調べます。</p>
+</details>

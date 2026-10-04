@@ -1,0 +1,217 @@
+<div class="hook"><span class="eyebrow">第 10 章の続きとして</span>
+<p>第 10 章で見たとおり、Strata は最もよく選ばれるエキスパートを VRAM に置き、残りは RAM に残して CPU がその場で計算します。話題が変わると、VRAM の中のエキスパートも入れ替わります。話としてはすっきりしています。ところが、いざコードを書くとなると、疑問が次々に出てきます。最初は誰を置くのか。VRAM には数千個のスロットがあります。48 層でどう分けるのか。いつ入れ替えて、誰を換えるのか。入れ替えの途中で、ちょうどそのエキスパートを使いたいトークンが来たらどうするのか。</p>
+<p>どれもキャッシュの昔からの問題です。この章では、Strata のエキスパートキャッシュを使って、1 つずつ説明していきます。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>エキスパートキャッシュは、最初に過去の頻度順で埋め、層ごとにスロットの区間を割り当てます。その後は 4 ラウンドごとに「減衰カウント」を見て、不人気のものを外し、人気のものを入れます。入れ替えるときは、先にテーブルの項目を外し、バイトのコピーが終わるのを待ってから登録します。GPU が新旧半分ずつのスロットを読むことは、決してありません。</p>
+
+<h2 id="sec-1">12.1 ヒット率：まず分母をはっきりさせる</h2>
+<p>キャッシュのよしあしを見るとき、最初に見る数字は<dfn>ヒット率</dfn>です。使いたいものの何割が、すでにキャッシュに入っているかを表します。エキスパートキャッシュでは、選ばれたエキスパートがちょうど VRAM にあれば「ヒット」で、GPU がそのまま計算します。「ミス」なら、CPU が RAM からそのエキスパートの 1.38 MB を読んで計算します。</p>
+<p>上流の開発者は、このキャッシュを作るときに測定しました。VRAM に 4,105 個のエキスパートを置くと、エキスパート 1 個あたりのヒット率は 0.6447 でした。10 分割のホールドアウト評価（学習に使っていないデータでの評価）での区間は、0.6110 から 0.6750 です。<span class="ev ev-report">上流レポート</span>[S05] 同じコメントには、別の数字も書かれています。1 層の 10 個のエキスパートが<strong>すべて</strong>ヒットする割合は、わずか 0.0456 です。<span class="ev ev-report">上流レポート</span>[S05] どちらも「ヒット率」と呼ばれますが、十数倍も違います。分母が違うからです。図 12-1 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 282" role="img" aria-label="図 12-1：同じ実行で、エキスパート 1 個あたりのヒット率は 64.5%。1 層の 10 個のエキスパートが全部ヒットする割合は 4.6% しかなく、各エキスパートが独立なら約 1.2% になる">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">4,105 スロット、ホールドアウト評価（上流の開発期）</text>
+<text class="f-text" fill="#182f2b" x="20" y="52" font-size="14">エキスパート 1 個あたりのヒット</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="60" width="300" height="22"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="60" width="193" height="22"/>
+<text class="f-text" fill="#182f2b" x="328" y="77" font-size="14">64.5%</text>
+<text class="f-text" fill="#182f2b" x="20" y="114" font-size="14">1 層の 10 個が全ヒット：実測</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="122" width="300" height="22"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="122" width="14" height="22"/>
+<text class="f-text" fill="#182f2b" x="328" y="139" font-size="14">4.6%</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="14">1 層の 10 個が全ヒット：独立なら</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="184" width="300" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="20" y="184" width="4" height="22"/>
+<text class="f-text" fill="#182f2b" x="328" y="201" font-size="14">1.2%</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="232" font-size="14">0.645¹⁰ ≈ 1.2%。実測のほうが高いのは、</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="252" font-size="14">同じ層で選ばれるエキスパートが、</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="272" font-size="14">一緒に熱くなり、一緒に冷めやすいから</text>
+</svg><figcaption>図 12-1　どちらも「ヒット率」と呼ばれる 2 つの数字。エキスパート 1 個あたりで数えると 64.5%、「層全体がヒット」で数えると 4.6% です。ヒット率を報告するときは、先に分母が何かを書かなければなりません。</figcaption></figure>
+<p>この違いは、設計に直接響きます。「層全体がヒット」したときだけ通れる高速な経路があるとします。すると、エキスパート単位の 64.5% は役に立ちません。そういう層は 4.6% しかないからです。上流のコメントはここから、「層」単位で GPU カーネルを設計してはいけない、と結論づけています。同じ層の中で、一部のエキスパートは GPU で、一部は CPU で計算できるようにするべきです。<span class="ev ev-code">コード上の事実</span>[S05]</p>
+<aside class="primer" id="c12-hit-rate">
+<h3>ヒット率とワーキングセット</h3>
+<p><dfn>ヒット率</dfn> ＝ ヒット回数 ÷ アクセス回数。単純に見えますが、難しいのは「1 回のアクセス」の数え方です。トークン数で数えるのか。「層 × トークン」で数えるのか。エキスパートの呼び出し数か。重複を除いたエキスパート数か。それともバイト数か。分母が変わると、数字は 1 桁違うこともあります。ヒット率を報告するときは、キャッシュの大きさ、コールドスタートかウォームアップ後か、どのデータで測ったかも書きましょう。</p>
+<p>役に立つ考え方が<dfn>ワーキングセット</dfn>です。ごく最近のあいだに実際に使われたものの集まりを指します。たとえば、直近 100 トークンのあいだに第 7 層で選ばれたエキスパートが 60 種類あったとします。この 60 個が、第 7 層の「今のワーキングセット」です。キャッシュにワーキングセットが収まれば、ヒット率は高くなります。収まらないと、入れたそばから追い出され、同じものを何度も運ぶことになります。これを<dfn>スラッシング</dfn>と呼びます。</p>
+<p>ワーキングセットは、時間とともに動いていきます。コードを書くときによく使うエキスパートと、散文を書くときに使うエキスパートは違います。だからキャッシュは、2 つの問いに答える必要があります。今のワーキングセットは誰か（統計）。その変化にどうついていくか（置換方式、12.4 を参照）。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%83%AF%E3%83%BC%E3%82%AD%E3%83%B3%E3%82%B0%E3%82%BB%E3%83%83%E3%83%88" target="_blank" rel="noopener noreferrer">Wikipedia：ワーキングセット</a> · <a href="https://en.wikipedia.org/wiki/Working_set" target="_blank" rel="noopener noreferrer">Wikipedia: Working set</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-beyondphys-policy.pdf" target="_blank" rel="noopener noreferrer">OSTEP 第 22 章：スワップのポリシー</a></p>
+</aside>
+
+<h2 id="sec-2">12.2 最初は誰を置くか：過去の頻度で名簿を作る</h2>
+<p>いちばん手軽な出だしは「先着順」です。動き出したあと、最初に選ばれた数千個の異なるエキスパートが順に席を取り、いっぱいになったらそれ以上は変えません。問題は、最初に誰と出会うかが、この会話の最初のプロンプトだけで決まってしまうことです。上流で測ったところ、この方法のヒット率は 0.4864 しかありませんでした。<span class="ev ev-report">上流レポート</span>[S05]</p>
+<p>Strata のやり方は、あらかじめ<dfn>エキスパートプロファイル</dfn>（profile）を用意することです。長いアクセス記録の上で、各（層、エキスパート）が選ばれた頻度を数え、高い順に名簿にします。最初は、名簿どおりに VRAM を埋めます。同じ 4,105 スロットで、ホールドアウト評価のヒット率は 0.6447 でした。<span class="ev ev-report">上流レポート</span>[S05] 図 12-2 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="図 12-2：最初が先着順だとヒット率は 0.4864、頻度の名簿で埋めると 0.6447">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">同じスロット数で、2 通りの出だし（上流の開発期の測定）</text>
+<text class="f-text" fill="#182f2b" x="20" y="52" font-size="14">先着順：最初の S 個の異なるエキスパート</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="60" width="300" height="24"/>
+<rect class="f-warn" fill="#9e5d24" x="20" y="60" width="146" height="24"/>
+<text class="f-text" fill="#182f2b" x="328" y="78" font-size="14">0.486</text>
+<text class="f-text" fill="#182f2b" x="20" y="116" font-size="14">頻度の名簿（profile）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="124" width="300" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="124" width="193" height="24"/>
+<text class="f-text" fill="#182f2b" x="328" y="142" font-size="14">0.645</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="180" font-size="14">CPU が計算するエキスパート数は「1 − ヒット率」に比例</text>
+</svg><figcaption>図 12-2　最初に誰を置くかで、結果は大きく変わります。名簿はある 1 本のアクセス記録から作り、評価には見たことのない別の記録を使います。</figcaption></figure>
+<p>コメントが特に強調している点があります。名簿はファイルから読み込む作りなので、「このプロンプトで名簿を作り、別のプロンプトで採点する」ことができます。そうして初めて、名簿が一般化できるかどうかが分かります。<span class="ev ev-code">コード上の事実</span>[S05] 同じ記録で名簿を作り、採点もすると、カンニングありの試験と同じで、点が高く出てしまいます。コメントによれば、README はかつて 0.6573 を公表していました。それは「サンプル内」で測った数字です。ホールドアウト評価の 0.6447 が本当の値です。<span class="ev ev-report">上流レポート</span>[S05]</p>
+<p class="bridge"><strong>機械学習を学んだ人へ：</strong>これは、学習用データとテスト用データを分ける話と同じです。キャッシュ方式の「人気者の集計」も一種のフィッティングなので、過学習します。</p>
+
+<h2 id="sec-3">12.3 前のほうの層に独占させない：層ごとにスロットの区間を割り当てる</h2>
+<p>スロットを 48 層にどう分けるか。上流はここで、教訓の多い落とし穴にはまりました。初期の受け入れルールは、全部の層で 1 つのカウンタを共有し、到着順にスロットを配って、なくなったら終わり、というものでした。1 つのトークンは第 0 層から後ろへ進み、各層で 10 個のエキスパートを選びます。スロットは 256 個なので、第 26 層あたりで配り終えてしまいます。後ろの層はいつまでもスロットをもらえず、実行のあいだじゅう、キャッシュは前のほうの数層でしか働きませんでした。<span class="ev ev-code">コード上の事実</span>[S05]</p>
+<figure class="fig"><svg viewBox="0 0 400 286" role="img" aria-label="図 12-3：全体で先着順にすると、256 個のスロットは最初の 26 層で使い切られ、ヒット率は 2.97%。層ごとに区間を割り当てると、同じ記録での試算で 1 層 8 スロットなら 21.4% になる">
+<text class="f-text" fill="#182f2b" x="20" y="20" font-size="15" font-weight="600">全体で先着順</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="34" width="190" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="210" y="34" width="170" height="40"/>
+<text class="f-on" fill="#ffffff" x="115" y="59" font-size="14" text-anchor="middle">第 0〜25 層で満杯</text>
+<text class="f-muted" fill="#5c6d66" x="295" y="59" font-size="14" text-anchor="middle">後ろの層：0 個</text>
+<text class="f-text" fill="#182f2b" x="20" y="98" font-size="14">実測 256 スロット：1,781 ÷ 60,000 ＝ 2.97%</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="15" font-weight="600">層ごとに分ける：各層は自分の区間だけ使う</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="160" width="360" height="40"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M65 160V200M110 160V200M155 160V200M200 160V200M245 160V200M290 160V200M335 160V200"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="222" font-size="14">第 0 層 ……………………… 第 47 層</text>
+<text class="f-text" fill="#182f2b" x="20" y="250" font-size="14">同じ記録での試算：1 層 8 スロット → 21.4%</text>
+<text class="f-text" fill="#182f2b" x="20" y="274" font-size="14">1 層 64 スロット → 70.4%</text>
+</svg><figcaption>図 12-3　キャッシュに足りなかったのは容量ではなく、公平さです。全体で先着順にすると、スロットが全部、いちばん早く出てきた数層に配られてしまいます。</figcaption></figure>
+<p>コメントの数字は目を引きます。256 スロットで走らせると、ヒットは 1,781 回、アクセスは 60,000 回で、ヒット率は 2.97% でした。一方、同じルーティング記録の上で試算すると、1 層に 8 スロット与えるだけで 21.4%、1 層に 64 スロットで 70.4% になります。コメントの結論は、キャッシュに足りなかったことは一度もなく、足りないのは公平な割り当てだ、というものです。<span class="ev ev-report">上流レポート</span>[S05]</p>
+<p>直し方は単純です。層ごとの受け入れをオンにすると、第 l 層は第 l·q から (l+1)·q までのスロットしか使えません。q は総スロット数を層数で割った値で、最後の層は余りをもらいます。<span class="ev ev-code">コード上の事実</span>[S05] この修正で変わるのは「誰がどのスロットを使えるか」だけで、ほかは変わりません。直し方より、ここでの教訓のほうが大切です。ヒット率が低いのは、キャッシュが小さすぎるせいとは限りません。まず、割り当てがアクセス順と絡み合っていないかを見ましょう。</p>
+
+<h2 id="sec-4">12.4 人気は変わる：LRU、LFU、減衰カウント</h2>
+<p>名簿が決めるのは出だしだけです。話しているうちに話題が変わり、人気のエキスパートも変わります。キャッシュがついていくには、「誰を追い出すか」を決めなければなりません。これを<dfn>置換方式</dfn>と呼びます。まず、昔からある方式を見ましょう。</p>
+<aside class="primer" id="c12-cache-replacement">
+<h3>キャッシュの置換方式：LRU、LFU、そのほか</h3>
+<p>キャッシュがいっぱいのとき、新しいものを入れるには、古いものに出ていってもらうしかありません。誰に出てもらうか。</p>
+<ul>
+<li><dfn>OPT</dfn>（最適方式）：「次に使われるのがいちばん遅い」ものを追い出します。理論上の最高成績ですが、未来を知らなければならないので、比べる基準としてしか使えません。</li>
+<li><dfn>FIFO</dfn>（先入れ先出し）：いちばん早く入ったものを追い出します。単純ですが、よく使う古いものまで追い出してしまいます。第 11 章のローテーション用ポインタは、グループごとに 1 つの FIFO です。</li>
+<li><dfn>LRU</dfn>（最近最も使われていないものを追い出す）：いちばん長く使われていないものを追い出します。「最近使ったものは、すぐまた使う」という考えです。反応は速いのですが、「1 回だけの走査」に弱く、1 回しか使わない不人気データの列が来ると、人気のものが全部押し出されます。</li>
+<li><dfn>LFU</dfn>（使用頻度が最も低いものを追い出す）：通算の回数がいちばん少ないものを追い出します。たまに来る不人気データには強いのですが、覚えすぎます。過去に大きな回数をためた昔の人気者は、話題が変わっても居座ります。</li>
+<li><dfn>CLOCK</dfn>（セカンドチャンス）：各マスに「最近使った」印をつけます。ポインタが 1 周するあいだ、印のあるものは印を消して見逃し、印のないものを入れ替えます。ごく小さなコストで LRU に近づけられるので、OS のページ置換でよく使われます。</li>
+</ul>
+<p>LFU の欠点には、昔からの定番の対策があります。回数を時間とともに<dfn>減衰</dfn>させるのです。たとえば、一定時間ごとに全部の回数へ 0.7 を掛けます。すると昔の手柄は少しずつ色あせ、新しい人気者が昔の人気者を追い越せるようになります。この種の方式は「エイジング」（aging）とも呼ばれます。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%82%AD%E3%83%A3%E3%83%83%E3%82%B7%E3%83%A5%E3%82%A2%E3%83%AB%E3%82%B4%E3%83%AA%E3%82%BA%E3%83%A0" target="_blank" rel="noopener noreferrer">Wikipedia：キャッシュアルゴリズム</a> · <a href="https://en.wikipedia.org/wiki/Cache_replacement_policies" target="_blank" rel="noopener noreferrer">Wikipedia: Cache replacement policies</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-beyondphys-policy.pdf" target="_blank" rel="noopener noreferrer">OSTEP 第 22 章：スワップのポリシー</a></p>
+</aside>
+<p>Strata のエキスパートキャッシュが選んだのは、まさに「減衰カウント」です。ルールは生成プログラムの中にあり、いくつかの数字が対応しています。<span class="ev ev-code">コード上の事実</span>（<code>src/program/generate.cpp</code>、<code>src/core/expert_source.cpp</code>）</p>
+<ol>
+<li><strong>回数を記録する</strong>：各層で、エキスパートが選ばれるたびに、そのカウントに 1 を足します。VRAM にいるかどうかは関係ありません。</li>
+<li><strong>定期的に調整する</strong>：デフォルトでは 4 ラウンドごとに調整します。1 ラウンドとは、大きなモデルが前向き計算を 1 回行い、ドラフトの 1 バッチを検証して、トークンを 1 個または数個出すことです。</li>
+<li><strong>資格を満たしたら入れ替える</strong>：同じ層の中で、VRAM にいないエキスパートは、カウントが 2 以上になって初めて候補になります。候補が、VRAM の中でいちばん冷たいエキスパートより 1.5 以上多いときだけ、本当に交代します。1 回の調整で入れ替えるのは最大 96 個です。</li>
+<li><strong>全体を色あせさせる</strong>：調整が終わったら、全部のカウントに 0.7 を掛けます。</li>
+</ol>
+<p>0.7 を掛けると、どうなるでしょうか。あるエキスパートがもう選ばれなくなると、そのカウントは約 2 回の調整ごとに半分になります（0.7² ≈ 0.49）。逆に、ある 1 回の「選ばれた」は、あとの色あせを全部足すと、合計で 1 + 0.7 + 0.49 + … = 1 ÷ (1 − 0.7) ≈ 3.3 の寄与になります。ソースのコメントは、この和を使って累積の「熱さ」を説明しています。<span class="ev ev-est">教育用の試算</span> 図 12-4 に、色あせていく様子を描きました。</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="図 12-4：あるエキスパートが選ばれなくなると、カウントは調整のたびに 0.7 倍になる。10、7、4.9、3.4、2.4、1.7 と下がり、5 回目の調整のあとに 2 を下回る">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">選ばれなくなったエキスパートのカウント</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="4 3" d="M30 182H390"/>
+<text class="f-warn" fill="#9e5d24" x="390" y="44" font-size="14" text-anchor="end">点線：資格ライン 2</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="86" width="40" height="120"/>
+<rect class="f-accent" fill="#136d5a" x="100" y="122" width="40" height="84"/>
+<rect class="f-accent" fill="#136d5a" x="160" y="147" width="40" height="59"/>
+<rect class="f-accent" fill="#136d5a" x="220" y="165" width="40" height="41"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="280" y="177" width="40" height="29"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="340" y="186" width="40" height="20"/>
+<text class="f-text" fill="#182f2b" x="60" y="78" font-size="14" text-anchor="middle">10</text>
+<text class="f-text" fill="#182f2b" x="120" y="114" font-size="14" text-anchor="middle">7</text>
+<text class="f-text" fill="#182f2b" x="180" y="139" font-size="14" text-anchor="middle">4.9</text>
+<text class="f-text" fill="#182f2b" x="240" y="157" font-size="14" text-anchor="middle">3.4</text>
+<text class="f-text" fill="#182f2b" x="300" y="169" font-size="14" text-anchor="middle">2.4</text>
+<text class="f-text" fill="#182f2b" x="360" y="168" font-size="14" text-anchor="middle">1.7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M30 206H390"/>
+<text class="f-muted" fill="#5c6d66" x="60" y="226" font-size="14" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="120" y="226" font-size="14" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="180" y="226" font-size="14" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="240" y="226" font-size="14" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="226" font-size="14" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="360" y="226" font-size="14" text-anchor="middle">5</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="246" font-size="14" text-anchor="middle">調整の回数（デフォルトは 4 ラウンドごと）</text>
+</svg><figcaption>図 12-4　調整のたびに 0.7 倍になり、約 2 回で半分になります。昔の人気者は少しずつ色あせ、新しい人気者がそれを追い越せるようになります。<span class="ev ev-est">教育用の試算</span></figcaption></figure>
+<p>この規則は、LRU や LFU と比べて、何がよいのでしょうか。下のシミュレーターでは、1 つの層を、エキスパート 24 個、各トークンが 4 個を選び、VRAM に置けるのは 6 個だけ、という小さな世界にします。3 つの方式が、同じルーティングの列を見ます。30 個目のトークンから話題が変わります。「不人気の割り込み」を入れることもできます。</p>
+<div class="viz" data-viz="cache-race"><figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="図 12-5：教育モデルでの 3 つの方式の結果。総ヒット率は LRU 40%、LFU 37%、減衰カウント 44%。話題が変わった後の最初の 15 トークンのヒット数は、LRU 26 回、LFU 5 回、減衰カウント 10 回">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">教育モデル：60 トークン、30 個目から話題が変わる</text>
+<text class="f-text" fill="#182f2b" x="20" y="50" font-size="14" font-weight="600">総ヒット率</text>
+<text class="f-text" fill="#182f2b" x="20" y="78" font-size="14">LRU</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="64" width="160" height="18"/>
+<text class="f-text" fill="#182f2b" x="278" y="78" font-size="14">40%</text>
+<text class="f-text" fill="#182f2b" x="20" y="104" font-size="14">LFU</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="90" width="148" height="18"/>
+<text class="f-text" fill="#182f2b" x="266" y="104" font-size="14">37%</text>
+<text class="f-text" fill="#182f2b" x="20" y="130" font-size="14">減衰カウント</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="116" width="176" height="18"/>
+<text class="f-text" fill="#182f2b" x="294" y="130" font-size="14">44%</text>
+<text class="f-text" fill="#182f2b" x="20" y="166" font-size="14" font-weight="600">話題が変わった後の最初の 15 トークンのヒット数</text>
+<text class="f-text" fill="#182f2b" x="20" y="194" font-size="14">LRU</text>
+<rect class="f-warn" fill="#9e5d24" x="110" y="180" width="156" height="18"/>
+<text class="f-text" fill="#182f2b" x="274" y="194" font-size="14">26</text>
+<text class="f-text" fill="#182f2b" x="20" y="220" font-size="14">LFU</text>
+<rect class="f-warn" fill="#9e5d24" x="110" y="206" width="30" height="18"/>
+<text class="f-text" fill="#182f2b" x="148" y="220" font-size="14">5</text>
+<text class="f-text" fill="#182f2b" x="20" y="246" font-size="14">減衰カウント</text>
+<rect class="f-warn" fill="#9e5d24" x="110" y="232" width="60" height="18"/>
+<text class="f-text" fill="#182f2b" x="178" y="246" font-size="14">10</text>
+</svg><figcaption>図 12-5　LRU は反応がいちばん速く、LFU は古い話題でためた回数に引きずられ、減衰カウントは数歩遅れて追いつき、総合点がいちばん高くなります。数字はこの本の教育モデルのもので、Strata の実測ではありません。</figcaption></figure></div>
+<p>シミュレーターは 1 層、エキスパート 24 個だけなので、数字をそのまま Strata に持ち込むことはできません。見てほしいのは、それぞれの性格です。LRU は敏感ですが、不人気データにかき乱されやすい。LFU は安定していますが、忘れません。減衰カウントは「定期調整 ＋ しきい値 ＋ 色あせ」で、その中間をとります。ミスのたびに入れ替えず、4 ラウンドごとにしか調整しないのはなぜでしょうか。入れ替えのたびに、PCIe 経由で 1.38 MB を運びます。頻繁に出し入れすること自体にコストがかかるからです。2 つのしきい値（2 回以上、1.5 のリード）を設けたのも、わずかな差のために運ばないためです。<span class="ev ev-est">教育用の試算</span></p>
+<p>Strata には、実はキャッシュがいくつもあり、それぞれ別の方式を使っています。図 12-6 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="図 12-6：Strata の 3 つのキャッシュと 3 つの置換方式。PLE 行キャッシュはグループ内ローテーション、エキスパートキャッシュは減衰カウント、長いコンテキストの KV ページは CLOCK を使う">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="8" width="380" height="84" rx="9"/>
+<text class="f-text" fill="#182f2b" x="24" y="34" font-size="15" font-weight="600">PLE 行キャッシュ（RAM）</text>
+<text class="f-text" fill="#182f2b" x="24" y="58" font-size="14">方式：グループごとに 1 つのローテーション用ポインタ</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="80" font-size="14">1 行はたった 90 バイト。検索を速くしたい</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="102" width="380" height="84" rx="9"/>
+<text class="f-on" fill="#ffffff" x="24" y="128" font-size="15" font-weight="600">エキスパートキャッシュ（VRAM）</text>
+<text class="f-on" fill="#ffffff" x="24" y="152" font-size="14">方式：減衰カウント、4 ラウンドごとに調整</text>
+<text class="f-on" fill="#ffffff" x="24" y="174" font-size="14">入れ替え 1 回で 1.38 MB 移動。むやみに換えない</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="196" width="380" height="84" rx="9"/>
+<text class="f-text" fill="#182f2b" x="24" y="222" font-size="15" font-weight="600">KV ページ（VRAM、64K 以上の長い入力）</text>
+<text class="f-text" fill="#182f2b" x="24" y="246" font-size="14">方式：CLOCK（セカンドチャンス）</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="268" font-size="14">毎ステップ GPU 上で、入れ替えるページを選ぶ</text>
+</svg><figcaption>図 12-6　同じエンジンの中に、3 種類のキャッシュと 3 種類の方式があります。何を入れるか、どのくらいの大きさか、どのくらいの頻度で変わるか、どこで判断するか。これらが方式を決めます。</figcaption></figure>
+<p>長いコンテキストの KV ページキャッシュ（第 17 章で詳しく扱います）は、VRAM にページの一部を置きます。毎ステップ、GPU 上の 1 つのスレッドブロックが CLOCK で走査して入れ替えるスロットを選び、足りないページをピン留めメモリからコピーしてきます。<span class="ev ev-code">コード上の事実</span>（<code>include/strata/kernels/kv_stream.hpp</code>）上流のドキュメントによると、コンテキストが 64K 以上で、RAM にも収まるとき、インストーラーがこの機能をオンにします。<span class="ev ev-report">上流レポート</span>[S03]</p>
+
+<h2 id="sec-5">12.5 入れ替えるとき：先にコピー、あとで登録</h2>
+<p>誰を換えるかが決まったら、実際に入れ替えます。この段階が、「問題なさそうに見える」エラーのいちばん出やすいところです。エキスパートキャッシュには 2 つのものがあります。1 つは<dfn>常駐テーブル</dfn>で、各（層、エキスパート）がどのスロットにいるか、または VRAM にいないことを記録します。もう 1 つは、スロットの中の本物のバイトです。GPU が見るのはテーブルだけです。テーブルに「#112 はスロット 5」とあれば、スロット 5 を読みにいきます。</p>
+<p>コピーは<dfn>非同期</dfn>です。コピーを始める関数はすぐ戻り、バイトはまだ PCIe の上を流れています（第 14 章で詳しく扱います）。先にテーブルへ「#112 はスロット 5」と登録してからコピーを始めると、その間にちょうど #112 を選んだトークンが来たとき、GPU は半分新しく半分古いバイトを読んでしまいます。下のシミュレーターは、この過程をゆっくり見せます。</p>
+<div class="viz" data-viz="expert-swap"><figure class="fig"><svg viewBox="0 0 400 318" role="img" aria-label="図 12-7：入れ替え 1 回の正しい順序。まず外すエキスパートのテーブル項目を外し、次に非同期コピー、コピー完了イベントを待ち、最後に入れるエキスパートを登録する">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="8" width="360" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="36" y="31" font-size="15" font-weight="600">① #331 を外す：項目を「なし」に</text>
+<text class="f-muted" fill="#5c6d66" x="36" y="52" font-size="14">以後 #331 が選ばれたら CPU が計算</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="72" width="360" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="36" y="95" font-size="15" font-weight="600">② 非同期コピー #112 → スロット 5</text>
+<text class="f-muted" fill="#5c6d66" x="36" y="116" font-size="14">途中で #112 が選ばれても CPU が計算</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="136" width="360" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="36" y="159" font-size="15" font-weight="600">③ コピー完了イベントが届く</text>
+<text class="f-muted" fill="#5c6d66" x="36" y="180" font-size="14">スロット 5 に #112 が丸ごと入った</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="200" width="360" height="54" rx="9"/>
+<text class="f-on" fill="#ffffff" x="36" y="223" font-size="15" font-weight="600">④ #112 → スロット 5 を登録</text>
+<text class="f-on" fill="#ffffff" x="36" y="244" font-size="14">以後 #112 が選ばれたら GPU が計算</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="284" font-size="14">順序が逆だと、コピーの途中で GPU が</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="304" font-size="14">新旧が半分ずつ混ざったバイトを読んでしまう</text>
+</svg><figcaption>図 12-7　テーブルの項目は、バイトが全部届いてからスロットを指します。外すエキスパートは先にテーブルから外し、入れるエキスパートはあとで登録します。</figcaption></figure></div>
+<p>Strata の適応キャッシュは、まさにこの順序で動きます。入れ替えを始めた瞬間に、外すエキスパートをテーブル上で「VRAM にいない」にします。ソースのコメントには「この時点から追い出し済み：その間は CPU が計算する」と書かれています。入れるエキスパートは、まず「保留」リストに記録します。コピーのあとに記録した完了イベントが届いたら、はじめてテーブルに書き込みます。<span class="ev ev-code">コード上の事実</span>（<code>src/program/generate.cpp</code>）</p>
+<p>もっと見つけにくいバージョンもあります。上流は以前、「コピーが終わったか」を待たずに問い合わせ、終わっていれば登録し、終わっていなければ次回に回していました。すると、同じエキスパートが、あるラウンドでは GPU で、次のラウンドでは CPU で計算されます。コピーが速いか遅いかしだいです。GPU と CPU は丸め方が違うので、同じプロンプトでも、2 回の実行で答えが変わることがあります。いまはデフォルトを変えて、コピーが着地するのを待ってから次のラウンドを始めます。<span class="ev ev-code">コード上の事実</span>（<code>src/program/generate.cpp</code>）上流のドキュメントも注意しています。バイト単位で同じ結果を繰り返し得たいなら、適応入れ替えなど、いくつかのスイッチをオフにする必要があります。<span class="ev ev-report">上流レポート</span>[S03]</p>
+<p>低メモリの「常駐」モードには、さらに制約が加わります。RAM には、グラフィックスカードにないエキスパートだけを置きます。外すエキスパートは、まずバイトを VRAM から RAM にコピーし戻し、入れるエキスパートが空けた場所に収めます。そうすれば、RAM のコピーは、カードに足りない分を「ちょうど補う」状態を保てます。<span class="ev ev-report">上流レポート</span>[S03] インターフェースには、このための専用の関数があります。<span class="ev ev-code">コード上の事実</span>[S06]</p>
+<p class="bridge"><strong>OS を学んだ人へ：</strong>これは、ページ置換で「まずページテーブルの項目を無効にし、書き戻しが終わってからページフレームを再利用する」のと同じ理屈です。対応関係を変えるたびに、それが頼っているデータが本当にそろうまで待たなければなりません。</p>
+<p>スロットの中身が、テーブルの言うエキスパートだと、どうやって証明するのでしょうか。キャッシュには、バイト単位で比べる関数があります。スロットの内容をホストに読み戻し、RAM にある原本と 1 バイトずつ比べます。コメントによれば、これは「キャッシュが、自分の言うエキスパートを持っていることを証明できる唯一のもの」です。テーブルのインデックスは合っているのにバイトが間違っていると、もっともらしいトークンが出てきます。このプロジェクトが最も痛い目にあったのは、この種のエラーでした。<span class="ev ev-code">コード上の事実</span>[S05]</p>
+
+<h2 id="sec-6">12.6 手を動かす：3 つの方式をレースさせる</h2>
+<p>まず「3 つの置換方式のレース」で 60 トークンを走らせます。30 個目のトークンのあと、3 本のヒットの小さなマスがどう見えるかを、メモしましょう。次に「不人気の割り込み」をオンにして走らせ直し、誰のスロットがかき乱されるかを見ます。そのあと「入れ替え 1 回」で、誤った順序を一度たどり、「ラベルは正しいのにバイトが誤り」がなぜいちばん危険なのかを体で覚えましょう。</p>
+<p>最後に、この章のインタラクティブ実験「キャッシュの軌跡と衝突」を開きます。同じアクセス列で、LRU、LFU、FIFO、8 ウェイのローテーションを比べます。実験の中の方式は、どれも教科書どおりのものです。Strata の減衰カウントではありません。練習するのは、次の 2 つです。同じ容量でも、方式が違うとヒット率がどれだけ変わるか。そして、特定の方式だけが損をするアクセス列を、どう作るか。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>ヒット率は、まず分母を言います。エキスパート単位なら 64.5%、「層全体がヒット」なら 4.6% だけです。名簿の評価には、見たことのない記録を使います。</li>
+<li>最初は頻度の名簿で埋め、層ごとにスロットの区間を割り当てます。全体で先着順にすると、前のほうの層がスロットを独占し、ヒット率が 3% まで落ちます。</li>
+<li>その後は 4 ラウンドごとに、減衰カウントで入れ替えます（2 回以上、リード 1.5、全体に 0.7 を掛ける）。入れ替えるときは、先にテーブルの項目を外し、コピーの完了を待ってから登録します。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「ヒット率が低いのは、キャッシュが小さいから。VRAM を増やせばよい。」</strong></p>
+<p>そうとは限りません。上流の初期版は、256 スロットでヒット率が 2.97% しかありませんでした。同じアクセス記録の上で、1 層に 8 スロットを割り当てるだけで 21.4% になります。<span class="ev ev-report">上流レポート</span>[S05] 容量はほとんど変わっていません。変わったのは「スロットを誰に渡すか」です。ヒット率が低いときは、先に、割り当てが公平か、方式がアクセス順と絡み合っていないか、統計の取り方が正しいかを調べましょう。容量を増やす話は、そのあとです。</p></div>
+
+<details class="deep"><summary>もう一歩深く：昔のコメント、正しさの不変条件、評価の方法</summary>
+<h3>「キャッシュは追い出さない」と「キャッシュは入れ替える」は、どう両立するのか</h3>
+<p><code>expert_cache.hpp</code> の冒頭には、このファイルはスロットの保存と常駐テーブルだけで、まだ計算は一切しない、だからキャッシュをオンにしても遅くなるだけだ、と書かれています。<span class="ev ev-code">コード上の事実</span>[S05] 受け入れ関数にも「追い出さない」とはっきり書かれています。追い出しの方式は実測で決めるべきで、仮の方式を置くと、後ろの設計がすべて間違ったヒット率を前提にしてしまうからです。<span class="ev ev-code">コード上の事実</span>[S05] これらのコメントは開発の初期に書かれました。いまのエンジンは、確かにエキスパートを入れ替えます。ただし入れ替えの動作はこのクラスの中ではありません。生成プログラムが減衰カウントで入れ替えのペアを選び、新しいエキスパートのバイトを古いエキスパートのスロットに直接コピーして、常駐テーブルを書き換えます。コードを読むときは、「このクラスがしないこと」と「システム全体がしないこと」を区別しましょう。</p>
+<h3>入れ替え 1 回で守るべき条件</h3>
+<ul>
+<li>テーブル上の有効な項目は、必ず、丸ごと埋まったスロットを指す。</li>
+<li>計算が読んでいる最中のスロットを、上書きしてはいけない。</li>
+<li>外したら、古い対応関係はすぐ無効になる。入れる対応関係は、バイトが着地してから有効になる。</li>
+<li>大きさの違うエキスパートのブロック（量子化の形式によっては層ごとに違う）が、スロットの境界をまたいではいけない。スロットがある層の大きさで分けられたら、ほかの層に回さない。<span class="ev ev-code">コード上の事実</span>[S05]</li>
+<li>常駐モードでは、外すエキスパートのバイトを先に RAM へコピーし戻す。そうすると、RAM のコピーは、カードに足りない分を「ちょうど補う」状態を保てる。</li>
+</ul>
+<h3>同期か非同期か：起動時の充填がブロックする理由</h3>
+<p>ふだんの充填は非同期です。コピーと、それを読むカーネルが同じストリームに並んでいるので、順序が自然に成り立つからです。起動時に名簿どおり埋めるときは、この保証がありません。元データは普通のメモリにあり、バイト単位の検証は別の「レガシーストリーム」で読み戻します。レガシーストリームとノンブロッキングストリームのあいだには、順序の関係がありません。最初の版は非同期の充填を使いました。すると検証が「スロット 0 の 0 バイト目から原本と違う」と報告し、実行を拒否しました。コメントによれば、これは検証が職務を果たしているのです。そこで、専用のブロックする充填ができました。<span class="ev ev-code">コード上の事実</span>[S05]</p>
+<h3>名簿は保存できる</h3>
+<p>上流のドキュメントによると、エンジン 0.1.36 から、任意の機能があります。適応キャッシュが学んだ順位を新しい名簿として保存し、次の起動ではそこから始めるのです。並べ方は、いま VRAM にいるものが先、次にこの実行の累積の熱さ、最後に元の名簿での位置です。<span class="ev ev-code">コード上の事実</span>[S05] ファイルを書くときは、まず一時ファイルに書き、書き終えてから名前を変えて上書きします。だからプロセスが落ちても、半端なファイルは残りません。<span class="ev ev-code">コード上の事実</span>[S05]</p>
+<h3>方式を公平に比べるには</h3>
+<p>キャッシュ方式を報告するときは、少なくとも次を書きましょう。キャッシュの総容量と層ごとの割り当て、ヒット率の分母、コールドスタートかウォームアップ後か、アクセス記録の出どころ、名簿と評価に別の記録を使ったか、話題が変わってからどのくらいで回復するか、1 秒あたりの入れ替えで何バイト出入りするか。「ヒット率 70%」の一言だけでは、再現もできず、VRAM の予算の見積もりにも使えません。</p>
+</details>

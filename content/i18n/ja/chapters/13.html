@@ -1,0 +1,177 @@
+<div class="hook"><span class="eyebrow">直感に反する話</span>
+<p>Strata は GPU と CPU を同時に働かせます。作業員が 2 人になるのだから、ぐっと速くなりそうです。ところが上流の開発記録に、こんな出来事があります。CPU が 1 トークンごとにこなすエキスパート計算を 18.2 ミリ秒から 10.2 ミリ秒へ減らしました。CPU の仕事は確かに半分近く減りました。それなのに、1 トークンを生成する合計時間はまったく変わりませんでした。<span class="ev ev-report">上流レポート</span>（<code>include/strata/core/hit_hook.hpp</code> のコメント）</p>
+<p>節約した 8 ミリ秒はどこへ消えたのでしょう。この章は CPU と GPU の性格の違いから始めて、「誰が誰を待つのか」を考え、最後に 1 つの言葉にたどり着きます。クリティカルパスです。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>エキスパートの計算はバイトを読む時間が大半です。そこで CPU は、メインメモリにあるエキスパートをその場で計算します。同じ層の中では、ヒットしたエキスパートを GPU が、ミスしたものを CPU が、同時に計算します。ただし層と層の間にはデータ依存があって、順番に待つしかありません。だから CPU の仕事は隠せず、キャッシュで減らすしかないのです。</p>
+
+<h2 id="sec-1">13.1 2 種類のプロセッサ、2 種類の性格</h2>
+<p>CPU は、何でもこなせる数人のベテラン職人のようなものです。GPU は、千人規模の流れ作業の工場のようなものです。職人は人数が少ないものの、1 人ひとりが複雑で「やりながら考える」仕事を任せられます。工場は人数が多く、「全員が同時に同じ単純な動作をする」ことが得意です。図 13-1 は、そのイメージ図です。</p>
+<aside class="primer" id="c13-cpu-gpu">
+<h3>CPU と GPU：SIMD と SIMT</h3>
+<p><dfn>CPU</dfn>（中央演算処理装置）のコアは多くありません。上流が計測に使ったマシンの Ryzen 5 7600 は 6 コアです。<span class="ev ev-report">上流レポート</span>[S03] 各コアはとても「賢く」できています。大きなキャッシュを持ち、分岐を予測し、命令を順序を入れ替えて実行できます。制御の流れが複雑なプログラムに向いています。CPU は複数の数を一度に計算することもできます。<dfn>SIMD</dfn>（単一命令・複数データ）の命令 1 つで、並んだ数すべてに同じ演算を同時に行います。AVX-512 命令のレジスタは 512 ビット幅で、32 ビット浮動小数点数を一度に 16 個入れられます。つまり 16 本の「レーン」があります。Strata の CPU 用エキスパートカーネルは、AVX-512 または AVX2 で書かれています。<span class="ev ev-report">上流レポート</span>[S02]</p>
+<p><dfn>GPU</dfn>（グラフィックス処理装置）は、チップの面積を大量の単純な計算ユニットに使います。一般的なゲーム用グラフィックスカードなら数千個あります。実行方式は <dfn>SIMT</dfn>（単一命令・複数スレッド）といいます。NVIDIA の GPU は 32 スレッドを 1 組（1 つの warp）にまとめ、同じ組が同じ命令を同時に実行し、各スレッドは自分のデータを処理します。[R01] さらに、帯域幅がずっと大きい VRAM を備えています。RTX 5070 の VRAM は約 672 GB/s です。一方、デュアルチャネルの DDR5-5200 メモリは約 83 GB/s です（第 1 章に比較があります）。</p>
+<p>両者に共通するのは、<strong>互いに無関係な同じ仕事を大量に同時にこなして</strong>初めて力を発揮できることです。毎ステップで前の結果を待つなら、レーンがいくらあっても 1 マスずつ進むしかありません。下のシミュレータで、その様子を目で確かめましょう。</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="図 13-1：CPU は少数の強力なコアで、各コアが 16 レーンの SIMD を持つ。GPU は数千個の単純な計算ユニットで、32 個ずつ組になって同じ命令を実行する">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="15" font-weight="600" text-anchor="middle">CPU：6 個の強いコア</text>
+<rect class="f-accent" fill="#136d5a" x="14" y="34" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="73" y="34" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="132" y="34" width="54" height="54" rx="6"/>
+<rect class="f-accent" fill="#136d5a" x="14" y="94" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="73" y="94" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="132" y="94" width="54" height="54" rx="6"/>
+<text class="f-on" fill="#ffffff" x="41" y="66" font-size="14" text-anchor="middle">コア</text><text class="f-on" fill="#ffffff" x="100" y="66" font-size="14" text-anchor="middle">コア</text><text class="f-on" fill="#ffffff" x="159" y="66" font-size="14" text-anchor="middle">コア</text>
+<text class="f-on" fill="#ffffff" x="41" y="126" font-size="14" text-anchor="middle">コア</text><text class="f-on" fill="#ffffff" x="100" y="126" font-size="14" text-anchor="middle">コア</text><text class="f-on" fill="#ffffff" x="159" y="126" font-size="14" text-anchor="middle">コア</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="174" font-size="14" text-anchor="middle">各コア：SIMD 16 レーン</text>
+<text class="f-text" fill="#182f2b" x="300" y="20" font-size="15" font-weight="600" text-anchor="middle">GPU：数千の小ユニット</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="214" y="34" width="172" height="114"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.8" d="M214 48H386M214 62H386M214 76H386M214 90H386M214 104H386M214 118H386M214 132H386M228 34V148M242 34V148M256 34V148M270 34V148M284 34V148M298 34V148M312 34V148M326 34V148M340 34V148M354 34V148M368 34V148"/>
+<rect class="f-accent" fill="#136d5a" x="214" y="34" width="172" height="14"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="174" font-size="14" text-anchor="middle">1 行 ＝ 1 組、同期して実行</text>
+<text class="f-text" fill="#182f2b" x="200" y="210" font-size="14" text-anchor="middle">CPU：複雑で、やりながら考える仕事が得意</text>
+<text class="f-text" fill="#182f2b" x="200" y="236" font-size="14" text-anchor="middle">GPU：大量の同じ動作の仕事が得意</text>
+</svg><figcaption>図 13-1　2 つの設計思想。CPU はコアが少なく強力で、各コアに SIMD のレーンが付きます。GPU はユニットが多く単純で、組になって同じ命令を実行します。イメージ図で、縮尺は正確ではありません。</figcaption></figure>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/SIMD" target="_blank" rel="noopener noreferrer">Wikipedia：SIMD</a> · <a href="https://en.wikipedia.org/wiki/Single_instruction,_multiple_threads" target="_blank" rel="noopener noreferrer">Wikipedia: Single instruction, multiple threads</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA CUDA Programming Guide</a></p>
+</aside>
+<div class="viz" data-viz="simd-lanes"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="図 13-2：16 個の数を 1 つずつ足すと 16 ステップ、SIMD で 16 個まとめて足すと 1 ステップ。ただし累積和の連鎖は、16 レーンあっても 16 ステップかかる">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">16 個の数を処理するのに何ステップ？</text>
+<text class="f-text" fill="#182f2b" x="20" y="56" font-size="14">1 つずつ加算</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="42" width="256" height="20"/>
+<text class="f-text" fill="#182f2b" x="376" y="80" font-size="14" text-anchor="end">16 ステップ</text>
+<text class="f-text" fill="#182f2b" x="20" y="112" font-size="14">SIMD 16 レーン</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="98" width="16" height="20"/>
+<text class="f-text" fill="#182f2b" x="144" y="113" font-size="14">1 ステップ</text>
+<text class="f-text" fill="#182f2b" x="20" y="160" font-size="14">累積和の連鎖</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="146" width="256" height="20"/>
+<text class="f-text" fill="#182f2b" x="376" y="184" font-size="14" text-anchor="end">16 ステップ</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="214" font-size="14">累積和の連鎖：どのマスも前のマスの結果を待つので、</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="232" font-size="14">レーンが増えても使い道がない</text>
+</svg><figcaption>図 13-2　並列にできるかどうかは、データ同士に依存があるかどうかで決まります。無関係な 16 個の加算は 1 ステップで終わります。1 つずつ鎖でつながった累積和は、1 ステップずつ進むしかありません。</figcaption></figure></div>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>SIMD はベクトル命令のことです（x86 の SSE と AVX、ARM の NEON）。GPU の SIMT は、「ハードウェアが 1 組のスレッドを自動的に 1 本の幅広いベクトルにまとめて実行する」ものと考えられます。分岐の向きがそろわないと、組の中のスレッドは何回かに分けて実行されます。</p>
+
+<h2 id="sec-2">13.2 CPU でもエキスパートを計算できる理由：大半はバイトを読む時間</h2>
+<p>GPU のほうがずっと速いのに、なぜ Strata は CPU にエキスパートを計算させるのでしょうか。エキスパートの計算で難しいのは、計算ではなく読み込みだからです。エキスパート 1 つは 1.38 MB で、各パラメータは 1、2 回しか乗算・加算されません。計算ユニットは、ほとんどの時間をメモリからデータが届くのを待って過ごします。上流の CPU 用エキスパートプールのコメントは率直です。エキスパートカーネルはメモリ帯域で頭打ちになり、6 コアの実測は約 42.55 GB/s で、速度はコア数にほぼ比例します。<span class="ev ev-code">コード上の事実</span>（<code>include/strata/kernels/cpu/pool.hpp</code>）</p>
+<p>ボトルネックがバイトの読み込みなら、バイトの移動距離を短くすればよいのです。第 10 章で計算しました。ミスしたエキスパートを PCIe 経由でグラフィックスカードへ運ぶと、1 トークンあたり運ぶだけで 10 ミリ秒以上かかります。逆に「仕事」をデータのそばへ送れば、転送するものはずっと少なくなります。図 13-3 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="図 13-3：10 個のエキスパートを GPU へ運ぶと 13.8 MB を転送する。仕事を CPU に任せると、10 KB の入力を送り、100 KB の結果を受け取るだけで済む">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">方法 1：エキスパートを GPU へ運ぶ</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="34" width="110" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="61" font-size="14" text-anchor="middle">メインメモリ</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="34" width="110" height="44" rx="6"/>
+<text class="f-on" fill="#ffffff" x="325" y="61" font-size="14" text-anchor="middle">GPU</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M132 56H262"/>
+<path class="f-muted" fill="#5c6d66" d="M268 56l-9-5v10z"/>
+<text class="f-warn" fill="#9e5d24" x="200" y="100" font-size="14" text-anchor="middle">10 × 1.38 MB ＝ 13.8 MB が PCIe を通る</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="15" font-weight="600">方法 2：仕事を CPU に任せる</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="158" width="110" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="185" font-size="14" text-anchor="middle">CPU ＋ メモリ</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="158" width="110" height="44" rx="6"/>
+<text class="f-on" fill="#ffffff" x="325" y="185" font-size="14" text-anchor="middle">GPU</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M268 170H138"/>
+<path class="f-muted" fill="#5c6d66" d="M132 170l9-5v10z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M132 192H262"/>
+<path class="f-muted" fill="#5c6d66" d="M268 192l-9-5v10z"/>
+<text class="f-text" fill="#182f2b" x="200" y="226" font-size="14" text-anchor="middle">送る：この層の入力 2560 個の数 ≈ 10 KB</text>
+<text class="f-text" fill="#182f2b" x="200" y="250" font-size="14" text-anchor="middle">戻る：10 × 2560 個の数 ≈ 100 KB</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="284" font-size="14" text-anchor="middle">エキスパートの 1.38 MB は動かさず、CPU が読む</text>
+</svg><figcaption>図 13-3　データを動かすか、計算を動かすか。エキスパートは動かさず、入力と結果だけが行き来します。PCIe を通るバイト数は 100 分の 1 ほどになります。<span class="ev ev-est">教育用の試算</span></figcaption></figure>
+<p>インターフェースの約束事はこうです。各層で、GPU は正規化後の入力と、選ばれた 10 個のエキスパート番号とその重みを CPU 側へ渡し、10 × 2560 個の数が戻ってくるのを待ちます。<span class="ev ev-code">コード上の事実</span>[S06] 数 1 つは 4 バイトなので、入力は約 10 KB、結果は約 100 KB です。13.8 MB より 100 倍以上小さくなります。<span class="ev ev-est">教育用の試算</span></p>
+<p>CPU 側は<dfn>エキスパートプール</dfn>です。物理コア 1 つにつきワーカースレッドを 1 本置き、最初のコアはメインループ用に空けておきます。各層の 10 個のエキスパートをこれらのスレッドに分けて同時に計算します。ホストは 10 個の結果をすべて集めて足し合わせないと次の層を始められません。つまり、どの層も「関所」になります。<span class="ev ev-code">コード上の事実</span>（<code>pool.hpp</code>）</p>
+<p class="bridge"><strong>OS を学んだ人へ：</strong>スレッドは論理プロセッサではなく、物理コアに固定します。1 つの物理コアの 2 本のハイパースレッドは、同じ実行ユニットとキャッシュを共有します。メモリを読むスレッドが 2 本ぶつかると、帯域は半分になります。ソースのコメントには、実測も記録されています。メインループのスレッドを自分のコアに固定しなかったとき、エキスパートプールは 36.32 GB/s から 26.9 GB/s に落ちました。<span class="ev ev-report">上流レポート</span>（<code>pool.hpp</code> のコメント）</p>
+<p>上流の開発時の計測によると、エキスパートキャッシュが登場する前は、CPU が 1 トークンごとに 663.6 MB のエキスパートデータを読んでいました。約 40 GB/s で計算すると 16.2 ミリ秒で、当時の 1 トークンは約 53 ミリ秒でした。<span class="ev ev-report">上流レポート</span>[S05] CPU の分担分は、マシン全体で最大の出費でした。</p>
+
+<h2 id="sec-3">13.3 1 つの層の中：ヒットは GPU、ミスは CPU、両方同時</h2>
+<p>エキスパートキャッシュがあると、1 つの層の 10 個のエキスパートは 3 組に分かれます。<span class="ev ev-code">コード上の事実</span>（<code>src/core/expert_source.cpp</code>、<code>src/program/generate.cpp</code>）</p>
+<ol>
+<li>VRAM にあるもの（ヒット）は、GPU がそのまま計算します。</li>
+<li>ミスしたもののうち、ある割合の分は、GPU が PCIe 経由でピン留めメモリから読んで計算します。この割合の既定値は、Q2_0 モデルで 0.2、ほかのネイティブ形式で 0.55 です。</li>
+<li>残りのミスは、CPU がその場で計算します。</li>
+</ol>
+<p>順番が肝心です。GPU の分を先に決めて先に公開し、GPU を先に動かします。そのあとで CPU が自分の分を始めます。<span class="ev ev-code">コード上の事実</span>（<code>expert_source.cpp</code> のコメント）上流のドキュメントによると、PCIe の割合を 0 にして、ミスをすべて CPU に戻すと、生成が遅くなります。<span class="ev ev-report">上流レポート</span>[S03]</p>
+<p>下のシミュレータは、1 つの層をタイムラインとして描きます。数字は教育用の試算です。エキスパート 1 つは 1.38 MB、CPU は 40 GB/s、VRAM は 672 GB/s、PCIe は 63 GB/s で読むものとします。アテンションとルーティングは 0.25 ミリ秒、マージは 0.05 ミリ秒と仮定しています。</p>
+<div class="viz" data-viz="layer-timeline"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="図 13-4：ヒット率 65%、PCIe の割合 20% のときの 1 つの層のタイムライン。GPU が先にアテンションとルーティングを計算し、その後 GPU と CPU が同時にエキスパートを計算する。CPU の分岐のほうが長く、これがクリティカルパスになる">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">1 つの層のタイムライン（ヒット 65%、PCIe の割合 20%）</text>
+<text class="f-text" fill="#182f2b" x="20" y="58" font-size="14">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="40" width="160" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="230" y="40" width="25" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="293" y="40" width="32" height="26"/>
+<text class="f-on" fill="#ffffff" x="150" y="58" font-size="14" text-anchor="middle">アテンション ＋ ルーティング</text>
+<text class="f-text" fill="#182f2b" x="20" y="108" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="230" y="90" width="63" height="26"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M293 32V124"/>
+<text class="f-text" fill="#182f2b" x="20" y="152" font-size="14">↑ 0.25 ms でルーティングが終わり、エキスパートを割り振る</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="14">GPU の分岐 0.039 ms、CPU の分岐 0.098 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="200" font-size="14">破線：両側が合流する点。遅いのは CPU 側</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="232" font-size="14" font-weight="600">この層 ＝ 0.25 ＋ max(0.098, 0.039) ＋ 0.05</text>
+</svg><figcaption>図 13-4　1 つの層の中の並列実行。合流点は遅いほうで決まります。CPU の分岐が長い限り、GPU がどれだけ速くても待たされます。<span class="ev ev-est">教育用の試算</span></figcaption></figure></div>
+<p>上流の最初のバージョンは、「どちらが先か」でつまずきました。当時は、GPU がヒット分を計算するステップが、CPU のエキスパートプールの<strong>後ろ</strong>に置かれていました。CPU の仕事は確かに半分近くになりました（18.2 から 10.2 ミリ秒）。しかし GPU の半分は「横」から「後ろ」へ移っただけで、経路全体は少しも短くなりませんでした。その後、2 段階に改めました。GPU は別のバッファでヒットしたエキスパートの計算を先に始め、CPU は同時にミスした分を計算します。CPU の結果が GPU に届いたら、2 つの結果を足し合わせます。バッファが 1 つ増え、加算が 1 回増えましたが、その代わりに本当の並列が手に入りました。<span class="ev ev-report">上流レポート</span>（<code>hit_hook.hpp</code> のコメント）シミュレータで「両側が同時に計算」をオフにすれば、この出来事を再現できます。</p>
+
+<h2 id="sec-4">13.4 層と層の間：データ依存が並列を阻む</h2>
+<p>1 つの層の中は並列にできるとして、CPU がまだ第 l 層を計算している間に、GPU が第 l + 1 層を始めることはできるでしょうか。できません。第 l + 1 層の入力は、第 l 層で 10 個のエキスパートをマージした結果そのものだからです。この線は鎖のようにつながっています。図 13-5 を見てください。</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="図 13-5：各層の中では、10 個のエキスパートを CPU と GPU に分けて同時に計算できる。しかし第 l+1 層の入力は第 l 層のマージが終わるまで待つので、層と層の間は順番に並ぶしかない">
+<rect class="f-accent" fill="#136d5a" x="20" y="10" width="360" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="32" font-size="14" text-anchor="middle">第 l 層：アテンション ＋ ルーティング（GPU）</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="56" width="174" height="40" rx="7"/>
+<text class="f-text" fill="#182f2b" x="107" y="74" font-size="14" text-anchor="middle">ヒットしたエキスパート</text><text class="f-text" fill="#182f2b" x="107" y="91" font-size="14" text-anchor="middle">（GPU）</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="206" y="56" width="174" height="40" rx="7"/>
+<text class="f-text" fill="#182f2b" x="293" y="74" font-size="14" text-anchor="middle">ミスしたエキスパート</text><text class="f-text" fill="#182f2b" x="293" y="91" font-size="14" text-anchor="middle">（CPU）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="108" width="360" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="130" font-size="14" text-anchor="middle">10 個をマージして、本流に書き戻す</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" d="M200 142V166"/>
+<path class="f-muted" fill="#5c6d66" d="M200 172l-6-9h12z"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="174" width="360" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="196" font-size="14" text-anchor="middle">第 l＋1 層：入力は前の層の結果</text>
+<text class="f-text" fill="#182f2b" x="20" y="236" font-size="14">横方向（同じ層の中）：並列にできる</text>
+<text class="f-text" fill="#182f2b" x="20" y="260" font-size="14">縦方向（層と層の間）：順番に待つだけ</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="288" font-size="14" font-weight="600">48 層が 1 本の鎖になる。これがクリティカルパス</text>
+</svg><figcaption>図 13-5　データ依存が、どこまで並列にできるかを決めます。同じ層のエキスパートは互いに無関係ですが、層と層の間は鎖でつながっています。</figcaption></figure>
+<aside class="primer" id="c13-dependence">
+<h3>データ依存とクリティカルパス</h3>
+<p>2 つの計算があって、後のほうが前の結果を使うとき、両者の間には<dfn>データ依存</dfn>があるといいます（正確には「書いてから読む」依存です）。依存のある 2 つのステップは、順番にしか実行できません。依存のないものだけが、同時に実行できる可能性を持ちます。</p>
+<p>すべての計算を 1 枚のグラフに描きます。各計算が点で、依存が矢印です。始点から終点までの最も長い矢印の連なりを<dfn>クリティカルパス</dfn>といいます。作業員が何人いても、全体はどんなに速くてもこれだけの時間がかかります。速くする方法は 2 つだけです。クリティカルパス上のあるステップを短くするか、クリティカルパス上のあるステップを脇へ移して、ほかのステップと並列にするかです。</p>
+<p>逆に、クリティカルパス<strong>上にない</strong>ステップを短くしても、まったく効果がありません。冒頭の話がまさにそうでした。CPU は 8 ミリ秒を減らしましたが、その 8 ミリ秒を外へ出したら GPU の分が代わりに入り込み、クリティカルパスの長さは変わりませんでした。これは第 5 章のアムダールの法則と同じ考え方です。一部だけを最適化しても、全体の改善は残りの部分に制限されます。</p>
+<p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%82%AF%E3%83%AA%E3%83%86%E3%82%A3%E3%82%AB%E3%83%AB%E3%83%BB%E3%83%91%E3%82%B9" target="_blank" rel="noopener noreferrer">Wikipedia：クリティカル・パス</a> · <a href="https://en.wikipedia.org/wiki/Data_dependency" target="_blank" rel="noopener noreferrer">Wikipedia: Data dependency</a> · <a href="https://en.wikipedia.org/wiki/Critical_path_method" target="_blank" rel="noopener noreferrer">Wikipedia: Critical path method</a></p>
+</aside>
+<p>Strata のソースコードは、このことを結論として書いています。各層は 2 つの GPU 計算グラフに分かれます。前半はアテンションからルーティングと共有エキスパートまでを計算します。後半はエキスパートの結果をマージして本流へ書き戻します。後半は CPU が結果を返すまで起動できません。こうして、第 l 層のエキスパートの結果に、第 l 層自身のルーティング重みが組み合わされます。代償として、CPU と GPU が重なれる時間は、共有エキスパートの短い区間だけになります。コメントにはこうあります。層ごとに 1 回ある CPU エキスパートプールは、厳密に直列な残差の鎖の後ろには隠せません。<span class="ev ev-code">コード上の事実</span>[S13]</p>
+<p>キャッシュのコメントには数字があります。当時のパイプラインは、19.035 ミリ秒の CPU 作業のうち 1.055 ミリ秒しか隠せず、96% がクリティカルパスの上に出ていました。理由は「残差の鎖が厳密に直列だから」です。だから唯一の出口は、読むバイトを減らすことです。エキスパートの一部を VRAM に置き、CPU にはミスした分だけを読ませます。<span class="ev ev-report">上流レポート</span>[S05] これが、第 12 章のエキスパートキャッシュが存在する理由です。</p>
+
+<h2 id="sec-5">13.5 本当に並列になったと、どう証明するか</h2>
+<p>「CPU も GPU も忙しい」は、「同時に忙しい」と同じではありません。図 13-6 の 2 つのケースでは、両側の稼働時間の合計は同じですが、全体の所要時間は大きく違います。</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="図 13-6：本当の並列では、GPU がまだ計算している間に CPU が作業を始める。見かけだけの並列では、GPU が計算を終えてから CPU が始める。両側の稼働時間は同じで、全体の時間は長くなる">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">本当の並列</text>
+<text class="f-text" fill="#182f2b" x="20" y="54" font-size="14">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="38" width="160" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="88" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="150" y="72" width="140" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="88" font-size="14">終了</text>
+<text class="f-text" fill="#182f2b" x="20" y="132" font-size="15" font-weight="600">見かけだけの並列</text>
+<text class="f-text" fill="#182f2b" x="20" y="164" font-size="14">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="148" width="160" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="198" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="230" y="182" width="140" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="228" font-size="14">CPU の開始時、GPU はもう空いている：直列と同じ</text>
+</svg><figcaption>図 13-6　稼働時間は同じでも、重なり方が違います。利用率だけを見ても、この 2 つは区別できません。</figcaption></figure>
+<p>Strata のセッションコードは、まさにこの点を数えます。各層で、ホストが「ドアベル」（GPU が出す「ルーティングが決まった」という合図）を見たとき、GPU の計算グラフがまだ実行中かどうかを調べます。まだ実行中なら、CPU には GPU と重なる時間帯があったことになります。すでに終わっていたら、CPU は GPU が空いているときに働いたことになり、パイプライン全体は直列と同じです。このカウンタは <code>rings_mid_graph</code> といい、コメントはこれを「ドアベルが飾りでないか」を判定するための診断量と呼んでいます。<span class="ev ev-code">コード上の事実</span>[S13]</p>
+<p>コメントは、これが必要な理由もはっきり述べています。どちらの場合も正しいトークンが計算でき、層ごとの所要時間も同じです。違いは「重なりが何も隠せていない」という形でしか現れません。もう 1 つのカウンタは、計算グラフを起動してからドアベルを見るまでのミリ秒数を記録します。CPU が使える時間帯は、「層の長さからそれを引いたもの」です。<span class="ev ev-code">コード上の事実</span>[S13] 設定に書かれた「重なりを有効にする」は意図にすぎません。実際の挙動を示すのは、イベントのタイムラインです。</p>
+
+<h2 id="sec-6">13.6 手を動かす：バランス点を探す</h2>
+<p>まず、この章の「1 つの層の中」シミュレータを使います。ヒット率を 0% にして、次に 65% にして、クリティカルパスがどこに移るかを見ましょう。「両側が同時に計算」をオフにして、上流の最初のバージョンの教訓を再現しましょう。「最適な割合に設定」を押して、2 つの分岐が同じ長さになる様子を見ましょう。そのあと、「一度に 16 個を計算」で 3 つのアルゴリズムをすべて動かします。</p>
+<p>次に、この章のインタラクティブ実験「CPU / GPU の仕事の分担」を開きます。分岐は 2 本だけです。CPU と、「PCIe 経由で GPU に任せる」分です。両側の有効速度と分担の割合を変えて、合計時間が最短になる割合を探します。実験の課題です。PCIe の分岐の有効速度を半分にします。なぜ最適な分担が「半分ずつ」ではなくなるのかを説明してください。注意点があります。実験もシミュレータも、2 つの分岐が資源を奪い合わないと仮定しています。実際のマシンでは、CPU のエキスパート読み込みと、PCIe 経由のピン留めメモリ読み込みは、同じメモリ帯域を使います。</p>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>エキスパートの計算は、バイトを読む時間が大半です。CPU がメモリ上のエキスパートをその場で計算すれば、PCIe を通るのは 10 KB の入力と 100 KB の結果だけです。</li>
+<li>同じ層の中では、ヒットしたエキスパートは GPU が、ミスの一部は PCIe 経由で GPU が、残りは CPU が、同時に計算します。合流するときは遅いほうを待ちます。</li>
+<li>層と層の間にはデータ依存があり、48 層は 1 本のクリティカルパスです。CPU の仕事は隠せず、キャッシュで減らすしかありません。クリティカルパス上にないステップを最適化しても、効果はありません。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「CPU と GPU が一緒に計算すれば、速度は 2 倍になる。CPU の仕事が半分になれば、合計時間もそれだけ減る。」</strong></p>
+<p>節約した部分がクリティカルパス上にあるときだけ、合計時間は短くなります。上流は CPU の仕事を 18.2 ミリ秒から 10.2 ミリ秒に減らしましたが、トークンは少しも速くなりませんでした。GPU の分が CPU の後ろに並べられたからです。<span class="ev ev-report">上流レポート</span> 同じように、「GPU 使用率 100%」も何も保証しません。空回りして待っているのかもしれないし、本来は並列にできた仕事を計算しているのかもしれません。見るべきなのは、クリティカルパスとイベントのタイムラインです。</p></div>
+
+<details class="deep"><summary>もう一歩深く：分担の式、それが当たらない理由、並行処理の落とし穴</summary>
+<h3>2 つの分岐の分担の式</h3>
+<p>残りの計算が必要なエキスパートデータの量を D とします。割合 f を「PCIe 経由の GPU の分岐」に渡し、残りを CPU に渡します。CPU の分岐の持続処理能力を毎秒 Bc バイト、PCIe の分岐を毎秒 Bp バイトに換算し、両者は互いに影響しないと仮定します。</p>
+<div class="equation">T(f) ≈ max((1 − f)·D / Bc, f·D / Bp) ＋ Tマージ</div>
+<p>2 つの分岐が同じ長さのときが最速で、f = Bp ÷ (Bc ＋ Bp) と求まります。Bc = 40、Bp = 20 なら f = 1/3 で、「半分ずつ」にはなりません。<span class="ev ev-est">教育用の試算</span> ここでの Bp は PCIe の公称帯域ではありません。この分岐のコストをすべて含めた有効速度です。</p>
+<h3>実際の最適点がここにない理由</h3>
+<p>式は 2 つの分岐がそれぞれ別の資源を使うと仮定しています。しかし実際のマシンでは、両者は奪い合います。CPU のエキスパート読み込みと、GPU が PCIe 経由で行うピン留めメモリの読み込みは、同じメモリチャネル群を通ります。PCIe は、長いコンテキストの KV ページを同時に転送していることもあります。エキスパートのサイズ、1 つの検証ウィンドウ内で同じエキスパートが何トークンに再利用されるか、GPU の起動コスト、ホストスレッドのコア固定も、両側の有効速度を変えます。だから Strata の既定の割合（Q2_0 は 0.2、ほかのネイティブ形式は 0.55）は、この式ではなく実測から来ています。<span class="ev ev-code">コード上の事実</span>（<code>generate.cpp</code>）式は仮説を立てるのに向いています。チューニングでは、各分岐の完了時間、転送バイト数、合計時間を記録し、別のタスクで再検証してください。</p>
+<h3>計算は合っているか：時間は合うのに、結果が間違っていた</h3>
+<p><code>hit_hook.hpp</code> には、教科書のような並行処理のバグが記録されています。最初のバージョンでは、「GPU がヒット分を先に計算する」ステップが、エキスパートプールのコールバックの中で決まるヒット名簿を読んでいました。そのコールバックは、このステップの後で実行されます。その結果、<strong>前の層</strong>の名簿を読み、前の層のエキスパートをこの層の位置で計算してしまいました。プログラムは普通にトークンを出力し、所要時間も正常でした。ところが標準の答えと比べると、平均 KL ダイバージェンスは 9.69×10⁻² から 1.03 に増え、最も可能性の高いトークンの一致率は 0.867 から 0.333 に落ちました。修正は、このステップがこの層のルーターが公開した番号を直接受け取るようにすることでした。<span class="ev ev-code">コード上の事実</span>（<code>hit_hook.hpp</code>）</p>
+<h3>スレッドプールの競合状態</h3>
+<p>CPU エキスパートプールは、あるバッチのタスクの完了を待つとき、最初は「完了カウント = タスク数」だけを待っていました。ところが VRAM が大きいカードでは、ほとんどのエキスパートがヒットするため、ワーカースレッドはよく眠っています。バッチが小さすぎると、眠っていたスレッドが起きる前に、そのバッチが終わってしまいます。起きたスレッドは、<strong>次のバッチ</strong>からタスクを奪って同じタスクを 2 回実行したり、ホストがゼロクリアした後でカウントを加算したりします。すると「完了カウント = タスク数」は永遠に成り立たず、GPU はずっと待ち続けます。修正は、タスクを取るたびにバッチ番号を付けることでした。タスクポインタは 64 ビット語で、「バッチ | タスク数 | 連番」が入っています。タスクの取得にはコンペア・アンド・スワップを使い、バッチ番号が一致したときだけ成功します。遅れて来たスレッドは、自然にタスクを取れなくなります。<span class="ev ev-code">コード上の事実</span>（<code>pool.hpp</code>）上流のドキュメントは、このハングを issue #29 として記録し、エンジン 0.1.12 で修正されました。</p>
+<h3>コメントと設計が食い違うところ</h3>
+<p><code>session.hpp</code> の後半には、少し古いコメントがあり、「重なりは層の遅延から生まれる。エキスパートプールの結果は次の層が消費する」と書かれています。<span class="ev ev-code">コード上の事実</span>（<code>session.hpp</code>）一方、前半の 2 つの計算グラフに関するコメントは正反対です。第 l 層のエキスパートに第 l + 1 層のルーティング重みが組み合わされるのを防ぐため、マージはこの層の中に置かなければなりません。<span class="ev ev-code">コード上の事実</span>[S13] このような矛盾に出会ったら、現在の呼び出し順序とテストを基準にしてください。</p>
+<h3>GPU と CPU が同じエキスパートを計算すると、最後の数桁が違うことがある</h3>
+<p>GPU と CPU のカーネルは、丸め方が違います。どのエキスパートを誰が計算するかは、キャッシュの状態と PCIe の割合で決まります。そのため、同じプロンプトを繰り返し実行しても、答えが 1 バイトも違わず同じになるとは限りません。上流のドキュメントによると、再現できる結果がほしいときは、PCIe の割合を 0 にするなどのスイッチがあります。代償として、生成は遅くなります。<span class="ev ev-report">上流レポート</span>[S03]</p>
+</details>
