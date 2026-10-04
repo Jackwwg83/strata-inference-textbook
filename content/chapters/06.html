@@ -1,18 +1,203 @@
-<h2 id="sec-1">6.1 文件不是已经可以计算的矩阵</h2>
-<p>加载器首先解释元数据：张量名字、形状、表示类型、分片位置、代码与 scale 的存放方式。然后建立运行时视图或拷贝到所需设备。有些格式需要重排或扩宽 scale；有些保留原生量化块，由内核解码。因此磁盘字节数与运行时 arena 字节数不是恒等式。[S14]</p>
-<p>这里连接到数据结构课的序列化：同一个抽象对象可以有不同编码；连接到操作系统课的地址空间：一个可访问虚拟地址不保证所有页已经在 RAM；连接到软件工程的契约：接受文件前必须证实它满足内核的假设。</p>
-<h2 id="sec-2">6.2 mmap 的直观解释与局限</h2>
-<p>把文件映射到地址空间，相当于允许程序通过指针访问文件内容。实际物理页可以按需进入内存，系统也可能回收干净页。映射成功不意味着模型已完整驻留，更不意味着后续访问没有磁盘延迟。[R02]</p>
-<p>Strata 专家来源接口把普通 blob、锁页状态、设备别名、临时缓冲和预取分别暴露。[S06] 这些区别必须保留：一个临时拼装的专家块只能活到约定期限，不能被异步拷贝队列无限期保存指针。</p>
-<h2 id="sec-3">6.3 例题：安全的区间核验</h2>
-<p>假设文件长度为 F，张量起点为 o，长度为 n。正确条件是 <code>o≤F 且 n≤F−o</code>。不要先计算 <code>o+n≤F</code>，因为定长无符号整数加法可能溢出，绕回一个很小的数。</p>
-<p>张量元素个数也要逐步检查乘法：乘维度 d 前先确认 <code>count≤MAX/d</code>，然后再乘。负维度、零维度是否允许、字节对齐、重复名字与重叠区间都应有明确规则。这些是教学设计建议，不代表我们已经审计了上游每一个文件解析路径。</p>
-<h2 id="sec-4">6.4 源码案例：两个模块一致，也可能一起错</h2>
-<p><code>layer.cpp</code> 保留了一段有价值的故障记录：scale 宽度曾被统一当成 4 字节，而部分表示实际是 2 字节；另一个案例中两个工具一起按错误字段名寻找 offset 平面。[S14] 两个结果相同，只能说明它们一致，不能说明它们独立地正确。</p>
-<p>当前看到的 <code>plane_ptrs</code> 使用已加载的 <code>codes_bytes + scales_bytes + offset_bytes</code> 与张量总字节数校验，并检查 <code>has_offset</code> 的一致性。[S14] 这叫从单一权威表示读取，而不是在每个消费者里重新推导。</p>
-<h2 id="sec-5">6.5 RAII、所有权与生命周期</h2>
-<p>在 C++ 中，资源不只是 <code>new</code> 出来的对象，也包括 GPU 内存、注册页、文件句柄、stream 和 event。初始化中途失败时，已取得的资源必须被释放；释放前还要确认没有异步工作正在使用它。智能指针只能管理它认识的所有权，不会自动替你完成 GPU 同步。</p>
-<p>一个可读的契约应写成：“调用者持有这段缓冲，直到拷贝完成事件被确认”，而不是“传入一个地址”。同样，释放 session 前要撤销其他模块登记的外部指针，否则新会话可能读到旧地址。[S13]</p>
-<h2 id="sec-6">6.6 实验：不下载模型也能学习加载器</h2>
-<p>给一个 128 字节的假文件定义三段张量。测试合法区间、末尾恰好对齐、越界一字节、极大 offset、维度乘法溢出、重复名字。验收不是“坏文件崩溃”，而是<strong>在任何计算内核启动前，给出可解释的拒绝原因</strong>。</p>
-<p>进阶任务：设计两个独立 oracle，一个按格式规范顺序解析，另一个用人工构造的固定样本逐字节核验。不要让二者共用同一个易错的布局推导函数，然后把一致当成强证据。</p>
+<div class="hook"><span class="eyebrow">你可能注意到过</span>
+<p>同一个大文件，第一次打开要转好一会儿，第二次却几乎瞬间就好。还有一件更怪的事：用 <code>mmap</code> “打开”一个 30 GB 的模型文件，函数眨眼就返回了，可此刻一个字节都还没从硬盘读出来。</p>
+<p>模型文件是一大块字节。引擎要的是一个个形状、类型都对得上的张量。这一章讲中间那段路：文件里装着什么，“打开”和“读进内存”为什么是两回事，以及引擎怎样证明读到的字节，正是它以为的那些字节。</p></div>
+<p class="tldr"><strong>一句话：</strong>模型文件要闯三关才能变成能用的张量：读懂目录，证明每个张量都完整地落在文件里，让字节真正进到内存。每一关出错都可能“悄无声息”，所以 Strata 在每一关都主动检查，宁可拒绝启动，也不带着错的字节去算。</p>
+
+<h2 id="sec-1">6.1 模型文件里装了什么</h2>
+<p>把模型文件想成一本书。封面写着书名和版本；接着是目录，告诉你每一章从第几页开始；最后才是正文。Strata 读的是 <dfn>GGUF</dfn> 格式，这是 llama.cpp 生态里常用的模型文件格式，结构正是这样，见图 6-1。</p>
+<figure class="fig"><svg viewBox="0 0 400 318" role="img" aria-label="图 6-1：GGUF 文件从头到尾依次是标记与版本、计数、元数据、张量目录、对齐填充和数据区">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="320" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">① 开头 4 字节“GGUF”，再写版本号 3</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="50" width="320" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="72" font-size="13" text-anchor="middle">② 有多少个张量、多少条元数据</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="92" width="320" height="50" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="112" font-size="13" font-weight="600" text-anchor="middle">③ 元数据：一条条“键 = 值”</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="131" font-size="12" text-anchor="middle">general.architecture = qwen4exp，层数 = 48 …</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="150" width="320" height="50" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="170" font-size="13" font-weight="600" text-anchor="middle">④ 张量目录：每个张量一行</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="189" font-size="12" text-anchor="middle">名字 · 维度数 · 形状 · 数据类型 · 偏移</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="40" y="208" width="320" height="28" rx="8"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="226" font-size="12" text-anchor="middle">⑤ 填充到对齐边界（默认 32 字节）</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="244" width="320" height="64" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="270" font-size="13" font-weight="600" text-anchor="middle">⑥ 数据区：所有张量的字节</text>
+<text class="f-on" fill="#ffffff" x="200" y="291" font-size="12" text-anchor="middle">目录里的“偏移”从这里开始数</text>
+</svg><figcaption>图 6-1　GGUF 文件先放目录，再放数据。引擎先读懂目录，再按目录去数据区取字节；目录本身也可能写错，所以每一项都要核对。</figcaption></figure>
+<p><dfn>元数据</dfn>是“关于数据的数据”，比如模型叫什么架构、有几层。<dfn>张量目录</dfn>给每个张量登记五样东西：名字、维度数、每一维多长、用什么数据类型存、从数据区第几个字节开始。</p>
+<p>Strata 的 GGUF 读取器一打开文件就开始核对。<span class="ev ev-code">代码事实</span> 开头 4 个字节必须是“GGUF”，版本必须是 3；元数据里的架构必须是 <code>qwen4exp</code>，层数 48、宽度 2560、注意力头 24、KV 头 2 也必须对得上。任何一项不符，它报出具体是哪个键、期望多少、实际多少，然后拒绝运行（<code>gguf_reader.hpp</code> 第 423–427、573–603 行）。这个引擎只为一个模型而写，“差不多能跑”比直接报错更危险。</p>
+<p>知道了形状和类型，就能算出一个张量占多少字节。Strata 的主力格式 Q2_0 把 64 个数打包进 18 个字节，相当于每个数 2.25 bit。<span class="ev ev-code">代码事实</span>（<code>gguf_reader.hpp</code> 第 120–121、213–216 行）一个 2560 × 640 的专家矩阵有 1,638,400 个数，也就是 25,600 个块，占 25,600 × 18 = 460,800 字节。一个专家有三个这样的矩阵，合计 1,382,400 字节，正好等于源码里写死的专家大小。<span class="ev ev-est">教学推演</span>[S06]</p>
+
+<h2 id="sec-2">6.2 “打开”不等于“读进来”：mmap 与页缓存</h2>
+<p>读文件有两种思路。第一种是“复印”：调用 <code>read</code>，操作系统把指定的字节拷进你准备好的内存。第二种是“借阅证”：调用 <code>mmap</code>，操作系统给你一段地址，说“这段地址就代表那个文件”，至于字节什么时候真的从硬盘搬上来，等你用到再说。</p>
+<aside class="primer" id="c06-mmap-page-cache">
+<h3>文件、内存映射与页缓存</h3>
+<p><dfn>文件</dfn>是硬盘上一串有名字的字节。程序不能直接对硬盘做加减乘除，数据必须先进内存。操作系统管理内存的单位叫<dfn>页</dfn>，常见大小是 4 KiB。</p>
+<p><dfn>内存映射</dfn>（mmap）把一个文件“挂”到进程的地址空间上：地址 base + i 就对应文件的第 i 个字节。映射建立时，操作系统只登记了对应关系，并不读数据。程序第一次访问某一页时，硬件发现这页还不在内存里，触发<dfn>缺页</dfn>。操作系统接手，从硬盘把这一页读进来，再让程序接着执行。程序自己完全察觉不到这次停顿，只是那一下变慢了。</p>
+<p>读进来的页不会马上丢掉，而是留在<dfn>页缓存</dfn>里。同一个文件再被访问，直接从内存拿，这就是“第二次打开快得多”的原因。内存紧张时，操作系统会把一段时间没用的干净页回收，以后要用再从硬盘读。专栏后的图 6-2 画出了这三层关系。</p>
+<p>和本章的关系：Strata 读 GGUF 文件头、在低内存模式下读专家，用的都是 mmap。所以“映射成功”只说明地址准备好了，不说明数据已经在内存里，更不说明以后访问不会卡在硬盘上。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/内存映射文件" target="_blank" rel="noopener noreferrer">维基百科：内存映射文件</a> · <a href="https://zh.wikipedia.org/zh-cn/页缺失" target="_blank" rel="noopener noreferrer">维基百科：页缺失</a> · <a href="https://en.wikipedia.org/wiki/Page_cache" target="_blank" rel="noopener noreferrer">Wikipedia: Page cache</a> · <a href="https://man7.org/linux/man-pages/man2/mmap.2.html" target="_blank" rel="noopener noreferrer">Linux 手册：mmap(2)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-beyondphys.pdf" target="_blank" rel="noopener noreferrer">OSTEP 第 21 章：超出物理内存</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="图 6-2：mmap 之后 8 页都有地址，只有被访问过的页在内存里；访问一个还没读入的页会触发缺页，从硬盘读入">
+<text class="f-text" fill="#182f2b" x="20" y="18" font-size="12" font-weight="600">进程的地址空间：mmap 之后 8 页都有地址</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="26" width="40" height="28" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="45" font-size="12" text-anchor="middle">页0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="65" y="26" width="40" height="28" rx="3"/><text class="f-muted" fill="#5c6d66" x="85" y="45" font-size="12" text-anchor="middle">页1</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="26" width="40" height="28" rx="3"/><text class="f-on" fill="#ffffff" x="130" y="45" font-size="12" text-anchor="middle">页2</text>
+<rect class="f-warn" fill="#9e5d24" x="155" y="26" width="40" height="28" rx="3"/><text class="f-on" fill="#ffffff" x="175" y="45" font-size="12" text-anchor="middle">页3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="26" width="40" height="28" rx="3"/><text class="f-muted" fill="#5c6d66" x="220" y="45" font-size="12" text-anchor="middle">页4</text>
+<rect class="f-accent" fill="#136d5a" x="245" y="26" width="40" height="28" rx="3"/><text class="f-on" fill="#ffffff" x="265" y="45" font-size="12" text-anchor="middle">页5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="26" width="40" height="28" rx="3"/><text class="f-muted" fill="#5c6d66" x="310" y="45" font-size="12" text-anchor="middle">页6</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="335" y="26" width="40" height="28" rx="3"/><text class="f-muted" fill="#5c6d66" x="355" y="45" font-size="12" text-anchor="middle">页7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M175 124V60M169 68L175 58L181 68"/>
+<text class="f-text" fill="#182f2b" x="186" y="86" font-size="12">访问页 3 → 缺页</text>
+<text class="f-text" fill="#182f2b" x="186" y="102" font-size="12">操作系统从硬盘读入这一页</text>
+<text class="f-text" fill="#182f2b" x="20" y="120" font-size="12" font-weight="600">硬盘上的模型文件</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="128" width="355" height="28" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="197" y="147" font-size="12" text-anchor="middle">第 0 页 … 第 7 页（每页 4 KiB）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="180" font-size="12">高亮：已在内存（页缓存）· 警示：此刻缺页</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="198" font-size="12">浅底：有地址，还没读入</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="216" font-size="12">读过的页留在页缓存里，下次访问直接命中</text>
+</svg><figcaption>图 6-2　mmap 只发“借阅证”，不搬书。字节在第一次被访问时才从硬盘读入，之后留在页缓存里，直到内存紧张被回收。</figcaption></figure>
+<p>Strata 的 GGUF 读取器在 Linux 上用 <code>mmap</code> 以只读方式映射整个文件，在 Windows 上用对应的 <code>MapViewOfFile</code>，然后在映射出来的地址上解析文件头。<span class="ev ev-code">代码事实</span>（<code>gguf_reader.hpp</code> 第 376–408 行）</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这就是《操作系统》里的按需调页（demand paging）。mmap 把“文件 I/O”变成了“访问内存”，缺页处理程序替你做了 <code>read</code>。虚拟内存和页表的细节在第 14 章展开。</p>
+<p>页缓存是好帮手，但它按自己的规则决定留谁、丢谁。规则和你的访问方式不合拍，会发生什么？Strata 的源码里记着一次真实的教训。<span class="ev ev-code">代码事实</span> 早期版本在 Windows 上打开专家文件时，给操作系统加了一个“随机访问”提示。这个提示让系统关掉预读，并且尽快丢弃读过的页，理由是“大文件随机访问，读过的不会再读”。可专家文件恰恰相反：每个 token 选的专家看似随机，读过的字节下一个 token 几乎都会再读。结果是速度只剩 1.93 GB/s，每个 token 要 344 ms，跑了 25 个 token 也没热起来，因为页被淘汰得和读进来一样快。注释的结论是：正确的提示就是不加提示，能不能留住页才是关键（<code>expert_source.cpp</code> 第 381–391 行）。</p>
+<p>下面的模拟器把这件事缩小到 16 段文件。每个 token 都按顺序读同样的 W 段，页缓存按“最久没用的先淘汰”（LRU）腾位置：</p>
+<div class="viz" data-viz="page-cache"><figure class="fig"><svg viewBox="0 0 400 180" role="img" aria-label="图 6-3：每个 token 按顺序读 6 段。页缓存有 8 个槽位时只有第一个 token 缺页；只有 5 个槽位时每次都缺页">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12" font-weight="600">每个 token 按顺序读 6 段（W = 6），LRU 淘汰</text>
+<text class="f-muted" fill="#5c6d66" x="185" y="38" font-size="12" text-anchor="middle">token 1</text>
+<text class="f-muted" fill="#5c6d66" x="259" y="38" font-size="12" text-anchor="middle">token 2</text>
+<text class="f-muted" fill="#5c6d66" x="333" y="38" font-size="12" text-anchor="middle">token 3</text>
+<text class="f-text" fill="#182f2b" x="10" y="61" font-size="12">C = 8：装得下</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="48" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="163" y="48" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="174" y="48" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="185" y="48" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="196" y="48" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="207" y="48" width="10" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="226" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="237" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="248" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="259" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="270" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="281" y="48" width="10" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="300" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="311" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="322" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="333" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="344" y="48" width="10" height="18"/><rect class="f-accent" fill="#136d5a" x="355" y="48" width="10" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="99" font-size="12">C = 5：差 1 个槽位</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="163" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="174" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="185" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="196" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="207" y="86" width="10" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="226" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="237" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="248" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="259" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="270" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="281" y="86" width="10" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="300" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="311" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="322" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="333" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="344" y="86" width="10" height="18"/><rect class="f-warn" fill="#9e5d24" x="355" y="86" width="10" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="128" font-size="12">C = 8：从第 2 个 token 起，命中率 100%</text>
+<text class="f-text" fill="#182f2b" x="10" y="146" font-size="12">C = 5：命中率一直是 0%</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="170" font-size="12">高亮格：命中，直接用内存里的页 · 警示格：缺页</text>
+</svg><figcaption>图 6-3　工作集装得下，只有第一轮缺页；比缓存多出一段，按顺序循环读时每次都缺页。缓存的收益常常是“全有或全无”。</figcaption></figure></div>
+<p>这个“全有或全无”的现象，在第 12 章讲缓存替换时还会再见到。各层存储的带宽差多少，见第 1 章的<a href="#chapter/01/c01-memory-hierarchy">「存储层次结构」</a>专栏。</p>
+
+<h2 id="sec-3">6.3 Strata 把字节放在哪：拷贝、映射、直读</h2>
+<p>同一个引擎，对不同的数据用了三种完全不同的放法，见图 6-4。选哪种，取决于两个问题：这份数据每个 token 都要反复读吗？内存装得下吗？</p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="图 6-4：Strata 的三种放法。常规模式把专家拷进内存并锁页；低内存模式用 mmap 让页缓存代管；n-gram 表绕过页缓存直接读硬盘">
+<rect class="f-accent" fill="#136d5a" x="8" y="8" width="122" height="34" rx="6"/>
+<text class="f-on" fill="#ffffff" x="69" y="30" font-size="13" font-weight="600" text-anchor="middle">常规：拷贝</text>
+<rect class="f-accent" fill="#136d5a" x="139" y="8" width="122" height="34" rx="6"/>
+<text class="f-on" fill="#ffffff" x="200" y="30" font-size="13" font-weight="600" text-anchor="middle">低内存：映射</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="8" width="122" height="34" rx="6"/>
+<text class="f-on" fill="#ffffff" x="331" y="30" font-size="13" font-weight="600" text-anchor="middle">n-gram 表：直读</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="50" width="122" height="104" rx="6"/>
+<text class="f-text" fill="#182f2b" x="69" y="72" font-size="12" text-anchor="middle">全部专家</text>
+<text class="f-text" fill="#182f2b" x="69" y="92" font-size="12" text-anchor="middle">拷进内存并锁页</text>
+<text class="f-text" fill="#182f2b" x="69" y="112" font-size="12" text-anchor="middle">不会被换出</text>
+<text class="f-text" fill="#182f2b" x="69" y="132" font-size="12" text-anchor="middle">显卡可直接 DMA</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="139" y="50" width="122" height="104" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="72" font-size="12" text-anchor="middle">mmap 映射</text>
+<text class="f-text" fill="#182f2b" x="200" y="92" font-size="12" text-anchor="middle">experts.bin</text>
+<text class="f-text" fill="#182f2b" x="200" y="112" font-size="12" text-anchor="middle">页缓存按需读入</text>
+<text class="f-text" fill="#182f2b" x="200" y="132" font-size="12" text-anchor="middle">内存紧张可归还</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="270" y="50" width="122" height="104" rx="6"/>
+<text class="f-text" fill="#182f2b" x="331" y="72" font-size="12" text-anchor="middle">28.8 GB 的表</text>
+<text class="f-text" fill="#182f2b" x="331" y="92" font-size="12" text-anchor="middle">一直留在硬盘</text>
+<text class="f-text" fill="#182f2b" x="331" y="112" font-size="12" text-anchor="middle">绕过页缓存直读</text>
+<text class="f-text" fill="#182f2b" x="331" y="132" font-size="12" text-anchor="middle">按 4 KiB 对齐</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="162" width="122" height="40" rx="6"/>
+<text class="f-warn" fill="#9e5d24" x="69" y="187" font-size="12" text-anchor="middle">占 23–50 GB 内存</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="139" y="162" width="122" height="40" rx="6"/>
+<text class="f-warn" fill="#9e5d24" x="200" y="187" font-size="12" text-anchor="middle">显卡小时常读硬盘</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="162" width="122" height="40" rx="6"/>
+<text class="f-warn" fill="#9e5d24" x="331" y="187" font-size="12" text-anchor="middle">每 token 读 16 行</text>
+</svg><figcaption>图 6-4　三种放法，三种代价。反复要读、内存装得下的，拷进来锁住；装不下的，交给页缓存代管；很大、每次只读几行的，干脆不进内存。</figcaption></figure>
+<p><strong>常规模式：拷进来，锁住。</strong>内存够大时，全部专家（23–50 GB，视量化版本而定）被拷进内存并<dfn>锁页</dfn>。<span class="ev ev-report">上游报告</span>[S03] 锁页的意思是告诉操作系统：这些页不许换出到硬盘。锁住之后，显卡可以通过 DMA 直接从这块内存取数据，不用 CPU 先倒一手。[S06] 平台层的锁页函数在 Linux 上调用 <code>mlock</code>，在 Windows 上调用 <code>VirtualLock</code>，只锁住一部分时会如实报告，而不是假装成功。<span class="ev ev-code">代码事实</span>（<code>platform/memory.hpp</code> 第 1–24 行）</p>
+<p><strong>低内存模式：映射，让页缓存代管。</strong>内存放不下全部专家时（引擎 0.1.26 起），安装程序改为映射模型目录里的 <code>experts.bin</code>。显卡没缓存的专家由操作系统的文件缓存代管，内存紧张时可以还回去。上游报告，Coder 版本的引擎已提交内存从 36 GB 降到约 13 GB，回答不变；但显卡小的话，多数专家要从硬盘读，会慢很多。<span class="ev ev-report">上游报告</span>[S03]</p>
+<p><strong>n-gram 表：不进内存，直接读硬盘。</strong>这张表有 320,001,536 行，按 IQ4_NL 格式每行 90 字节，合计约 28.8 GB（26.8 GiB）。<span class="ev ev-code">代码事实</span> 读取器的设计要求它<strong>永远不占内存</strong>，连页缓存也不占：每一行都用不经缓冲的 4 KiB 读取直接从硬盘取，每个 token 要读 16 行，分布在 16 个不同的页上（<code>ple_reader.hpp</code> 第 1–5 行）。底层的直读模块写明了原因：内存映射做不到“不进页缓存”的承诺，不经缓冲的读取可以；代价是偏移、长度和缓冲区地址都必须是 4096 的倍数（<code>direct_file.hpp</code> 第 3–9 行）。这张表是做什么用的，第 11 章细讲。</p>
+
+<h2 id="sec-4">6.4 每个张量都要过安检</h2>
+<p>目录说“张量 X 从偏移 o 开始，长 n 字节”。引擎能信吗？文件可能下载到一半就断了，可能被别的工具写坏了，也可能根本是另一个模型的文件。引擎读张量之前，必须先证明 [o, o+n) 这一段完整地落在文件里。</p>
+<p>最顺手的写法是 <code>o + n ≤ F</code>（F 是数据区的长度）。可计算机里的整数位数是固定的。<dfn>无符号整数</dfn>算出的结果超过上限时，会悄悄“绕回”到很小的数，这叫<dfn>溢出</dfn>。如果目录里的 o 被写坏成一个极大的数，o + n 绕回成一个小数，检查就被骗过去了。</p>
+<p>Strata 用的是不会溢出的写法：先确认 <code>o ≤ F</code>，再确认 <code>n ≤ F − o</code>。第一步保证了减法不会出负数，第二步不再做加法。<span class="ev ev-code">代码事实</span>（<code>gguf_reader.hpp</code> 第 530–536 行）下面的模拟器把整数缩小到 8 位，让溢出看得见：</p>
+<div class="viz" data-viz="range-check"><figure class="fig"><svg viewBox="0 0 400 210" role="img" aria-label="图 6-5：8 位整数里 200 加 100 绕回成 44，写法 A 误判越界张量合法，写法 B 先检查偏移，正确拒绝">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">8 位无符号整数：F = 128，o = 200，n = 100</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="36" width="120" height="18"/>
+<text class="f-text" fill="#182f2b" x="26" y="49" font-size="12">文件 [0, 128)</text>
+<rect class="f-warn" fill="#9e5d24" x="207.5" y="62" width="93.8" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="207" y="96" font-size="12">张量声称 [200, 300)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="4 3" d="M260 36V112"/>
+<text class="f-muted" fill="#5c6d66" x="264" y="48" font-size="12">上限 255</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" stroke-dasharray="2 2" d="M61.3 62V112"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 116H380M20 112V120M140 112V120M260 112V120M380 112V120"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="134" font-size="12" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="61.3" y="134" font-size="12" text-anchor="middle">44</text>
+<text class="f-muted" fill="#5c6d66" x="140" y="134" font-size="12" text-anchor="middle">128</text>
+<text class="f-muted" fill="#5c6d66" x="260" y="134" font-size="12" text-anchor="middle">256</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="134" font-size="12" text-anchor="middle">384</text>
+<text class="f-text" fill="#182f2b" x="20" y="158" font-size="12">200 + 100 = 300，在 8 位里绕回成 300 − 256 = 44</text>
+<text class="f-text" fill="#182f2b" x="20" y="180" font-size="12">写法 A：44 ≤ 128 → 放行（错）</text>
+<text class="f-text" fill="#182f2b" x="20" y="200" font-size="12">写法 B：先查 200 ≤ 128，不成立 → 拒绝（对）</text>
+</svg><figcaption>图 6-5　同一个越界张量，两种检查写法给出相反的结论。先查偏移、再做减法的写法不会溢出，所以不会被骗。</figcaption></figure></div>
+<p class="bridge"><strong>学过计算机的同学：</strong>在 C/C++ 里，无符号整数溢出是“定义良好”的：按 2<sup>64</sup> 取模，不报错，不崩溃。正因为它安静，才危险。有符号整数溢出则是未定义行为，编译器甚至可能把你的检查优化掉。</p>
+<p>算字节数时的乘法也会溢出。一个张量的元素个数是各维长度相乘，四个维度相乘很容易超过 64 位。Strata 每乘一个维度 d 之前，先检查“当前积 ≤ 上限 ÷ d”，不满足就返回 0，表示“这个形状算不出合法大小”。<span class="ev ev-code">代码事实</span>（<code>gguf_reader.hpp</code> 第 475–488 行）</p>
+<p>这只是安检的一部分。同一个读取器还会拒绝这些文件：两个张量重名（否则查找时谁排前面谁赢，悄悄用错张量）；维度数是 0 或超过 4；元数据数组长度超过 2<sup>24</sup>；数据区起点落在文件末尾之后。<span class="ev ev-code">代码事实</span>（<code>gguf_reader.hpp</code> 第 326、437–446、458 行）映射专家文件之前，引擎还会核对文件大小是否<strong>正好</strong>等于专家布局要求的字节数，差一个字节都拒绝（<code>expert_source.cpp</code> 第 436–446 行）。</p>
+<p>字节范围对了，形状也要对。<code>layout.hpp</code> 在加载时逐层核对每个张量的形状：名字对应的张量是不是内核以为的那个形状。头文件里写着它的目标：在<strong>加载时</strong>报出张量名、实际形状和要求的形状，而不是在第 4000 个 token 时变成矩阵乘法里的一个错数。<span class="ev ev-code">代码事实</span>[S04]</p>
+
+<h2 id="sec-5">6.5 字节对不对：校验和与哈希</h2>
+<p>区间检查回答的是“字节在不在文件里”。还有一个问题它答不了：这些字节是不是原本的那些？下载时坏了一个字节，文件大小不变，区间检查照样通过。要回答这个问题，需要给数据算一个“指纹”。</p>
+<aside class="primer" id="c06-checksum-hash">
+<h3>校验和与哈希</h3>
+<p>直觉：寄一大箱书，怎么知道路上没丢、没换？可以先数一遍总页数写在箱子上，收到后再数一遍。这个“总页数”就是最朴素的<dfn>校验和</dfn>：用很短的一个数概括一大块数据，两边一比就知道有没有变。</p>
+<p>最简单的校验和是把所有字节加起来。它能发现“某个字节变了”，却发现不了“两个字节换了位置”，因为加法不在乎顺序。更好的校验算法，例如 <dfn>CRC</dfn>（循环冗余校验），对顺序敏感，常用来发现传输和存储中的随机错误。</p>
+<p><dfn>密码学哈希</dfn>更进一步，例如 SHA-256。它把任意长的数据变成 256 位的摘要，并且有两个性质：输入改一个比特，摘要大约一半的位都会变（<dfn>雪崩效应</dfn>）；想故意造出两份摘要相同的不同文件，在现有计算能力下做不到。所以它不但能发现意外损坏，也能发现有人故意替换。专栏后的图 6-6 是一个小例子。</p>
+<p>和本章的关系：几十 GB 的模型文件，靠文件名和大小只能证明“有个差不多大的文件”；算一遍哈希，才能证明“就是那个文件”。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/校验和" target="_blank" rel="noopener noreferrer">维基百科：校验和</a> · <a href="https://zh.wikipedia.org/zh-cn/散列函數" target="_blank" rel="noopener noreferrer">维基百科：散列函数</a> · <a href="https://zh.wikipedia.org/zh-cn/SHA-2" target="_blank" rel="noopener noreferrer">维基百科：SHA-2</a> · <a href="https://oi-wiki.org/string/hash/" target="_blank" rel="noopener noreferrer">OI Wiki：字符串哈希</a> · <a href="https://developer.mozilla.org/zh-CN/docs/Web/API/SubtleCrypto/digest" target="_blank" rel="noopener noreferrer">MDN：在浏览器里计算 SHA-256</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/file-integrity.pdf" target="_blank" rel="noopener noreferrer">OSTEP 第 45 章：数据完整性</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 178" role="img" aria-label="图 6-6：交换两个字节后，字节和不变，SHA-256 摘要完全不同">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="12">输入</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="18" font-size="12">字节和</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="18" font-size="12">SHA-256 的前 16 个十六进制位</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="26" width="376" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="49" font-size="13">“AB”</text>
+<text class="f-text" fill="#182f2b" x="70" y="49" font-size="13">65 + 66 = 131</text>
+<text class="f-text" fill="#182f2b" x="190" y="49" font-size="13">38164fbd17603d73</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="70" width="376" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="93" font-size="13">“BA”</text>
+<text class="f-text" fill="#182f2b" x="70" y="93" font-size="13">66 + 65 = 131</text>
+<text class="f-text" fill="#182f2b" x="190" y="93" font-size="13">296d71a7f66e75b7</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="134" font-size="12">字节和：两次都是 131，看不出数据变了</text>
+<text class="f-text" fill="#182f2b" x="20" y="156" font-size="12">SHA-256：只差两个字节的顺序，摘要已面目全非</text>
+</svg><figcaption>图 6-6　朴素校验和对“换位置”视而不见；密码学哈希对任何改动都极其敏感。</figcaption></figure>
+<p>Strata 的安装脚本对实验性的 Unsloth 模型文件做了完整的哈希核对。<span class="ev ev-code">代码事实</span> 每个分片的字节数和 SHA-256 都写死在脚本里。下载完成后，先比字节数，不对就直接报错；再以每次 16 MiB 的块读完整个文件，算 SHA-256。不一致就删掉文件，提示重新下载。算一遍 111 GB 大约要 5 分钟，所以结果会记在一个“完成标记”文件里，下次启动不再重算（<code>setup.py</code> 第 132–133、921–943 行）。其他模型文件不做哈希，安装脚本会读一遍它们的张量目录来核对（同一处注释）。</p>
+<p>哈希管的是“文件对不对”。字节从内存搬到显存之后，还要再确认一次。专家缓存有一个 <code>verify_slot</code> 函数：把显存里某个槽位的字节读回来，和内存里的原件逐字节比较。注释说，这是“唯一能证明缓存里装的就是它声称的那个专家”的东西，因为槽位编号对、字节错，产出的是一个看起来合理的错 token。[S05] 它还真的抓到过问题：第一版启动填充用了异步拷贝，与读回检查不在同一个执行顺序里，检查直接拒绝了整次运行，报“slot 0 differs from the arena at byte 0”。注释的评价是：这正是检查在尽它的职责。<span class="ev ev-code">代码事实</span>[S05]</p>
+
+<h2 id="sec-6">6.6 动手：不下载模型也能练加载器</h2>
+<p>本章没有独立的实验页，上面两个交互图就是实验。建议按这个顺序玩：</p>
+<ol>
+<li>在「页缓存模拟器」里先让 C ≥ W 跑 10 个 token，再把 C 调成 W − 1。记下两次的命中率，用一句话解释为什么差一个槽位就从接近 100% 掉到 0%。</li>
+<li>在「区间检查」里把 n 固定为 100，从 o = 150 开始往上拖，找出写法 A 第一次被骗的 o 值，并用 o + n − 256 验证你的答案。</li>
+</ol>
+<p>进阶练习：自己设计一个 128 字节的假 GGUF 文件，目录里写三个张量。依次测试：合法区间、恰好到末尾、越界 1 字节、极大的偏移、维度相乘溢出、两个张量重名。验收标准不是“坏文件会崩溃”，而是<strong>在任何计算开始之前，给出一句人能看懂的拒绝原因</strong>。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>mmap 只建立“地址 ↔ 文件”的对应关系，字节在第一次访问时才因缺页从硬盘读入，然后留在页缓存里。映射成功不等于数据已在内存。</li>
+<li>Strata 按访问方式选放法：反复读又装得下的专家拷进内存并锁页；装不下时交给页缓存；28.8 GB 的 n-gram 表绕过页缓存直接读硬盘。</li>
+<li>每个张量都要过安检：区间检查写成 <code>o ≤ F 且 n ≤ F − o</code> 才不会溢出；形状在加载时核对；文件整体用 SHA-256 这类哈希证明“就是那个文件”。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“mmap 成功了，模型就已经在内存里了。”</strong></p>
+<p>mmap 返回时，操作系统只登记了对应关系，可能一页都还没读。真正的读取发生在第一次访问时，而且读进来的页在内存紧张时还可能被回收，下次访问再从硬盘读。Strata 的源码里就记录过：页被淘汰得和读进来一样快时，速度会掉到硬盘水平。</p></div>
+
+<details class="deep"><summary>深入一层：一致不等于正确、所有权与生命周期、文档和代码打架时信谁</summary>
+<h3>两个工具一致，也可能一起错</h3>
+<p><code>layer.cpp</code> 里保留了两段很有价值的故障记录。[S14] 第一段：有个函数自己重新推导量化张量三块数据（编码、缩放系数、偏移）的大小，假设每个缩放系数占 4 字节。可 303 个量化张量里有 90 个的缩放系数是 2 字节的 fp16，包括全部 58 个 Q2_0 专家张量。于是算出来的缩放系数块大了一倍，三块加起来对不上张量总大小。第一反应是怀疑清单里的分组大小写错了；审计全部 303 个张量后发现分组大小没问题，<strong>被漏查的输入是缩放系数的宽度</strong>。</p>
+<p>第二段：两个打包工具都去找名叫 <code>mins</code> 的数据块，可真正的键名是 <code>offsets</code>。两个工具“一致地”漏掉了 54 个 Q4_K/Q5_K 张量的偏移块：内存预算少算了 136 MiB，这些字节也没拷进去。注释的结论是：两个工具一致，只有在它们不共享同一个错误假设时才算证据。现在的 <code>plane_ptrs</code> 不再自己推导，只核对加载器记录的三块大小之和是否等于张量总字节数，以及“有没有偏移块”的标志是否和偏移块大小一致，不符就拒绝。<span class="ev ev-code">代码事实</span>[S14]</p>
+<p>测试设计上的启发：两个 oracle（判定对错的参考实现）要真正独立。一个按格式规范顺序解析，另一个用手工构造、逐字节核对过的固定样本；不要让它们共用同一个布局推导函数，再把“结果相同”当成强证据。</p>
+<h3>表头游标里的一处加法</h3>
+<p>读文件头用的 <code>Cursor::need</code> 写的是 <code>pos_ + n &gt; size_</code>（<code>gguf_reader.hpp</code> 第 240–242 行），正是 6.4 节说的加法写法。头部的定长字段很小，这没问题；但字符串长度 n 是从文件里读出来的。练习：如果 n 被篡改成接近 2<sup>64</sup>，这次比较会不会被绕回骗过？提示：即使骗过了，下一行用 n 构造 <code>std::string</code> 时，长度超过上限会抛出异常，文件仍会被拒绝，只是报错信息不再是那句精确的“unexpected end of file”。这说明安全往往靠多层防线，但每一层都值得写对。</p>
+<h3>RAII 管得住的，和管不住的</h3>
+<p>C++ 的 <dfn>RAII</dfn>（资源获取即初始化）让对象在析构时自动释放资源：GGUF 读取器在构造中途失败时，会先解除映射、关闭文件，再把异常抛出去（<code>gguf_reader.hpp</code> 第 342–345、410–419 行）。可推理引擎里的资源不只是内存和文件句柄，还有显存、锁页内存、CUDA stream 和 event。智能指针只认识它被告知的所有权，<strong>不会</strong>替你等异步拷贝完成。</p>
+<p>所以接口契约要写成“调用者持有这块缓冲，直到拷贝完成事件被确认”，而不是“传入一个地址”。<code>expert_source.hpp</code> 就把指针的寿命写得很清楚：普通来源返回的指针只保证活到下一次 <code>blob()</code> 调用；带缓存的来源必须返回指向缓存本身的指针，不能指向一块会被复用的暂存区，否则 CPU 算这个专家时，读到的可能已经是下一个专家的字节。从 GGUF 分片现拼出来的“临时”专家块，只保证在当前层和之后一两层内有效；要留得更久，必须用 <code>copy_blob</code> 拷一份。[S06] 释放会话内存之前，<code>session_release</code> 还要先撤销别的模块登记过的外部指针（比如旋转位置编码的角度表），免得新会话拿着已释放的地址去算。[S13]</p>
+<h3>文档和代码说法不一时，信谁</h3>
+<p>Strata 的说明文档写 n-gram 表“通过操作系统缓存读几行”（<code>docs/HOW_IT_WORKS.md</code> 第 31 行），而读取器的头文件写的是“永远不进内存，每行都用不经缓冲的 4 KiB 读取”（<code>ple_reader.hpp</code> 第 3–4 行）。本书按固定提交的源码叙述，并把这种分歧原样指出来。读开源项目时，文档是作者的意图，代码是实际的行为；二者不一致时，以能运行、能测试的那一方为准，同时记下分歧，别替任何一方圆场。</p>
+<h3>为什么“异步返回”不能当成“拷贝完成”</h3>
+<p>异步拷贝函数返回，只表示任务已经排进队列，DMA 引擎可能还没读源缓冲。此时复用或释放源缓冲，拷过去的可能是一半旧、一半新的字节。正确的复用许可，是同一个 stream 上的完成事件，或明确写在契约里的同步点。<code>expert_cache.hpp</code> 里那次 “slot 0 differs” 的失败，本质上就是两条执行顺序没有对齐。[S05]</p>
+</details>
