@@ -94,7 +94,7 @@
     /* ---------- building blocks ---------- */
     // Outer frame with the module bar. Returns the body element to fill.
     frame(el, { code, title, tag, intro }) {
-      el.insertAdjacentHTML('beforeend', `<div class="viz-frame"><div class="viz-bar"><b>${esc(code)} // ${esc(title)}</b><span class="tag">${esc(tag || '教学推演')}</span></div><div class="viz-body">${intro ? `<p class="viz-intro">${intro}</p>` : ''}</div></div>`);
+      el.insertAdjacentHTML('beforeend', `<div class="viz-frame"><div class="viz-bar"><b><span class="code">${esc(code)} // </span>${esc(title)}</b><span class="tag">${esc(tag || '教学推演')}</span></div><div class="viz-body">${intro ? `<p class="viz-intro">${intro}</p>` : ''}</div></div>`);
       return el.querySelector('.viz-body');
     },
     // items: [{ color: CSS color or var(), text, glow }]
