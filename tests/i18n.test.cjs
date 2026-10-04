@@ -32,3 +32,19 @@ test('published languages have complete translated content', () => {
     for (const ch of chapters) assert.ok(fs.existsSync(path.join(dir, 'chapters', ch.id + '.html')), `${lang}/chapters/${ch.id}.html`);
   }
 });
+
+test('lab page string tables match the Chinese keys', () => {
+  require('../src/labs.js');
+  const T = globalThis.LabViews.TABLE, zh = T.zh;
+  const translatorKeys = new Set(['math', 'mathPatterns', 'names']);
+  for (const [lang, table] of Object.entries(T)) {
+    if (lang === 'zh') continue;
+    assert.deepEqual(Object.keys(table).sort(), Object.keys(zh).sort(), 'labs ' + lang + ' key set differs from zh');
+    for (const k of Object.keys(zh)) {
+      assert.equal(typeof table[k], typeof zh[k], `labs ${lang}.${k} type`);
+      if (Array.isArray(zh[k]) && !translatorKeys.has(k)) assert.equal(table[k].length, zh[k].length, `labs ${lang}.${k} length`);
+      if (translatorKeys.has(k)) continue;
+      assert.ok(!/[一-鿿]/.test(typeof table[k] === 'function' ? String(table[k]) : JSON.stringify(table[k])), `labs ${lang}.${k} contains Chinese`);
+    }
+  }
+});
