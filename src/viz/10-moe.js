@@ -46,6 +46,46 @@
       rGo: '▶ 开跑', rSlow: '动画放慢 60 倍',
       rVerdict: (pcie, pTok, ssd, sTok) => `① 走 PCIe 搬一遍要 <b>${pcie} ms</b>，光搬运就把速度压到每秒最多 <b>${pTok}</b> 个 token，还没开始计算。<br>② 从硬盘读要 <b>${ssd} ms</b>，每秒最多 ${sTok} 个 token，不可能每次都读。<br>③ 所以 Strata 让 CPU 直接在内存里计算大部分没命中的专家，这些数据不必经过 PCIe。`,
     },
+    en: {
+      code: 'ROUTER_SIM', title: 'Router simulator', tag: 'Teaching estimate · random scores',
+      intro: 'One layer\'s 512 experts sit in a 32 × 16 grid. Press <b>Step</b> to watch, one step at a time, how the router scores the experts, picks the top k, and adds up their results by weight.',
+      lgCell: 'One cell = one expert in this layer', lgScore: 'Being scored (brighter = higher score)', lgPick: 'Picked, takes part in the computation',
+      steps: ['Token arrives', 'Score', 'Pick top k', 'Experts compute', 'Weighted sum', 'Next layer'],
+      gridLabel: 'Scoring grid of 512 experts',
+      bStep: '▶ Step', bAll: '▶▶ Run all 48 layers', bReset: 'Reset',
+      kLabel: 'Experts picked per layer (k)',
+      layers: (n) => `${n} / 48 layers done`, read: (mb) => `${mb} MB read so far`,
+      ready: '<span class="c">$</span> ready. Press [ ▶ Step ] to begin; each press moves one step along the strip',
+      readyShort: '<span class="c">$</span> ready. Press [ ▶ Step ] to begin',
+      sPicksK: 'Expert picks per token', sPicksF: '<b>= 48 layers × k</b><br>every layer picks again',
+      sParamsK: 'Parameters one token actually uses',
+      sParamsF: (picks, pct) => `<b>= ${picks} × 4.9152 M + about 4.2 B</b><br>chosen experts' parameters + the parts used every step<br>${pct}% of the full 125 billion`,
+      sBytesK: 'Expert data one token must read', sBytesF: (picks) => `<b>= ${picks} × 1.3824 MB</b><br>each expert takes 1,382,400 bytes in the standard format`,
+      sWK: 'How much say each picked expert gets (weights)', sWEmpty: 'Shown once you Step to step 5', sWF: 'Higher score, bigger weight; the weights add up to 1', sWMore: (n) => `…and ${n} more`,
+      params: (x) => `${(x / 1e9).toFixed(1)} billion`,
+      try: [
+        'Keep pressing <b>Step</b> and watch the strip advance cell by cell; the terminal explains every step in one line.',
+        'Drag k down to <b>1</b>, then up to <b>64</b>: the parameters used rise from about 4.4 billion to about 19.3 billion. A bigger k means more experts working each step, and a slower step.',
+        'Press <b>Run all 48 layers</b>: every layer picks again, and the 48 layers read exactly 664 MB in total. That is the work for generating just <b>one</b> token.',
+      ],
+      restart: '<span class="y">// all 48 layers done; starting again from layer 1</span>',
+      l0: (n) => `<span class="c">[L${String(n).padStart(2, '0')}]</span> token data arrives and goes to the router of layer ${n}`,
+      l1: '<span class="m">Score</span>: the router computes a score for each of the 512 experts (brighter = higher)',
+      l2: (k, ids, rest) => `<span class="c">Pick top ${k}</span>: chose ${ids}; the other ${rest} sit this step out`,
+      l3: (k, mb) => `<span class="w">Experts compute</span>: each of the ${k} experts computes a result, reading ${k} × 1.38 MB ≈ ${mb} MB of parameters`,
+      l4: (max) => `<span class="y">Weighted sum</span>: scores become weights (largest ${max}, total 1.00); higher-scoring experts get more say`,
+      l5: (n, mb) => `<span class="c">→</span> result goes to the next layer. ${n} / 48 layers done, ${mb} MB read so far`,
+      fast: '<span class="y">// fast-forward: running all 48 layers</span>',
+      done: (k, mb) => `<span class="y">Done</span>: 48 layers × ${k} = ${48 * k} picks, ${mb} MB read in total. That is the work for generating just <span class="w">one</span> token`,
+
+      rCode: 'TRANSFER_RACE', rTitle: 'Transfer race: 664 MB', rTag: 'Theoretical peak · Teaching estimate',
+      rIntro: 'One token needs to read about 664 MB of expert data. Let four places move those 664 MB at once and see who finishes first. <b>Transfer time = data size ÷ bandwidth</b>.',
+      rLgLane: 'Each lane = one kind of storage or link', rLgFill: 'The faster a bar fills, the higher the bandwidth',
+      lanes: [['VRAM', 'RTX 5070 VRAM'], ['RAM', 'dual-channel DDR5-5200'], ['PCIe 5.0', 'the bus between GPU and RAM'], ['SSD', 'typical NVMe sequential read']],
+      rEq: (hw, mb, bw, ms, tok) => `${hw}: ${mb} MB ÷ ${bw} GB/s = ${ms} ms → at most ${tok} tokens per second`,
+      rGo: '▶ Go', rSlow: 'animation slowed 60×',
+      rVerdict: (pcie, pTok, ssd, sTok) => `① One trip over PCIe takes <b>${pcie} ms</b>; the moving alone caps you at <b>${pTok}</b> tokens per second, before any computing starts.<br>② Reading from the SSD takes <b>${ssd} ms</b>, at most ${sTok} tokens per second, so you cannot read from it every time.<br>③ That is why Strata lets the CPU compute most missed experts right in RAM, so that data never has to cross PCIe.`,
+    },
   });
 
   Viz.register('moe-router', {
@@ -75,7 +115,7 @@
       const $ = s => el.querySelector(s);
       const [stepBtn, allBtn, resetBtn] = el.querySelectorAll('.viz-btn');
       const range = $('input[type=range]');
-      const emptyWeights = () => { $('.r-w').innerHTML = `<div><span>—</span><span style="grid-column:2/4">${T.sWEmpty}</span></div>`; };
+      const emptyWeights = () => { $('.r-w').innerHTML = `<div><span style="grid-column:1/-1">${T.sWEmpty}</span></div>`; };
       let k = 10, layer = 0, phase = 0, busy = false, scores = new Float32Array(M.EXPERTS), picked = [];
       const mbRead = () => Math.round(layer * k * M.EXPERT_BYTES / 1e6);
 
