@@ -1,20 +1,245 @@
-<h2 id="sec-1">2.1 token 不是固定长度的一个字</h2>
-<p>分词器把字符串映射成词表中的整数序列。一个 token 可以对应一个字、一个词的片段、空白或部分字节；同一字数的中文、代码、英文不一定得到相同 token 数。不能把某个英语经验比例当成通用容量公式。输入预算必须在实际模板和分词器运行后计算。[S15][S16]</p>
-<p>聊天模板同样是输入的一部分。角色标记、工具参数说明、结束标记以及思考模式的控制文本都会改变 token 序列。两次请求表面上都是“你好”，但模板或系统提示变化后，其实不是同一个数学问题。</p>
-<h2 id="sec-2">2.2 自回归：联合问题变成一串条件问题</h2>
-<p>设序列为 x₁…xₙ。概率的链式法则给出：</p>
+<div class="hook"><span class="eyebrow">你可能注意到过</span>
+<p>同一个问题问两遍，聊天 AI 给的回答常常不一样。可它明明是一台计算机：同样的输入，怎么会有不同的输出？</p>
+<p>答案藏在第 1 章那六步里的第 ⑤ 步。模型从来不直接“说出”下一个词。它只给出一张概率表，然后像掷骰子一样，从表里挑一个。这一章把这张表怎么来、骰子怎么掷、掷之前要先做哪些筛选，一步步讲清楚。</p></div>
+<p class="tldr"><strong>一句话：</strong>模型每一步只做一道选择题：根据前文，给词表里每个 token 打分；softmax 把分数变成概率，再用一个随机数按概率挑一个。温度、top-k、top-p 这些参数，都是在“挑”之前修改这张概率表。</p>
+
+<h2 id="sec-1">2.1 模型读到的不是字，是一串编号</h2>
+<p>第 1 章说过，<dfn>分词器</dfn>把文字切成 token，再换成整数编号。Strata 用的分词器有 248,320 个 token，切法叫<dfn>字节级 BPE</dfn>：先把文字拆成最小的字节，再把训练语料里经常挨在一起的片段反复合并成一个 token。常见的词合成一个 token，生僻的字就拆成几块。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/tools/strata_tokenizer.py#L3-L14" target="_blank" rel="noopener noreferrer">strata_tokenizer.py</a></p>
+<p>因为最底层是字节，任何文字都能被表示，不会出现“这个字不认识”。这个分词器的说明里还写了它最看重的检查：把一段文字编码再解码，必须一个字节不差地变回原文。表情符号、多字节的汉字、连续空格，都在检查范围里。</p>
+<p>所以，一个 token 不等于一个字。Strata 的 README 说“一个 token 大约是 ¾ 个英文单词”。[S01] 这是英文的经验值，中文、代码、表格的比例都不一样。要算一段话占多少 token，唯一可靠的办法是真的用这个分词器切一遍。</p>
+<p>还有一件容易忽略的事：你打的那句话，并不是模型读到的全部。第 ② 步的<dfn>聊天模板</dfn>会在前后加上角色标记、系统提示、工具说明，见图 2-1。</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="图 2-1：你的消息先套上聊天模板，再被分词器换成编号，引擎只收到这串编号">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="320" height="44" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="27" font-size="13" font-weight="600" text-anchor="middle">① 你的消息</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="44" font-size="12" text-anchor="middle">“你好”</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 52V70"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="72" width="320" height="64" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="92" font-size="13" font-weight="600" text-anchor="middle">② 套上聊天模板</text>
+<text class="f-text" fill="#182f2b" x="200" y="111" font-size="12" text-anchor="middle">〈用户〉你好〈结束〉〈助手〉</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="128" font-size="12" text-anchor="middle">思考档位、工具说明也会写进这段文字</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 136V154"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="156" width="320" height="48" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="176" font-size="13" font-weight="600" text-anchor="middle">③ 分词器</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="195" font-size="12" text-anchor="middle">文字 → [3, 1023, 4, 5]（编号为示意）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 204V222"/>
+<rect class="f-accent" fill="#136d5a" x="40" y="224" width="320" height="44" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="251" font-size="13" font-weight="600" text-anchor="middle">④ 引擎只收到这串编号</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="12" text-anchor="middle">模板一变，编号就变：对模型来说，这是另一道题</text>
+</svg><figcaption>图 2-1　你的话要先套上模板、再切成编号，才轮到模型。模板和你打的字一样，都是输入的一部分。</figcaption></figure>
+<p>Strata 的服务层用模型自带的 Jinja 模板来渲染，而且要求结果和 Hugging Face 的做法完全一致，用 10 个标准样例核对过，其中包括思考模式和工具调用。<span class="ev ev-code">代码事实</span>[S16] 你在界面上选的“思考档位”，也是作为参数交给模板的：选 high 时，传给模板的实际值是 xhigh；选 none 时，传的是“关闭思考”。[S16] 这些都会改变最后那串编号。</p>
+<p>服务层和引擎之间的接口是 <code>Engine.generate(prompt_ids, max_new, sampling, cancel)</code>：交进去的是编号列表，拿回来的是一个个 token 编号。[S15] 文字只存在于这条边界之外。</p>
+
+<h2 id="sec-2">2.2 一次只猜下一个：链式法则</h2>
+<p>手机输入法会在你打字时猜下一个词。大模型做的是同一件事，只是猜得准得多。它每一步只回答一个问题：<strong>已知前面所有的 token，下一个是什么？</strong>答案不是一个词，而是一张概率表：词表里每个 token 各有一个概率，加起来等于 1。</p>
+<p>一整句话的概率，就是一步步猜下来的概率连乘，见图 2-2。这个规则叫<dfn>链式法则</dfn>。</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="图 2-2：一句话的概率等于每一步条件概率的乘积，我爱你的概率是 0.20 乘 0.10 乘 0.60 等于 0.012">
+<text class="f-text" fill="#182f2b" x="75" y="18" font-size="13" font-weight="600" text-anchor="middle">第 1 步</text>
+<text class="f-muted" fill="#5c6d66" x="75" y="36" font-size="12" text-anchor="middle">已知：开头</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">第 2 步</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="36" font-size="12" text-anchor="middle">已知：我</text>
+<text class="f-text" fill="#182f2b" x="325" y="18" font-size="13" font-weight="600" text-anchor="middle">第 3 步</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="36" font-size="12" text-anchor="middle">已知：我爱</text>
+<rect class="f-accent" fill="#136d5a" x="23" y="48" width="104" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="35" y="66" font-size="13">我</text><text class="f-on" fill="#ffffff" x="117" y="66" font-size="12" text-anchor="end">0.20</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="23" y="80" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="35" y="98" font-size="13">你</text><text class="f-muted" fill="#5c6d66" x="117" y="98" font-size="12" text-anchor="end">0.15</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="23" y="112" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="35" y="130" font-size="13">今天</text><text class="f-muted" fill="#5c6d66" x="117" y="130" font-size="12" text-anchor="end">0.10</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="148" y="48" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="160" y="66" font-size="13">是</text><text class="f-muted" fill="#5c6d66" x="242" y="66" font-size="12" text-anchor="end">0.30</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="148" y="80" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="160" y="98" font-size="13">想</text><text class="f-muted" fill="#5c6d66" x="242" y="98" font-size="12" text-anchor="end">0.20</text>
+<rect class="f-accent" fill="#136d5a" x="148" y="112" width="104" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="160" y="130" font-size="13">爱</text><text class="f-on" fill="#ffffff" x="242" y="130" font-size="12" text-anchor="end">0.10</text>
+<rect class="f-accent" fill="#136d5a" x="273" y="48" width="104" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="285" y="66" font-size="13">你</text><text class="f-on" fill="#ffffff" x="367" y="66" font-size="12" text-anchor="end">0.60</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="273" y="80" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="285" y="98" font-size="13">吃</text><text class="f-muted" fill="#5c6d66" x="367" y="98" font-size="12" text-anchor="end">0.10</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="273" y="112" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="285" y="130" font-size="13">们</text><text class="f-muted" fill="#5c6d66" x="367" y="130" font-size="12" text-anchor="end">0.05</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M127 61H137V125H146M252 125H262V61H271"/>
+<text class="f-text" fill="#182f2b" x="200" y="170" font-size="13" font-weight="600" text-anchor="middle">P(我爱你) = 0.20 × 0.10 × 0.60 = 0.012</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="196" font-size="12" text-anchor="middle">每一步都是“已知前文，猜下一个”的条件概率</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="216" font-size="12" text-anchor="middle">高亮的是这句话实际走的路；概率为示意</text>
+</svg><figcaption>图 2-2　链式法则：整句话的概率等于每一步条件概率的乘积。第 2 步选的“爱”并不是最高的，一句话不必每步都挑第一名。</figcaption></figure>
+<aside class="primer" id="c02-chain-rule">
+<h3>条件概率与链式法则</h3>
+<p>先看一个直觉：街上随便一个人带伞的概率不高；可如果已知“外面在下雨”，这个概率就高多了。“已知 B 发生时 A 的概率”叫<dfn>条件概率</dfn>，写作 P(A | B)，定义是 P(A | B) = P(A 且 B) ÷ P(B)。</p>
+<p>把定义移一下项，就得到乘法公式：P(A 且 B) = P(B) × P(A | B)。反复使用它，一长串事件的联合概率就拆成了一串条件概率的乘积：P(x₁, x₂, x₃) = P(x₁) × P(x₂ | x₁) × P(x₃ | x₁, x₂)。这就是<dfn>链式法则</dfn>。它不需要任何假设，对所有概率分布都成立。</p>
+<p>语言模型正是按这个公式造的：它每一步只学一件事，就是 P(下一个 token | 前面所有 token)。图 2-2 里“我爱你”的概率 0.012，就是三个条件概率相乘。注意条件里是<strong>前面所有</strong> token，所以前文改一个字，后面每一步的概率表都可能跟着变。</p>
+<p class="further">延伸阅读：<a href="https://oi-wiki.org/math/probability/conditional-probability/" target="_blank" rel="noopener noreferrer">OI Wiki：条件概率与独立性</a> · <a href="https://zh.wikipedia.org/zh-cn/条件概率" target="_blank" rel="noopener noreferrer">维基百科：条件概率</a> · <a href="https://en.wikipedia.org/wiki/Chain_rule_(probability)" target="_blank" rel="noopener noreferrer">Wikipedia: Chain rule (probability)</a></p>
+</aside>
+<p class="bridge"><strong>学过计算机的同学：</strong>这就是《概率论》里的乘法公式。和马尔可夫链不同，这里的条件是<strong>全部</strong>历史，不是只看上一个状态。正因为条件里有全部历史，引擎才要把历史存下来反复用（第 17 章的 KV 缓存）。</p>
+<p>顺带澄清一个常见的混淆：生成的时候，模型的参数一个都不变，变的只是“已有的 token”这份历史。参数只在训练时改。第 10 章讲的专家缓存会随着对话调整，但它调整的是参数<strong>放在哪</strong>，不是参数<strong>是多少</strong>，所以那也不是“模型在学习”。</p>
+
+<h2 id="sec-3">2.3 从分数到概率：softmax 与温度</h2>
+<p>模型最后一层输出的并不是概率，而是一串<dfn>分数</dfn>，行话叫 <dfn>logits</dfn>：词表里每个 token 一个数，可正可负，加起来也不等于 1。要变成概率，得经过一个叫 <dfn>softmax</dfn> 的函数：先给每个分数取指数 e<sup>z</sup>，变成正数；再除以所有指数的总和，让它们加起来等于 1。</p>
+<p>在取指数之前，还可以先把每个分数除以一个数 T，这个 T 就叫<dfn>温度</dfn>。T 小于 1，分数之间的差距被放大，高分的更高，分布变“尖”，回答更保守；T 大于 1，差距被缩小，分布变“平”，冷门词更有机会，回答更发散。图 2-3 是同一组分数在三种温度下的样子。</p>
+<div class="viz" data-viz="softmax-temperature"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 2-3：同一组分数在温度 0.5、1、2 下的概率。温度越低，最高分的猫越占优势，分别是 86%、62% 和 42%">
+<text class="f-text" fill="#182f2b" x="72" y="18" font-size="12" font-weight="600" text-anchor="middle">T = 0.5（更尖）</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="12" font-weight="600" text-anchor="middle">T = 1</text>
+<text class="f-text" fill="#182f2b" x="328" y="18" font-size="12" font-weight="600" text-anchor="middle">T = 2（更平）</text>
+<rect class="f-accent" fill="#136d5a" x="17" y="68" width="16" height="112"/>
+<rect class="f-muted" fill="#5c6d66" x="40" y="164.8" width="16" height="15.2"/>
+<rect class="f-muted" fill="#5c6d66" x="63" y="177.9" width="16" height="2.1"/>
+<rect class="f-muted" fill="#5c6d66" x="86" y="179" width="16" height="1"/>
+<rect class="f-muted" fill="#5c6d66" x="109" y="179" width="16" height="1"/>
+<text class="f-text" fill="#182f2b" x="25" y="62" font-size="12" text-anchor="middle">86%</text>
+<rect class="f-accent" fill="#136d5a" x="145" y="98.9" width="16" height="81.1"/>
+<rect class="f-muted" fill="#5c6d66" x="168" y="150.2" width="16" height="29.8"/>
+<rect class="f-muted" fill="#5c6d66" x="191" y="169" width="16" height="11"/>
+<rect class="f-muted" fill="#5c6d66" x="214" y="173.3" width="16" height="6.7"/>
+<rect class="f-muted" fill="#5c6d66" x="237" y="178.5" width="16" height="1.5"/>
+<text class="f-text" fill="#182f2b" x="153" y="92" font-size="12" text-anchor="middle">62%</text>
+<rect class="f-accent" fill="#136d5a" x="273" y="125.7" width="16" height="54.3"/>
+<rect class="f-muted" fill="#5c6d66" x="296" y="147.1" width="16" height="32.9"/>
+<rect class="f-muted" fill="#5c6d66" x="319" y="160" width="16" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="342" y="164.5" width="16" height="15.5"/>
+<rect class="f-muted" fill="#5c6d66" x="365" y="172.7" width="16" height="7.3"/>
+<text class="f-text" fill="#182f2b" x="281" y="119" font-size="12" text-anchor="middle">42%</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M12 180.5H130M140 180.5H258M268 180.5H386"/>
+<text class="f-muted" fill="#5c6d66" x="25" y="196" font-size="12" text-anchor="middle">猫</text><text class="f-muted" fill="#5c6d66" x="48" y="196" font-size="12" text-anchor="middle">狗</text><text class="f-muted" fill="#5c6d66" x="71" y="196" font-size="12" text-anchor="middle">鸟</text><text class="f-muted" fill="#5c6d66" x="94" y="196" font-size="12" text-anchor="middle">鱼</text><text class="f-muted" fill="#5c6d66" x="117" y="196" font-size="12" text-anchor="middle">车</text>
+<text class="f-muted" fill="#5c6d66" x="153" y="196" font-size="12" text-anchor="middle">猫</text><text class="f-muted" fill="#5c6d66" x="176" y="196" font-size="12" text-anchor="middle">狗</text><text class="f-muted" fill="#5c6d66" x="199" y="196" font-size="12" text-anchor="middle">鸟</text><text class="f-muted" fill="#5c6d66" x="222" y="196" font-size="12" text-anchor="middle">鱼</text><text class="f-muted" fill="#5c6d66" x="245" y="196" font-size="12" text-anchor="middle">车</text>
+<text class="f-muted" fill="#5c6d66" x="281" y="196" font-size="12" text-anchor="middle">猫</text><text class="f-muted" fill="#5c6d66" x="304" y="196" font-size="12" text-anchor="middle">狗</text><text class="f-muted" fill="#5c6d66" x="327" y="196" font-size="12" text-anchor="middle">鸟</text><text class="f-muted" fill="#5c6d66" x="350" y="196" font-size="12" text-anchor="middle">鱼</text><text class="f-muted" fill="#5c6d66" x="373" y="196" font-size="12" text-anchor="middle">车</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="224" font-size="12" text-anchor="middle">分数：猫 3、狗 2、鸟 1、鱼 0.5、车 −1（教学假设）</text>
+</svg><figcaption>图 2-3　同一组分数，温度不同，概率表的形状就不同。温度只改变“尖还是平”，不改变谁排第一。</figcaption></figure></div>
+<p>softmax 的公式里有指数，指数长得极快。这在计算机里会惹麻烦，下面的专栏讲为什么，以及怎么一招化解。</p>
+<aside class="primer" id="c02-softmax-overflow">
+<h3>softmax 与浮点溢出</h3>
+<p>计算机里的小数用<dfn>浮点数</dfn>存，位数有限，能表示的最大值也有限。最常用的 32 位浮点数（FP32），最大约 3.4 × 10³⁸。听上去很大，可 e<sup>89</sup> 就已经超过它了。超过上限的结果会变成“无穷大”（∞），这叫<dfn>上溢</dfn>。一旦分子分母都是 ∞，∞ ÷ ∞ 在浮点数里是 <dfn>NaN</dfn>（Not a Number），整张概率表就坏了。</p>
+<p>化解的办法只要一行：取指数之前，让每个分数先减去它们当中的最大值 m。因为 e<sup>z−m</sup> = e<sup>z</sup> ÷ e<sup>m</sup>，分子分母同时除以同一个 e<sup>m</sup>，比值一点不变。但减完之后，最大的数变成 0，e<sup>0</sup> = 1，其余都小于 1，再也不会上溢。数学上等价，数值上安全，这叫<dfn>数值稳定</dfn>的写法。</p>
+<p>举个例子：分数 [1000, 999] 直接取指数，两项都是 ∞；先减去 1000，变成 [0, −1]，指数是 [1, 0.3679]，概率是 [0.7311, 0.2689]。Strata 的采样内核正是这样做的：每一项都先减去最大值，再用双精度算指数和累计概率。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L366-L408" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/Softmax函数" target="_blank" rel="noopener noreferrer">维基百科：Softmax 函数</a> · <a href="https://docs.python.org/zh-cn/3/tutorial/floatingpoint.html" target="_blank" rel="noopener noreferrer">Python 文档：浮点算术的问题与限制</a> · <a href="https://en.wikipedia.org/wiki/Softmax_function" target="_blank" rel="noopener noreferrer">Wikipedia: Softmax function</a></p>
+</aside>
+<p>浮点数为什么有上限、FP32 和 FP16 有什么不同，第 4 章细讲。</p>
+
+<h2 id="sec-4">2.4 掷骰子：按概率挑一个</h2>
+<p>有了概率表，怎么“按概率挑”？想象一根长度为 1 的尺子。把每个候选的概率依次排上去：猫占前 0.62，狗占接下来的 0.23，以此类推，正好铺满整根尺子。然后随机扔一枚针，针落在哪一段，就选哪个词，见图 2-4。概率大的段长，被扎中的机会就大。</p>
+<div class="viz" data-viz="sampling-dice"><figure class="fig"><svg viewBox="0 0 400 186" role="img" aria-label="图 2-4：五个候选的概率依次铺满 0 到 1 的线段，随机数 u 等于 0.8 落在狗那一段，于是选中狗">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="12">把概率依次铺在 [0, 1) 上（段长按比例）</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="44" width="224.5" height="34"/>
+<rect class="f-accent" fill="#136d5a" x="244.5" y="44" width="82.6" height="34"/>
+<rect class="f-soft" fill="#e5f1df" x="327.1" y="44" width="30.4" height="34"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="357.5" y="44" width="18.4" height="34"/>
+<rect class="f-muted" fill="#5c6d66" x="375.9" y="44" width="4.1" height="34"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 44V78M244.5 44V78M327.1 44V78M357.5 44V78M375.9 44V78M380 44V78"/>
+<text class="f-text" fill="#182f2b" x="132" y="66" font-size="13" text-anchor="middle">猫 0.62</text>
+<text class="f-on" fill="#ffffff" x="286" y="66" font-size="13" text-anchor="middle">狗 0.23</text>
+<text class="f-text" fill="#182f2b" x="342" y="66" font-size="12" text-anchor="middle">鸟</text>
+<text class="f-text" fill="#182f2b" x="366.7" y="66" font-size="12" text-anchor="middle">鱼</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M378 80V108H372"/>
+<text class="f-muted" fill="#5c6d66" x="368" y="112" font-size="12" text-anchor="end">车（约 1%）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="96" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="244.5" y="96" font-size="12" text-anchor="middle">0.62</text>
+<text class="f-muted" fill="#5c6d66" x="318" y="96" font-size="12" text-anchor="middle">0.85</text>
+<path class="f-warn" fill="#9e5d24" d="M308 40l-5-10h10z"/>
+<text class="f-warn" fill="#9e5d24" x="308" y="24" font-size="12" text-anchor="middle">u = 0.8</text>
+<text class="f-text" fill="#182f2b" x="200" y="132" font-size="13" font-weight="600" text-anchor="middle">0.62 ≤ 0.8 &lt; 0.85，所以选“狗”</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="156" font-size="12" text-anchor="middle">u 是 [0, 1) 里均匀分布的随机数；贪心则永远选第一段</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="176" font-size="12" text-anchor="middle">温度 T = 1，分数同图 2-3</text>
+</svg><figcaption>图 2-4　按概率挑一个 token：概率决定每段多长，随机数 u 决定针扎在哪。分布和抽样是两件事。</figcaption></figure></div>
+<p>这个方法叫<dfn>逆变换采样</dfn>：先算出累计概率（0.62、0.85、0.94……），再找第一个大于 u 的位置。Strata 的采样内核就是这样挑的：累计概率一项项往上加，第一次超过 u 的那一项就是结果。<span class="ev ev-code">代码事实</span>[S07]</p>
+<p>另一种做法是<dfn>贪心</dfn>：不掷骰子，永远选概率最高的那个。贪心的输出完全确定，适合需要稳定答案的场合，比如做题、测试。Strata 的采样参数里约定，温度小于等于 0 就走贪心；请求里不写温度时，服务层说明引擎默认也是贪心。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/sampler.hpp#L15-L28" target="_blank" rel="noopener noreferrer">sampler.hpp</a> · <a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/serve/server.py#L297-L302" target="_blank" rel="noopener noreferrer">server.py</a></p>
+<p>剩下一个问题：计算机怎么“随机”扔针？它其实是在<strong>算</strong>一个看起来随机的数。</p>
+<aside class="primer" id="c02-prng">
+<h3>伪随机数与种子</h3>
+<p>计算机是确定的机器，同样的输入永远得到同样的输出。它产生的“随机数”，其实是一个公式算出来的数列，只是看上去毫无规律，这叫<dfn>伪随机数</dfn>。公式的起点叫<dfn>种子</dfn>（seed）：种子相同，整串数列就相同。这是好事：出了问题，可以用同一个种子把现场原样重放。</p>
+<p>常见的生成器是<strong>顺序式</strong>的：每个数由上一个数算出来，想要第 1000 个，就得先算出前 999 个。还有一种<strong>计数器式</strong>的：第 n 个数直接由（种子, n）算出来，和前面算过几个无关，见图 2-5。</p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="图 2-5：顺序式生成器要一个接一个地算，计数器式生成器用种子和位置直接算出任意一个随机数">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">顺序式：一个接一个</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="41" y="52" font-size="12" text-anchor="middle">种子</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="102" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="133" y="52" font-size="12" text-anchor="middle">r₁</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="194" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="225" y="52" font-size="12" text-anchor="middle">r₂</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="286" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="317" y="52" font-size="12" text-anchor="middle">r₃</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M72 47H100M164 47H192M256 47H284"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="82" font-size="12">想要 r₃，必须先算出 r₁ 和 r₂</text>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="13" font-weight="600">计数器式：位置直接算</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="130" width="100" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="60" y="150" font-size="12" text-anchor="middle">(种子, 0)</text>
+<rect class="f-soft" fill="#e5f1df" x="145" y="130" width="100" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="195" y="150" font-size="12" text-anchor="middle">(种子, 1)</text>
+<rect class="f-soft" fill="#e5f1df" x="280" y="130" width="100" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="330" y="150" font-size="12" text-anchor="middle">(种子, 2)</text>
+<text class="f-text" fill="#182f2b" x="60" y="182" font-size="12" text-anchor="middle">↓ u₀</text>
+<text class="f-text" fill="#182f2b" x="195" y="182" font-size="12" text-anchor="middle">↓ u₁</text>
+<text class="f-text" fill="#182f2b" x="330" y="182" font-size="12" text-anchor="middle">↓ u₂</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">每个位置互不依赖，可以按任意顺序、同时算。Strata 用的就是这种</text>
+</svg><figcaption>图 2-5　两种伪随机数生成器。计数器式的结果只取决于（种子, 位置），所以并行算、跳着算都能重现。</figcaption></figure>
+<p>Strata 的采样用的是一种叫 Philox 的计数器式生成器：第 t 个 token 用的随机数只由（种子, 位置 t）决定。源码注释点明了这样选的原因：一批 token 可以按任意顺序采样，结果仍然可以重现。生成的 u 取 24 个二进制位，严格落在 [0, 1) 之内，不会被舍入成 1。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L38-L63" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p class="further">延伸阅读：<a href="https://oi-wiki.org/misc/random/" target="_blank" rel="noopener noreferrer">OI Wiki：随机函数</a> · <a href="https://docs.python.org/zh-cn/3/library/random.html" target="_blank" rel="noopener noreferrer">Python 文档：random 模块</a> · <a href="https://zh.wikipedia.org/zh-cn/伪随机数生成器" target="_blank" rel="noopener noreferrer">维基百科：伪随机数生成器</a> · <a href="https://en.wikipedia.org/wiki/Counter-based_random_number_generator" target="_blank" rel="noopener noreferrer">Wikipedia: Counter-based RNG</a></p>
+</aside>
+<p class="bridge"><strong>学过计算机的同学：</strong>逆变换采样就是在累计分布函数（CDF）上做查找：把 [0, 1) 上的均匀分布，映射成任意离散分布。候选很多时，累计数组是有序的，可以用二分查找把一次采样降到 O(log n)。</p>
+
+<h2 id="sec-5">2.5 采样链：先后顺序也算数</h2>
+<p>真实的引擎在掷骰子之前，还会先把概率表“修剪”几遍。Strata 的采样链有六步，顺序固定，见图 2-6。<span class="ev ev-code">代码事实</span>[S07]</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="图 2-6：Strata 的采样链，依次是重复惩罚、top-k、top-p、min-p、温度、按随机数挑选">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">右侧：这一步之后还剩多少候选</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="290" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="45" font-size="13" font-weight="600">① 重复惩罚</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="62" font-size="12">最近出现过的 token，分数调低一点</text>
+<text class="f-text" fill="#182f2b" x="390" y="52" font-size="12" text-anchor="end">248,320</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="80" width="290" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="99" font-size="13" font-weight="600">② top-k</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="116" font-size="12">只留分数最高的 k 个（默认 20）</text>
+<text class="f-text" fill="#182f2b" x="390" y="106" font-size="12" text-anchor="end">20</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="134" width="290" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="153" font-size="13" font-weight="600">③ top-p</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="170" font-size="12">从高到低累加概率，够 p 就停（默认 0.95）</text>
+<text class="f-text" fill="#182f2b" x="390" y="160" font-size="12" text-anchor="end">≤ 20</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="188" width="290" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="207" font-size="13" font-weight="600">④ min-p</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="224" font-size="12">去掉概率不到第一名 min_p 倍的（默认关）</text>
+<text class="f-text" fill="#182f2b" x="390" y="214" font-size="12" text-anchor="end">更少</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="242" width="290" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="261" font-size="13" font-weight="600">⑤ 温度</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="278" font-size="12">只对剩下的候选，调整分布的尖平</text>
+<text class="f-text" fill="#182f2b" x="390" y="268" font-size="12" text-anchor="end">不变</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="296" width="290" height="44" rx="8"/>
+<text class="f-on" fill="#ffffff" x="22" y="315" font-size="13" font-weight="600">⑥ 挑选</text>
+<text class="f-on" fill="#ffffff" x="22" y="332" font-size="12">一个随机数 u，按累计概率挑一个</text>
+<text class="f-text" fill="#182f2b" x="390" y="322" font-size="12" text-anchor="end">1</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M155 70V80M155 124V134M155 178V188M155 232V242M155 286V296"/>
+</svg><figcaption>图 2-6　Strata 的采样链。温度排在截断之后：top-k、top-p 先按原始分布砍掉候选，温度只能在剩下的候选里调整。默认值来自采样参数的定义。</figcaption></figure>
+<ul>
+<li><strong>重复惩罚</strong>：最近出现过的 token，分数被调低，防止模型车轱辘话来回说。</li>
+<li><strong>top-k</strong>：只保留分数最高的 k 个。Strata 采样参数的默认值是 20；服务层把 top-k 限制在 1 到 64，因为引擎的采样路径最多只保留 64 个候选。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/serve/server.py#L456-L459" target="_blank" rel="noopener noreferrer">server.py</a></li>
+<li><strong>top-p</strong>：按概率从高到低累加，加到 p 就停，后面的全砍掉。默认 p = 0.95。</li>
+<li><strong>min-p</strong>：去掉概率不到第一名 min_p 倍的候选。默认 0，也就是关闭。</li>
+<li><strong>温度</strong>和<strong>挑选</strong>：前面讲过。</li>
+</ul>
+<p>为什么顺序要紧？看温度的位置：它排在截断之后。所以 top-p 那一刀，是按温度为 1 时的概率砍的。温度再高，也救不回已经被砍掉的候选。反过来，如果把温度挪到最前面，同样的参数会砍出另一批候选。</p>
+<p>Strata 自己就踩过这个坑。源码注释记录了一次修复：早先的版本把重复惩罚做了两遍（温度之后又做一遍），还把 min-p 放到了 top-p 前面。注释说得很直白：<strong>每一种顺序都能产出一个“合法”的 token</strong>，所以只看输出根本发现不了，必须在概率分布这一层和独立算出的结果逐项比对。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L1-L11" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p>这给我们一个重要的习惯：<strong>判断两个采样实现是否一致，要比概率表，不要只比最后的文字。</strong>文字一样，分布可能不同；分布只差一点点，文字也可能在某一步分叉。</p>
+
+<h2 id="sec-6">2.6 动手：把“分布”和“抽样”分开看</h2>
+<p>打开本章的交互实验「从 logits 到概率」。它只用三个分数，把温度和随机数 u 做成两个独立的旋钮。</p>
+<ol>
+<li><strong>固定 u，只改温度。</strong>你会看到概率条的长短在变，选中的 token 可能跟着变。温度改的是<strong>分布</strong>。</li>
+<li><strong>固定温度，只改 u。</strong>概率条纹丝不动，只有针扎的位置在变。u 改的是<strong>从分布里抽到哪个样本</strong>。</li>
+<li>把三个概率加起来。屏幕上显示的数字四舍五入后，加起来可能是 0.999 或 1.001。这不是 bug：判断“加起来等于 1”，要允许一个很小的浮点误差。</li>
+</ol>
+<p>实验和本页的两个交互图都是教学推演：分数是假设的，随机数用的是一个简单的哈希函数，不是 Strata 的 Philox。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>模型每一步只输出一张“下一个 token”的概率表；整句话的概率是各步条件概率的乘积（链式法则）。</li>
+<li>softmax 把分数变成概率。先减去最大值，结果不变，还能防止浮点溢出。温度只改分布的尖平。</li>
+<li>采样 = 用一个伪随机数按累计概率挑一个。采样链的顺序也是语义：顺序不同，概率表就不同。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“温度设成 0，同一个问题的回答就永远一字不差。”</strong></p>
+<p>温度 0 只保证“每一步都挑最高分”。可最高分本身是浮点运算算出来的，换一种求和顺序，最后几位小数就可能不同；两个候选分数极接近时，这点差别就能换掉一个 token，后面整段都会分叉。Strata 的文档就记录了这种情况：用 IQ 系列模型时，CPU 算一个 token 和一次算几个 token 用的是不同的内核，舍入略有不同，同一个提示在温度 0 下可能得到另一个（同样合理的）回答。想要逐字节相同，还得关掉提示缓存、专家换入换出和 PCIe 分流等几项设置。上游测量（IQ3_XXS，约 3,600 个 token 的提示，重复 4 次）：开齐这些开关，4 次只出现 1 种回答；用默认设置会出现 2 种。<span class="ev ev-report">上游报告</span>[S03]</p></div>
+
+<details class="deep"><summary>深入一层：手算一遍，再看服务层的契约</summary>
+<h3>链式法则的完整写法</h3>
+<p>设一段序列为 x₁…xₙ，链式法则给出：</p>
 <div class="equation">P(x₁…xₙ) = ∏ₜ P(xₜ | x₁…xₜ₋₁)</div>
-<p>推理循环每次计算一个条件分布。这里“历史”不是可有可无的背景，而是函数的输入。改变一个较早 token，之后的条件分布都可能变化，这也解释了前缀缓存只能在身份条件满足时复用。</p>
-<p><strong>训练与推理的区别</strong>：训练通常用误差更新权重；生成时通常保持权重固定，更新序列状态并选择下一个 token。专家热度缓存的在线调整改变计算放在哪里，不是梯度学习，更不应称为模型在线训练。</p>
-<h2 id="sec-3">2.3 手算 softmax：数值稳定来自代数等价</h2>
-<p>模型输出的 logits z 不是概率。对温度 τ&gt;0，定义 pᵢ=exp(zᵢ/τ)/Σⱼexp(zⱼ/τ)。直接计算很大的指数可能溢出；减去所有 logits 的最大值不会改变比例。</p>
-<p>取 z=[2,1,0]、τ=1。减去 2 后指数约为 [1,0.3679,0.1353]，归一化得到 <strong>[0.6652,0.2447,0.0900]</strong>。累计概率约为 [0.6652,0.9100,1]。若均匀随机数 u=0.8，逆累积分布法选择第二项。贪心法则总选第一项。</p>
-<p>温度趋近零的数学极限要与程序分支区分：工程实现通常单独处理贪心，不应该真的计算 <code>z / 0</code>。logits 并列时还需要稳定的 tie-break 规则。</p>
-<h2 id="sec-4">2.4 采样链的顺序也是语义</h2>
-<p>top-k 保留若干候选，top-p 按累计概率截断，重复惩罚根据历史调整分数。交换处理顺序一般不能保证相同结果。Strata 的耦合草稿接口说明了目标采样链及逐位置随机计数器；它要求草稿与目标对同一位置使用一致的历史。[S07]</p>
-<p>假设候选 A 原本分数最高，但它在历史里重复过很多次。先做 top-k 再惩罚，和先惩罚再选 top-k，候选集合可能完全不同。因此“种子相同”并不足以证明输出相同；还要固定历史、采样参数、处理顺序与目标 logits 的数值路径。</p>
-<h2 id="sec-5">2.5 源码阅读：找边界，而不是找神秘函数</h2>
-<p>打开 <code>serve/frontend.py</code>，先看 <code>ChatTemplate.render</code> 如何传入 messages、tools 和 generation prompt，再看 <code>effort_kwargs</code> 怎样规范化输入模式。接着看 <code>Engine.generate</code> 的接口：进入引擎的是 IDs，不是原始 JSON。[S15][S16]</p>
-<p>课堂追问：API 里未设置最大输出、设置为零以及上下文不足，分别是什么契约？在固定服务文件的说明中，超预算请求被拒绝而不是悄悄截短；实际核算还包含 <code>CTX_SLACK=8</code>。这八个位置不是模型数学常数，而是前后端约定。[S15]</p>
-<h2 id="sec-6">2.6 实验与验收</h2>
-<p>在“采样分布”实验中拖动温度，观察概率而不是只看最后选中的 token。固定 u，再改温度；固定温度，再改 u。写出哪一种改变了分布，哪一种只改变了从分布中取出的样本。把总概率误差控制在浮点容差内，不要求十进制展示相加永远恰好等于 1。</p>
+<p>推理循环每一轮计算一个条件分布。“历史”不是可有可无的背景，而是函数的输入。改掉较早的一个 token，之后所有条件分布都可能变。这也解释了为什么缓存前文的计算结果（第 20 章的会话缓存）只能在前缀完全相同时复用。</p>
+<h3>手算 softmax 和一次采样</h3>
+<p>取 z = [2, 1, 0]，T = 1。减去最大值 2，得到 [0, −1, −2]，指数约为 [1, 0.3679, 0.1353]，总和 1.5032，归一化得到 <strong>[0.6652, 0.2447, 0.0900]</strong>。累计概率约为 [0.6652, 0.9100, 1]。若 u = 0.8，第一个超过它的累计值是 0.9100，选第二项；u = 0.5 选第一项；u = 0.95 选第三项。贪心永远选第一项。</p>
+<h3>温度趋于 0，和贪心不是同一回事</h3>
+<p>数学上，T 趋于 0 时 softmax 趋向“最高分的那项概率为 1”。但程序里不能真的去算 z ÷ 0，所以工程实现都把贪心写成一个单独的分支。另一个细节是<strong>并列</strong>：两个分数完全相等时选谁，必须有固定规则。Strata 的贪心内核规定编号小的胜出，并行版本也保持了这条规则，注释称它是“整个正确性论证的核心”。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L98-L99" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<h3>重复惩罚的符号陷阱</h3>
+<p>重复惩罚“把分数调低”，听上去就是除以一个大于 1 的数。可分数可能是负的：负数除以 1.1，反而变大了。Strata 照搬了 llama.cpp 的规则：分数为正时除以惩罚系数，分数小于等于 0 时乘以惩罚系数。注释提醒，无条件相除是读论文时最自然的写法，却会在一半词表上把惩罚变成奖励。另一个细节：“出现过”惩罚（presence）只看出现没出现，是个 0/1 开关，不看出现了几次。<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L65-L80" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<h3>种子相同，不等于输出相同</h3>
+<p>假设候选 A 原本分数最高，但它在历史里重复了很多次。先做 top-k 再惩罚，和先惩罚再做 top-k，候选集合可能完全不同。所以“种子相同”远不足以证明输出相同。还要固定：历史、采样参数、处理顺序，以及算出 logits 的那条数值路径。Strata 的耦合草稿接口就把这些写进了契约：验证窗口第 t 行用 Philox(种子, pos₀ + t) 抽样，草稿只有在<strong>等于</strong>这一行的抽样结果时才被接受，所以输出只是种子的函数，草稿只决定一轮能产出几个 token。这个模式默认关闭。<span class="ev ev-code">代码事实</span>[S07]</p>
+<h3>服务层的契约：拒绝，而不是悄悄截断</h3>
+<p>读 <code>serve/frontend.py</code> 时，先看 <code>ChatTemplate.render</code> 怎样传入 messages、tools 和 generation prompt，再看 <code>effort_kwargs</code> 怎样把各种写法的“思考档位”归一成模板认识的四档。[S16] 然后看 <code>serve/server.py</code> 的文件头：提示加上最大输出长度超过上下文时，请求被拒绝并返回 400，<strong>从不截断</strong>；最大输出不填、填 0 或填 −1，都表示“上下文剩多少就能写多少”。[S15] 核算时还留了 <code>CTX_SLACK = 8</code> 个位置的余量，和引擎那边的检查保持一致。[S15] 这 8 个位置不是模型的数学常数，而是前后端之间的约定。</p>
+<h3>怎样验收一个采样实现</h3>
+<p>在实验里拖动温度，观察概率，不要只看最后选中的 token。验收时比较的是分布：同样的 logits、同样的参数，两个实现给出的概率表要在浮点容差内一致。不要求屏幕上四舍五入后的数字相加恰好等于 1。</p>
+</details>
