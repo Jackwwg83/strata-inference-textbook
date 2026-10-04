@@ -1,18 +1,252 @@
-<h2 id="sec-1">15.1 从很多标量运算到一组线程</h2>
-<p>GPU 内核把工作分给线程和线程块。SIMT 让一组线程执行相似指令，但它们可以有各自的数据和控制状态。连续访存通常更容易合并成有效内存事务；因此数学上可自由选择的运行时布局，会影响真实执行成本。[R01]</p>
-<p>GDN 的 <code>(i,h,j)</code> 布局让相邻 j 连续，就是把线性代数坐标转成硬件友好的地址模式。[S17] 但“更多线程”不一定更快：寄存器、共享内存、同步和工作量规模都会限制收益。</p>
-<h2 id="sec-2">15.2 融合与图重放解决不同问题</h2>
-<p>内核融合把若干操作放进一个内核，可以少写读中间结果、少启动；代价可能是寄存器更多、占用下降、实现复杂。CUDA Graph 则把一组已有操作及其依赖记录下来后重放，主要减少重复提交与调度开销。图不自动把多个内核变成一个，也不自动消除数据依赖。[R01]</p>
-<p>教学例子：一个层有 20 次启动，每次主机开销 5 μs，仅启动就约 100 μs。减少这部分对小算子可能很有意义；如果每次计算已经是数毫秒，收益上限会不同。这些是假设值，不是本机实测。</p>
-<h2 id="sec-3">15.3 动态位置被冻结，是最隐蔽的错误之一</h2>
-<p>图捕获时，参数值和地址被记录。若把当前 position 作为主机标量传给 kernel，第一次捕获是 0，之后直接重放可能一直按 0 运行。KV 每步写回位置 0，图仍可合法执行，模型却像失忆。[S18]</p>
-<p>QSA 接口说明了一种修复：固定地址的 device step buffer，包含 pos、n_kv、块数和选择宽度；每轮更新其内容，kernel 从缓冲读取动态值。这样“地址不变”和“内容随 token 变化”同时成立。[S18]</p>
-<h2 id="sec-4">15.4 不要把旧执行路径当作唯一当前路径</h2>
-<p><code>SessionGraphs</code> 描述分层图与 pre/post 顺序；<code>Verifier</code> 又有多 token 验证窗口的图。[S13][S08] 二者用于不同路径或阶段。读到某个头文件说明“一层一个图”，不能据此宣布整个引擎永远不做全窗口图。</p>
-<p>这种源码考古与编译器课程相通：一个库里可能保留参考路径、调试路径、专用快路径、按设备能力分派的实现。调用上下文和启用条件是结论的一部分。</p>
-<h2 id="sec-5">15.5 验证边界：地址、数值与状态</h2>
-<p>一项图优化至少验证三件事：动态参数每轮正确更新；被捕获的地址在所有重放期间有效；重放后状态与未捕获参考路径一致。一次请求结束后释放缓冲，但保留图对象用于下一请求，就是典型生命周期危险。</p>
-<p>采样参数也会逐请求改变。验证器说明采样放在被捕获图之外，避免温度等请求参数被永久固化。[S08] 不能只拿同一个 prompt 和同一温度重复一遍，就宣称多请求参数切换正确。</p>
-<h2 id="sec-6">15.6 实验：用三个位置暴露冻结问题</h2>
-<p>构造一个只有 <code>state[pos]=token</code> 的教学图。分别执行 pos=0、1、2，比较按值捕获与固定缓冲读取的结果。测试要检查三个位置，不能只看最终返回值为真。再释放旧缓冲重新创建，确认旧图被丢弃或重新绑定。</p>
-<p>进阶 GPU 作业才需要 profiler：记录启动时间、内核时间、寄存器与重放时间，并通过端到端 A/B 判断局部优化是否真的改善关键路径。</p>
+<div class="hook"><span class="eyebrow">一个奇怪的计时</span>
+<p>Strata 的源码注释里记着一件怪事：有个叫 <code>gdn_gate</code> 的 GPU 小程序，一共只处理 48 个数，每次却要花 28 微秒。作者的评语是：这么小的 kernel，不可能真的执行 28 微秒。<span class="ev ev-code">代码事实</span>[S13]</p>
+<p>48 个数，GPU 一眨眼就算完了。多出来的时间花在哪？答案是“挂号”：CPU 每让 GPU 跑一个小程序，都要先走一遍提交手续。如果一个一个地提交，生成一个 token 要提交两千次左右。这一章讲 GPU 怎样分活，挂号费从哪来，以及 Strata 怎样把两千次挂号压到几十次，甚至一次。</p></div>
+<p class="tldr"><strong>一句话：</strong>GPU 上的小程序叫 kernel，每启动一次都有几十微秒的固定开销。Strata 用两招省掉它：把几个 kernel 融合成一个，把整层的 kernel 录成 CUDA Graph 一次提交。代价是图会把参数录死，所以每步都变的“位置”必须放进一块固定地址的显存里。</p>
+
+<h2 id="sec-1">15.1 GPU 怎样分活：线程、线程块和 warp</h2>
+<p>先想象一个大型阅卷现场。几万份试卷，每位老师批一份。老师们分成很多个考场，每个考场里再按 32 人一排坐好，一排人听同一声口令：“翻页”“看第一题”“打分”。口令相同，手里的卷子各不相同。</p>
+<p>GPU 就是这样干活的。CPU 交给 GPU 的一段小程序叫 <dfn>kernel</dfn>（内核函数）。启动一次 kernel，GPU 就开出成千上万个<dfn>线程</dfn>，每个线程跑同一段代码，只是处理的数据下标不同。线程先分成若干<dfn>线程块</dfn>（block），一个块里的线程在同一个计算单元上运行，可以共享一小块高速存储。块里的线程再按 32 个一组排成 <dfn>warp</dfn>：同一个 warp 的 32 个线程同时执行同一条指令。[R01] 图 15-1 把这三层画在一起。</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="图 15-1：一次 kernel 启动开出一个网格，网格分成线程块，线程块里每 32 个线程组成一个 warp">
+<defs><pattern id="c15-lane" width="9" height="12" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="7" height="12" rx="1"/></pattern></defs>
+<rect class="f-soft" fill="#e5f1df" x="10" y="8" width="380" height="96" rx="10"/>
+<text class="f-text" fill="#182f2b" x="22" y="28" font-size="13" font-weight="600">一次启动 = 一个网格（grid）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="22" y="40" width="82" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="63" y="62" font-size="12" text-anchor="middle">线程块 0</text>
+<text class="f-muted" fill="#5c6d66" x="63" y="80" font-size="12" text-anchor="middle">很多线程</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="114" y="40" width="82" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="155" y="62" font-size="12" text-anchor="middle">线程块 1</text>
+<text class="f-muted" fill="#5c6d66" x="155" y="80" font-size="12" text-anchor="middle">很多线程</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="206" y="40" width="82" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="247" y="62" font-size="12" text-anchor="middle">线程块 2</text>
+<text class="f-muted" fill="#5c6d66" x="247" y="80" font-size="12" text-anchor="middle">很多线程</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="298" y="40" width="82" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="339" y="62" font-size="12" text-anchor="middle">……</text>
+<text class="f-muted" fill="#5c6d66" x="339" y="80" font-size="12" text-anchor="middle">块数可以很多</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M63 92V112H200V122"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="124" width="380" height="118" rx="10"/>
+<text class="f-text" fill="#182f2b" x="22" y="144" font-size="13" font-weight="600">一个线程块：最多 1024 个线程</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="167" font-size="12">warp 0</text>
+<rect fill="url(#c15-lane)" x="80" y="157" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="22" y="187" font-size="12">warp 1</text>
+<rect fill="url(#c15-lane)" x="80" y="177" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="22" y="207" font-size="12">warp 2</text>
+<rect fill="url(#c15-lane)" x="80" y="197" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="224" y="232" font-size="12" text-anchor="middle">……每一行 32 个小格 = 32 个线程</text>
+<text class="f-text" fill="#182f2b" x="200" y="262" font-size="12" text-anchor="middle">warp：32 个线程一组，同一时刻执行同一条指令</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="282" font-size="12" text-anchor="middle">每个线程按自己的编号，处理自己那一份数据</text>
+</svg><figcaption>图 15-1　GPU 的三层分工。一次启动开出一个网格，网格分成线程块，块里每 32 个线程组成一个 warp，听同一声口令。</figcaption></figure>
+<p>Strata 里到处是这种安排。比如第 17 章会讲到的 KV 换页，源码写的是“用一个 1,024 线程的线程块，扫一遍被选中的编号”。<span class="ev ev-code">代码事实</span> 又比如 GDN 层的递推，源码注释说每一行公式只涉及状态的某一列，列与列之间互不相干，所以“一个线程可以包下一整列，整步都不需要线程之间互相等待”。[S17]</p>
+<aside class="primer" id="c15-gpu-model">
+<h3>GPU 编程模型：线程、线程块与 warp</h3>
+<p>直觉：CPU 像几位全能教授，每人能处理复杂的分支和判断；GPU 像几千名助教，每人只会照口令做简单的事，但人多。想让 GPU 快，就要把工作拆成成千上万份<strong>互不依赖</strong>的小任务。</p>
+<p>定义：程序员写一个 kernel 函数，启动时指定“开多少个线程块、每块多少线程”。CUDA 的写法是 <code>vecAdd&lt;&lt;&lt;4, 256&gt;&gt;&gt;(A, B, C)</code>：4 个块，每块 256 个线程，共 1,024 个线程，各自用 <code>threadIdx.x + blockDim.x × blockIdx.x</code> 算出自己负责第几个元素。当前的 NVIDIA GPU 上，一个线程块最多 1,024 个线程；块里的线程按 32 个一组组成 warp。[R01]</p>
+<p>一个具体数字：一个 warp 读显存时，如果 32 个线程读的是<strong>相邻</strong>地址，硬件能把它们合成很少几次内存事务，这叫<dfn>合并访问</dfn>。如果它们读的地址彼此隔得很远，就要拆成很多次事务，每次只用上一小部分字节。下一节的 Strata 例子会给出差距有多大。</p>
+<p>和本章的关系：kernel 是 CPU 交给 GPU 的最小工作单位。kernel 越小、越多，“交接”本身的开销就越显眼。</p>
+<p class="further">延伸阅读：<a href="https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html" target="_blank" rel="noopener noreferrer">NVIDIA CUDA 编程指南：编程模型</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/intro-to-cuda-cpp.html" target="_blank" rel="noopener noreferrer">NVIDIA：CUDA C++ 入门（含 vecAdd 例子）</a> · <a href="https://zh.wikipedia.org/zh-cn/CUDA" target="_blank" rel="noopener noreferrer">维基百科：CUDA</a> · <a href="https://en.wikipedia.org/wiki/Thread_block_(CUDA_programming)" target="_blank" rel="noopener noreferrer">Wikipedia: Thread block</a></p>
+</aside>
+<p class="bridge"><strong>学过计算机的同学：</strong>warp 就是 SIMT（单指令多线程）的执行单位：一条指令驱动 32 个线程，像 SIMD 的向量指令；但每个线程有自己的寄存器和程序计数器，可以走不同分支，代价是分支两边要轮流执行。第 13 章细讲 SIMD 和 SIMT 的区别。</p>
+
+<h2 id="sec-2">15.2 相邻线程读相邻地址：数据怎么摆很重要</h2>
+<p>同样的数学，数据摆法不同，速度能差好几倍。图 15-2 对比了两种读法。</p>
+<figure class="fig"><svg viewBox="0 0 400 324" role="img" aria-label="图 15-2：相邻线程读相邻地址时一次事务全部有用；相邻线程隔得很远时每次 32 字节只用上 4 字节">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">合并访问：相邻线程读相邻地址</text>
+<circle class="f-soft" fill="#e5f1df" cx="44" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="44" y="46" font-size="12" text-anchor="middle">0</text>
+<circle class="f-soft" fill="#e5f1df" cx="88" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="88" y="46" font-size="12" text-anchor="middle">1</text>
+<circle class="f-soft" fill="#e5f1df" cx="132" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="132" y="46" font-size="12" text-anchor="middle">2</text>
+<circle class="f-soft" fill="#e5f1df" cx="176" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="176" y="46" font-size="12" text-anchor="middle">3</text>
+<circle class="f-soft" fill="#e5f1df" cx="220" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="220" y="46" font-size="12" text-anchor="middle">4</text>
+<circle class="f-soft" fill="#e5f1df" cx="264" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="264" y="46" font-size="12" text-anchor="middle">5</text>
+<circle class="f-soft" fill="#e5f1df" cx="308" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="308" y="46" font-size="12" text-anchor="middle">6</text>
+<circle class="f-soft" fill="#e5f1df" cx="352" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="352" y="46" font-size="12" text-anchor="middle">7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 52L40 84M88 52L66 84M132 52L92 84M176 52L118 84M220 52L144 84M264 52L170 84M308 52L196 84M352 52L222 84"/>
+<rect class="f-accent" fill="#136d5a" x="28" y="86" width="208" height="22" rx="3"/>
+<text class="f-on" fill="#ffffff" x="132" y="101" font-size="12" text-anchor="middle">一段连续的 32 字节，全部有用</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="132" font-size="12">8 个线程各读 4 字节，一次内存事务就够</text>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="13" font-weight="600">跨步访问：相邻线程隔得很远</text>
+<circle class="f-soft" fill="#e5f1df" cx="44" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="44" y="194" font-size="12" text-anchor="middle">0</text>
+<circle class="f-soft" fill="#e5f1df" cx="88" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="88" y="194" font-size="12" text-anchor="middle">1</text>
+<circle class="f-soft" fill="#e5f1df" cx="132" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="132" y="194" font-size="12" text-anchor="middle">2</text>
+<circle class="f-soft" fill="#e5f1df" cx="176" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="176" y="194" font-size="12" text-anchor="middle">3</text>
+<circle class="f-soft" fill="#e5f1df" cx="220" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="220" y="194" font-size="12" text-anchor="middle">4</text>
+<circle class="f-soft" fill="#e5f1df" cx="264" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="264" y="194" font-size="12" text-anchor="middle">5</text>
+<circle class="f-soft" fill="#e5f1df" cx="308" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="308" y="194" font-size="12" text-anchor="middle">6</text>
+<circle class="f-soft" fill="#e5f1df" cx="352" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="352" y="194" font-size="12" text-anchor="middle">7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 200L28 232M88 200L72 232M132 200L116 232M176 200L160 232M220 200L204 232M264 200L248 232M308 200L292 232M352 200L336 232"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="26" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="26" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="70" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="114" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="114" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="158" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="158" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="202" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="246" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="246" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="290" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="334" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="334" y="234" width="5" height="22"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="280" font-size="12">8 次事务，每次取 32 字节只用上 4 字节（警示色那一小段）</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="306" font-size="12">Strata 改写前的 GDN 递推就是这样：相邻线程相距约 24.5 KB</text>
+</svg><figcaption>图 15-2　同样读 8 个数，摆法不同，搬运量差 8 倍。warp 里的线程读相邻地址时，硬件能合成一次事务。</figcaption></figure>
+<p>Strata 的 GDN 层吃过这个亏。融合版内核的注释写道：原来的写法让一个 warp 负责状态的一列，32 个线程沿着 128 行往下走；可状态按“行、头、列”存放，相邻两个线程要读的数据相距约 24.5 KB。结果每取一个 32 字节的扇区，只用上 4 个字节，每层花 47.6 微秒才搬完 6.3 MB 的状态。<span class="ev ev-code">代码事实</span></p>
+<p>改写后，一个线程块包下一个完整的头，512 个线程按“行组、列”排开，一行的 128 列正好是一次连续的 512 字节读取。<span class="ev ev-code">代码事实</span> 道理和图 15-2 一样：让相邻线程读相邻地址。GDN 的基础 kernel 也遵守这一条：状态按 (i, h, j) 存，j 变化最快，所以 i 固定时，一个 warp 沿着 j 读到的是连续内存。[S17]</p>
+<p>数据摆法是个“免费”的选择：状态是运行时缓冲，不是模型权重，想怎么摆都行。但源码特意提醒，两种摆法索引的是同样三个数，一旦读写双方摆法不一致，程序照样跑，结果悄悄出错。[S17]</p>
+
+<h2 id="sec-3">15.3 每启动一次 kernel，都要付一笔“挂号费”</h2>
+<p>回到开头的怪事。CPU 让 GPU 跑一个 kernel，要经过驱动程序：检查参数、打包命令、放进提交队列。这些手续在 CPU 上做，要花时间，叫<dfn>启动开销</dfn>。如果 kernel 本身只算几微秒，而手续要十几、二十微秒，GPU 就会算完一个、干等下一个。图 15-3 画出了这个“等”。</p>
+<div class="viz" data-viz="kernel-launch"><figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="图 15-3：8 个小 kernel 用三种方式提交。逐个启动 165 微秒，两两融合 90 微秒，CUDA Graph 60 微秒">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">逐个启动</text>
+<text class="f-text" fill="#182f2b" x="390" y="18" font-size="12" text-anchor="end">165 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="37" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="26" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="116.4" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="152.7" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="189.1" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="225.5" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="261.8" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="298.2" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="334.5" y="27" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="57" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="46" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="152.7" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="189.1" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="225.5" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="261.8" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="298.2" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="334.5" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="370.9" y="47" width="8.6" height="12"/>
+<text class="f-text" fill="#182f2b" x="10" y="92" font-size="13" font-weight="600">两两融合</text>
+<text class="f-text" fill="#182f2b" x="390" y="92" font-size="12" text-anchor="end">90 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="111" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="100" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="116.4" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="152.7" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="189.1" y="101" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="131" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="120" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="152.7" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="189.1" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="225.5" y="121" width="17.7" height="12"/>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="13" font-weight="600">CUDA Graph</text>
+<text class="f-text" fill="#182f2b" x="390" y="166" font-size="12" text-anchor="end">60 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="185" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="174" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="175" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="205" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="194" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="195" width="72.7" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">示意：8 个 kernel，每个算 5 µs；每次提交 20 µs（警示色）</text>
+</svg><figcaption>图 15-3　小 kernel 的时间都花在等提交上。逐个启动时，GPU 行几乎全是空隙；融合减少提交次数；CUDA Graph 只提交一次，节点一个接一个跑。数字是教学假设。</figcaption></figure></div>
+<p>这不是假想。Strata 的注释直接下了结论：“这个引擎受启动开销限制，而不是受带宽限制。”GDN 层里每个 kernel 都测出约 0.028 毫秒，连只处理 48 个数的 <code>gdn_gate</code> 也一样，这正是这台机器上一次普通启动的开销。一个 GDN 层大约启动 19 次，一个完整的层块约 45 次。<span class="ev ev-code">代码事实</span>[S13] 注释没有写明测试用的显卡和驱动版本，下面这些数字只用来体会数量级。</p>
+<p>算一笔账。另一处注释说，按 kernel 逐个启动，一个 token 要启动约 2,000 次；每次调用驱动的开销实测 10–22 微秒。<span class="ev ev-code">代码事实</span> 光是“挂号”，每个 token 就要 2,000 × 10 µs ＝ 20 毫秒到 2,000 × 22 µs ≈ 44 毫秒。换成速度，即使 GPU 一点不算，也最多每秒 23–50 个 token。<span class="ev ev-est">教学推演</span></p>
+<aside class="primer" id="c15-launch-fusion">
+<h3>kernel 启动开销与算子融合</h3>
+<p>直觉：去医院看病，挂号要排队。如果每个小检查都要重新挂号，一上午就耗在挂号窗口了。两种办法：一是把几个检查合并成一次（<dfn>算子融合</dfn>）；二是让医生一次开好整套检查单，护士照单执行（<dfn>CUDA Graph</dfn>）。</p>
+<p>定义：启动开销是 CPU 准备并提交一个 kernel 的固定成本，和 kernel 算多少几乎无关。设一个 kernel 计算要 w 微秒，提交要 L 微秒。逐个提交 n 个 kernel：如果 w &lt; L，总时间约为 n × L + w，GPU 大部分时间在等；如果 w ≥ L，总时间约为 L + n × w，提交被藏在计算后面。<span class="ev ev-est">教学推演</span></p>
+<p>融合的好处不止少挂号：几个算子合成一个 kernel 后，中间结果可以留在寄存器或片上存储里，不用写回显存再读出来。代价是这个 kernel 更复杂，可能占更多寄存器，同时能在 GPU 上跑的线程变少。CUDA Graph 则不改 kernel 本身：它把一串操作和依赖关系录下来，以后一次提交、整串重放，省的是 CPU 端的提交成本。[R01]</p>
+<p>和本章的关系：Strata 两招都用。下一节看具体数字。</p>
+<p class="further">延伸阅读：<a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html" target="_blank" rel="noopener noreferrer">NVIDIA CUDA 编程指南：CUDA Graphs</a> · <a href="https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/" target="_blank" rel="noopener noreferrer">PyTorch 博客：用 CUDA Graphs 加速</a> · <a href="https://en.wikipedia.org/wiki/Loop_fission_and_fusion" target="_blank" rel="noopener noreferrer">Wikipedia: Loop fusion（编译器里的同类思想）</a></p>
+</aside>
+
+<h2 id="sec-4">15.4 两种省法：融合与 CUDA Graph</h2>
+<p>图 15-4 把两招放在一起对比：融合改的是 GPU 上跑什么，图改的是 CPU 怎么提交。</p>
+<figure class="fig"><svg viewBox="0 0 400 334" role="img" aria-label="图 15-4：融合把三个 kernel 写成一个，中间结果留在片上；CUDA Graph 把五次提交变成一次，节点仍是原来的五个 kernel">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">算子融合：几个 kernel 合成一个</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="65" y="54" font-size="12" text-anchor="middle">卷积 + SiLU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="54" font-size="12" text-anchor="middle">L2 范数（q）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="335" y="54" font-size="12" text-anchor="middle">L2 范数（k）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M120 49H143M255 49H278"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="86" font-size="12">3 次启动；中间结果写回显存，下一个 kernel 再读出来</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 92V104"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="106" width="380" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="128" font-size="12" text-anchor="middle">1 个 kernel：卷积 + SiLU + 两次 L2 范数</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="160" font-size="12">1 次启动；中间结果留在片上（Strata 的 fused_gdn_conv_l2）</text>
+<text class="f-text" fill="#182f2b" x="10" y="192" font-size="13" font-weight="600">CUDA Graph：录一次，重放很多次</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="202" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="102" y="222" font-size="12" text-anchor="middle">不用图：逐个提交</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="232" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="243" font-size="12" text-anchor="middle">提交 kernel 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="250" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="261" font-size="12" text-anchor="middle">提交 kernel 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="268" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="279" font-size="12" text-anchor="middle">提交 kernel 3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="286" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="297" font-size="12" text-anchor="middle">提交 kernel 4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="304" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="315" font-size="12" text-anchor="middle">提交 kernel 5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="202" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="297" y="222" font-size="12" text-anchor="middle">用图：一次提交整张图</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M233 266H361"/>
+<circle class="f-accent" fill="#136d5a" cx="233" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="265" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="297" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="329" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="361" cy="266" r="10"/>
+<text class="f-muted" fill="#5c6d66" x="297" y="300" font-size="12" text-anchor="middle">节点仍是原来的 5 个 kernel</text>
+<text class="f-muted" fill="#5c6d66" x="297" y="316" font-size="12" text-anchor="middle">省的是 CPU 端的提交</text>
+</svg><figcaption>图 15-4　融合改变 GPU 上跑什么：几个算子变成一个 kernel，中间结果不落地。图改变 CPU 怎么提交：整串一次交出去，每个节点照旧是一个 kernel。两招可以叠加。</figcaption></figure>
+<p><strong>融合。</strong>Strata 有一批文件名带 <code>fused_</code> 的内核。比如 <code>fused_gdn_conv_l2</code> 一个 kernel 顶替了原来的“卷积加 SiLU”和两次 L2 范数共三次启动；<code>fused_gdn_ab</code> 顶替了两次矩阵向量乘和两个逐元素 kernel。<span class="ev ev-code">代码事实</span> 混合残差的读取原来每次要六个 kernel，每个 token 走 96 次，融合后压到两个 kernel。<span class="ev ev-code">代码事实</span></p>
+<p><strong>CUDA Graph。</strong>Strata 把每一层的 kernel 录成一张图。注释给出了实测：同一个层块的 43 个节点，逐个启动要 2.393 毫秒，录成图重放只要 1.585 毫秒，快了 1.51 倍，而且省下的“全是启动开销”。<span class="ev ev-code">代码事实</span>[S13] 另一处注释说得更直白：重放和逐个启动的算术完全一样，区别只是“约 2,000 次 kernel 启动变成 48 次图启动”。<span class="ev ev-code">代码事实</span></p>
+<p>还能再进一步吗？能。在 Windows 的显示驱动模式下，每次图启动本身也要约 0.3–0.4 毫秒；逐层循环每个 token 要启动 96 次图，实测一个 token 花 48.6 毫秒，而 GPU 上真正的 kernel 只占 12 毫秒。于是 Strata 又写了“整个 token 一张图”的版本，把 48 层全装进去。<span class="ev ev-code">代码事实</span> 图 15-5 把三个阶段排在一起。</p>
+<figure class="fig"><svg viewBox="0 0 400 202" role="img" aria-label="图 15-5：每生成一个 token 的提交次数，从约 2000 次 kernel 启动，到 48 到 96 次图启动，再到 1 次整 token 图">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">每生成一个 token，CPU 向 GPU 提交几次（条长按对数刻度）</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">逐个启动 kernel</text>
+<text class="f-text" fill="#182f2b" x="390" y="44" font-size="12" text-anchor="end">约 2,000 次</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="52" width="344" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="10" y="94" font-size="12">每层录成图（一层一到两张）</text>
+<text class="f-text" fill="#182f2b" x="390" y="94" font-size="12" text-anchor="end">48–96 次</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="102" width="239" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="10" y="144" font-size="12">整个 token 录成一张图</text>
+<text class="f-text" fill="#182f2b" x="390" y="144" font-size="12" text-anchor="end">1 次</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="152" width="80" height="16" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="12">数字来自 session.hpp 的注释；条长按对数刻度画</text>
+</svg><figcaption>图 15-5　Strata 一步步减少提交次数：先按层录图，再把整个 token 录成一张图。每少一次提交，就少一笔几十到几百微秒的固定开销。</figcaption></figure>
+<p>为什么不一开始就录整个 token？因为每层中间要和 CPU 专家池交接：GPU 算到路由那一步，CPU 才知道该算哪些专家。Strata 最早把“一层”作为图的单位，就是为了让主机在层与层之间插手，让 CPU 专家池在 GPU 跑下一段时同时开工。[S13] 整 token 图改用一个 GPU 上的单线程 kernel 在设备端等主机写好标志位，主机不再调用驱动。<span class="ev ev-code">代码事实</span></p>
+
+<h2 id="sec-5">15.5 图会把参数录死：被冻住的位置</h2>
+<p>CUDA Graph 有个脾气：录制时，kernel 的<strong>参数</strong>被原样抄进图里，以后每次重放都用这份抄本。Strata 专门写了个小实验验证：图在重放时会重新读取输入缓冲里的数据，但不会重新读取 kernel 参数。<span class="ev ev-code">代码事实</span></p>
+<p>麻烦在于，有些参数每个 token 都变。最典型的是<strong>位置</strong>：这是第几个 token。如果把位置当参数传给写 KV 缓存的 kernel，录图时它是 0，之后每次重放都还是 0。下面的模拟器把这个过程放慢了，先选“按值录进图”，按<strong>单步</strong>走几个 token：</p>
+<div class="viz" data-viz="graph-freeze"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 15-6：位置按值录进图时 4 个 token 都写进位置 0；kernel 从 step 缓冲读位置时各写各的格">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">错误：位置作为参数录进图</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="28" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="53" font-size="13" text-anchor="middle">t3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="58" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="106" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="298" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="346" y="28" width="44" height="40" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="32" y="84" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="80" y="84" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="128" y="84" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="176" y="84" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="224" y="84" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="272" y="84" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="320" y="84" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="368" y="84" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="104" font-size="12">t0–t3 全写进位置 0，后写的盖掉先写的；注意力只看 1 格</text>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="13" font-weight="600">正确：kernel 从 step 缓冲读位置</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="169" font-size="13" text-anchor="middle">t0</text>
+<rect class="f-accent" fill="#136d5a" x="58" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="80" y="169" font-size="13" text-anchor="middle">t1</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="128" y="169" font-size="13" text-anchor="middle">t2</text>
+<rect class="f-accent" fill="#136d5a" x="154" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="176" y="169" font-size="13" text-anchor="middle">t3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="298" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="346" y="144" width="44" height="40" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="32" y="200" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="80" y="200" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="128" y="200" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="176" y="200" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="224" y="200" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="272" y="200" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="320" y="200" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="368" y="200" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="224" font-size="12">step 缓冲：地址不变，内容每步由主机更新</text>
+</svg><figcaption>图 15-6　同一张图，两种写法。位置作为参数被录死时，所有 token 挤在第 0 格；位置放进固定地址的显存缓冲时，图记住的是地址，内容每步由主机改写。</figcaption></figure></div>
+<p>Strata 的 <code>qsa.hpp</code> 把这种错误的后果写得很具体：位置被冻住后，每个 token 都写进第 0 格，打分和选择只看 1 格，注意力始终只看一格历史。注释的评价是“比崩溃更糟”：输出是有限的、看起来合理的数，症状和“模型不会用上下文”一模一样，人们会去怀疑 KV 缓存、选择算法或权重，就是想不到图。<span class="ev ev-code">代码事实</span>[S18]</p>
+<p>它的修法是“一块显存，而不是改六个函数签名”：把每步都变的四个数放进一个小小的 <dfn>step 缓冲</dfn>：</p>
+<ul>
+<li><code>step[0] = pos</code>：新 token 的位置；</li>
+<li><code>step[1] = n_kv = pos + 1</code>：缓存里有几格；</li>
+<li><code>step[2] = n_bid</code>：已经填满几个 4 格的块；</li>
+<li><code>step[3] = width</code>：这一步选几格，等于 min(n_kv, 2051)。[S18]</li>
+</ul>
+<p>每个 kernel 从这块显存里读自己要的数，参数列表在每个 token 之间完全不变，整条 QSA 路径就能录成图。主机每步只做一次小拷贝，改写这块显存的内容。<span class="ev ev-code">代码事实</span>[S18] 四个数互相依赖，放在一处、由一段代码统一计算，就不会出现“改了 pos、忘了 n_kv”。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这和 C 语言里“传值”与“传指针”的区别一模一样。图录下的是值，就永远是那个值；录下的是指针，每次解引用都能读到新内容。前提是指针指向的内存一直有效，这一点图自己检查不了。</p>
+<p>同样的道理也用在采样上：温度、top-p 这些参数每个请求都可能不同，所以 Strata 把采样放在被录制的图<strong>之外</strong>，否则这些参数会被“永久烤进图里”。<span class="ev ev-code">代码事实</span>[S08]</p>
+
+<h2 id="sec-6">15.6 动手：自己找出瓶颈和冻结</h2>
+<p>本章的两个交互图都可以当作小实验来做。</p>
+<ol>
+<li><strong>启动开销时间线</strong>（图 15-3）：先用默认参数播放，记下三种方式的总时间和 GPU 忙碌占比。再把每个 kernel 的计算时间 w 从 5 µs 慢慢拉到 40 µs，找出“图不再明显更快”的那个点。你会发现它大约出现在 w 接近 L 的地方：kernel 比提交还长时，提交开销自然被藏起来了。</li>
+<li><strong>被冻住的位置</strong>（图 15-6）：两种写法各走 4 个 token。对比 KV 格子和“注意力能看到几格”。再想一想：如果只检查“程序有没有报错、输出是不是有限的数”，能不能发现错误写法？</li>
+</ol>
+<p>想在真 GPU 上验证，可以写一个只做 <code>state[pos] = token</code> 的小图，分别用 pos = 0、1、2 重放，检查三个位置是否都被写到。只看最后的返回值“成功”是不够的。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>GPU 用成千上万个线程干活：线程分成线程块，块里每 32 个线程组成一个 warp。让相邻线程读相邻地址，搬运才不浪费。</li>
+<li>每启动一次 kernel 都有固定开销。Strata 每个 token 原本要启动约 2,000 次，它用融合减少 kernel 数，用 CUDA Graph 把提交压到每层一次，再到每个 token 一次。</li>
+<li>图会把 kernel 参数录死。每步都变的值（位置、n_kv、选择宽度）必须放进固定地址的显存缓冲，由 kernel 每次去读。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“CUDA Graph 就是把很多 kernel 合成一个大 kernel。”</strong></p>
+<p>不是。图只是把一串操作和它们的依赖录下来，重放时每个节点照旧是一个独立的 kernel，中间结果照旧写回显存。它省的是 CPU 端的提交成本。把计算真正合并进一个 kernel 的是算子融合，那需要重写 kernel。两者解决不同的问题，Strata 同时用了两种。[R01]</p></div>
+
+<details class="deep"><summary>深入一层：融合的代价、录图的三条义务和验收方法</summary>
+<h3>融合不是免费的</h3>
+<p>把几个算子写进一个 kernel，可以少启动几次，也少写读几次中间结果。代价是：kernel 里同时活着的变量更多，每个线程要占更多寄存器；寄存器总量固定，每个线程占得多，同时能驻留的线程就少，GPU 用来掩盖访存等待的“备用线程”也少了，这叫占用率下降。实现也更复杂，更难测试。所以融合要按测量结果来定。比如 Strata 的混合残差融合读取有几个变体，引擎在每张卡上先用随机权重跑一遍，只采用和基准写法逐位相同的最新变体。<span class="ev ev-code">代码事实</span></p>
+<p>教学算例：一个层有 20 次启动，每次主机开销 5 µs，光启动就约 100 µs。对每次只算几微秒的小算子，这很可观；如果每个 kernel 本身要算几毫秒，同样 100 µs 就只是零头。这些都是假设值，用来判断“值不值得优化”，不是实测。<span class="ev ev-est">教学推演</span></p>
+<h3>录图的三条义务</h3>
+<p><code>graph.hpp</code> 把三件事写成了接口的前提，每一条都来自一个专门的小实验。<span class="ev ev-code">代码事实</span></p>
+<ol>
+<li><strong>等待必须调用驱动，不能只读内存。</strong>在 Windows 的显示驱动模型下，命令提交是攒批的。一个只读内存、不调用驱动的自旋循环，500 毫秒里转了 5,907,703 圈，kernel 却根本没开始跑；直到有代码调用了驱动，数据才翻转。所以等待改成反复查询一个事件，每次查询约 0.021 毫秒，它是“查询”，不是“同步”。</li>
+<li><strong>图会重读输入缓冲，不会重读 kernel 参数。</strong>8 次重放、每次换一份锁页输入，结果都跟得上；而参数在录制时被拷进节点，再也不读。凡是每步变化的值（位置、页表基址、token 编号）都必须是显存里的<strong>数据</strong>，不能是参数。</li>
+<li><strong>固定地址是调用方的责任。</strong>图持有的是图，不是内存。被录制的代码用到的每一块缓冲，都必须在录制前分配好，之后不能重新分配。</li>
+</ol>
+<p>另外两条防御也值得学：录制结果是 0 个节点时直接报错，因为“一张什么也不做的图”会永远安静地重放，不产生错误也不产生输出；录制体里如果留下了 CUDA 错误，就放弃这次录制，不实例化一张坏图。<span class="ev ev-code">代码事实</span></p>
+<h3>不要把一条执行路径当成全部</h3>
+<p>Strata 里同时存在好几种图：<code>SessionGraphs</code> 每层一张或两张（路由前一段、专家合并后一段）[S13]，投机解码验证窗口用的多 token 图（第 18 章）[S08]，整 token 的 <code>TokenGraph</code>，还有用来逐段计时的前缀图。 读到某个头文件写着“一层一张图”，不能据此断言整个引擎永远不录更大的图。源码里常常并存参考路径、调试路径、快速路径和按设备能力选择的实现；调用上下文和启用条件，是结论的一部分。这和编译原理课里“同一个函数有多个特化版本”是一回事。</p>
+<h3>验收：地址、数值、状态三件事</h3>
+<p>一项图优化至少要验证三件事：每步变化的值每轮都正确更新；被录制的地址在所有重放期间有效；重放后的状态和不录图的参考路径一致。一个典型的生命周期陷阱是：请求结束时释放了缓冲，却留着图对象给下一个请求用，下一次重放就会读写已释放的内存。</p>
+<p>测试也要能“看见”错误。只用同一个提示词、同一个温度重复一遍，证明不了参数切换正确。更好的做法是：固定 logits，两个连续请求分别用贪心和高温度（或不同的固定随机数），与不录图的参考实现比较实际使用的参数和结果；第二个请求必须走一条与第一个不同、而且可以预测的分支。</p>
+<p>进阶的 GPU 作业才需要性能分析器：记录启动时间、kernel 时间、寄存器用量和重放时间，再用端到端的 A/B 对比，判断局部优化是否真的缩短了关键路径。Strata 的注释里就有反例：某轮用不录图模式测出的分段计时，比录图后同一段工作的真实成本高了 4 倍，差点误导了优化方向。<span class="ev ev-code">代码事实</span></p>
+</details>
