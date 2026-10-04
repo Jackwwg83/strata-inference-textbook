@@ -1,0 +1,261 @@
+<div class="hook"><span class="eyebrow">먼저 비유 하나</span>
+<p>원고 한 편이 편집자 48명을 거쳐요. 편집자마다 전체 원고를 처음부터 다시 베껴 쓰며 고친다면, 48번째 베낄 때쯤 원문은 이미 엉망이 되어 있을 거예요. 더 똑똑한 방법이 있어요. 각자 여백에 포스트잇만 붙여서 자기 수정 의견을 적고, 원문은 그대로 두는 거예요.</p>
+<p>Strata가 돌리는 모델이 바로 48층이고, 한 층이 편집자 한 명이에요. 이 장에서는 층 하나를 뜯어봐요. 무엇을 읽고, 무엇을 계산하고, 결과를 어떻게 원고에 "붙이는지" 볼 거예요. 그다음 모양은 완전히 맞는데 뜻이 슬그머니 틀어질 수 있는 인터페이스 몇 곳도 살펴봐요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 한 층은 두 반쪽이에요. 먼저 "기록 섞기"(36층은 GDN, 12층은 QSA 어텐션)를 하고, 다음에 "전문가 가공"(MoE)을 해요. 두 반쪽 모두 "잔차 읽기 → 정규화 → 작은 수정값 계산 → 잔차에 더하기" 순서예요. Strata의 잔차는 벡터 한 개가 아니라 나란히 달리는 4개의 차선이에요.</p>
+
+<h2 id="sec-1">7.1 한 층이 하는 일: 숫자가 들어가고, 숫자가 나온다</h2>
+<p>모델에게 토큰 하나는 층과 층 사이에서 숫자 한 줄일 뿐이에요. Strata가 쓰는 모델에서는 이 줄이 숫자 2560개이고, <dfn>은닉 벡터(hidden vector)</dfn>라고 불러요. <span class="ev ev-code">코드 사실</span>[S04] 각 층은 숫자 2560개를 읽고, 같은 길이의 숫자 줄을 내보내 다음 층에 넘겨요. 층과 층 사이에서 전달되는 것은 이 숫자 줄에 점점 풍부하게 담기는 "이해"예요.</p>
+<aside class="primer" id="c07-layer-activation">
+<h3>신경망의 층과 활성화 함수</h3>
+<p>직관: 신경망의 한 층은 믹싱 콘솔과 비슷해요. 출력 노브마다 모든 입력을 서로 다른 비율로 섞어요. 이 단계가 바로 3장의 행렬 곱이에요. 출력 = 가중치 행렬 × 입력이에요. 가중치 행렬 속 숫자가 훈련으로 배운 "파라미터"예요.</p>
+<p>행렬 곱만으로는 부족해요. 행렬 곱 두 번을 이으면 행렬 곱 한 번과 같아요. A(Bx) = (AB)x예요. 100층을 쌓아도 1층과 같아서, 구불구불한 규칙을 배울 수 없어요. 그래서 행렬 곱이 끝날 때마다 <dfn>활성화 함수(activation function)</dfn>를 통과시켜요. 숫자 하나하나에 적용하는 비선형 함수로, 직선을 "꺾어" 줘요. 흔한 세 가지는 아래와 같아요. 곡선은 칼럼 뒤의 그림 7-2에 있어요.</p>
+<ul>
+<li><dfn>ReLU</dfn>: 음수는 0으로, 양수는 그대로 둬요. 가장 단순해요.</li>
+<li><dfn>sigmoid</dfn>(σ): σ(z) = 1 ÷ (1 + e<sup>−z</sup>). 어떤 수든 0과 1 사이로 눌러 줘요. 그래서 "스위치"나 "게이트"로 자주 써요. 0은 닫힘, 1은 활짝 열림이에요.</li>
+<li><dfn>SiLU</dfn>: SiLU(z) = z × σ(z). 부드러운 ReLU처럼 생겼고, 음수 구간에서 살짝 아래로 내려가요.</li>
+</ul>
+<p>이 장과의 관계: Strata의 한 층 안에서 sigmoid와 SiLU는 서로 다른 자리에 나와요. 둘 다 흔히 "게이트"라고 뭉뚱그려 부르지만, 하나라도 잘못 쓰면 값이 전부 달라져요. 7.5절에서 볼 거예요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EC%9D%B8%EA%B3%B5_%EC%8B%A0%EA%B2%BD%EB%A7%9D" target="_blank" rel="noopener noreferrer">위키백과: 인공 신경망</a> · <a href="https://ko.wikipedia.org/wiki/%ED%99%9C%EC%84%B1%ED%99%94_%ED%95%A8%EC%88%98" target="_blank" rel="noopener noreferrer">위키백과: 활성화 함수</a> · <a href="https://ko.wikipedia.org/wiki/%EC%8B%9C%EA%B7%B8%EB%AA%A8%EC%9D%B4%EB%93%9C_%ED%95%A8%EC%88%98" target="_blank" rel="noopener noreferrer">위키백과: 시그모이드 함수</a> · <a href="https://pytorch.org/docs/stable/generated/torch.nn.SiLU.html" target="_blank" rel="noopener noreferrer">PyTorch 문서: SiLU</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="그림 7-2: ReLU, sigmoid, SiLU 활성화 함수 곡선 세 개. sigmoid는 0과 1 사이에 눌려 있다">
+<text class="f-text" fill="#182f2b" x="20" y="18" font-size="12" font-weight="600">활성화 함수 3개 (가로축 z: −4 ~ 4)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 196H360M200 60V214"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.6" stroke-dasharray="2 3" d="M40 164H360"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="232" font-size="12" text-anchor="middle">−4</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="232" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="360" y="232" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="168" font-size="12" text-anchor="end">1</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="72" font-size="12" text-anchor="end">4</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M40 196L200 196L360 68"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" stroke-dasharray="6 3" d="M40.0 198.3L50.0 198.8L60.0 199.3L70.0 199.9L80.0 200.6L90.0 201.3L100.0 202.1L110.0 202.9L120.0 203.6L130.0 204.3L140.0 204.8L150.0 204.9L160.0 204.6L170.0 203.7L180.0 202.0L190.0 199.5L200.0 196.0L210.0 191.5L220.0 186.0L230.0 179.7L240.0 172.6L250.0 164.9L260.0 156.8L270.0 148.3L280.0 139.6L290.0 130.9L300.0 122.1L310.0 113.3L320.0 104.6L330.0 95.9L340.0 87.3L350.0 78.8L360.0 70.3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" stroke-dasharray="1 3" d="M40.0 195.4L50.0 195.3L60.0 195.1L70.0 194.8L80.0 194.5L90.0 194.1L100.0 193.6L110.0 192.9L120.0 192.2L130.0 191.3L140.0 190.2L150.0 188.9L160.0 187.4L170.0 185.7L180.0 183.9L190.0 182.0L200.0 180.0L210.0 178.0L220.0 176.1L230.0 174.3L240.0 172.6L250.0 171.1L260.0 169.8L270.0 168.7L280.0 167.8L290.0 167.1L300.0 166.4L310.0 165.9L320.0 165.5L330.0 165.2L340.0 164.9L350.0 164.7L360.0 164.6"/>
+<text class="f-text" fill="#182f2b" x="296" y="98" font-size="12">ReLU(실선)</text>
+<text class="f-text" fill="#182f2b" x="232" y="136" font-size="12">SiLU(파선)</text>
+<text class="f-text" fill="#182f2b" x="262" y="156" font-size="12">sigmoid(점선)</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="246" font-size="12">sigmoid는 늘 0과 1 사이라서 게이트에 알맞아요</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="264" font-size="12">SiLU와 ReLU에는 이런 상한이 없어요</text>
+</svg><figcaption>그림 7-2　활성화 함수 곡선 세 개. 모두 직선을 꺾어 주지만 값의 범위가 달라서 아무거나 바꿔 쓸 수 없어요.</figcaption></figure>
+<p>Strata의 GDN 층에서는 활성화 함수의 위치가 분명하게 적혀 있어요. 합성곱 뒤에 숫자 10240개 <strong>전체</strong>에 SiLU를 적용하고, 그다음에야 q, k, v로 잘라요. 쓰기 강도 β는 먼저 sigmoid를 통과해요. 마지막 출력에는 sigmoid(z)를 곱해요. <span class="ev ev-code">코드 사실</span>(<code>layer.hpp</code> 10–22행) 이 세 곳 중 어디서든 순서를 바꾸거나 함수를 바꾸면, 결과는 여전히 정상적인 숫자 줄이에요. 다만 틀렸을 뿐이에요.</p>
+
+<h2 id="sec-2">7.2 48층은 모두 같지 않아요: GDN 36층 + QSA 12층</h2>
+<p>각 층의 앞쪽 절반은 "기록을 되돌아보는" 일을 해요. 현재 토큰이 앞 내용에서 관련 정보를 찾아야 해요. Strata의 모델에는 되돌아보는 방법이 두 가지 있어요. <dfn>QSA</dfn>는 어텐션의 한 종류예요. 앞 내용의 모든 위치에 대한 기록을 남겨 두고, 필요할 때 관련 있는 것을 골라 봐요(8장). <dfn>GDN</dfn>은 앞 내용을 크기가 고정된 "화이트보드"에 압축해 두고, 토큰이 올 때마다 한 번씩 지우고 다시 써요(9장).</p>
+<p>어느 층이 어느 방식을 쓰는지는 규칙 하나로 정해져요. 층 번호를 4로 나눈 나머지가 3이면 QSA, 나머지는 GDN이에요. <span class="ev ev-code">코드 사실</span>[S04] 층 번호는 0부터 세므로 QSA 층은 3, 7, 11 … 47이고 모두 12층이에요. 나머지 36층이 GDN이에요. 그림 7-3을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="그림 7-3: 48개 층을 번호순으로 두 줄에 늘어놓았다. 4층마다 마지막 층이 QSA 어텐션 층이고 모두 12개이며, 나머지 36개는 GDN이다">
+<text class="f-text" fill="#182f2b" x="20" y="18" font-size="12" font-weight="600">48층의 역할 분담 (칸 하나가 한 층, 번호순)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="35" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="50" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="65" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="95" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="110" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="125" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="155" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="185" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="245" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="260" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="275" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="305" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="320" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="335" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="365" y="30" width="13" height="26"/>
+<text class="f-muted" fill="#5c6d66" x="26.5" y="72" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="71.5" y="72" font-size="12" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="131.5" y="72" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="371.5" y="72" font-size="12" text-anchor="middle">23</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="35" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="50" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="65" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="95" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="110" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="125" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="155" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="185" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="245" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="260" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="275" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="305" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="320" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="335" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="365" y="84" width="13" height="26"/>
+<text class="f-muted" fill="#5c6d66" x="26.5" y="126" font-size="12" text-anchor="middle">24</text>
+<text class="f-muted" fill="#5c6d66" x="371.5" y="126" font-size="12" text-anchor="middle">47</text>
+<text class="f-text" fill="#182f2b" x="20" y="152" font-size="12">강조색: QSA 어텐션 층, 모두 12개</text>
+<text class="f-text" fill="#182f2b" x="20" y="170" font-size="12">(0부터 센 번호 3, 7, 11 … 47)</text>
+<text class="f-text" fill="#182f2b" x="20" y="188" font-size="12">옅은색: GDN 층, 모두 36개</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="206" font-size="12">규칙: 층 번호 % 4 == 3 → QSA, 아니면 GDN</text>
+</svg><figcaption>그림 7-3　4층마다 마지막 층이 QSA예요. 0부터 센 번호 3은 사람이 세는 "4번째 층"이에요. 규칙은 "4층마다 한 번"이고, "3층마다 한 번"이 아니에요.</figcaption></figure>
+<p>앞쪽 절반이 어떤 믹서를 쓰든 한 층의 뼈대는 같아요. 소스 코드는 한 층의 연산 순서를 두 줄로 적어 두었어요. <span class="ev ev-code">코드 사실</span>(<code>layer.hpp</code> 508–515행)</p>
+<ul>
+<li>전반 층: 잔차 읽기 → 믹서(GDN 또는 QSA) → 잔차에 다시 쓰기</li>
+<li>후반 층: 잔차 읽기 → MoE(10장의 전문가) → 잔차에 다시 쓰기</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 364" role="img" aria-label="그림 7-1: 한 층의 여섯 단계. 전반 층은 잔차 읽기, 믹서, 다시 쓰기. 후반 층은 잔차 읽기, MoE, 다시 쓰기. 이를 48층 반복한다">
+<rect class="f-soft" fill="#e5f1df" x="80" y="8" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">잔차: 차선 4개 × 숫자 2560개</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="58" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="80" font-size="13" text-anchor="middle">① 잔차 읽기: 정규화 후 합치기</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="108" width="240" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="128" font-size="13" font-weight="600" text-anchor="middle">② 믹서: 기록 되돌아보기</text>
+<text class="f-on" fill="#ffffff" x="200" y="146" font-size="12" text-anchor="middle">GDN(36층) 또는 QSA(12층)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="170" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="192" font-size="13" text-anchor="middle">③ 다시 쓰기: 차선마다 더하기</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="220" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="242" font-size="13" text-anchor="middle">④ 잔차 다시 읽기</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="270" width="240" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="290" font-size="13" font-weight="600" text-anchor="middle">⑤ MoE: 전문가 가공</text>
+<text class="f-on" fill="#ffffff" x="200" y="308" font-size="12" text-anchor="middle">전문가 10명을 골라 가중합</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="322" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="344" font-size="13" text-anchor="middle">⑥ 다시 쓰기 → 다음 층으로</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V56M200 92V106M200 154V168M200 204V218M200 254V268M200 316V320"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M70 58V204M70 220V356"/>
+<text class="f-muted" fill="#5c6d66" x="8" y="136" font-size="12">전반</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="292" font-size="12">후반</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="4 3" d="M320 339H346V25H320"/>
+<text class="f-muted" fill="#5c6d66" x="352" y="186" font-size="12">× 48</text>
+</svg><figcaption>그림 7-1　한 층의 뼈대: "읽기 → 계산 → 다시 쓰기"가 두 번. 믹서는 "앞 내용 보기"를 맡고, MoE는 "지금 이 토큰 가공하기"를 맡아요. 48층 모두 이 뼈대예요.</figcaption></figure>
+<p>놓치기 쉬운 차이가 하나 더 있어요. QSA 층은 현재 토큰의 위치를 알아야 하지만, GDN 층에는 위치 파라미터가 아예 없어요. GDN이 토큰마다 받는 입력은 그 숫자 줄이 전부예요. 토큰과 토큰 사이를 이어 주는 것은 화이트보드 상태예요. <span class="ev ev-code">코드 사실</span>(<code>layer.hpp</code> 513–515행)</p>
+
+<h2 id="sec-3">7.3 정규화: 먼저 볼륨을 맞춘다</h2>
+<p>숫자들은 48층을 지나며 더해지고 빼지는 동안, 어떤 것은 점점 커지고 어떤 것은 점점 작아져요. 그냥 두면 다음 층의 행렬 곱은 어떨 때는 "속삭임"을, 어떨 때는 "고함"을 받게 되어 학습이 어려워져요. 그래서 거의 모든 계산 전에 벡터를 먼저 "표준 볼륨"으로 맞춰요.</p>
+<aside class="primer" id="c07-normalization">
+<h3>정규화: L2와 RMS</h3>
+<p><dfn>정규화(normalization)</dfn>는 벡터를 그 "크기"로 나눠서 방향만 남기는 일이에요. 문제는 "크기"를 어떻게 재느냐예요. 흔한 두 방법은 나누는 값 하나만 달라요.</p>
+<ul>
+<li><dfn>L2 노름(norm)</dfn>: ‖x‖ = √(x₁² + x₂² + … + x_d²). 벡터의 기하학적 길이예요. L2 정규화를 하면 벡터 길이가 1이 돼요.</li>
+<li><dfn>제곱평균제곱근</dfn>(RMS): √((x₁² + … + x_d²) ÷ d). 제곱의 <strong>평균</strong>을 먼저 구하고 제곱근을 취해요. RMS 정규화를 하면 성분 하나하나의 "평균 볼륨"이 1이 돼요.</li>
+</ul>
+<p>예: x = [3, 4]. L2 길이는 √(9 + 16) = 5이고, 정규화하면 [0.6, 0.8]이에요. RMS는 √(25 ÷ 2) ≈ 3.54이고, 정규화하면 약 [0.85, 1.13]이에요. 두 결과는 방향이 같고 크기만 √2배 달라요. 일반적으로 d차원 벡터에서는 두 결과가 √d배 차이 나요.</p>
+<p>실제 공식에는 아주 작은 수 ε(epsilon)도 있어요. 근호 <strong>안쪽</strong>에 더해서, 벡터가 전부 0일 때 0으로 나누는 일을 막아요. <dfn>RMSNorm</dfn>은 여기에 배워 둔 계수 묶음을 한 번 더 곱해서, 성분마다 자기만의 볼륨을 갖게 해요.</p>
+<p>이 장과의 관계: Strata는 둘 다 쓰고, 쓰는 자리가 서로 달라요. 하나를 잘못 쓰면 오류는 나지 않고 √d배만큼 어긋나요.</p>
+<p class="further">더 읽을거리: <a href="https://en.wikipedia.org/wiki/Normalization_(machine_learning)" target="_blank" rel="noopener noreferrer">Wikipedia: Normalization (machine learning)</a> · <a href="https://arxiv.org/abs/1910.07467" target="_blank" rel="noopener noreferrer">RMSNorm 원 논문</a> · <a href="https://pytorch.org/docs/stable/generated/torch.nn.RMSNorm.html" target="_blank" rel="noopener noreferrer">PyTorch 문서: RMSNorm</a> · <a href="https://ko.wikipedia.org/wiki/%EB%B2%A1%ED%84%B0" target="_blank" rel="noopener noreferrer">위키백과: 벡터</a></p>
+</aside>
+<p>Strata에서는 잔차를 읽을 때마다 차선 각각에 RMS 정규화를 해요. GDN 층은 q와 k에 L2 정규화를 하고, v에는 하지 않아요. <span class="ev ev-code">코드 사실</span>(<code>gr.hpp</code> 81행, <code>layer.hpp</code> 12, 23행) GDN의 헤더 파일은 특별히 이렇게 알려 줘요. ε는 <strong>제곱합</strong>에 붙는 하한이지 평균에 붙는 것이 아니므로 너비로 나누면 안 돼요. "평균 제곱"으로 잘못 읽으면 헤드마다 128차원이라 결과가 √128 ≈ 11.3배 어긋나요.[S17] 이 모델의 RMS 정규화 ε는 10<sup>−6</sup>이에요.[S14][S18]</p>
+<p>아래 작은 도구가 계산해 줘요. 입력을 바꿔 가며 두 정규화를 비교해 보세요.</p>
+<div class="viz" data-viz="norm-compare"><figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="그림 7-5: 입력 3과 4에서 L2 정규화는 0.6과 0.8, RMS 정규화는 0.85와 1.13이 된다. 두 결과는 루트 2배 차이가 난다">
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">입력 x</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="28" width="180" height="14"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="46" width="240" height="14"/>
+<text class="f-text" fill="#182f2b" x="286" y="40" font-size="12">3</text>
+<text class="f-text" fill="#182f2b" x="346" y="58" font-size="12">4</text>
+<text class="f-text" fill="#182f2b" x="10" y="104" font-size="12">L2 정규화</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="88" width="36" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="100" y="106" width="48" height="14"/>
+<text class="f-text" fill="#182f2b" x="142" y="100" font-size="12">0.60</text>
+<text class="f-text" fill="#182f2b" x="154" y="118" font-size="12">0.80</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">RMS 정규화</text>
+<rect class="f-warn" fill="#9e5d24" x="100" y="148" width="50.9" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="100" y="166" width="67.9" height="14"/>
+<text class="f-text" fill="#182f2b" x="157" y="160" font-size="12">0.85</text>
+<text class="f-text" fill="#182f2b" x="174" y="178" font-size="12">1.13</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="208" font-size="12">L2: √(9 + 16) = 5로 나눠요</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="226" font-size="12">RMS: √(25 ÷ 2) ≈ 3.54로 나눠요</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="244" font-size="12">방향은 같고 크기는 √2 ≈ 1.41배 차이 나요</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="262" font-size="12">d차원이면 √d배 차이 나요</text>
+</svg><figcaption>그림 7-5　같은 입력에 두 정규화는 "d로 나누는지"만 달라요. d = 128이면 이 차이가 11.3배예요.</figcaption></figure></div>
+
+<h2 id="sec-4">7.4 잔차: 층마다 "수정 의견"만 쓴다</h2>
+<p>처음의 편집자 비유로 돌아가요. 각 층은 이 숫자 줄을 다시 쓰지 않아요. "수정값"만 계산해서 더해요. "원문은 그대로 남기고 수정이 계속 쌓이는" 이 통로를 잔차라고 해요.</p>
+<aside class="primer" id="c07-residual">
+<h3>잔차 연결</h3>
+<p><dfn>잔차 연결(residual connection)</dfn>은 한 층을 x′ = x + f(x)로 써요. 출력은 입력에 이 층이 계산한 수정값 f(x)를 더한 것이에요. 어떤 층에 "고칠 게 없으면" f(x)를 0에 가깝게 만들기만 하면 돼요. 그러면 입력이 그대로 지나가요.</p>
+<p>왜 중요할까요? 잔차가 없으면 정보가 층마다 행렬 곱과 활성화 함수를 통과해야 해요. 층이 많아지면 처음 신호는 전달 게임처럼 변질돼요. 훈련할 때도 오차 신호가 거꾸로 전해지며 점점 약해져요. 잔차가 있으면 "직통 차선"이 하나 더 생겨요. 1층의 정보가 거의 그대로 48층에 닿을 수 있고, 오차 신호도 이 차선을 따라 돌아올 수 있어요. 2015년의 ResNet이 이 아이디어로 이미지 신경망을 100층 넘게 안정적으로 훈련했어요.</p>
+<p>요즘 언어 모델은 보통 x′ = x + f(norm(x))로 써요. 먼저 정규화하고, 계산하고, 원래 x에 더해요. 더하는 쪽은 <strong>정규화하지 않은</strong> x라는 점에 주의하세요.</p>
+<p>이 장과의 관계: Strata의 모델은 이 직통 차선을 4개로 늘렸어요. 더할 때는 배워 둔 가중치도 함께 곱해요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EC%9E%94%EC%B0%A8_%EC%8B%A0%EA%B2%BD%EB%A7%9D" target="_blank" rel="noopener noreferrer">위키백과: 잔차 신경망</a> · <a href="https://arxiv.org/abs/1512.03385" target="_blank" rel="noopener noreferrer">ResNet 원 논문</a> · <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener noreferrer">The Illustrated Transformer(그림 해설, 잔차와 정규화 포함)</a></p>
+</aside>
+<p>Strata의 잔차는 나란히 달리는 차선 4개이고, 차선마다 숫자 2560개예요. <span class="ev ev-code">코드 사실</span>[S04][S13] 읽을 때는 차선 4개가 각자 정규화된 뒤, 벡터 하나로 합쳐져 믹서나 MoE에 전달돼요. 다시 쓸 때는 같은 수정값을 <strong>모든</strong> 차선에 더하고, 차선마다 곱하는 가중치만 달라요. 가중치는 w = 2 × sigmoid(inject ÷ 4)예요. inject는 잔차를 읽을 때 덤으로 계산되는 숫자예요.(<code>gr.hpp</code> 6–8, 114–120행)</p>
+<p>이 "2배 sigmoid" 설계는 꽤 영리해요. sigmoid(0) = 0.5라서 inject = 0이면 w가 정확히 1이 되고, 다시 쓰기는 평범한 잔차 덧셈으로 돌아가요. 소스 코드 주석도 이 점을 짚고 있고, 테스트에서도 따로 단언해요. 가중치는 0에서 2 사이에서 움직여서, 모델이 차선마다 "더 귀 기울일지" "덜 귀 기울일지"를 스스로 정해요. 그림 7-4를 보세요.</p>
+<div class="viz" data-viz="layer-walk"><figure class="fig"><svg viewBox="0 0 400 266" role="img" aria-label="그림 7-4: 잔차 차선 4개에서 벡터 하나를 읽어 수정값 Δ를 계산하고, Δ에 각자의 가중치를 곱해 모든 차선에 다시 더한다">
+<text class="f-text" fill="#182f2b" x="8" y="43" font-size="12">차선 0</text>
+<text class="f-text" fill="#182f2b" x="8" y="73" font-size="12">차선 1</text>
+<text class="f-text" fill="#182f2b" x="8" y="103" font-size="12">차선 2</text>
+<text class="f-text" fill="#182f2b" x="8" y="133" font-size="12">차선 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="31" width="320" height="14" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="61" width="320" height="14" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="91" width="320" height="14" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="121" width="320" height="14" rx="3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 38V160"/>
+<circle class="f-text" fill="#182f2b" cx="100" cy="38" r="3"/><circle class="f-text" fill="#182f2b" cx="100" cy="68" r="3"/><circle class="f-text" fill="#182f2b" cx="100" cy="98" r="3"/><circle class="f-text" fill="#182f2b" cx="100" cy="128" r="3"/>
+<text class="f-muted" fill="#5c6d66" x="106" y="154" font-size="12">① 읽기</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="162" width="160" height="36" rx="8"/>
+<text class="f-on" fill="#ffffff" x="140" y="185" font-size="12" text-anchor="middle">② 수정값 Δ 계산</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M220 180H320V38"/>
+<circle class="f-text" fill="#182f2b" cx="320" cy="38" r="3"/><circle class="f-text" fill="#182f2b" cx="320" cy="68" r="3"/><circle class="f-text" fill="#182f2b" cx="320" cy="98" r="3"/><circle class="f-text" fill="#182f2b" cx="320" cy="128" r="3"/>
+<text class="f-text" fill="#182f2b" x="328" y="28" font-size="12">+Δ×w₀</text>
+<text class="f-text" fill="#182f2b" x="328" y="58" font-size="12">+Δ×w₁</text>
+<text class="f-text" fill="#182f2b" x="328" y="88" font-size="12">+Δ×w₂</text>
+<text class="f-text" fill="#182f2b" x="328" y="118" font-size="12">+Δ×w₃</text>
+<text class="f-muted" fill="#5c6d66" x="236" y="174" font-size="12">③ 다시 쓰기</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="222" font-size="12">쓰기 가중치 w = 2 × sigmoid(inject ÷ 4)</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="240" font-size="12">inject = 0이면 w = 1이라 그냥 더하기예요</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="258" font-size="12">같은 수정값 Δ를 모든 차선에 더하고, 가중치만 달라요</text>
+</svg><figcaption>그림 7-4　Strata의 잔차에는 차선이 4개 있어요. 읽을 때는 벡터 하나로 합치고, 다시 쓸 때는 같은 수정값에 각자의 가중치를 곱해 모든 차선에 더해요.</figcaption></figure></div>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 잔차 연결은 버전 관리의 "패치"와 조금 닮았어요. 층마다 파일 전체를 다시 쓰는 대신 diff 하나를 커밋해요. 패치 48개를 차례로 적용해도 원래 내용은 늘 남아 있어요. 대신 어느 층의 패치가 잘못 적용되면, 그 오류도 이 직통 차선을 따라 끝까지 전해지고 "희석"되지 않아요.</p>
+
+<h2 id="sec-5">7.5 모양만 맞으면 안 돼요, 뜻도 맞아야 해요: 모듈 계약</h2>
+<p>한 층은 열 몇 개의 작은 단계로 이루어져요. 단계마다 따로 테스트하면 다 맞는데, 이어 붙이면 여전히 틀릴 수 있어요. 가장 위험한 오류는 <strong>모양도 완전히 맞고 값도 완전히 정상인</strong> 오류예요. 멈추지도 않고 NaN도 나오지 않고, 조용히 다른 답을 내요. Strata의 소스 코드에는 이런 "계약"이 여러 군데 적혀 있어요. 그림 7-6은 그중 네 가지를 골랐어요.</p>
+<figure class="fig"><svg viewBox="0 0 400 296" role="img" aria-label="그림 7-6: 모듈 계약 네 가지. 하나라도 틀리게 쓰면 결과는 여전히 정상적인 숫자다">
+<text class="f-muted" fill="#5c6d66" x="8" y="18" font-size="12">계약</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="18" font-size="12">맞는 방식</text>
+<text class="f-muted" fill="#5c6d66" x="240" y="18" font-size="12">틀린 방식 (값은 정상)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="4" y="28" width="66" height="62" rx="4"/>
+<text class="f-text" fill="#182f2b" x="9" y="52" font-size="12">β 쓰기</text>
+<text class="f-text" fill="#182f2b" x="9" y="70" font-size="12">게이트</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="74" y="28" width="158" height="62" rx="4"/>
+<text class="f-text" fill="#182f2b" x="80" y="47" font-size="12">먼저 sigmoid 통과</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="66" font-size="12">값이 0과 1 사이</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="236" y="28" width="160" height="62" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="242" y="47" font-size="12">sigmoid를 빼먹음</text>
+<text class="f-muted" fill="#5c6d66" x="242" y="64" font-size="12">쓰기 강도에 한계가</text>
+<text class="f-muted" fill="#5c6d66" x="242" y="81" font-size="12">없고 음수도 가능</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="4" y="96" width="66" height="62" rx="4"/>
+<text class="f-text" fill="#182f2b" x="9" y="120" font-size="12">출력</text>
+<text class="f-text" fill="#182f2b" x="9" y="138" font-size="12">게이트</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="74" y="96" width="158" height="62" rx="4"/>
+<text class="f-text" fill="#182f2b" x="80" y="115" font-size="12">sigmoid(z)를 곱함</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="134" font-size="12">이 모델의 방식</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="236" y="96" width="160" height="62" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="242" y="115" font-size="12">qwen3.5의 SiLU를</text>
+<text class="f-warn" fill="#9e5d24" x="242" y="132" font-size="12">그대로 가져옴</text>
+<text class="f-muted" fill="#5c6d66" x="242" y="149" font-size="12">모양 같고 값 변함</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="4" y="164" width="66" height="62" rx="4"/>
+<text class="f-text" fill="#182f2b" x="9" y="188" font-size="12">라우팅</text>
+<text class="f-text" fill="#182f2b" x="9" y="206" font-size="12">가중치</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="74" y="164" width="158" height="62" rx="4"/>
+<text class="f-text" fill="#182f2b" x="80" y="183" font-size="12">합칠 때 한 번만 곱함</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="202" font-size="12">계수 0.2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="236" y="164" width="160" height="62" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="242" y="183" font-size="12">전문가 풀에서도</text>
+<text class="f-warn" fill="#9e5d24" x="242" y="200" font-size="12">한 번 더 곱함</text>
+<text class="f-muted" fill="#5c6d66" x="242" y="217" font-size="12">0.2 × 0.2 = 0.04</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="4" y="232" width="66" height="62" rx="4"/>
+<text class="f-text" fill="#182f2b" x="9" y="256" font-size="12">전문가</text>
+<text class="f-text" fill="#182f2b" x="9" y="274" font-size="12">출력</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="74" y="232" width="158" height="62" rx="4"/>
+<text class="f-text" fill="#182f2b" x="80" y="251" font-size="12">이번 층에서 고른</text>
+<text class="f-text" fill="#182f2b" x="80" y="268" font-size="12">전문가를</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="285" font-size="12">이번 층의 가중치와 짝</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="236" y="232" width="160" height="62" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="242" y="251" font-size="12">이전 층에서 고른</text>
+<text class="f-warn" fill="#9e5d24" x="242" y="268" font-size="12">전문가를</text>
+<text class="f-muted" fill="#5c6d66" x="242" y="285" font-size="12">이번 층의 가중치와 짝</text>
+</svg><figcaption>그림 7-6　계약 네 가지, "완전히 정상으로 보이는" 틀린 방식 네 가지. 프로그램을 멈추게 하지는 않고, 모델이 다른 말을 하게 만들 뿐이에요.</figcaption></figure>
+<ul>
+<li><strong>β는 먼저 sigmoid를 통과해야 하고, 그 일은 층이 맡아요.</strong> GDN의 단일 스텝 커널은 이 단계를 하지 않아요. 커널의 계약은 "받은 β는 이미 0과 1 사이의 값"이에요. 헤더 파일에 대문자로 적혀 있어요. 커널은 하지 않으니 층이 해야 한다고요.[S17]</li>
+<li><strong>출력 게이트는 SiLU가 아니라 sigmoid예요.</strong> qwen3.5 모델은 여기서 SiLU를 쓰지만, 이 모델은 안 써요.[S17] 두 함수는 이름이 모두 "게이트"와 얽혀 있고 모양도 비슷하지만, 값은 완전히 달라요.</li>
+<li><strong>라우팅 가중치는 한 번만 곱해요.</strong> 전문가 풀은 라우팅 가중치를 곱하지 <strong>않아요</strong>. 곱하기는 GPU의 합치기 단계가 한꺼번에 맡아요. 양쪽에서 다 곱하면 한 층만 봐서는 거의 알아챌 수 없고, 48층이 쌓이면 오차가 눈덩이처럼 커져요.[S06]</li>
+<li><strong>전문가 출력은 이번 층의 가중치와 짝지어야 해요.</strong> CPU가 전문가를 계산하는 동안 GPU도 일하게 하려고, 초기 버전은 l번째 층의 전문가 결과를 l+1번째 층에 넘겨 합치게 했어요. 그래서 l+1번째 층의 가중치가 쓰였어요. 주석은 이때 나온 것을 "유한하고, 유창하고, 결정적이지만, 이 모델의 것이 아닌 토큰"이라고 불러요. 고친 방법은 한 층을 그래프 두 조각으로 나누는 것이에요. 라우팅이 끝나면 CPU가 먼저 계산하고, 다 끝난 뒤에 이번 층의 가중치로 합쳐요. <span class="ev ev-code">코드 사실</span>(<code>layer.hpp</code> 146–165, 174–176행)</li>
+</ul>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 소프트웨어 공학의 "인터페이스 계약"과 "통합 테스트"를 보여 주는 생생한 교재예요. 함수마다 단위 테스트가 통과해도, 합쳤을 때 맞는다는 뜻은 아니에요. 계약에는 "누가 무엇을 맡는지"(누가 sigmoid를 통과시키는지, 누가 가중치를 곱하는지)를 분명히 적어야 하고, 통합 테스트에서는 한 층 전체, 토큰 하나 전체의 출력을 참조 구현과 비교해야 해요.</p>
+
+<h2 id="sec-6">7.6 직접 해 보기: 한 층이 읽고, 계산하고, 쓰는 모습 보기</h2>
+<p>이 장에는 따로 떨어진 실험 페이지가 없어요. 인터랙티브 그림 두 개가 곧 실험이에요.</p>
+<ol>
+<li>「한 층 따라가 보기」에서 0번 층부터 한 단계 버튼을 6번 눌러, 차선의 숫자가 매번 조금씩만 변하는 것을 보세요. 그다음 시작 층을 3으로 올려 믹서가 QSA로 바뀌는지 확인하고, 마지막으로 차선 0의 주입값을 0으로 옮겨 쓰기 가중치가 정확히 1인지 확인해 보세요.</li>
+<li>「L2 vs RMS」에서 [3, 4]와 128차원을 차례로 누르고, 두 비율을 적어 √d와 같은지 확인해 보세요.</li>
+</ol>
+<p>종이와 펜으로 풀어 보기: 전문가 두 명의 출력이 [2, 0]과 [0, 4]이고, 라우팅 가중치가 0.25와 0.75예요. 올바른 합치기 결과는 0.25 × [2, 0] + 0.75 × [0, 4] = [0.5, 3]이에요. 전문가 풀이 이미 가중치를 한 번 곱했는데 합칠 때 또 곱하면 결과는 어떻게 될까요? 이런 오류는 왜 "출력이 정상인지 보는 것"만으로는 찾기 어려울까요?</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>한 층 = 두 반쪽: 잔차 읽기 → 믹서(GDN 36층, QSA 12층, 규칙은 층 번호 % 4 == 3이면 QSA) → 다시 쓰기. 그리고 잔차 읽기 → MoE → 다시 쓰기.</li>
+<li>정규화는 벡터를 표준 크기로 맞춰요. L2는 제곱합의 제곱근으로, RMS는 제곱평균의 제곱근으로 나눠서 둘은 √d배 차이 나요. GDN의 q, k는 L2를 쓰고, 잘못 쓰면 11.3배 어긋나요.</li>
+<li>잔차 덕분에 각 층은 "수정값"만 써요. Strata의 잔차에는 차선이 4개 있고, 쓰기 가중치는 w = 2 × sigmoid(inject ÷ 4)예요. inject = 0이면 평범한 덧셈이에요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: "연산을 하나하나 다 테스트했으니, 이어 붙인 층도 반드시 맞다."</strong></p>
+<p>연산이 각자 맞아도, 이어 붙일 때 다른 층의 값을 넘기거나, sigmoid를 한 번 빼먹거나, 가중치를 한 번 더 곱하거나, 정규화의 분모를 잘못 쓸 수 있어요. 이런 오류는 모두 정상적인 숫자를 내므로 단위 테스트에는 보이지 않아요. 한 층 전체, 토큰 하나 전체의 출력을 참조 구현과 비교해야만 잡을 수 있어요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 다중 차선 잔차의 실제 공식, 타입에 따라 고르는 활성값 형식, 어느 층이 틀렸는지 찾는 법</summary>
+<h3>교육용 식 x′ = x + f(norm(x))는 Strata의 항별 등식이 아니에요</h3>
+<p>본문에서는 직관을 위해 벡터 하나짜리 잔차 공식을 썼어요. 실제 모델의 기하 구조에는 <code>hc = 4</code>가 있고, 세션 상태 속 잔차 R은 4 × 2560의 다중 차선 구조예요.[S04][S13] 이것을 평범한 단일 벡터 잔차로 바꾸면 모델이 달라져요.</p>
+<p>잔차 읽기(<code>gr_read</code>)의 전체 단계는 다음과 같아요. 차선마다 따로 RMS 정규화를 해서 xn을 얻어요(정규화 계수는 저장할 때부터 1 + w 형태로 적어 둬요). 차선 4개를 이어 붙여 320차원의 "병목"을 통과시켜요. lo = SiLU((xn의 BF16 버전 × w_down) ÷ hc)예요. hc로 나누는 것이 SiLU <strong>안쪽</strong>에 있다는 점을 놓치기 쉬운데, 결과를 실질적으로 바꿔요. 그다음 mixed = 각 차선에서 xn × sigmoid(lo × w_up)의 평균이고, inject = xn × w_inject예요. 마지막 층 뒤의 "최종 합치기"에는 inject가 없어요. 그 뒤에 다시 쓸 곳이 없기 때문이에요.(<code>gr.hpp</code> 79–91행)</p>
+<p>다시 쓰기(<code>gr_write</code>)는 R_out[c] = R[c] + block_out × w[c]이고, w[c] = 2 × sigmoid(inject[c] ÷ hc)예요.(<code>gr.hpp</code> 114–120행)</p>
+<p>이 차선 가중치는 모두 BF16 형식이에요. 패킹 파일은 디코딩을 쉽게 하려고 이것을 32비트로 넓혀 저장해요. 엔진이 로드할 때 다시 16비트로 줄이면 정밀도는 하나도 잃지 않고, 밀집(dense) 가중치 5.305 GiB 중 1.374 GiB를 아껴요. 주석은 이것이 "밀집 가중치가 전문가 캐시와 함께 VRAM에 들어가느냐, 못 들어가느냐"의 차이라고 해요.(<code>gr.hpp</code> 10–14행)</p>
+<h3>활성값 형식은 이름이 아니라 텐서 타입을 따라가요</h3>
+<p>양자화된 가중치는 행렬 곱 전에 입력 벡터도 맞는 형식으로 바꿔야 해요. <code>layer.cpp</code>에는 교훈 하나가 적혀 있어요. 이름이 같은 텐서라도 층마다 양자화 타입이 다를 수 있어요. 예를 들어 GDN 층 36개의 <code>attn_qkv</code>는 13개 층이 IQ4_XS, 18개 층이 Q3_K, 4개 층이 Q4_K, 1개 층이 Q2_0이에요. 규칙은 <strong>타입</strong>으로 정해요. 2비트 인코딩에는 Q8_0 형식의 입력을, 다른 양자화 타입에는 Q8_K를 짝지어요. 형식을 잘못 고르면 행렬 곱이 0.6%–1.4% 어긋나고, 망가진 벡터가 아니라 "그럴듯해 보이는" 벡터가 나와요.[S14]</p>
+<h3>어느 층, 어느 단계가 틀렸는지 아는 법</h3>
+<p>Strata에는 두 단계의 "대조표"가 있어요. 층별 잔차 기록(residual ladder)은 참조 구현과 <strong>어느 층부터</strong> 갈라지는지 알려 줘요. 반쪽 층 단위 기록은 층마다 "어텐션 반쪽의 출력", "MoE 반쪽의 출력", inject 두 묶음으로 다시 나눠서 <strong>어느 단계</strong>인지 알려 줘요. 이 복사 작업은 층마다 CUDA 그래프 안에 녹화되어 층과 함께 재생돼요. 켜지 않으면 추가 비용이 전혀 없어요.(<code>layer.hpp</code> 445–453행)</p>
+<p>디버그 스위치 <code>--sync-every-layer</code>도 있어요. 층이 끝날 때마다 동기화와 오류 검사를 한 번씩 끼워 넣어요. "어떤 커널이 뒤쪽 층이 나중에 쓸 버퍼를 먼저 읽는" 식의 오류를 잡을 수 있어요. 평소에는 보이지 않는 오류예요. 대신 빠른 경로의 "동기화 금지" 요구를 정면으로 어기는 셈이라서, 기본 동작이 아니라 실행 시 옵션이에요.[S13]</p>
+<h3>조합 테스트가 꼭 필요한 이유</h3>
+<p>모듈 사이에서는 다른 층의 활성값이 넘어가거나, 정규화가 두 번 되거나, 가중치가 두 번 곱해지거나, 레이아웃이나 상태가 잘못 쓰일 수 있어요. 이 중 무엇이든 각자의 단위 테스트는 통과할 수 있어요. 올바른 방법은 입력과 기록을 고정하고, 한 층의 출력과 반쪽 층의 출력 같은 중간 체크포인트를 독립적인 참조 구현과 항목별로 비교하는 거예요. 마지막 토큰이 맞는지만 보는 것은 대개 너무 늦고 너무 거칠어요.</p>
+</details>
