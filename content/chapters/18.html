@@ -1,18 +1,165 @@
-<h2 id="sec-1">18.1 草稿不是未经检查地替目标回答</h2>
-<p>一个便宜的过程先猜若干 token，较贵的目标模型批量验证。只有满足验证规则的连续前缀被接受；第一次不一致之后的草稿不再属于正确条件历史。目标模型还会提供用于继续生成的选择。[S08]</p>
-<p>草稿可以来自 MTP 层，也可以来自 prompt lookup。草稿质量主要影响接受率与成本，不能允许未经目标确认的内容混入已提交历史。保存目标语义是投机执行的核心，与 CPU 分支预测中的“预测执行，错误时恢复”有直观联系。</p>
-<h2 id="sec-2">18.2 贪心情况下，为什么只能接受连续前缀？</h2>
-<p>假设已提交历史为 H，草稿为 a,b,c。目标对 H 选 a，说明 a 可以接受；目标对 H+a 选 b，b 也可接受；目标对 H+a+b 选 d≠c，于是拒绝 c，并继续使用目标选择 d。</p>
-<p>不能再单独检查草稿后面的 e “恰好也对”就接受，因为它是基于包含错误 c 的历史计算的。正确性是沿前缀归纳成立的，不是把窗口每个位置独立打勾。</p>
-<h2 id="sec-3">18.3 经典拒绝采样与本项目精确匹配不能混写</h2>
-<p>经典投机采样论文讨论了基于目标分布 p 与草稿分布 q 的接受 / 修正方法。[R04] 但读到的 Strata 接口描述的是：目标每行按固定 seed 和绝对位置采样，草稿 token 与该目标样本<strong>相等才接受</strong>；可选 coupled draft 使用同一均匀随机数提高相等概率。[S07]</p>
-<p>因此本书没有把 <code>min(1,p/q)</code> 写成 Strata 当前代码。两类方法都可研究，但其分布论证、随机数组织和实现条件不同。相同输出还依赖目标数值路径和惩罚历史保持一致；上游自身也说明不同内核及缓存放置可能导致舍入差异。[S03]</p>
-<h2 id="sec-4">18.4 窗口运行与状态提交分离</h2>
-<p><code>Verifier</code> 的窗口包含最后接受 token 与若干草稿；run 计算候选结果，commit 只永久保留前缀。[S08] 各状态采用不同处理：GDN 通过保存的输入重放接受前缀更新递归和卷积；indexer 尾部恢复快照后追加接受键；PLE 恢复到接受位置；拒绝部分的 KV 物理单元将在可见读取前被正确覆盖。</p>
-<p>这不是“把数组长度减一下”能概括的行为。不同模块的历史压缩方式不同，回滚能力也不同。任何新增状态都必须回答：run 会不会写它、commit 如何保留前缀、拒绝部分如何失效、谁确认异步操作完成。</p>
-<h2 id="sec-5">18.5 例题：三份草稿拒绝第二份</h2>
-<p>已提交长度为 100，草稿 d₁,d₂,d₃。若只有 d₁ 被目标认可，后续推进应基于已接受前缀和目标产生的下一 token，而不是包含 d₂ 的状态。特别注意实现窗口的 row 0 是输入的 last accepted token，<strong>窗口提交计数与“接受了多少草稿”存在一个偏移</strong>。[S08]</p>
-<p>数学推导可用“本轮至少贡献一个目标推进，加上接受草稿数”解释期望产出；工程里则必须逐项核对 pos0、row、预测下一位置与 commit(n_keep)，不能直接把两个计数变量当成同一含义。</p>
-<h2 id="sec-6">18.6 实验与验收</h2>
-<p>在“事务化前缀”实验中设置拒绝位置，查看哪些候选仍属于接受前缀，以及固定递归 toy state 如何恢复。它是教学状态机，不模拟完整模型。</p>
-<p>GPU 作业需覆盖：全拒绝、全接受、中途拒绝、接近上下文上限、EOS、取消、惩罚历史与跨请求参数切换。比较相同目标历史下的 logits、提交状态与最终 token，不只看平均接受率。</p>
+<div class="hook"><span class="eyebrow">一个“作弊”的提速</span>
+<p>Strata 的说明文档这样介绍它的一个提速手段：一个又小又快的助手先猜接下来的几个词，大模型一次把这些猜测全部检查一遍，留下它认同的，再自己写下一个词。“助手只管猜，每个词都由大模型决定，所以回答质量不变，只是快了 1.6–1.8 倍。”<span class="ev ev-report">上游报告</span>[S02]</p>
+<p>猜测怎么能让计算变快，又不改变答案？猜错了怎么办？已经按错的猜测算出来的东西，又怎样“撤回”？这一章用 Strata 的验证窗口回答这三个问题。</p></div>
+<p class="tldr"><strong>一句话：</strong>草稿层先猜最多 3 个 token，目标模型把它们放进一个窗口一次算完，从左往右比对，接受到第一个不一致为止，其余全部作废；目标模型在不一致处给出自己的选择，所以每轮至少前进 1 个。这和 CPU 的推测执行、数据库的“先暂写、再提交、错了回滚”是同一个思路。</p>
+
+<h2 id="sec-1">18.1 先猜后验：猜错了也不亏</h2>
+<p>第 16 章讲过：一次算好几个 token，比一个个算便宜得多，因为权重只读一遍。写答案时，下一个 token 要等上一个选出来才知道，没法批量。<dfn>投机解码</dfn>（speculative decoding）的办法是：先用一个便宜的方法<strong>猜</strong>出接下来几个 token，再把“上一个结果 ＋ 这几个猜测”当成一批，交给大模型一次算完。大模型在每个位置都会说出“我在这里会写什么”，拿它和猜测比一比，就知道哪些猜对了。</p>
+<p>负责猜的叫<dfn>草稿</dfn>（draft），负责拍板的大模型叫<dfn>目标模型</dfn>（target）。Strata 的草稿来自模型自带的一层 MTP（多 token 预测）层，最多猜 3 个；如果回答在重复上文（比如改代码、引用原文），还可以从上文里“抄”出最多 5 个，叫 prompt lookup。一次验证要把全部 48 层过一遍，平均每轮能前进 2.4–3.2 个 token。[S02] 图 18-1 是一个对比。</p>
+<figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="图 18-1：普通生成每轮只出 1 个 token；先猜后验一轮验证 4 行，这次接受 2 个草稿，加上目标自己的 1 个，共前进 3 个">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">普通生成：每轮过一遍 48 层，只出 1 个 token</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="28" width="88" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="54" y="44" font-size="12" text-anchor="middle">第 1 轮</text><text class="f-muted" fill="#5c6d66" x="54" y="61" font-size="12" text-anchor="middle">→ 1 个</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="106" y="28" width="88" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="150" y="44" font-size="12" text-anchor="middle">第 2 轮</text><text class="f-muted" fill="#5c6d66" x="150" y="61" font-size="12" text-anchor="middle">→ 1 个</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="28" width="88" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="246" y="44" font-size="12" text-anchor="middle">第 3 轮</text><text class="f-muted" fill="#5c6d66" x="246" y="61" font-size="12" text-anchor="middle">→ 1 个</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="298" y="28" width="88" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="342" y="44" font-size="12" text-anchor="middle">第 4 轮</text><text class="f-muted" fill="#5c6d66" x="342" y="61" font-size="12" text-anchor="middle">→ 1 个</text>
+<text class="f-text" fill="#182f2b" x="10" y="100" font-size="13" font-weight="600">先猜后验：1 轮验证 4 行，这次前进 3 个</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="110" width="380" height="44" rx="8"/>
+<rect class="f-accent" fill="#136d5a" x="18" y="117" width="86" height="30" rx="5"/><text class="f-on" fill="#ffffff" x="61" y="137" font-size="12" text-anchor="middle">上一轮结果</text>
+<rect class="f-accent" fill="#136d5a" x="111" y="117" width="86" height="30" rx="5"/><text class="f-on" fill="#ffffff" x="154" y="137" font-size="12" text-anchor="middle">草稿 1 ✓</text>
+<rect class="f-accent" fill="#136d5a" x="204" y="117" width="86" height="30" rx="5"/><text class="f-on" fill="#ffffff" x="247" y="137" font-size="12" text-anchor="middle">草稿 2 ✓</text>
+<rect class="f-warn" fill="#9e5d24" x="297" y="117" width="86" height="30" rx="5"/><text class="f-on" fill="#ffffff" x="340" y="137" font-size="12" text-anchor="middle">草稿 3 ✗</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="178" font-size="12">接受 2 个草稿，目标在第 3 格自己选 1 个：本轮前进 3 个</text>
+</svg><figcaption>图 18-1　同样过一遍 48 层，普通生成只出 1 个 token；先猜后验能出 1 到 k＋1 个。猜错的部分只是白算，不会进入答案。</figcaption></figure>
+<p>为什么一轮多验几个 token 不怎么费事？源码给了一笔账：一个窗口的代价是“稠密权重只读一次，供 T 个 token 共用”，外加 T 个 token 各自没命中的专家的并集要在 CPU 上算。按实际解码记录统计，要在 CPU 上算的未命中专家，T ＝ 2 时是单个 token 的 1.75 倍，T ＝ 3 时 2.4 倍，T ＝ 4 时 3.05 倍。[S08] 多验一个 token 的边际成本，远小于再跑一轮。</p>
+<p>猜得准不准，直接决定赚多少。源码注释记录，MTP 层在第 1、2、3 步猜中贪心结果的比例分别是 0.89、0.86、0.85。<span class="ev ev-code">代码事实</span> 上游文档也提醒，输出速度和文本有关：草稿被接受得越多就越快，同一个提示词换一个回答，速度能差好几个百分点。[S03] 每次该猜几个、值不值得猜，是第 19 章的话题。</p>
+
+<h2 id="sec-2">18.2 只接受连续的前缀</h2>
+<p>比对规则只有一条：<strong>从左往右，接受到第一个不一致为止</strong>。设窗口第 0 行是上一轮定下的 token x，后面是草稿 d₁、d₂、d₃。目标模型算出“在 x 之后我会写 a”“在 x、d₁ 之后我会写 b”……依次比较：</p>
+<ul>
+<li>目标在 x 之后选 a，草稿 d₁ ＝ a，接受；</li>
+<li>目标在 x、a 之后选 b，草稿 d₂ ＝ b，接受；</li>
+<li>目标在 x、a、b 之后选 e，草稿 d₃ ≠ e，停。d₃ 作废，换成目标自己的 e。</li>
+</ul>
+<p>Strata 的生成循环里，这条规则就是一行代码：<code>while (a &lt; T - 1 &amp;&amp; window[a + 1] == outv[a]) ++a;</code>，紧接着 <code>ver.commit(a + 1)</code>。<span class="ev ev-code">代码事实</span> 其中 <code>outv[t]</code> 是目标在窗口第 t 行之后的选择，a 是接受的草稿数。不一致处目标自己的那个 token 也会输出，所以每轮前进 a ＋ 1 个，最少 1 个。投机控制器的注释也写着：“验证这一遍总会提交一个 token。”[S09]</p>
+<p>为什么第一个不一致之后的草稿一律作废，哪怕它“看起来是对的”？因为它是接在错的 token 后面猜的，它的前提已经不成立。下面的模拟器专门设计了这种情况，按<strong>单步</strong>走第 2 轮看看：</p>
+<div class="viz" data-viz="spec-verify"><figure class="fig"><svg viewBox="0 0 400 228" role="img" aria-label="图 18-2：窗口里第 1 个草稿“我们”被接受，第 2 个草稿“在”与目标的“去”不一致，第 3 个草稿“公园”虽然和原文一样也作废">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="13">已输出：今天天气很好，</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="42" font-size="12">窗口：第 0 行是上一轮的结果，后面是草稿</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="50" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="53" y="70" font-size="13" text-anchor="middle">，</text>
+<rect class="f-accent" fill="#136d5a" x="102" y="50" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="145" y="70" font-size="13" text-anchor="middle">我们</text>
+<rect class="f-warn" fill="#9e5d24" x="194" y="50" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="237" y="70" font-size="13" text-anchor="middle">在</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="50" width="86" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="329" y="70" font-size="13" text-anchor="middle">公园</text>
+<text class="f-muted" fill="#5c6d66" x="145" y="96" font-size="12" text-anchor="middle">接受</text><text class="f-muted" fill="#5c6d66" x="237" y="96" font-size="12" text-anchor="middle">不一致</text><text class="f-muted" fill="#5c6d66" x="329" y="96" font-size="12" text-anchor="middle">作废</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="118" font-size="12">目标模型在每一行之后的选择</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="126" width="86" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="53" y="146" font-size="13" text-anchor="middle">我们</text>
+<rect class="f-warn" fill="#9e5d24" x="102" y="126" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="145" y="146" font-size="13" text-anchor="middle">去</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="194" y="126" width="86" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="237" y="146" font-size="13" text-anchor="middle">…</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="126" width="86" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="329" y="146" font-size="13" text-anchor="middle">…</text>
+<text class="f-text" fill="#182f2b" x="10" y="182" font-size="12">“公园”和原文一样，但接在错字“在”后面，照样作废</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">commit(2)：保留窗口前 2 行；本轮输出“我们 去”</text>
+</svg><figcaption>图 18-2　比对到第一个不一致为止。第 2 个草稿“在”不对，目标在这里写“去”；第 3 个草稿就算碰巧和原文相同，也是接在错字后面猜的，一律作废。</figcaption></figure></div>
+<p class="bridge"><strong>学过计算机的同学：</strong>这条规则的正确性可以用数学归纳法证明。设已提交的历史 H 等于贪心生成的结果；若 d₁ 等于目标在 H 之后的选择，则 H＋d₁ 仍等于贪心结果；依此类推，直到第一个不一致。不一致之后的草稿基于一个错误的历史，归纳链断了，没有任何理由接受它们。正确性是沿着前缀<strong>链式</strong>成立的，不是窗口里每个位置各自打勾。</p>
+<p>贪心时（每步取概率最大的 token），Strata 的验证窗口还做了一个更强的保证：窗口里第 t 行的结果，和普通逐个生成在那个位置的结果<strong>逐位相同</strong>，因为窗口里的每个 kernel 要么就是单 token 的 kernel，要么每个 token 的算术和单 token 版本完全一样。所以“草稿被接受”恰好等于“普通生成也会写出它”。[S08]</p>
+
+<h2 id="sec-3">18.3 推测执行：CPU 早就这么干了</h2>
+<p>“先猜着往下做，猜错再撤回”不是语言模型发明的。现代 CPU 每秒都在这么做几十亿次。</p>
+<aside class="primer" id="c18-speculation">
+<h3>推测执行与分支预测</h3>
+<p>直觉：你在食堂排队，前面的人还没决定吃面还是吃饭，阿姨已经根据他平时的习惯先下了面。猜对了，省下等待的时间；猜错了，把面放一边重新做，最多白忙一场，不会端错菜。</p>
+<p>定义：CPU 用流水线执行指令（第 16 章讲过流水线），遇到 <code>if</code> 这样的分支时，条件还没算出来，下一条指令该取哪条就不确定。<dfn>分支预测器</dfn>根据历史猜一个方向，CPU 沿着猜的方向继续执行，这叫<dfn>推测执行</dfn>。关键是：推测执行的结果先放在临时的地方，<strong>不写进正式状态</strong>。条件算出来后，猜对了就把结果“退休”（提交）；猜错了就清空流水线里那些指令，从正确的方向重来。</p>
+<p>一个具体数字：现代处理器的分支预测准确率通常在九成以上，所以“偶尔白做一点”远比“每次都停下来等”划算。猜错的代价是流水线越长、白做的越多。</p>
+<p>和本章的关系：草稿就是分支预测，验证窗口就是推测执行，<code>commit(a + 1)</code> 就是退休。两边都遵守同一条纪律：猜测的结果在核对之前不能生效。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/推测执行" target="_blank" rel="noopener noreferrer">维基百科：推测执行</a> · <a href="https://en.wikipedia.org/wiki/Branch_predictor" target="_blank" rel="noopener noreferrer">Wikipedia: Branch predictor</a> · <a href="https://zh.wikipedia.org/zh-cn/指令管線化" target="_blank" rel="noopener noreferrer">维基百科：指令流水线</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="图 18-3：CPU 分支预测与投机解码的五个环节一一对应：先猜、照猜的做、核对、猜对提交、猜错撤回">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">环节</text>
+<text class="f-text" fill="#182f2b" x="160" y="18" font-size="13" font-weight="600" text-anchor="middle">CPU 分支预测</text>
+<text class="f-text" fill="#182f2b" x="320" y="18" font-size="13" font-weight="600" text-anchor="middle">投机解码</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="28" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="48" font-size="12">先猜</text><text class="f-text" fill="#182f2b" x="160" y="48" font-size="12" text-anchor="middle">预测分支走哪边</text><text class="f-text" fill="#182f2b" x="320" y="48" font-size="12" text-anchor="middle">草稿层猜 k 个 token</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="62" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="82" font-size="12">照猜的做</text><text class="f-text" fill="#182f2b" x="160" y="82" font-size="12" text-anchor="middle">沿预测方向执行</text><text class="f-text" fill="#182f2b" x="320" y="82" font-size="12" text-anchor="middle">整窗一起过 48 层</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="96" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="116" font-size="12">核对</text><text class="f-text" fill="#182f2b" x="160" y="116" font-size="12" text-anchor="middle">条件算出后比对</text><text class="f-text" fill="#182f2b" x="320" y="116" font-size="12" text-anchor="middle">和目标的选择比对</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="130" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="150" font-size="12">猜对</text><text class="f-text" fill="#182f2b" x="160" y="150" font-size="12" text-anchor="middle">结果退休、生效</text><text class="f-text" fill="#182f2b" x="320" y="150" font-size="12" text-anchor="middle">commit(a+1) 保留前缀</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="164" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="184" font-size="12">猜错</text><text class="f-text" fill="#182f2b" x="160" y="184" font-size="12" text-anchor="middle">清空流水线重来</text><text class="f-text" fill="#182f2b" x="320" y="184" font-size="12" text-anchor="middle">作废其余、暂写可覆盖</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">共同纪律：猜测的结果在核对之前不能生效</text>
+</svg><figcaption>图 18-3　CPU 的推测执行和投机解码一一对应。两者都把“猜”和“生效”分开：猜可以大胆，生效必须等核对。</figcaption></figure>
+
+<h2 id="sec-4">18.4 先暂写，再提交：事务式的状态管理</h2>
+<p>难点在“撤回”。验证窗口算 T 行时，模型的各种状态都可能被改动：KV 缓存多了 T 格，GDN 的递推状态往前走了，索引器多了几个键。如果只接受了前 2 行，后面那些改动必须像没发生过一样。这正是数据库里“事务”要解决的问题。</p>
+<aside class="primer" id="c18-transaction">
+<h3>事务的提交与回滚</h3>
+<p>直觉：银行转账要做两步，A 账户减 100，B 账户加 100。做完第一步时断电了怎么办？银行的做法是把两步包成一个<dfn>事务</dfn>：要么全部生效，要么像什么都没发生。</p>
+<p>定义：事务执行期间的修改先记在临时的地方（日志或副本），外界看不到。全部检查通过后执行<dfn>提交</dfn>（commit），修改一次性生效；中途出错就<dfn>回滚</dfn>（rollback），丢掉临时修改，回到事务开始前的状态。实现回滚有两种常见做法：一是先存一份<strong>快照</strong>，出错时恢复；二是记下<strong>输入</strong>，确认后再按输入重做一遍。文件系统的“日志”（journaling）用的也是这套思路。</p>
+<p>一个具体例子：Strata 的 <code>commit(n)</code> 不是“提交整个窗口或者全部回滚”，而是“只提交前 n 行”。这比教科书里的事务更细：一个窗口里，前缀生效，后缀回滚。</p>
+<p>和本章的关系：不同的状态有不同的撤回方式。下面逐项看。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/数据库事务" target="_blank" rel="noopener noreferrer">维基百科：数据库事务</a> · <a href="https://zh.wikipedia.org/zh-cn/回滚" target="_blank" rel="noopener noreferrer">维基百科：回滚</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/file-journaling.pdf" target="_blank" rel="noopener noreferrer">OSTEP：Crash Consistency: FSCK and Journaling（PDF）</a></p>
+</aside>
+<p>Strata 的验证窗口把这件事写得很清楚。窗口运行时，为全部 T 个位置追加 K/V 和索引器的键，但<strong>不动</strong> GDN 状态。<code>commit(n)</code> 再让前 n 个 token 生效，每种状态各有办法：[S08]</p>
+<figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="图 18-4：四种状态在验证窗口里和提交时的处理方式：GDN 用存下的输入重放，索引器恢复快照后追加，PLE 恢复到对应快照，KV 多写的格之后覆盖">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">状态</text>
+<text class="f-muted" fill="#5c6d66" x="105" y="18" font-size="12">窗口里</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="12">提交前 n 行时（n = a + 1）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="28" width="380" height="32" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="49" font-size="12" font-weight="600">GDN 递推</text><text class="f-text" fill="#182f2b" x="105" y="49" font-size="12">不动</text><text class="f-text" fill="#182f2b" x="200" y="49" font-size="12">用存下的输入重放前 n 个</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="64" width="380" height="32" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="85" font-size="12" font-weight="600">索引器尾部</text><text class="f-text" fill="#182f2b" x="105" y="85" font-size="12">追加 T 个键</text><text class="f-text" fill="#182f2b" x="200" y="85" font-size="12">恢复快照，再追加接受的键</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="100" width="380" height="32" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="121" font-size="12" font-weight="600">PLE 历史</text><text class="f-text" fill="#182f2b" x="105" y="121" font-size="12">逐行留快照</text><text class="f-text" fill="#182f2b" x="200" y="121" font-size="12">设成第 n−1 行之后的快照</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="136" width="380" height="32" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="157" font-size="12" font-weight="600">KV 缓存</text><text class="f-text" fill="#182f2b" x="105" y="157" font-size="12">T 格都写</text><text class="f-text" fill="#182f2b" x="200" y="157" font-size="12">多写的格等下次直接覆盖</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="194" font-size="12">三种撤回手法：重放输入、恢复快照、等着被覆盖</text>
+</svg><figcaption>图 18-4　同一个“提交前 n 行”，四种状态用了三种办法。没有一种是“把计数器减一下”就能概括的。</figcaption></figure>
+<ul>
+<li><strong>GDN 递推状态</strong>：窗口里根本不改它，只把每行的输入存下来。提交时，用存下的输入把前 n 个 token 重放一遍，状态就前进到正确的位置。这是“记输入、确认后重做”。</li>
+<li><strong>索引器的键</strong>：先恢复窗口前存的快照，再把接受的键重新追加。注释特别说明了原因：被拒绝的键可能落在当前块还要用的槽位里。这是“快照 ＋ 重做”。</li>
+<li><strong>PLE 历史</strong>：直接设成第 n−1 个 token 之后的快照。</li>
+<li><strong>KV 缓存</strong>：多写的那些格什么都不用做。这些位置下一轮会被重新处理，新值在任何查询读它之前就会覆盖上去。[S08] 第 17 章讲的 KV 流式也遵守同一条：新 token 总写进内存里的权威副本，所以“拒绝了草稿”之后不需要作废任何显存槽位。<span class="ev ev-code">代码事实</span></li>
+</ul>
+<p>注意窗口的“行数”和“接受的草稿数”差 1：窗口第 0 行是上一轮定下的 token，它本身也要在这一轮写进状态。所以接受了 a 个草稿时，提交的是 a ＋ 1 行。生成循环里的注释说：“窗口的前 a ＋ 1 个 token 现在进入了会话；最后那个输出还没有，它是下一轮的第 0 行。”<span class="ev ev-code">代码事实</span> 草稿层的位置计数也按这个偏移来算：在位置 p 的窗口接受 a 个草稿后，下一个窗口从 p ＋ a ＋ 1 开始。[S07]</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>每加一种新的序列状态，都要回答四个问题：窗口运行时会不会写它？<code>commit(n)</code> 怎样只保留前缀？被拒绝的部分怎样失效？异步的读写由谁确认完成？这和给数据库加一张新表、要想清楚它的日志和恢复，是一回事。</p>
+
+<h2 id="sec-5">18.5 采样时怎么验：和目标的抽样结果精确相等</h2>
+<p>贪心时比对很简单：目标在这一行概率最大的 token 是不是草稿。可聊天时常常开着温度采样，每一步是“按概率抽一个”。抽样结果本身是随机的，怎么比？</p>
+<p>Strata 的做法是让目标模型的抽样<strong>可以复现</strong>：窗口第 t 行的随机数由“种子”和这一行的绝对位置决定，再走完整的采样链（重复惩罚、top-k、top-p、min-p、温度，最后按累积分布抽一个）。草稿只有和这一行的抽样结果<strong>完全相等</strong>才被接受。于是输出只取决于种子，和草稿是什么无关；草稿只决定一轮能前进几步。[S07] 每一行的重复惩罚也按“这一行之前应有的历史”单独准备，和普通逐个生成时数的一样。[S08]</p>
+<p>草稿怎么猜，才更容易“撞上”目标的抽样？Strata 有一个默认关闭的“耦合草稿”模式：草稿层不再提交它最有把握的 token，而是用目标同样的采样链，配上目标<strong>将要使用的同一个随机数</strong>去抽。两个分布接近时，用同一个随机数按累积分布去抽，结果相同的机会远大于“拿最大值去碰一个随机样本”。目标的抽样不变，所以输出文字也不变。[S07] 图 18-5 是这个想法的示意。</p>
+<figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="图 18-5：目标分布和草稿分布画成两条累积条，同一个随机数 u 等于 0.42 在两条上都落在 token A">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">把概率排成一条，按随机数 u 落在哪一段来抽（示意数字）</text>
+<text class="f-text" fill="#182f2b" x="10" y="54" font-size="12">目标 p</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="38" width="160" height="24"/><text class="f-on" fill="#ffffff" x="144" y="55" font-size="12" text-anchor="middle">A 0.50</text>
+<rect class="f-soft" fill="#e5f1df" x="224" y="38" width="96" height="24"/><text class="f-text" fill="#182f2b" x="272" y="55" font-size="12" text-anchor="middle">B 0.30</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="38" width="48" height="24"/><text class="f-text" fill="#182f2b" x="344" y="55" font-size="12" text-anchor="middle">C</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="368" y="38" width="16" height="24"/>
+<text class="f-text" fill="#182f2b" x="10" y="110" font-size="12">草稿 q</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="94" width="144" height="24"/><text class="f-on" fill="#ffffff" x="136" y="111" font-size="12" text-anchor="middle">A 0.45</text>
+<rect class="f-soft" fill="#e5f1df" x="208" y="94" width="112" height="24"/><text class="f-text" fill="#182f2b" x="264" y="111" font-size="12" text-anchor="middle">B 0.35</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="94" width="48" height="24"/><text class="f-text" fill="#182f2b" x="344" y="111" font-size="12" text-anchor="middle">C</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="368" y="94" width="16" height="24"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" stroke-dasharray="4 3" d="M198 30V126"/>
+<text class="f-text" fill="#182f2b" x="198" y="144" font-size="12" text-anchor="middle">同一个 u = 0.42：两条都落在 A</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="172" font-size="12">两个分布接近时，同一个 u 多半落在同一个 token 上</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="194" font-size="12">接受与否仍只看目标的抽样结果：不相等就作废</text>
+</svg><figcaption>图 18-5　耦合草稿：草稿和目标用同一个随机数按累积分布抽样。分布越接近，越容易撞上同一个 token；裁判始终是目标的抽样结果。</figcaption></figure>
+<p>注意，这和投机解码的经典论文不是一回事。经典方法按 min(1, p ÷ q) 的概率接受草稿，被拒绝时再从修正后的分布里补抽一个，从而保证输出分布和目标完全一致。[R04] 本书读到的 Strata 代码用的是“和目标的抽样结果精确相等”，不是这个公式。两种方法的分布论证、随机数的组织方式和实现条件都不同，不能混写。</p>
+<p>草稿能猜什么，还受一个现实限制：MTP 草稿层只能从词表的一个子集里提议 token。从引擎 0.1.27 起，这个子集加进了全部中文、日文和韩文的 token，上游实测这些语言的回答因此快了 15–38%（Q2_0，RTX 5070）。[S03] 中文用户用到的提速，有一部分就来自这里。</p>
+
+<h2 id="sec-6">18.6 动手：亲手提交一个前缀</h2>
+<ol>
+<li>用本章的模拟器（图 18-2）连跑 5 轮，记下平均每轮输出几个 token。再把 k 改成 1 和 5 各跑一遍，比较三次的平均值。思考：k 越大，全对时赚得越多，可验证也更贵，那最佳的 k 由什么决定？（答案在第 19 章。）</li>
+<li>打开本书的交互实验「只提交接受前缀」。它用一个玩具递推 s ← 0.5s ＋ t 代替真实状态。让第二个草稿被拒绝，然后回答：如果只把位置计数器往回拨，而不恢复递推状态，会留下哪个错误？这个实验没有模拟窗口第 0 行的偏移。</li>
+<li>对照图 18-4，给“新增一个序列内统计缓冲”写一份检查清单，再和本章习题的参考答案比一比。</li>
+</ol>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>草稿负责猜，目标负责拍板。比对从左往右，接受到第一个不一致为止；不一致之后的草稿哪怕碰巧正确也作废。每轮前进 a ＋ 1 个 token，至少 1 个。</li>
+<li>这和 CPU 的推测执行同一个纪律：猜测的结果在核对前不能生效。Strata 用 <code>commit(a + 1)</code> 只让窗口的前缀生效。</li>
+<li>撤回要逐项设计：GDN 重放存下的输入，索引器恢复快照再追加，PLE 恢复到对应快照，KV 多写的格等着被覆盖。只把位置减一下是不够的。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“草稿层又小又不准，用了它，回答质量会变差。”</strong></p>
+<p>不会。草稿只是提议，每个 token 都要和目标模型自己的选择（或可复现的抽样结果）完全相等才能留下。猜得差只会让每轮前进得少、速度变慢，不会改变写出来的字。[S02][S07] 上游也记录了一个需要知道的例外：使用 IQ 系列模型时，CPU 算一个 token 和算多个 token 的专家用的是两套 kernel，舍入略有不同，所以温度为 0 时，同一个提示词可能因草稿不同而得到另一个同样合理的回答；打开一个开关让所有分组都用多 token kernel，答案就不再依赖草稿。[S03]</p></div>
+
+<details class="deep"><summary>深入一层：偏移量、异步提交与验收清单</summary>
+<h3>窗口里的几个计数，别混成一个</h3>
+<p>设已提交长度为 100，窗口第 0 行是第 100 个位置的 token x，草稿 d₁、d₂、d₃ 占位置 101–103。若只有 d₁ 被接受（a ＝ 1），提交 2 行（位置 100 和 101），目标在位置 101 之后的选择成为下一个窗口的第 0 行，下一个窗口从位置 102 开始。[S07] 数学上可以说“本轮至少贡献一个目标推进，再加上接受的草稿数”；工程上则要逐项核对窗口起点、行号、下一个位置和 <code>commit(n_keep)</code> 的含义，不能把“接受的草稿数”和“提交的行数”当成同一个变量。耦合草稿的随机数计数也遵守同样的偏移：在 MTP 第 c 格做出的草稿，由计数器 c ＋ 1 那一行来验证。[S07]</p>
+<h3>每一行的惩罚历史</h3>
+<p>重复惩罚要数“这一行之前出现过哪些 token”。窗口第 t 行之前的历史，是已提交的内容加上草稿 1 到 t。Strata 给窗口的每一行单独准备一份历史；0.1.19 之前只准备了第 0 行，草稿行读到的是没写过的槽位。[S08] 这类错误不会让程序崩溃，只会在开着惩罚时悄悄让结果和普通生成不一致。</p>
+<h3>异步提交</h3>
+<p>单 GPU 时，<code>commit()</code> 默认不等它的图跑完就返回：下一个窗口在同一个流上排在它后面，草稿层又不读它写的东西，于是提交和下一轮的草稿可以重叠。任何从别的流或主机读写会话的人（新请求、检查点、快照、读题路径、运行结束），都要先调用 <code>wait_commit()</code>。[S08] 这是第 14 章“同步与异步”的又一个例子：快路径省掉了等待，代价是每个旁路读者都必须记得自己去等。</p>
+<h3>草稿层的“偷懒”为什么不影响输出</h3>
+<p>MTP 草稿层在实现上做了好几处简化：大投影用 Q8_0 量化，注意力在它见过的所有格子上做稠密计算，全部 512 个专家常驻显存（708 MB）。源码说得明白：这些选择只影响草稿的质量，从不影响输出，因为每个输出的 token 都由验证窗口决定。投机写入的格子也从不碰索引器状态，到位置被重新处理时直接覆盖。<span class="ev ev-code">代码事实</span></p>
+<h3>验收清单</h3>
+<p>测试投机解码，不能只看平均接受率。至少覆盖：全部拒绝、全部接受、中途拒绝、接近上下文上限、遇到结束符、中途取消、开着重复惩罚、请求之间切换采样参数。比较的对象是“同一段固定历史下不开投机的参考结果”：logits、提交后的状态和最终 token 都要一致。新增任何序列状态时，按 18.4 节的四个问题逐项回答，并补上对应的测试。</p>
+</details>
