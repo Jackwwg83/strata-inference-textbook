@@ -8,16 +8,16 @@
 <p>如果每次都从第一个 token 读起，长对话会越聊越慢。聪明的做法像读书夹书签：上次读到哪，这次从哪接着读。这种做法叫<dfn>前缀复用</dfn>，在引擎里也常叫 prompt cache（提示缓存）。</p>
 <p>省下多少？Strata 读长文本的速度是每秒 1,000 个 token 以上。<span class="ev ev-report">上游报告</span>[S02] 源码注释里也算过一笔账：一段 3 万 token 的系统提示，按每秒约 1,000 个读，要约 30 秒。<span class="ev ev-report">上游报告</span> 图 20-1 把两种做法放在一起比。</p>
 <figure class="fig"><svg viewBox="0 0 400 196" role="img" aria-label="图 20-1：前缀 3 万 token、新问题 500 token。从头读约 30.5 秒，复用检查点只读新增部分约 0.5 秒">
-<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="11">读完整个请求要多久（条长按比例，教学推演）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="12">读完整个请求要多久（条长按比例，教学推演）</text>
 <text class="f-text" fill="#182f2b" x="20" y="46" font-size="12" font-weight="600">不复用：从第一个 token 读起</text>
 <rect class="f-accent" fill="#136d5a" x="20" y="54" width="354" height="18"/>
 <rect class="f-warn" fill="#9e5d24" x="374" y="54" width="6" height="18"/>
-<text class="f-muted" fill="#5c6d66" x="20" y="90" font-size="11">30,000 个前缀 token ＋ 500 个新 token，约 30.5 秒</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="90" font-size="12">30,000 个前缀 token ＋ 500 个新 token，约 30.5 秒</text>
 <text class="f-text" fill="#182f2b" x="20" y="124" font-size="12" font-weight="600">复用检查点：只读新增部分</text>
 <rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="20" y="132" width="354" height="18"/>
 <rect class="f-warn" fill="#9e5d24" x="374" y="132" width="6" height="18"/>
-<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="11">前缀从检查点直接接上，只读 500 个新 token，约 0.5 秒</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="188" font-size="11">按每秒约 1,000 个 token 计：时间 = token 数 ÷ 1,000</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="12">前缀从检查点直接接上，只读 500 个新 token，约 0.5 秒</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="188" font-size="12">按每秒约 1,000 个 token 计：时间 = token 数 ÷ 1,000</text>
 </svg><figcaption>图 20-1　前缀越长，复用越值钱。不复用时 30,000 ÷ 1,000 = 30 秒花在重读上；复用时只读 500 个新 token，约 0.5 秒。<span class="ev ev-est">教学推演</span></figcaption></figure>
 <p>接上检查点本身也有成本：检查点存在内存里，要搬回显卡。一个检查点约 118 MB（下一节解释为什么），按第 10 章用过的 PCIe 5.0 理论带宽约 63 GB/s 算，118 ÷ 63 ≈ 2 毫秒。<span class="ev ev-est">教学推演</span> 和 30 秒比，可以忽略。</p>
 <p>上游文档还提醒了一个副作用：提示缓存会让重复的请求只读尾巴，走的计算路径和从头读不同，回答可能和从头读时不完全一样。想要逐字节相同的输出，要用 <code>--prompt-cache 0</code> 等参数关掉它。<span class="ev ev-report">上游报告</span>[S03]</p>
@@ -62,25 +62,25 @@
 </ul>
 <figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="图 20-3：KV 缓存像笔记本，按位置逐行追加，退回前缀只需忽略后面几行；递推状态像白板，每个 token 整块改写，想退回只能事先拍照">
 <text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">KV 缓存：笔记本</text>
-<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="11" text-anchor="middle">每个 token 记一行，只往后追加</text>
-<rect class="f-accent" fill="#136d5a" x="30" y="50" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="64" font-size="11">第 1 个 token</text>
-<rect class="f-accent" fill="#136d5a" x="30" y="74" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="88" font-size="11">第 2 个 token</text>
-<rect class="f-accent" fill="#136d5a" x="30" y="98" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="112" font-size="11">第 3 个 token</text>
-<rect class="f-accent" fill="#136d5a" x="30" y="122" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="136" font-size="11">第 4 个 token</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="30" y="146" width="140" height="20" rx="3"/><text class="f-muted" fill="#5c6d66" x="40" y="160" font-size="11">第 5 个（旧分支）</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="30" y="170" width="140" height="20" rx="3"/><text class="f-muted" fill="#5c6d66" x="40" y="184" font-size="11">第 6 个（旧分支）</text>
-<text class="f-text" fill="#182f2b" x="100" y="214" font-size="11" text-anchor="middle">退回前 4 个：后两行不管它，</text>
-<text class="f-text" fill="#182f2b" x="100" y="232" font-size="11" text-anchor="middle">下次写到那里直接覆盖</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="12" text-anchor="middle">每个 token 记一行，只往后追加</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="50" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="64" font-size="12">第 1 个 token</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="74" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="88" font-size="12">第 2 个 token</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="98" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="112" font-size="12">第 3 个 token</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="122" width="140" height="20" rx="3"/><text class="f-on" fill="#ffffff" x="40" y="136" font-size="12">第 4 个 token</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="30" y="146" width="140" height="20" rx="3"/><text class="f-muted" fill="#5c6d66" x="40" y="160" font-size="12">第 5 个（旧分支）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="30" y="170" width="140" height="20" rx="3"/><text class="f-muted" fill="#5c6d66" x="40" y="184" font-size="12">第 6 个（旧分支）</text>
+<text class="f-text" fill="#182f2b" x="100" y="214" font-size="12" text-anchor="middle">退回前 4 个：后两行不管它，</text>
+<text class="f-text" fill="#182f2b" x="100" y="232" font-size="12" text-anchor="middle">下次写到那里直接覆盖</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 10V250"/>
 <text class="f-text" fill="#182f2b" x="300" y="20" font-size="13" font-weight="600" text-anchor="middle">递推状态：白板</text>
-<text class="f-muted" fill="#5c6d66" x="300" y="38" font-size="11" text-anchor="middle">每个 token 都把整块原地改写</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="38" font-size="12" text-anchor="middle">每个 token 都把整块原地改写</text>
 <rect class="f-soft" fill="#e5f1df" x="225" y="50" width="150" height="100" rx="6"/>
 <text class="f-text" fill="#182f2b" x="300" y="94" font-size="12" text-anchor="middle">读完第 6 个 token</text>
 <text class="f-text" fill="#182f2b" x="300" y="114" font-size="12" text-anchor="middle">之后的样子</text>
-<text class="f-warn" fill="#9e5d24" x="300" y="176" font-size="11" text-anchor="middle">想退回第 4 个 token？</text>
-<text class="f-warn" fill="#9e5d24" x="300" y="194" font-size="11" text-anchor="middle">已经擦掉了，算不回来</text>
-<text class="f-text" fill="#182f2b" x="300" y="222" font-size="11" text-anchor="middle">只能事先拍照：</text>
-<text class="f-text" fill="#182f2b" x="300" y="240" font-size="11" text-anchor="middle">这张照片就是检查点</text>
+<text class="f-warn" fill="#9e5d24" x="300" y="176" font-size="12" text-anchor="middle">想退回第 4 个 token？</text>
+<text class="f-warn" fill="#9e5d24" x="300" y="194" font-size="12" text-anchor="middle">已经擦掉了，算不回来</text>
+<text class="f-text" fill="#182f2b" x="300" y="222" font-size="12" text-anchor="middle">只能事先拍照：</text>
+<text class="f-text" fill="#182f2b" x="300" y="240" font-size="12" text-anchor="middle">这张照片就是检查点</text>
 </svg><figcaption>图 20-3　两种记忆，两种回退方式。笔记本只要“假装没写后面几行”就能回退；白板只能靠事先拍下的照片。</figcaption></figure>
 <p>白板有多大？每个 GDN 层的状态是 128 × 48 × 128 个 32 位浮点数，36 层合计 36 × 128 × 48 × 128 × 4 字节 ≈ 113 MB。<span class="ev ev-est">教学推演</span>[S04][S17] 不管对话多长，这块白板的大小都不变。KV 笔记本则越写越厚：如果按每个数 2 字节存，12 层每个 token 要 12 × 2 × 2 × 256 × 2 字节 ≈ 24.6 KB，3 万 token 约 737 MB。<span class="ev ev-est">教学推演</span></p>
 <p>所以 Strata 的检查点主要存白板：GDN 递推状态，加上 PLE（每层嵌入）的历史、注意力索引器的尾部等几块小状态，再记下这段前缀的 token 编号和图片身份。<span class="ev ev-code">代码事实</span>[S10] 上游文档说一个检查点约 118 MB，<span class="ev ev-report">上游报告</span> 和白板的 113 MB 对得上：大头就是它。</p>
@@ -89,10 +89,10 @@
 <p>引擎什么时候拍照？上游文档写的是：每个新的助手回合开始时拍一张，长提示每读 16K 个 token 再拍一张；内存里最多留 6 张。<span class="ev ev-report">上游报告</span></p>
 <p>这些检查点有个特别的形状。显卡上的 KV 缓存只有一块区域，一次只能装一条历史分支。所以留下来的检查点都必须是当前历史的前缀，按长度排好，每一个都是下一个的前缀，连成一条<dfn>链</dfn>。源码注释把它比作基数树：一棵树压扁到会话能装下的那一条分支上。<span class="ev ev-code">代码事实</span></p>
 <figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="图 20-4：检查点链。每个检查点都是下一个的前缀，根在系统提示末尾并被钉住；新请求从最长的匹配检查点接着读">
-<text class="f-muted" fill="#5c6d66" x="20" y="16" font-size="11">一条对话的检查点（条长 = 前缀长度，示意）</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="16" font-size="12">一条对话的检查点（条长 = 前缀长度，示意）</text>
 <rect class="f-accent" fill="#136d5a" x="20" y="28" width="90" height="24" rx="3"/>
 <text class="f-on" fill="#ffffff" x="30" y="45" font-size="12">根 · 钉住</text>
-<text class="f-muted" fill="#5c6d66" x="118" y="45" font-size="11">系统提示的末尾</text>
+<text class="f-muted" fill="#5c6d66" x="118" y="45" font-size="12">系统提示的末尾</text>
 <rect class="f-soft" fill="#e5f1df" x="20" y="60" width="170" height="24" rx="3"/>
 <text class="f-text" fill="#182f2b" x="30" y="77" font-size="12">第 2 轮开始</text>
 <rect class="f-soft" fill="#e5f1df" x="20" y="92" width="250" height="24" rx="3"/>
@@ -103,9 +103,9 @@
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="160" width="320" height="24" rx="3"/>
 <rect class="f-warn" fill="#9e5d24" x="340" y="160" width="40" height="24" rx="3"/>
 <text class="f-text" fill="#182f2b" x="30" y="177" font-size="12">新请求：前缀与第 4 轮检查点一致</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="208" font-size="11">新请求从最长的匹配检查点接着读，只读末尾那一截</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="228" font-size="11">最多 6 个，每个约 118 MB；满了就淘汰最久没用的，根除外</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="248" font-size="11">新开一个聊天：从根接着读，省掉整段系统提示</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="208" font-size="12">新请求从最长的匹配检查点接着读，只读末尾那一截</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="228" font-size="12">最多 6 个，每个约 118 MB；满了就淘汰最久没用的，根除外</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="248" font-size="12">新开一个聊天：从根接着读，省掉整段系统提示</text>
 </svg><figcaption>图 20-4　检查点连成一条链，每个都是下一个的前缀。根被钉住，所以连新开的聊天也能跳过系统提示。</figcaption></figure>
 <p>链满了，淘汰谁？早期的做法是先进先出，最早的检查点最先被扔。可最早的那个往往是系统提示的末尾，也就是同一个客户端每次新开聊天都会经过的地方。扔掉它，每个新聊天都要把系统提示从头再读一遍。<span class="ev ev-code">代码事实</span></p>
 <p>现在的规则是：<strong>根钉住，其余按最近最少使用（LRU）轮换</strong>。源码里的淘汰函数只有几行：容量不足 2 个时关掉钉住，扔最老的；否则跳过第 0 个，在剩下的里面挑最久没被用过的。<span class="ev ev-code">代码事实</span> 上游文档还补了一条：从头读的提示，如果系统提示有 2,048 个 token 或更多，也会在系统提示末尾拍一张，好让根存在（引擎 0.1.20 起）。<span class="ev ev-report">上游报告</span> 第 12 章会细讲 LRU 这类缓存替换策略。</p>
@@ -126,7 +126,7 @@
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="19" y="166" width="166" height="22" rx="4"/>
 <text class="f-text" fill="#182f2b" x="102" y="182" font-size="12" text-anchor="middle">B 的页表</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 50V70M102 50V70M160 50V70M44 100V166M102 100V166M160 100V166"/>
-<text class="f-muted" fill="#5c6d66" x="102" y="214" font-size="11" text-anchor="middle">复制了 0 页</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="214" font-size="12" text-anchor="middle">复制了 0 页</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 8V222"/>
 <text class="f-text" fill="#182f2b" x="302" y="16" font-size="12" font-weight="600" text-anchor="middle">② B 改第 2 页：只复制它</text>
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="214" y="28" width="166" height="22" rx="4"/>
@@ -138,7 +138,7 @@
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="214" y="166" width="166" height="22" rx="4"/>
 <text class="f-text" fill="#182f2b" x="297" y="182" font-size="12" text-anchor="middle">B 的页表</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M239 50V70M297 50V70M355 50V70M239 100V166M297 148V166M355 100V166"/>
-<text class="f-muted" fill="#5c6d66" x="297" y="214" font-size="11" text-anchor="middle">只复制了被改的 1 页</text>
+<text class="f-muted" fill="#5c6d66" x="297" y="214" font-size="12" text-anchor="middle">只复制了被改的 1 页</text>
 </svg><figcaption>图 20-5　写时复制：先共用，谁写谁复制，而且只复制被写的那一页。“×2”是引用计数。</figcaption></figure>
 <p>最有名的例子是 Linux 的 <code>fork()</code>：创建子进程时只复制页表，父子进程共用全部物理内存页，并把它们标成只读。谁先写某一页，就触发一次缺页异常，内核这时才复制那一页。所以 fork 一个占几 GB 内存的进程，也几乎是瞬间完成。文件系统的快照、数据库的多版本并发控制（MVCC），用的都是同一个思路。</p>
 <p>回到本章：两段对话的共同前缀，就是“没人改的页”。只要前缀里的 KV 页只读不写，就可以放心共用。下面的模拟器让你亲手试。</p>
