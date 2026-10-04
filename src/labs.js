@@ -1,0 +1,80 @@
+/* Browser UI for the pure educational math models in lab-math.js. */
+(function(root){
+'use strict';
+const M=root.LabMath;
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=(n,d=2)=>Number(n).toLocaleString('zh-CN',{maximumFractionDigits:d});
+const pct=n=>fmt(n*100,1)+'%';
+const metric=(label,value,unit='')=>`<div class="metric"><span>${label}</span><strong>${value}<small>${unit}</small></strong></div>`;
+const range=(key,label,value,min,max,step=1,unit='')=>`<label class="control"><span>${label}<output for="p-${key}">${value}${unit}</output></span><input id="p-${key}" name="${key}" type="range" min="${min}" max="${max}" step="${step}" value="${value}" data-unit="${unit}"></label>`;
+const select=(key,label,options,value)=>`<label class="control"><span>${label}</span><select id="p-${key}" name="${key}">${options.map(([v,t])=>`<option value="${esc(v)}" ${String(v)===String(value)?'selected':''}>${esc(t)}</option>`).join('')}</select></label>`;
+const text=(key,label,value)=>`<label class="control"><span>${label}</span><input id="p-${key}" name="${key}" type="text" value="${esc(value)}" autocomplete="off" spellcheck="false"></label>`;
+const table=(heads,rows)=>`<div class="table-wrap"><table><thead><tr>${heads.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(x=>`<td>${x}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+const bar=(label,v,max,value)=>`<div class="barrow"><span>${label}</span><div class="bartrack"><i style="width:${Math.max(0,Math.min(100,v/max*100))}%"></i></div><strong>${value}</strong></div>`;
+const numberlist=(text,min=-1e6,max=1e6)=>{const a=text.trim().split(/[,，\s]+/);if(!a.length||a.some(s=>!s.trim()))throw new Error('请输入以逗号分隔的数字');return a.map(s=>{const n=Number(s);if(!Number.isFinite(n)||n<min||n>max)throw new Error('数值不在允许范围');return n;});};
+function plot(points,{xLabel='比例',yLabel='ms'}={}){
+ const W=640,H=220,pad=44,maxX=Math.max(...points.map(p=>p[0]),1),maxY=Math.max(...points.map(p=>p[1]),.001)*1.08;
+ const X=x=>pad+x/maxX*(W-pad-16),Y=y=>H-pad-y/maxY*(H-pad-20);
+ const path=points.map(([x,y],i)=>(i?'L':'M')+X(x).toFixed(2)+','+Y(y).toFixed(2)).join(' ');
+ return `<svg class="plot" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(yLabel+' 随 '+xLabel+' 变化的教学曲线')}"><path class="axis" d="M${pad} 15V${H-pad}H625"/>${[0,.5,1].map(t=>`<text x="${pad-7}" y="${Y(maxY*t)+4}" text-anchor="end">${fmt(maxY*t,1)}</text><path class="gridline" d="M${pad} ${Y(maxY*t)}H625"/>`).join('')}<path class="plotline" d="${path}"/><text x="${pad}" y="205">0</text><text x="622" y="205" text-anchor="end">${fmt(maxX)} · ${esc(xLabel)}</text><text x="${pad+5}" y="14">${esc(yLabel)}</text></svg>`;
+}
+function mount(id,element){
+ let controls='',compute;
+ const val=(k)=>{const e=element.querySelector(`[name="${k}"]`);if(!e)throw new Error('缺少输入');return e.value;};
+ const num=k=>Number(val(k));
+ if(id==='journey'){
+  controls=range('step','当前阶段',0,0,5,1);
+  compute=()=>{const steps=[['消息与模板','服务层把角色、工具与文本放入模板，再编码成 token IDs。','23','S16'],['处理已有输入','Prefill 按块建立各层状态。最后一个 prompt token 与验证窗口的交接有明确约定。','16','S12'],['逐层计算与路由','GDN / QSA 处理历史；每个 MoE 层选择专家，而不是整个模型只选一次。','10','S04'],['异构专家计算','热专家在 GPU；RAM 侧可以由 CPU 计算缺失专家。关键路径仍受残差依赖限制。','13','S06'],['验证与提交','候选只接受连续正确前缀；GDN、PLE、indexer 与 KV 各有状态处理方式。','18','S08'],['采样与协议输出','目标选择成为新历史；字节经增量解码和事件分帧呈现给客户端，然后循环继续。','23','S15']];let i=num('step');return {data:{step:i,title:steps[i][0],kind:'教学路径示意'},html:`<div class="journey-strip">${steps.map((s,j)=>`<button class="journey-step ${i===j?'selected':''}" data-journey="${j}"><b>0${j+1}</b>${s[0]}</button>`).join('')}</div><div class="focus-panel"><span class="eyebrow">STAGE 0${i+1}</span><h2>${steps[i][0]}</h2><p>${steps[i][1]}</p><a class="text-link" href="#chapter/${steps[i][2]}">阅读对应章节 →</a> <a class="ref" href="#source/${steps[i][3]}">${steps[i][3]}</a></div>`};};
+ }else if(id==='sampling'){
+  controls=range('temp','温度（0 = 贪心）',1,0,3,.05)+range('u','均匀随机数 u',.8,0,.999,.001);
+  compute=()=>{const p=M.softmax([2,1,0],num('temp')),chosen=M.sample(p,num('u'));let total=0;return {data:{probabilities:p,selected:chosen},html:`<div class="metrics">${metric('选中候选',['A','B','C'][chosen])}${metric('概率总和',fmt(p.reduce((a,b)=>a+b),6))}</div><h3>固定 logits = [2, 1, 0]</h3>${p.map((x,i)=>bar(['A','B','C'][i],x,1,pct(x))).join('')}${table(['候选','概率','累计概率'],p.map((x,i)=>{total+=x;return [[`A`,`B`,`C`][i],fmt(x,6),fmt(total,6)];}))}<p class="hint">逆累计法选择使 u 落入的区间。概率区间左闭右开，舍入后的展示值不是内部精度。</p>`};};
+ }else if(id==='matrix'){
+  controls=range('x0','x₀',1,-3,3,.5)+range('x1','x₁',0,-3,3,.5)+range('x2','x₂',-1,-3,3,.5);
+  compute=()=>{const W=[[1,2,3],[4,5,6]],x=[num('x0'),num('x1'),num('x2')],y=M.gemv(W,x);return {data:{W,x,y},html:`<div class="matrix-equation"><div class="matrix-box">${W.map(r=>`<div>${r.map(n=>`<span>${n}</span>`).join('')}</div>`).join('')}</div><b>×</b><div class="matrix-box vector">${x.map(n=>`<div><span>${n}</span></div>`).join('')}</div><b>=</b><div class="matrix-box vector result-matrix">${y.map(n=>`<div><span>${n}</span></div>`).join('')}</div></div><p class="hint">形状：(2×3) · (3×1) → (2×1)。行优先 W[i,j] 的元素偏移为 i×3+j。</p>${table(['输出行','逐项乘积','求和'],W.map((r,i)=>[i,r.map((w,j)=>`${w}×(${x[j]})`).join(' + '),fmt(y[i])]))}`};};
+ }else if(id==='quant'){
+  controls=range('bits','代码位宽',4,2,8,1,' bit')+range('outlier','最后一个元素倍率',1,1,20,.5,'×');
+  compute=()=>{const values=[-1,-.3,.2,num('outlier')],r=M.quantize(values,num('bits'));return {data:{values,...r},html:`<div class="metrics">${metric('MSE',fmt(r.mse,6))}${metric('最大误差',fmt(r.maxError,6))}${metric('含 scale 的存储',fmt(r.bpw32),' bit/权重')}</div><div class="equation">Q=${r.Q}；scale=${fmt(r.scale,6)}；q=round(x/scale)，限制在 [−Q,Q]</div>${table(['原值','代码','重构','误差'],values.map((x,i)=>[x,r.codes[i],fmt(r.reconstructed[i],6),fmt(r.errors[i],6)]))}<p class="hint">存储指标另按每 32 个权重共用一个 16-bit scale 估算；本表只有 4 个示例元素。不含 offset、对齐或实际码本。</p>`};};
+ }else if(id==='roofline'){
+  controls=range('ops','工作量',16,1,256,1,' GFLOP')+range('bytes','跨所选层级流量',.6,.1,4,.1,' GB')+range('peak','计算上限',100,1,200,1,' TFLOP/s')+range('bw','持续带宽',40,10,1000,10,' GB/s')+range('launch','不可隐藏固定开销',1,0,10,.1,' ms')+range('share','被优化阶段占比',20,0,100,1,'%')+range('speedup','局部加速',2,1,10,.1,'×');
+  compute=()=>{const r=M.roofline(num('ops'),num('bytes'),num('peak'),num('bw'),num('launch')),s=M.amdahl(num('share')/100,num('speedup'));return {data:{...r,amdahl:s},html:`<div class="metrics">${metric('时间下界',fmt(r.lowerMs),' ms')}${metric('主约束',r.bottleneck)}${metric('整体加速',fmt(s,3),'×')}</div>${bar('纯计算',r.computeMs,Math.max(r.computeMs,r.memoryMs),fmt(r.computeMs)+' ms')}${bar('纯搬运',r.memoryMs,Math.max(r.computeMs,r.memoryMs),fmt(r.memoryMs)+' ms')}<div class="equation">I=${fmt(r.intensity,2)} FLOP/byte<br>T ≥ max(${fmt(r.computeMs)}, ${fmt(r.memoryMs)}) + ${num('launch')} ms<br>S=1 / [(1−${num('share')/100})+${num('share')/100}/${num('speedup')}]</div><p class="hint">输入的是假设持续能力。未计依赖、不规则访问等成本，输出不是某块显卡的真实性能。</p>`};};
+ }else if(id==='gdn'){
+  controls=range('old','旧状态 S',2,-4,4,.25)+range('alpha','衰减 α',.5,0,1,.05)+range('beta','写入强度 β',.25,0,1,.05)+range('key','键 k',1,-2,2,.25)+range('value','值 v',3,-4,4,.25);
+  compute=()=>{const r=M.gdn(num('old'),num('alpha'),num('beta'),num('key'),num('value'));return {data:r,html:`<div class="metrics">${metric('正确输出',fmt(r.output,5))}${metric('错误顺序输出',fmt(r.wrong,5))}</div>${table(['步骤','数值'],[['先衰减 αS',fmt(r.decayed,5)],['预测 k×衰减状态',fmt(r.predicted,5)],['残差 β(v−预测)',fmt(r.delta,5)],['新状态 衰减状态+k×残差',fmt(r.state,5)]])}<p class="hint">q 固定为 1。错误顺序先按旧状态更新再衰减；有限、流畅的数值不等于正确。</p>`};};
+ }else if(id==='cache'){
+  controls=select('policy','策略',[['lru','全相联 LRU'],['lfu','全相联 LFU'],['fifo','全相联 FIFO'],['assoc','八路组相联 · 轮换']],'lru')+range('capacity','槽数',16,4,32,4)+text('trace','访问轨迹（0…10⁶，最多 256 项）','1,3,5,7,9,11,13,15,17,1,3,5,7,9,11,13,15,17');
+  compute=()=>{const t=numberlist(val('trace'),0,1e6),r=M.cache(t,num('capacity'),val('policy'));return {data:r,html:`<div class="metrics">${metric('命中率',pct(r.rate))}${metric('命中 / 未命中',r.hits+' / '+r.misses)}${metric('实际可用槽',r.capacity)}</div><div class="trace-tokens">${r.steps.map(s=>`<span class="${s.hit?'hit':'miss'}" title="第 ${s.step} 步 · ${s.hit?'命中':'未命中'}">${s.key}</span>`).join('')}</div><p class="hint">绿色命中、带虚线的灰色未命中，同时提供文字状态。组映射 key % sets；容量非 8 整倍数时向下取整，最少 8。</p>${table(['步','键','状态','淘汰','当前键集合'],r.steps.slice(0,48).map(s=>[s.step,s.key,s.hit?'命中':'未命中',s.evicted??'—',s.contents.join(', ')]))}${r.steps.length>48?'<p class="hint">表仅展示前 48 步，计算与导出包含完整轨迹。</p>':''}`};};
+ }else if(id==='hetero'){
+  controls=range('bytes','剩余流量 D',.6,.1,2,.1,' GB')+range('cpu','CPU 分支有效速率',40,5,100,5,' GB/s')+range('gpu','PCIe/GPU 分支有效速率',20,5,100,5,' GB/s')+range('fraction','分给 GPU 的比例',33,0,100,1,'%')+range('join','合并成本',1,0,10,.1,' ms');
+  compute=()=>{const D=num('bytes'),c=num('cpu'),g=num('gpu'),j=num('join'),r=M.hetero(D,c,g,num('fraction')/100,j);const pts=Array.from({length:21},(_,i)=>[i*5,M.hetero(D,c,g,i/20,j).totalMs]);return {data:r,html:`<div class="metrics">${metric('当前分工阶段时间',fmt(r.totalMs),' ms')}${metric('理想 GPU 比例',pct(r.bestFraction))}${metric('理想平衡时间',fmt(r.idealMs),' ms')}</div>${plot(pts,{xLabel:'GPU 比例 %',yLabel:'阶段时间 ms'})}<p class="hint">CPU 分支 ${fmt(r.cpuMs)} ms；GPU 分支 ${fmt(r.gpuMs)} ms。模型未计共享 DRAM、KV 传输竞争与实际 GPU 算子成本变化。</p>`};};
+ }else if(id==='prefill'){
+  controls=select('tokens','输入 token 数',[[1024,'1,024'],[4096,'4,096'],[16384,'16,384'],[65536,'65,536'],[131072,'131,072']],16384)+select('chunk','chunk 大小',[128,256,512,1024,2048,4096,8192,16384].map(n=>[n,String(n)]),1024)+range('budget','可借用 scratch 预算',1024,256,8192,256,' MiB');
+  compute=()=>{const N=num('tokens'),C=num('chunk'),B=num('budget'),r=M.prefill(N,C,B),sizes=[128,256,512,1024,2048,4096,8192,16384];return {data:r,html:`<div class="metrics">${metric('块数',r.chunks)}${metric('scratch',fmt(r.scratchMiB),' MiB')}${metric('预算判定',r.feasible?'可行':'不可行')}</div><div class="callout ${r.feasible?'':'warn'}">${r.feasible?'教学成本约 '+fmt(r.timeMs/1000,3)+' 秒。':'该块大小超出输入预算；不能把它当作可部署结果。'} 复用曲线与内存斜率均为人为设定。</div>${table(['chunk','scratch MiB','教学时间 s','预算'],sizes.map(s=>{const p=M.prefill(N,s,B);return [s,p.scratchMiB,fmt(p.timeMs/1000,3),p.feasible?'可行':'超额'];}))}<div class="equation">r(C)=300+2700C/(C+512) token/s<br>scratch=128+0.5C MiB<br>T=N/r(C)+ceil(N/C)×0.005 秒</div>`};};
+ }else if(id==='kv'){
+  controls=select('tokens','每序列上下文',[4096,16384,32768,65536,131072,262144].map(n=>[n,fmt(n,0)]),131072)+range('sequences','活动序列数',1,1,20,1)+select('precision','教学 K/V 位宽',[[16,'K16 / V16'],[8,'K8 / V8'],[4,'K4 / V4'],[84,'K8 / V4（教学混合）']],16)+select('resident','显存驻留窗口',[4096,16384,32768,65536,131072,262144].map(n=>[n,fmt(n,0)]),32768)+range('metadata','假设 KV 元数据开销',0,0,20,1,'%');
+  compute=()=>{const b=num('precision'),r=M.kv(num('tokens'),num('sequences'),b===84?8:b,b===84?4:b,num('resident'),num('metadata')/100);return {data:r,html:`<div class="metrics">${metric('总主 KV 载荷',fmt(r.all/2**30,3),' GiB')}${metric('驻留 KV 载荷',fmt(r.working/2**30,3),' GiB')}${metric('GDN 主状态总和',fmt(r.gdn/2**20,1),' MiB')}</div>${table(['项目','教学计算'],[['每序列每 token 主 KV',fmt(r.bytesPerToken/1024,2)+' KiB'],['每序列完整 KV',fmt(r.one,0)+' 字节'],['总 KV + 假设元数据',fmt(r.kvWithMetadata/2**30,3)+' GiB'],['未驻留的逻辑 KV 载荷',fmt(r.nonResidentPayload/2**30,3)+' GiB']])}<div class="callout warn">未驻留不等于已删除，主机可能还保留完整 KV 副本。位宽菜单只用于容量推演，不保证上游任意量化与 streaming 组合兼容。</div><p class="hint">${r.excluded}</p><div class="equation">12层 × T × 2 KV头 × 256维 × (K位宽+V位宽)/8 × 会话数</div>`};};
+ }else if(id==='spec'){
+  controls=range('p','每位置条件接受率 p',.8,0,1,.01)+range('base','无草稿目标成本',8,1,30,.5,' ms')+range('verify','每份额外验证成本',2,0,10,.1,' ms')+range('draft','每份起草成本',1,0,10,.1,' ms');
+  compute=()=>{const rows=Array.from({length:6},(_,k)=>M.spec(num('p'),k,num('base'),num('verify'),num('draft'))),best=rows.reduce((a,b)=>a.rate>=b.rate?a:b);return {data:{rows,best},html:`<div class="metrics">${metric('理想最优草稿数',best.k)}${metric('教学产出速率',fmt(best.rate,1),' token/s')}${metric('相对无草稿',pct(best.gain))}</div>${table(['k','期望推进 E','本轮成本 ms','token/s','净收益'],rows.map(r=>[r.k===best.k?'<strong>'+r.k+' ★</strong>':r.k,fmt(r.expected,4),fmt(r.cost,2),fmt(r.rate,2),pct(r.gain)]))}<div class="equation">E=1+p+p²+…+pᵏ<br>成本=base+k×(额外验证+起草)；速率=1000E/成本</div><p class="hint">期望公式连接上游控制器；此成本式省略专家集合复用、缓存与非线性内核成本。</p>`};};
+ }else if(id==='commit'){
+  controls=range('accepted','接受的草稿前缀长度',1,0,4,1);
+  compute=()=>{const r=M.commitDemo(num('accepted'));return {data:r,html:`<div class="metrics">${metric('起点状态',r.base)}${metric('正确提交状态',fmt(r.committed,4))}${metric('只回退计数的错误状态',fmt(r.naive,4))}</div><div class="candidate-strip">${r.rows.map((x,i)=>`<div class="candidate ${x.accepted?'accepted':'rejected'}"><small>草稿 ${i+1}</small><b>${x.token}</b><span>${x.accepted?'接受':'丢弃后缀'}</span><small>候选状态 ${fmt(x.state,4)}</small></div>`).join('')}</div><div class="equation">toy 递推 s ← 0.5s+t；已提交前缀 [1,2]；候选 [3,5,2,4]</div><p class="hint">${r.warning}</p>`};};
+ }else if(id==='sse'){
+  controls=range('size','每次网络读取的字节数',3,1,32,1,' B')+select('crlf','事件换行',[[0,'LF'],[1,'CRLF']],0);
+  compute=()=>{const r=M.sse(num('size'),num('crlf')===1);return {data:r,html:`<div class="metrics">${metric('恢复文本',esc(r.output))}${metric('读取分片数',r.chunks.length)}${metric('完整事件数',r.events.length)}</div><h3>原始事件文本</h3><pre><code>${esc(r.wire)}</code></pre><h3>字节切片（十六进制）</h3><div class="hexchunks">${r.chunks.map((x,i)=>`<span title="分片 ${i+1}">${x}</span>`).join('')}</div><p class="hint">${r.byteLength} 字节 → 增量 UTF-8 解码 → 空行分帧 → data 行合并 → JSON。网络分片数不是 token 数。</p>`};};
+ }else if(id==='scheduler'){
+  controls=text('lengths','同时到达的作业长度（最多 6 条）','8,3,5')+select('mode','调度策略',[['fcfs','FCFS 先来先服务'],['rr','轮转 RR']],'rr')+range('quantum','每轮 token 量子',1,1,16,1)+range('switch','换作业成本',0,0,3,.1,' ms');
+  compute=()=>{const lengths=numberlist(val('lengths'),1,128),r=M.schedule(lengths,val('mode'),num('quantum'),num('switch')),W=640,H=45+lengths.length*35,scale=560/r.time;return {data:r,html:`<div class="metrics">${metric('总完成时间',fmt(r.time),' ms')}${metric('首 token p95',fmt(r.p95first),' ms')}${metric('系统总吞吐',fmt(r.rate,1),' token/s')}</div><svg class="timeline" viewBox="0 0 ${W} ${H}" role="img" aria-label="作业调度教学甘特图">${lengths.map((_,i)=>`<text x="6" y="${30+i*35}">作业${i+1}</text>`).join('')}${r.timeline.map(s=>`<rect class="job-${s.job%4}" x="${65+s.start*scale}" y="${12+s.job*35}" width="${Math.max(.5,(s.end-s.start)*scale)}" height="23"><title>作业${s.job+1}: ${s.start}–${s.end}ms</title></rect>`).join('')}<text x="65" y="${H-3}">0</text><text x="625" text-anchor="end" y="${H-3}">${fmt(r.time)} ms</text></svg>${table(['作业','长度','首 token ms','完成 ms'],lengths.map((n,i)=>[i+1,n,fmt(r.first[i]),fmt(r.finish[i])]))}<p class="hint">${r.note} 切换 ${r.switches} 次；首次启动不计切换。</p>`};};
+ }else{element.innerHTML='<p>未找到实验。</p>';return;}
+ element.innerHTML=`<div class="lab-layout"><form class="lab-controls" aria-label="实验参数" onsubmit="return false">${controls}<button type="button" class="secondary reset-lab">恢复默认参数</button></form><div id="lab-result" class="lab-result" aria-live="polite"></div></div>`;
+ const out=element.querySelector('#lab-result'),form=element.querySelector('form');
+ let snapshot=null;
+ function update(){
+  form.querySelectorAll('input[type=range]').forEach(e=>{e.previousElementSibling.querySelector('output').textContent=e.value+e.dataset.unit;});
+  try{const r=compute();out.innerHTML=r.html;const params=Object.fromEntries(new FormData(form));snapshot={lab:id,kind:'教学推演；非硬件实测',params,result:r.data};out.querySelectorAll('[data-journey]').forEach(b=>b.addEventListener('click',()=>{form.elements.step.value=b.dataset.journey;update();}));}
+  catch(e){out.innerHTML=`<div class="callout warn" role="alert">${esc(e.message)}</div>`;snapshot=null;}
+ }
+ form.addEventListener('input',update);form.addEventListener('change',update);element.querySelector('.reset-lab').onclick=()=>{form.reset();update();};update();
+ return ()=>snapshot;
+}
+root.LabViews={mount};
+})(globalThis);

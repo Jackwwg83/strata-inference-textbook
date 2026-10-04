@@ -1,0 +1,90 @@
+[
+  {
+    "source": "S04",
+    "title": "让形状成为可执行的契约",
+    "code": "int64_t n_layers = 48;\nint64_t qsa_interval = 4;\nint64_t n_expert = 512;\n\nreturn layer % g.qsa_interval == g.qsa_interval - 1;",
+    "steps": [
+      "先看字段是模型几何还是可调性能参数。",
+      "再从模运算推出 12 个 QSA 层，注意零基编号。",
+      "最后检查层与张量形状的关联，不能只用名称猜类型。"
+    ],
+    "challenge": "反证：把 QSA 层数写成 48，会使 KV 预算四倍偏大。保守方向的错误仍是错误。"
+  },
+  {
+    "source": "S17",
+    "title": "用一维例子证明更新顺序",
+    "code": "dec      = exp(gate)\nst       = state * dec\nsk[h,j]  = sum_i st[i,j,h] * k[idx[h]][i]\nd[h,j]   = (v[h,j] - sk[h,j]) * beta[h]\nst[i,j,h] += k[idx[h]][i] * d[h,j]",
+    "steps": [
+      "这是头文件中的数学说明节选，不是可直接编译的 C++。",
+      "沿一列读：衰减→预测→残差→外积。",
+      "状态物理轴顺序与参考坐标不同；β 已在调用前 sigmoid。"
+    ],
+    "challenge": "反证：先更新再衰减得到另一个有限数，NaN 测试不会发现。"
+  },
+  {
+    "source": "S18",
+    "title": "选择预算不等于缓存总容量",
+    "code": "inline int64_t qsa_selection_width(int64_t n_kv, const QsaShapes& s) {\n    const int64_t w = s.idx_top_k + s.idx_block - 1;\n    return n_kv < w ? n_kv : w;\n}",
+    "steps": [
+      "idx_top_k=2048、idx_block=4；因此当前接口宽度上界 2051。",
+      "这是本次选择工作量，不是永久保存历史的上限。",
+      "页表决定物理位置；逻辑索引不应随驻留变化。"
+    ],
+    "challenge": "反证：永久删除未选页后，未来查询可能失去应可访问的信息。"
+  },
+  {
+    "source": "S09",
+    "title": "从代码读出期望值",
+    "code": "double Controller::expected(const double* p, int k, bool same) {\n    double e = 1.0, run = 1.0;\n    for (int i = 0; i < k; ++i) {\n        run *= same ? p[0] : p[i];\n        e += run;\n    }\n    return e;\n}",
+    "steps": [
+      "run 是到当前位置都接受的联合概率。",
+      "e 累积 1 + 所有前缀接受概率；same 是同概率简化。",
+      "选择器还要除以 step_ms，不能只优化 e。"
+    ],
+    "challenge": "反证：p=1 时必须等于 k+1；p=0 时必须等于 1。"
+  },
+  {
+    "source": "S10",
+    "title": "前缀的严格条件",
+    "code": "const size_t n = c.ids.size();\nif (n == 0 || n >= prompt.size() ||\n    !std::equal(c.ids.begin(), c.ids.end(), prompt.begin())) return 0;",
+    "steps": [
+      "这是 conversation_prefix 的片段，后面还有图像身份核验。",
+      "n 必须严格小于新 prompt 长度，最后 token 启动验证窗口。",
+      "不要截取这三行后宣称“只要 token 相同就能复用”。"
+    ],
+    "challenge": "反证：相同 token 占位符但不同图片，不应命中同一多模态状态。"
+  },
+  {
+    "source": "S11",
+    "title": "准确命名替换策略",
+    "code": "constexpr uint32_t WAYS = 8;\n// inside insert:\nuint32_t w = next[s];\nnext[s] = (uint8_t) ((w + 1) % WAYS);",
+    "steps": [
+      "WAYS 规定相联度。",
+      "next 在组内轮换，访问命中不更新最近性顺序。",
+      "不要把它称为 LRU；浏览器模运算 trace 是教学简化。"
+    ],
+    "challenge": "反证：9 个键全落同一组，即使其他组空闲也可能冲突。"
+  },
+  {
+    "source": "S13",
+    "title": "共享 scratch 与私有状态",
+    "code": "float* gdn_state = nullptr;\nQsaState* qsa_states = nullptr;\nfloat* R = nullptr;\nint64_t k = 10;\nint32_t ple_prev[2] = {-1, -1};",
+    "steps": [
+      "从权重之外的字段枚举每个序列的历史。",
+      "同序列不同层可共用临时缓冲，不代表不同序列可并发共用。",
+      "新增并发时逐项复核读写者、生命周期与代次。"
+    ],
+    "challenge": "反证：A/B 交错运行与各自独立重放不一致，是状态隔离失败的证据。"
+  },
+  {
+    "source": "S15",
+    "title": "引擎是可替换的协议边界",
+    "code": "class Engine(Protocol):\n    max_context: int\n    def generate(self, ids: list[int], max_new: int,\n                 sampling: dict, cancel: threading.Event) -> Iterator[int]: ...",
+    "steps": [
+      "输入 IDs、输出 token IDs，协议层和数学层因此可拆开。",
+      "MockEngine 可测 API，不证明 GPU 内核或语言质量。",
+      "文件开头明确 FIFO 单序列；多连接与多执行流分开计数。"
+    ],
+    "challenge": "反证：五个客户端线程全部排队，不算五条活动生成流。"
+  }
+]
