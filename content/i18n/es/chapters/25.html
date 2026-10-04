@@ -1,0 +1,258 @@
+<div class="hook"><span class="eyebrow">Imagina primero una escena</span>
+<p>Tienes Strata funcionando en tu computadora de casa, y tus compañeros de piso y de clase también quieren usarlo. Cinco personas abren la página web y hacen preguntas al mismo tiempo. El README de Strata lo dice sin rodeos: responde una solicitud a la vez. <span class="ev ev-report">Informe upstream</span>[S01] Entonces, ¿cuánto espera la quinta persona? Y si una de ellas pide un ensayo largo, ¿se quedan las otras cuatro esperando sin hacer nada?</p>
+<p>Este capítulo es una <strong>clase de diseño</strong>. El Strata upstream atiende una secuencia detrás de una única cola de primero en entrar, primero en salir. La planificación para varios usuarios no es una función suya, sino una ampliación que diseñamos nosotros. Primero usamos algoritmos de planificación y teoría de colas para calcular «cuánto se espera». Después vemos qué hay que cambiar para pasar de una secuencia a varias.</p></div>
+<p class="tldr"><strong>En una línea:</strong> quién va primero, cuánto espera la gente y si se pueden calcular solicitudes juntas son tres preguntas distintas, que responden la política de planificación, la teoría de colas y el batching. Y antes de cambiar nada, hay que aislar bien el estado de cada secuencia.</p>
+
+<h2 id="sec-1">25.1 Situación actual: un cerrojo, una cola</h2>
+<p>El principio de <code>serve/server.py</code> dice: «Una secuencia a la vez, detrás de un FIFO». <span class="ev ev-code">Hecho de código</span>[S15] La implementación es simple: la capa de servicio tiene un cerrojo, <code>self.fifo = threading.Lock()</code>. La solicitud que tiene el cerrojo se queda con el motor para ella sola. Las demás esperan en cola fuera del cerrojo, y el contador de «en cola» de la página de estado sube en uno. <span class="ev ev-code">Hecho de código</span></p>
+<p>Por otro lado, el servidor HTTP es el <code>ThreadingHTTPServer</code> de Python, con un hilo por conexión, así que cinco personas pueden <strong>conectarse</strong> al mismo tiempo. Estar conectado no es lo mismo que ser atendido. Mira la figura 25-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 286" role="img" aria-label="Figura 25-1: cinco conexiones llegan a la vez y hacen cola en el cerrojo FIFO; el motor atiende una secuencia a la vez. Las conexiones, las solicitudes en cola y las secuencias activas son tres números distintos">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="44" y="31" font-size="12" text-anchor="middle">Usuario 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="88" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="122" y="31" font-size="12" text-anchor="middle">Usuario 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="166" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="200" y="31" font-size="12" text-anchor="middle">Usuario 3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="278" y="31" font-size="12" text-anchor="middle">Usuario 4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="322" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="356" y="31" font-size="12" text-anchor="middle">Usuario 5</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M44 42L150 74M122 42L170 74M200 42V74M278 42L230 74M356 42L250 74"/>
+<rect class="f-soft" fill="#e5f1df" x="70" y="76" width="260" height="40" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="101" font-size="13" text-anchor="middle">Cerrojo FIFO: los demás esperan</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 116V138"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="140" width="260" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="165" font-size="13" text-anchor="middle">Motor: 1 secuencia a la vez</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="198" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="221" font-size="12">Conexiones HTTP: 5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="198" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="215" y="221" font-size="12">Solicitudes en cola: 4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="242" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="265" font-size="12">Secuencias generando: 1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="242" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="215" y="265" font-size="12">Secuencias por lote: 1</text>
+</svg><figcaption>Figura 25-1　El Strata upstream hoy: las cinco personas pueden conectarse, pero en cada momento solo genera la secuencia de una. Los cuatro números de abajo hay que contarlos por separado; pueden ser totalmente distintos.</figcaption></figure>
+<p>Upstream sí tiene una función que roza las «múltiples sesiones». Puedes activar una zona de estacionamiento de sesiones, con tamaño limitado, que guarda en la RAM el estado de unas pocas conversaciones, para que las solicitudes que llegan por turnos no tengan que releer su prompt desde cero cada vez. Pero la documentación dice con claridad que <strong>no ejecuta solicitudes de forma concurrente</strong>. <span class="ev ev-report">Informe upstream</span> El código que gestiona esas sesiones estacionadas también es estricto con la reutilización: los tokens deben coincidir exactamente, la identidad de la imagen debe coincidir y el modo de guía debe coincidir. Hacen falta las tres cosas. <span class="ev ev-code">Hecho de código</span>[S10]</p>
+<p>Así que todo lo que sigue en este capítulo, desde comparar políticas de planificación hasta aislar el estado de varias secuencias, es un <strong>ejercicio de diseño</strong>, no algo que upstream ya sepa hacer.</p>
+
+<h2 id="sec-2">25.2 Quién va primero: FIFO, SJF, round-robin</h2>
+<aside class="primer" id="c25-scheduling">
+<h3>Algoritmos de planificación: FIFO, SJF y round-robin</h3>
+<p>Cuando hay un solo camarero y una multitud de clientes, «a quién atender primero» es el problema de la <dfn>planificación</dfn>. Un sistema operativo que reparte tiempo de CPU a los procesos, una impresora que ordena sus trabajos y un servicio de inferencia que ordena solicitudes son el mismo problema. Las tres políticas clásicas:</p>
+<ul>
+<li><dfn>FIFO</dfn> (primero en entrar, primero en salir; también se llama FCFS, primero en llegar, primero en ser atendido): por orden de llegada, uno termina antes de que empiece el siguiente. Es simple y justo, pero un trabajo largo bloquea a todos los cortos que vienen detrás. Es el <dfn>efecto convoy</dfn>.</li>
+<li><dfn>SJF</dfn> (trabajo más corto primero): se hace siempre el trabajo más corto. Se puede demostrar que, cuando todos los trabajos llegan a la vez, da el tiempo medio de espera más corto. Tiene dos costos: hay que conocer de antemano la duración de cada trabajo, y un trabajo largo puede quedar empujado para siempre por un flujo constante de cortos. Es la <dfn>inanición</dfn> (starvation).</li>
+<li><dfn>Round-robin</dfn> (turnos rotativos): cada uno trabaja por turnos un tramo corto, llamado <dfn>porción de tiempo</dfn> (time slice), y si no termina vuelve al final de la fila. Todos empiezan pronto, pero cambiar de uno a otro tiene un costo, y el tiempo medio de finalización no necesariamente es menor.</li>
+</ul>
+<p>Tampoco hay una sola vara de medir: el <strong>tiempo de espera</strong> (instante de fin − instante de llegada − duración propia), la <strong>primera respuesta</strong> (en cuánto empieza la atención; en un chat, en cuánto ves la primera palabra) y el <strong>throughput</strong> (cuánto se termina por unidad de tiempo). Cada política gana en unas medidas y pierde en otras.</p>
+<p class="further">Para seguir leyendo: <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-sched.pdf" target="_blank" rel="noopener noreferrer">OSTEP: Scheduling: Introduction (en inglés)</a> · <a href="https://en.wikipedia.org/wiki/Scheduling_%28computing%29" target="_blank" rel="noopener noreferrer">Wikipedia: Scheduling (computing) (en inglés)</a> · <a href="https://es.wikipedia.org/wiki/Inanici%C3%B3n_%28inform%C3%A1tica%29" target="_blank" rel="noopener noreferrer">Wikipedia: Inanición (informática)</a> · <a href="https://es.wikipedia.org/wiki/Planificaci%C3%B3n_Round-robin" target="_blank" rel="noopener noreferrer">Wikipedia: Planificación Round-robin</a></p>
+</aside>
+<p>Empecemos con el ejemplo más pequeño: tres solicitudes llegan juntas, con respuestas de 8, 3 y 5 tokens. Supón que cada token tarda 1 unidad de tiempo en generarse y que cambiar de solicitud no cuesta tiempo. <span class="ev ev-est">Estimación didáctica</span></p>
+<div class="viz" data-viz="sched-race"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figura 25-2: tres solicitudes llegan juntas, con longitudes 8, 3 y 5. Con FIFO las primeras palabras aparecen en 1, 9 y 12; con round-robin y una porción de tiempo de 1 aparecen en 1, 2 y 3, pero la espera media pasa de 6,33 a 7">
+<text class="f-text" fill="#182f2b" x="20" y="30" font-size="13" font-weight="600">FIFO: primeras palabras 1, 9, 12; espera 6,33</text>
+<rect class="f-accent" fill="#136d5a" x="20.0" y="40" width="179.0" height="28"/>
+<text class="f-on" fill="#ffffff" x="110.0" y="59" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="200.0" y="40" width="66.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="233.8" y="59" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="267.5" y="40" width="111.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="323.8" y="59" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<text class="f-text" fill="#182f2b" x="20" y="114" font-size="13" font-weight="600">Round-robin (porción 1): 1, 2, 3; espera 7</text>
+<rect class="f-accent" fill="#136d5a" x="20.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="31.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="42.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="53.8" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="65.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="76.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="87.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="98.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="110.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="121.3" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="132.5" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="143.8" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="155.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="166.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="177.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="188.8" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="200.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="211.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="222.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="233.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-soft" fill="#e5f1df" x="245.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="256.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="267.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="278.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-soft" fill="#e5f1df" x="290.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="301.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="312.5" y="124" width="66.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="346.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 168H380"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="186" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="186" font-size="12" text-anchor="middle">8</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="186" font-size="12" text-anchor="middle">16</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="210" font-size="12" text-anchor="middle">Misma longitud: mismo trabajo total, cambia el orden</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="228" font-size="12" text-anchor="middle">Interactivo: 3 políticas, 3 casos, porción libre</text>
+</svg><figcaption>Figura 25-2　Las mismas tres solicitudes: el round-robin (RR) hace que todos vean una primera palabra antes de la unidad de tiempo 3, pero la espera media sube de 6,33 a 7. Entre justicia y eficiencia no hay almuerzo gratis. <span class="ev ev-est">Estimación didáctica</span></figcaption></figure></div>
+<p>Calculemos FIFO. A termina en 8, B en 11 y C en 16. Las esperas son 0, 8 y 11, unos 6,33 de media. SJF hace primero B (3), luego C (5) y por último A (8). Las esperas son 8, 0 y 3, unos 3,67 de media, la más corta. El round-robin da a cada una 1 unidad por turno, así que las primeras palabras aparecen en 1, 2 y 3, y todos reciben una respuesta rápida. Pero las tres terminan muy tarde, y la espera media es 7, la más larga de todas.</p>
+<p>Si cada cambio además exige guardar y restaurar un bloque grande de estado de la secuencia (como el estado recurrente de GDN del capítulo 9), una porción demasiado pequeña hace que el costo del cambio se coma mucho tiempo. La justicia no es gratis. Hay que mirar a la vez el tiempo de la primera palabra, el tiempo de finalización, el throughput y cuánto estado se mueve.</p>
+<p class="bridge"><strong>Si estudiaste informática:</strong> es el capítulo de planificación de CPU de Sistemas operativos, con «proceso» sustituido por «solicitud de generación» y «porción de tiempo de CPU» por «paso de token». Hay una diferencia clave. Cuando un sistema operativo cambia de proceso, guarda solo un poco de contexto, como los registros. Cuando un motor de inferencia cambia de secuencia, detrás hay grandes bloques de datos, como la caché KV y el estado recurrente.</p>
+
+<h2 id="sec-3">25.3 Nociones de teoría de colas: al 80 % de ocupación empieza el atasco</h2>
+<p>La planificación decide quién va primero, pero hay una pregunta más básica: ¿con qué densidad llegan las solicitudes? Por muy lista que sea la política de planificación, si el trabajo llega más rápido de lo que se termina, la cola crece sin límite.</p>
+<aside class="primer" id="c25-queueing">
+<h3>Nociones de teoría de colas: la ley de Little y M/M/1</h3>
+<p>La <dfn>teoría de colas</dfn> estudia sistemas de «llegar, hacer cola, ser atendido». Describe un sistema con unas pocas cantidades: la tasa de llegada λ (cuántas llegan por unidad de tiempo), la tasa de servicio μ (cuántas se pueden atender por unidad de tiempo) y la <dfn>utilización</dfn> ρ = λ ÷ μ (la fracción del tiempo en que el servidor está ocupado).</p>
+<p>El resultado más útil es la <dfn>ley de Little</dfn>: L = λ × W. El número medio de clientes en el sistema, L, es igual a la tasa de llegada por el tiempo medio que permanece cada uno, W. Casi no necesita supuestos y vale igual para una tienda de té con burbujas, una autopista y un servicio de inferencia. Por ejemplo, si llegan 3 solicitudes por minuto y cada una permanece en promedio 20 segundos (1/3 de minuto), hay en promedio 1 solicitud en el sistema.</p>
+<p>El modelo de colas más simple se llama <dfn>M/M/1</dfn>: las llegadas son aleatorias (los intervalos entre llegadas siguen una distribución exponencial), los tiempos de servicio también son aleatorios y hay un solo servidor. Su tiempo medio en el sistema es W = 1 ÷ (μ − λ). Esta fórmula nos dice algo contraintuitivo: <strong>cuanto más se acerca la utilización al 100 %, más bruscamente crece la espera</strong>. Con ρ = 50 %, W es 2 veces el tiempo de servicio. Con 80 %, 5 veces. Con 95 %, 20 veces.</p>
+<p class="further">Para seguir leyendo: <a href="https://en.wikipedia.org/wiki/Little%27s_law" target="_blank" rel="noopener noreferrer">Wikipedia: Little's law (en inglés)</a> · <a href="https://en.wikipedia.org/wiki/M/M/1_queue" target="_blank" rel="noopener noreferrer">Wikipedia: M/M/1 queue (en inglés)</a> · <a href="https://es.wikipedia.org/wiki/Teor%C3%ADa_de_colas" target="_blank" rel="noopener noreferrer">Wikipedia: Teoría de colas</a></p>
+</aside>
+<p>Apliquémoslo a Strata. <span class="ev ev-est">Estimación didáctica</span> Supón que una respuesta tarda 10 segundos de media (por ejemplo, 500 tokens a 50 por segundo). Entonces un Strata puede atender como máximo μ = 6 solicitudes por minuto. Si llegan 3 por minuto de media (ρ = 50 %), la permanencia media es 1 ÷ (6 − 3) minutos = 20 segundos. Con 4,8 por minuto (ρ = 80 %), es 1 ÷ 1,2 minutos = 50 segundos. Con 5,7 por minuto (ρ = 95 %), pasa a 200 segundos. Las solicitudes subieron menos del doble, pero la espera se multiplicó por diez.</p>
+<div class="viz" data-viz="queue-load"><figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="Figura 25-3: tiempo medio en el sistema según la utilización con el modelo M/M/1. 20 segundos al 50 %, 50 segundos al 80 %, 200 segundos al 95 %, con una subida brusca cerca del 100 %">
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M56 20V206H382"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.6" stroke-dasharray="3 4" d="M56 144H382M56 82H382M56 20H382"/>
+<text class="f-muted" fill="#5c6d66" x="50" y="211" font-size="12" text-anchor="end">0</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="148" font-size="12" text-anchor="end">100</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="86" font-size="12" text-anchor="end">200</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="24" font-size="12" text-anchor="end">300</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M56.0 199.8L62.5 199.7L69.0 199.5L75.4 199.4L81.9 199.3L88.4 199.1L94.9 199.0L101.4 198.8L107.8 198.6L114.3 198.4L120.8 198.3L127.3 198.1L133.8 197.8L140.2 197.6L146.7 197.4L153.2 197.1L159.7 196.9L166.2 196.6L172.6 196.3L179.1 196.0L185.6 195.7L192.1 195.3L198.6 194.9L205.0 194.5L211.5 194.1L218.0 193.6L224.5 193.1L231.0 192.5L237.4 191.9L243.9 191.2L250.4 190.5L256.9 189.7L263.4 188.8L269.8 187.8L276.3 186.6L282.8 185.3L289.3 183.9L295.8 182.2L302.2 180.2L308.7 177.8L315.2 175.0L321.7 171.6L328.2 167.2L334.6 161.7L341.1 154.3L347.6 144.0L354.1 128.5L360.6 102.7L367.0 51.0L369.2 20.0"/>
+<circle class="f-warn" fill="#9e5d24" cx="218.0" cy="193.6" r="5"/>
+<circle class="f-warn" fill="#9e5d24" cx="315.2" cy="175.0" r="5"/>
+<circle class="f-warn" fill="#9e5d24" cx="363.8" cy="82.0" r="5"/>
+<text class="f-text" fill="#182f2b" x="218" y="180" font-size="12" text-anchor="middle">50 %: 20 s</text>
+<text class="f-text" fill="#182f2b" x="300" y="160" font-size="12" text-anchor="end">80 %: 50 s</text>
+<text class="f-text" fill="#182f2b" x="354" y="80" font-size="12" text-anchor="end">95 %: 200 s</text>
+<text class="f-muted" fill="#5c6d66" x="218" y="226" font-size="12" text-anchor="middle">50 %</text>
+<text class="f-muted" fill="#5c6d66" x="315" y="226" font-size="12" text-anchor="middle">80 %</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="226" font-size="12" text-anchor="middle">100 %</text>
+<text class="f-muted" fill="#5c6d66" x="62" y="16" font-size="12">Tiempo medio en el sistema (s)</text>
+<text class="f-muted" fill="#5c6d66" x="219" y="246" font-size="12" text-anchor="middle">Utilización ρ (respuesta media de 10 s)</text>
+</svg><figcaption>Figura 25-3　La espera sube bruscamente con la utilización. Antes del 80 % la curva es bastante plana, y pasado el 90 % es casi vertical. Por eso un servicio necesita margen y no debe planificarse para estar «justo al máximo». <span class="ev ev-est">Estimación didáctica</span></figcaption></figure></div>
+<p>M/M/1 es solo un modelo burdo: la longitud de las respuestas de un modelo grande no sigue una distribución exponencial, y el prefill y el decode tardan cantidades muy distintas. Pero su conclusión cualitativa es muy robusta: <strong>en cuanto te acercas a la carga máxima, la espera se descontrola</strong>. En un sistema real, esto significa que hay que añadir máquinas, limitar el ritmo (si la cola es demasiado larga, decirle al usuario «inténtalo más tarde» sin demora) o buscar la forma de subir μ, que es el batching de la sección siguiente.</p>
+
+<h2 id="sec-4">25.4 Batching continuo: que varias secuencias avancen juntas</h2>
+<p>Las dos secciones anteriores suponían que el motor atiende una secuencia a la vez. Una forma de subir μ es dejar que varias secuencias <strong>avancen juntas en el mismo cálculo</strong>.</p>
+<aside class="primer" id="c25-continuous-batching">
+<h3>Batching continuo</h3>
+<p>Para generar un token, el motor tiene que leer una vez de la VRAM los pesos pertinentes. Si atiende una sola secuencia, una lectura de los pesos da un solo token. Si atiende 8 secuencias a la vez, una lectura da 8 tokens. Esa es la ganancia del <dfn>batching</dfn> (procesamiento por lotes): convierte matriz por vector en matriz por matriz, de modo que los pesos se leen una vez y se usan muchas veces (el capítulo 16 lo explica a fondo).</p>
+<p>El <dfn>batching estático</dfn> ingenuo agrupa unas cuantas secuencias en un lote que empieza junto y termina junto. El problema es que las respuestas tienen longitudes distintas: las cortas terminan antes, su lugar solo puede quedar vacío, y el lote siguiente no puede empezar hasta que acaba la más larga.</p>
+<p>El <dfn>batching continuo</dfn> (también llamado planificación a nivel de iteración) reduce la unidad de planificación de «un lote de solicitudes» a «un paso de generación». Tras cada token, comprueba si alguna secuencia terminó, y si es así, una secuencia en espera ocupa su lugar de inmediato. El sistema Orca fue de los primeros en exponer esta idea de forma sistemática. Después, marcos de inferencia como vLLM la adoptaron de manera generalizada, junto con una gestión paginada de la caché KV (capítulo 17).</p>
+<p class="further">Para seguir leyendo: <a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener noreferrer">El artículo de vLLM / PagedAttention (arXiv, en inglés)</a> · <a href="https://es.wikipedia.org/wiki/Procesamiento_por_lotes" target="_blank" rel="noopener noreferrer">Wikipedia: Procesamiento por lotes</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 316" role="img" aria-label="Figura 25-4: tres slots, seis secuencias. El batching estático espera a la secuencia más larga del lote antes de pasar al siguiente, y tarda 11 pasos con 10 pasos de slot inactivos; el batching continuo llena un hueco de inmediato, y tarda 9 pasos con 4 inactivos">
+<text class="f-text" fill="#182f2b" x="10" y="22" font-size="13" font-weight="600">Batching estático: empiezan y acaban juntos</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="51" font-size="12">#1</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="79" font-size="12">#2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="107" font-size="12">#3</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="13" font-weight="600">Batching continuo: se llena el hueco</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="181" font-size="12">#1</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="209" font-size="12">#2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="237" font-size="12">#3</text>
+<rect class="f-accent" fill="#136d5a" x="50.0" y="34" width="83.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="92.5" y="51" font-size="13" font-weight="600" text-anchor="middle">P</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="135.0" y="34" width="83.5" height="24" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="220.0" y="34" width="55.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="248.3" y="51" font-size="13" font-weight="600" text-anchor="middle">S</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="276.7" y="34" width="83.5" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="50.0" y="62" width="168.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="135.0" y="79" font-size="13" font-weight="600" text-anchor="middle">Q</text>
+<rect class="f-warn" fill="#9e5d24" x="220.0" y="62" width="140.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="290.8" y="79" font-size="13" font-weight="600" text-anchor="middle">T</text>
+<rect class="f-soft" fill="#e5f1df" x="50.0" y="90" width="111.8" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="106.7" y="107" font-size="13" font-weight="600" text-anchor="middle">R</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="163.3" y="90" width="55.2" height="24" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" x="220.0" y="90" width="83.5" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="262.5" y="107" font-size="13" font-weight="600" text-anchor="middle">U</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="305.0" y="90" width="55.2" height="24" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="50.0" y="164" width="83.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="92.5" y="181" font-size="13" font-weight="600" text-anchor="middle">P</text>
+<rect class="f-accent" fill="#136d5a" x="135.0" y="164" width="55.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="163.3" y="181" font-size="13" font-weight="600" text-anchor="middle">S</text>
+<rect class="f-soft" fill="#e5f1df" x="191.7" y="164" width="83.5" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="234.2" y="181" font-size="13" font-weight="600" text-anchor="middle">U</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="276.7" y="164" width="26.8" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="50.0" y="192" width="168.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="135.0" y="209" font-size="13" font-weight="600" text-anchor="middle">Q</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="220.0" y="192" width="83.5" height="24" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" x="50.0" y="220" width="111.8" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="106.7" y="237" font-size="13" font-weight="600" text-anchor="middle">R</text>
+<rect class="f-warn" fill="#9e5d24" x="163.3" y="220" width="140.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="234.2" y="237" font-size="13" font-weight="600" text-anchor="middle">T</text>
+<text class="f-muted" fill="#5c6d66" x="50.0" y="266" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="106.7" y="266" font-size="12" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="163.3" y="266" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="220.0" y="266" font-size="12" text-anchor="middle">6</text>
+<text class="f-muted" fill="#5c6d66" x="276.7" y="266" font-size="12" text-anchor="middle">8</text>
+<text class="f-muted" fill="#5c6d66" x="333.3" y="266" font-size="12" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="390.0" y="266" font-size="12" text-anchor="middle">12</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="288" font-size="12" text-anchor="middle">Discontinua = slot inactivo; filas #1–#3 = los slots</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="306" font-size="12" text-anchor="middle">Estático: 11 pasos, 10 inactivos · continuo: 9 y 4</text>
+</svg><figcaption>Figura 25-4　Los mismos tres slots y seis secuencias de distinta longitud. El batching continuo comprueba en cada paso si hay un hueco, así que los slots rara vez quedan ociosos y el trabajo entero termina antes. <span class="ev ev-est">Estimación didáctica</span></figcaption></figure>
+<p>Para un modelo MoE como el que corre Strata, el batching tiene un giro especial. Cada secuencia elige 10 expertos en cada capa (capítulo 10), y secuencias distintas suelen elegir expertos distintos. Cuantas más secuencias hay en un lote, mayor es la <strong>unión</strong> de expertos que una capa tiene que despertar. Mira la figura 25-5. <span class="ev ev-est">Estimación didáctica</span></p>
+<figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="Figura 25-5: cada secuencia elige 10 expertos por capa; si cada secuencia elige de forma independiente y uniforme, 1 secuencia usa 10 expertos, 4 usan unos 39, 16 unos 139 y 32 unos 240">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">Expertos que activa un lote en una capa (de 512)</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">1 secuencia</text><text class="f-text" fill="#182f2b" x="390" y="44" font-size="12" text-anchor="end">10 (2 %)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="50" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="50" width="7.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">4 secuencias (máx. 40)</text><text class="f-text" fill="#182f2b" x="390" y="88" font-size="12" text-anchor="end">unos 38,8 (8 %)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="94" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="94" width="28.8" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="132" font-size="12">16 secuencias (máx. 160)</text><text class="f-text" fill="#182f2b" x="390" y="132" font-size="12" text-anchor="end">unos 138,6 (27 %)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="138" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="138" width="102.9" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">32 secuencias (máx. 320)</text><text class="f-text" fill="#182f2b" x="390" y="176" font-size="12" text-anchor="end">unos 239,6 (47 %)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="182" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="182" width="177.8" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">Supone elecciones independientes y uniformes de 10</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="238" font-size="12">Esperado = 512 × (1 − (1 − 10/512)^B),</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="256" font-size="12">con B = número de secuencias</text>
+</svg><figcaption>Figura 25-5　Cuanto mayor es el lote, más expertos se despiertan en cada capa. En Strata, que guarda la mayoría de los expertos en la RAM y los calcula en la CPU, el ahorro de «leer los pesos una vez» que da el batching se compensa en parte con la lectura de más expertos. <span class="ev ev-est">Estimación didáctica</span></figcaption></figure>
+<p>Esta estimación supone que los expertos se eligen de forma uniforme. El enrutamiento real tiene expertos calientes y fríos, así que la unión es menor. Pero la dirección es segura: en una arquitectura donde «los expertos viven en la RAM y la CPU calcula los que fallan», no se puede trasladar sin más lo que se sabe del batching en modelos densos. Hay que medir. Por eso este capítulo lo trata solo como un problema de diseño.</p>
+
+<h2 id="sec-5">25.5 Pasar a varias secuencias: primero aislar el estado, luego hablar de velocidad</h2>
+<p>Supón que decides hacerlo y que Strata atienda dos secuencias a la vez. El primer paso no es escribir un planificador, sino hacer una lista clara: qué se comparte y qué pertenece solo a cada secuencia.</p>
+<p>El código upstream da un buen punto de partida para leer. <code>SessionState</code>, en <code>session.hpp</code>, tiene un comentario que lo describe como «todo lo que necesita una secuencia aparte de los pesos»: el estado de cada capa, el espacio temporal para el cálculo por chunks y la zona de traspaso entre los grupos de expertos de la GPU y de la CPU. <span class="ev ev-code">Hecho de código</span>[S13] Es decir, en el diseño upstream, una secuencia corresponde a un <code>SessionState</code>.</p>
+<p>Más importantes son estas dos líneas del comentario. Las 36 capas GDN <strong>comparten un juego</strong> de espacio temporal, mientras que su <strong>estado</strong> es uno por capa. Las 12 capas QSA también comparten un juego de espacio temporal, y la razón está entre paréntesis: «nunca corren al mismo tiempo». <span class="ev ev-code">Hecho de código</span>[S13] Con una sola secuencia y las capas ejecutándose en orden, este reparto es completamente correcto y además ahorra VRAM. Pero en cuanto dos secuencias corren a la vez, la premisa «nunca corren al mismo tiempo» deja de cumplirse. Los dos lados escriben a la vez en el espacio temporal compartido, y los datos de las dos secuencias se mezclan entre sí.</p>
+<p class="bridge"><strong>Si estudiaste informática:</strong> es la trampa más clásica de la programación concurrente: un código que era correcto solo por una suposición oculta de que «hay un solo ejecutor». Al pasar a varios hilos, hay que sacar a la luz una por una todas esas suposiciones y volver a demostrar la exclusión mutua, o dar a cada ejecutor su propia copia. No basta con poner un cerrojo global por fuera y darlo por terminado.</p>
+<p>Lo siguiente es el presupuesto de VRAM. Upstream reserva de una sola vez el estado de todas las capas para el contexto máximo cuando empieza la sesión. El comentario explica que lo hace porque exige <strong>cero asignaciones</strong> en el camino que genera cada token: un solo <code>cudaMalloc</code> temporal puede pasar todas las demás pruebas y aun así fallar esta. <span class="ev ev-code">Hecho de código</span>[S13] Con varias secuencias, el mismo principio significa que, antes de admitir una secuencia nueva, hay que reservar primero todo su espacio de estado. La figura 25-6 calcula el presupuesto con unas cifras didácticas.</p>
+<figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="Figura 25-6: un presupuesto didáctico. Una secuencia necesita 26 GiB; cinco secuencias que comparten los pesos necesitan solo 34 GiB; copiar todo cinco veces necesitaría 130 GiB">
+<text class="f-text" fill="#182f2b" x="10" y="22" font-size="12" font-weight="600">1 secuencia: 20 + 2 + 2 + 2 = 26 GiB</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="30" width="55.4" height="18"/><rect class="f-warn" fill="#9e5d24" x="65.4" y="30" width="5.5" height="18"/><rect class="f-soft" fill="#e5f1df" x="70.9" y="30" width="5.5" height="18"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76.4" y="30" width="5.5" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="78" font-size="12" font-weight="600">5 secuencias, compartido: 20 + 5 × 2 + 2 + 2 = 34 GiB</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="86" width="55.4" height="18"/><rect class="f-warn" fill="#9e5d24" x="65.4" y="86" width="27.7" height="18"/><rect class="f-soft" fill="#e5f1df" x="93.1" y="86" width="5.5" height="18"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="98.6" y="86" width="5.5" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="12" font-weight="600">5 secuencias, copias completas: 5 × 26 = 130 GiB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="142" width="360" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="26" y="193" font-size="12">Pesos y caché compartidos</text>
+<rect class="f-warn" fill="#9e5d24" x="210" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="226" y="193" font-size="12">Estado por secuencia</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="202" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="26" y="213" font-size="12">Búfer scratch</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="210" y="202" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="226" y="213" font-size="12">Margen reservado</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="233" font-size="12">Barras a escala; cifras = supuestos didácticos</text>
+</svg><figcaption>Figura 25-6　Los pesos hacen falta una sola vez; solo el estado hace falta una vez por secuencia. Por eso cinco secuencias no necesitan ni 5 veces la VRAM ni tan poca como una sola. <span class="ev ev-est">Estimación didáctica</span></figcaption></figure>
+<p>Estas cifras son supuestos didácticos: 20 GiB de pesos y caché compartidos, 2 GiB de estado por secuencia, 2 GiB de espacio temporal y 2 GiB de reserva. <span class="ev ev-est">Estimación didáctica</span> Cinco secuencias activas necesitan 20 + 5 × 2 + 2 + 2 = 34 GiB. Fíjate en dos cosas. Las secuencias con longitudes de contexto distintas tienen tamaños de estado distintos. Y si las cinco secuencias calculan de verdad a la vez, el espacio temporal también hay que recalcularlo según el nivel de concurrencia, y ya no puede ser una copia compartida.</p>
+<p>De aquí sale el principio del <dfn>control de admisión</dfn>: antes de prometer que una secuencia está «activa», se reserva de forma atómica todo su presupuesto. Si el presupuesto no alcanza, se la deja en cola o se la rechaza con claridad. No se debe aceptar primero todas las solicitudes y luego esperar que el asignador de VRAM no falle.</p>
+
+<h2 id="sec-6">25.6 Manos a la obra: por qué la solicitud corta sigue esperando</h2>
+<p>Abre el laboratorio de este capítulo, «Por qué las solicitudes cortas siguen esperando». Compara FIFO y round-robin en tiempo de la primera palabra, tiempo de finalización y costo del cambio. Todas las solicitudes están listas en el instante 0, 1 token tarda 1 milisegundo, y no se modelan el batching ni el prefill en una GPU real. Prueba esto, en orden:</p>
+<ol>
+<li>Con las solicitudes por defecto, compara FIFO y round-robin en el tiempo de la primera palabra: el round-robin deja que la solicitud corta empiece antes.</li>
+<li>Sube el costo del cambio: el tiempo total del round-robin crece, y el precio de la justicia se hace visible.</li>
+<li>Agranda la porción de tiempo hasta que el round-robin dé exactamente el mismo resultado que FIFO.</li>
+</ol>
+<p>Después vuelve a las dos figuras interactivas de este capítulo. En el comparador de planificación, prueba «las solicitudes cortas siguen llegando» y mira cómo SJF deja sin atender a la solicitud larga. En la curva de colas, lleva la utilización al 95 % y ejecuta la simulación varias veces. Las cifras del laboratorio sirven solo para discutir las compensaciones de la planificación; no son mediciones de rendimiento de ningún sistema real.</p>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>El Strata upstream atiende una secuencia a la vez, y las demás solicitudes esperan en el cerrojo FIFO. La planificación para varios usuarios es el ejercicio de diseño de este capítulo, no una función upstream. Cuenta por separado las conexiones, las solicitudes en cola y las secuencias activas.</li>
+<li>FIFO es simple, pero lo bloquean las solicitudes largas. SJF tiene la espera media más corta, pero deja sin atender a las largas. El round-robin hace que todos vean antes una primera palabra, pero paga un costo por cambiar. Cuanto más se acerca la utilización al 100 %, más bruscamente crece la espera.</li>
+<li>Para pasar a varias secuencias, primero hay que encontrar todas las suposiciones ocultas de «un solo ejecutor», como el espacio temporal compartido. Después se calcula el presupuesto con «los pesos una vez, el estado una vez por secuencia» y se reserva de forma atómica antes de admitir una secuencia nueva.</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «El servidor HTTP de Strata es multihilo, así que puede atender a varios usuarios a la vez».</strong></p>
+<p>El multihilo solo permite que varias personas se <strong>conecten</strong> a la vez. Delante del motor, que es el que trabaja de verdad, hay un cerrojo FIFO, y en cada momento solo genera una secuencia. La concurrencia de conexiones, la de hilos y la de secuencias son tres niveles distintos. Ver <code>ThreadingHTTPServer</code> no significa que el motor admita batching continuo.</p></div>
+
+<details class="deep"><summary>Más a fondo: cuatro contadores, detalles del presupuesto, costo del cambio y pruebas de concurrencia</summary>
+<h3>Primero, separar lo que existe de lo que se diseña</h3>
+<p>El archivo de servicio upstream fijado lo dice sin rodeos: una secuencia a la vez detrás de un FIFO. [S15] Quien inició este libro ha comentado que modificó una rama de Strata que admite varias solicitudes concurrentes, pero el código fuente de esa rama queda fuera del alcance de esta revisión. Este capítulo propone <strong>un diseño y un método de prueba para una ampliación multiusuario</strong>, y no afirma haber auditado ni implementado esa rama.</p>
+<p>Hay que contar cuatro números por separado: las conexiones HTTP concurrentes, las solicitudes en cola, las secuencias que están generando y las secuencias que se procesan en el mismo cálculo de kernel. Pueden ser totalmente distintos. Abrir más hilos no resuelve de forma automática el aislamiento de la caché KV, el estado GDN, el estado PLE, los números aleatorios y los búferes temporales.</p>
+<h3>Anotar quién es dueño de cada pieza de estado mutable</h3>
+<p>Los pesos de solo lectura y el contenido de caché de solo lectura se pueden compartir, con la sincronización adecuada. El historial de tokens de cada secuencia, su mapa de páginas KV, el estado GDN, el estado PLE, los parámetros de muestreo, el contador de números aleatorios y la bandera de cancelación deben tener un dueño claro. <code>SessionState</code> de upstream es un buen punto de partida para leer sobre el «estado de la secuencia aparte de los pesos» [S13]. Fíjate en que el historial de PLE y la ventana de tokens también se llaman expresamente «estado de la secuencia» en los comentarios.</p>
+<p>Que el espacio temporal compartido sea seguro depende de que la planificación garantice la exclusión mutua. Un espacio temporal que suponía que «las capas nunca corren a la vez» se rompe de inmediato cuando lo usan dos sesiones a la vez, aunque el código antes fuera correcto. Al añadir concurrencia, hay que listar todas las suposiciones de una sola secuencia, y no solo buscar un mutex global.</p>
+<h3>Detalles del presupuesto</h3>
+<p>Los 34 GiB del texto principal son solo un punto de partida. Si las cinco secuencias necesitan su propio espacio temporal, esos 2 GiB hay que recalcularlos según la concurrencia real. Las secuencias con longitudes de contexto distintas también tienen tamaños de estado distintos. El control de admisión debe reservar el presupuesto de forma atómica antes de prometer que una secuencia está activa. La zona de estacionamiento de sesiones (una función opcional de upstream) usa RAM del host, y también hay que contarla en el presupuesto. <span class="ev ev-report">Informe upstream</span></p>
+<h3>El costo real del round-robin</h3>
+<p>La simulación didáctica supone que cambiar no cuesta nada, o una constante fija. Cuando un motor real cambia de secuencia, si tiene que sacar de la VRAM la caché KV y el estado recurrente de una secuencia y meter los de otra, una porción demasiado pequeña deja que el costo de mover supere al del cálculo. Por eso una evaluación de la «justicia» debe mirar a la vez el tiempo de la primera palabra, el tiempo de finalización, el throughput y la cantidad de estado movido. SJF tiene además un problema práctico: la longitud de una respuesta no se conoce hasta que está completamente generada, así que solo se puede estimar. Para evitar la inanición, un enfoque habitual es dar más prioridad a las solicitudes cuanto más esperan, y eso se llama <dfn>envejecimiento</dfn> (aging).</p>
+<h3>Ejemplo resuelto: el último slot, dos solicitudes en el mismo momento</h3>
+<p>Aserciones de prueba: exactamente una solicitud obtiene un presupuesto válido y pasa a activa, y la otra queda en cola o se rechaza con claridad. No se reserva nada dos veces, y un reintento del cliente no debe crear dos sesiones. Tras completar o cancelar, el presupuesto se libera exactamente una vez, y una solicitud vieja no puede seguir escribiendo en el estado de un slot nuevo.</p>
+<h3>Las pruebas de concurrencia deben apuntar al riesgo de «estado cruzado»</h3>
+<p>Diseña dos solicitudes fijas, A y B, en idiomas o tareas distintos. Primero ejecuta cada una sola y anota las salidas de referencia. Después ejecútalas de forma alternada o en paralelo. Cubre estos casos: A se cancela mientras B continúa; A está en un prefill largo mientras B hace decode; el mismo prefijo con imágenes distintas; la restauración de una sesión; y dos solicitudes que compiten por el último slot de presupuesto.</p>
+<p>Condiciones mínimas para aprobar: el aislamiento del estado es correcto, ninguna promesa supera el presupuesto, nada termina dos veces, no se cuela salida de una solicitud vieja y ninguna solicitud larga sufre inanición. Un sistema cuyo throughput total subió pero que de vez en cuando mezcla contextos no es un servicio de inferencia concurrente aceptable.</p>
+<h3>Los límites de la evidencia de los simuladores</h3>
+<p>Las dos figuras interactivas de este capítulo y su laboratorio son simulaciones didácticas discretas: cada token tarda un tiempo fijo, y no hay prefill real, verificación de borradores, aciertos de prefijo, kernels de GPU ni contención de caché. Sirven solo para discutir las compensaciones de la planificación, y las proporciones que muestran no deben usarse para promocionar el rendimiento de ningún sistema real.</p>
+</details>
