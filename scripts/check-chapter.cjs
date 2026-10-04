@@ -32,6 +32,14 @@ if (lang !== 'zh') {
   const han = lang === 'ja' ? /[这们说时过发个对现么无问还进动样实关应长开见边头间两东车经资认该处则网签维计读钟递传输钮页图标题码块缓选择设显错误]/g : /[\u4e00-\u9fff]/g;
   const cjk = html.replace(/<code>[\s\S]*?<\/code>/g, '').replace(/<(text|tspan|code|span)\b[^>]*\blang="zh"[^>]*>[\s\S]*?<\/\1>/g, '').match(han);
   need(!cjk, `contains ${cjk ? cjk.length : 0} Chinese characters${cjk ? ': ' + [...new Set(cjk)].slice(0, 12).join('') : ''}`);
+  // A lab named in the master must appear under its official translated title, so readers can find it.
+  const labsTr = path.join(root, `content/i18n/${lang}/labs.json`);
+  if (fs.existsSync(labsTr)) {
+    const tr = new Map(JSON.parse(fs.readFileSync(labsTr, 'utf8')).map(l => [l.id, l.title]));
+    for (const l of JSON.parse(fs.readFileSync(path.join(root, 'content/labs.json'), 'utf8'))) {
+      if (zh.includes(l.title) && tr.has(l.id)) need(html.includes(tr.get(l.id)), `lab "${l.id}" must use its official title: ${tr.get(l.id)}`);
+    }
+  }
 }
 
 // Template blocks
