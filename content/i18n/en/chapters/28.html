@@ -1,0 +1,215 @@
+<div class="hook"><span class="eyebrow">A story where every part was green</span>
+<p>Strata's model has a lookup module called PLE (covered in Chapter 11). The developers split it into a few parts: compute a hash, read one row from a big table, run a small computation. Every part was written, and every part passed its comparison test, matching the results of a reference script, numpy and ggml respectively.</p>
+<p>Then the whole model failed an acceptance check. The reason is written in a source comment: these parts <strong>had never been called by the model's main path</strong>. <span class="ev ev-code">Code fact</span>[S13] Every part was correct, yet the machine as a whole was missing a piece. This is the book's last chapter, and it is about how your course project can avoid that trap.</p></div>
+<p class="tldr"><strong>In one line:</strong> when you build a system, first open up one thin "vertical slice": let one token travel all the way from input to output and leave evidence you can check; then add features layer by layer. For every trade-off, write down what it bought, what it cost and how you verify it. When you deliver, label each component with how far its evidence has come.</p>
+
+<h2 id="sec-1">28.1 Every module green, the system still wrong</h2>
+<p>Figure 28-1 draws PLE's situation. Each of the three parts passed its comparison test, yet the model's main path, from layer 0 to layer 47, never once went through them. Look at any one part's test report alone and you would see no problem.</p>
+<figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="Figure 28-1: PLE's three parts each pass their comparison tests, but the model's main path never calls them, and the whole-model acceptance check fails">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle">Parts all pass, but nobody calls them</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="70" y="58" font-size="13" text-anchor="middle">Compute hash</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="80" font-size="12" text-anchor="middle">✓ check passed</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="58" font-size="13" text-anchor="middle">Read one row</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="80" font-size="12" text-anchor="middle">✓ check passed</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="270" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="58" font-size="13" text-anchor="middle">Compute block</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="80" font-size="12" text-anchor="middle">✓ check passed</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M70 94V128M200 94V128M330 94V128"/>
+<text class="f-warn" fill="#9e5d24" x="80" y="116" font-size="13">✗ not wired in</text>
+<text class="f-warn" fill="#9e5d24" x="210" y="116" font-size="13">✗</text>
+<text class="f-warn" fill="#9e5d24" x="340" y="116" font-size="13">✗</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="132" width="380" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="157" font-size="12" text-anchor="middle">Model main path: layer 0 → layer 1 → … → layer 47</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 172V188"/>
+<rect class="f-warn" fill="#9e5d24" x="50" y="190" width="300" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="215" font-size="13" text-anchor="middle">Whole-model acceptance (C1) failed</text>
+</svg><figcaption>Figure 28-1　Passing every part-level test does not mean the system is wired up. Only a test that really walks the whole main path can catch a bug like "never called at all". [S13]</figcaption></figure>
+<p>Bugs like this share one root cause: finish each layer "horizontally" first and connect them only at the end. It is like building a road from city A to city B by paving every kilometer to its final width, only to find on the last day that one stretch in the middle was never connected. The safer way is to build a narrow road first, all the way from A to B. Once cars can drive on it, widen it bit by bit.</p>
+<p>In software, this "narrow road" is called a <dfn>vertical slice</dfn>: one feature runs straight through from entrance to exit. Each layer does only the small part it must, but the whole chain is real, runs, and produces results you can check. For an inference engine, the first vertical slice is: a sentence comes in, goes through encoding, layer-by-layer computation and word picking, comes out as one token, and the key intermediate data are printed so a person can check them.</p>
+<p>A vertical slice is not sloppy code. It must be "thin", not "rough": every step in the chain needs tests, and the reference answers and negative cases from Chapter 26 are just as necessary. What it saves is breadth, not correctness.</p>
+
+<h2 id="sec-2">28.2 System design is writing your trade-offs down</h2>
+<p>Once the vertical slice works, every new feature brings choices: trade more VRAM for speed, or save VRAM; aim for speed first, or for debuggability first. These choices have no standard answer, but they do have a standard way to be written down.</p>
+<aside class="primer" id="c28-system-design">
+<h3>System design and engineering trade-offs</h3>
+<p><dfn>System design</dfn> answers this: under given constraints, how do you organize a pile of parts into a whole that meets the requirements? It differs from writing an algorithm. An algorithm problem usually has an optimal solution; system design is almost always a <dfn>trade-off</dfn> among several goals. Speed, memory, correctness, debuggability and development time often pull against each other.</p>
+<p>A decent trade-off writes down at least five things:</p>
+<p>① <strong>Decision</strong>: what you chose, and what you did not. ② <strong>Gain</strong>: what benefit you got, ideally with numbers. ③ <strong>Cost</strong>: what you paid, again with numbers. ④ <strong>Verification</strong>: how you confirm the benefit is real and the cost is no bigger than stated. ⑤ <strong>Conditions to revisit</strong>: what would make you overturn this decision.</p>
+<p>Item ⑤ is the easiest to forget. Without it, a decision that was reasonable at the time lives on after the conditions change and turns into "legacy" nobody dares to touch. Engineers call this kind of cost, which piles up and must be repaid sooner or later, <dfn>technical debt</dfn>.</p>
+<p>Trade-offs have another common trap: optimizing only the thing you can measure. Look only at average speed and you may sacrifice tail latency; look only at unit tests and you may miss composition errors. So decide at design time which metric measures each goal.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Software_engineering" target="_blank" rel="noopener noreferrer">Wikipedia: Software engineering</a> · <a href="https://en.wikipedia.org/wiki/Technical_debt" target="_blank" rel="noopener noreferrer">Wikipedia: Technical debt</a> · <a href="https://en.wikipedia.org/wiki/Systems_design" target="_blank" rel="noopener noreferrer">Wikipedia: Systems design</a> · <a href="https://en.wikipedia.org/wiki/Trade-off" target="_blank" rel="noopener noreferrer">Wikipedia: Trade-off</a></p>
+</aside>
+<p>Strata's source comments contain many trade-offs written out this clearly. Figure 28-2 lays out one of them: the indexer in the QSA layer picks which history positions to read, and its keys are stored in FP32 rather than the smaller FP16. <span class="ev ev-code">Code fact</span>[S18]</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figure 28-2: a complete record of one trade-off: the indexer's keys are stored in FP32, which buys selections that match the reference, at a cost of about 50 MiB at a 32K context">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="14" font-weight="600" text-anchor="middle">A complete trade-off record</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="380" height="234" rx="10"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="62" font-size="12">Decision</text><text class="f-text" fill="#182f2b" x="112" y="62" font-size="12">Store indexer keys in FP32, not FP16</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="92" font-size="12">Gain</text><text class="f-text" fill="#182f2b" x="112" y="92" font-size="12">Picked positions match the reference</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="122" font-size="12">Cost</text><text class="f-text" fill="#182f2b" x="112" y="122" font-size="12">About 50 MiB for these keys at 32K</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="152" font-size="12">Reason</text><text class="f-text" fill="#182f2b" x="112" y="152" font-size="12">FP16 shifts each score by about 2⁻¹¹</text>
+<text class="f-text" fill="#182f2b" x="112" y="174" font-size="12">relative, right on the "who wins" edge</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="204" font-size="12">Check</text><text class="f-text" fill="#182f2b" x="112" y="204" font-size="12">Same positions exactly; no tolerance</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="234" font-size="12">Revisit if</text><text class="f-text" fill="#182f2b" x="112" y="234" font-size="12">Before moving to INT8: measure flips</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="12" text-anchor="middle">Source: the layout notes at the top of qsa.hpp</text>
+</svg><figcaption>Figure 28-2　A trade-off written out in full: decision, gain, cost, reason, check and when to revisit, all six present. In the comment's own words, this bit of VRAM is "cheap next to a correctness contract". [S18]</figcaption></figure>
+<p>A few more examples come from <code>session.hpp</code>, each writing "what it buys" and "what it costs" side by side <span class="ev ev-code">Code fact</span>[S13]:</p>
+<ul>
+<li><strong>One GPU compute graph per layer.</strong> Recording a layer's dozens of kernel launches into one graph and replaying it took the same work from 2.393 milliseconds down to 1.585 milliseconds in measurement, 1.51 times faster, because the engine's bottleneck is the overhead of "launching kernels", not bandwidth. The related cost is written right next to it. To merge each layer's expert results with that layer's own weights, every layer needs one more graph, so the window in which the CPU can work alongside the GPU shrinks to just the shared-expert stretch. The comment says it plainly: "a strictly serial residual chain cannot hide per-layer CPU work". That part can only be solved by the expert cache in VRAM.</li>
+<li><strong>The debug switch is a runtime parameter.</strong> "Synchronize after every layer" catches bugs you cannot see any other way, but it slows things down. So it is a runtime parameter, not a compile-time option: on when you need it, off the rest of the time.</li>
+<li><strong>Zero memory allocation while generating tokens.</strong> Every piece of state a session needs is allocated once, at the start. The comment points out specifically: if VRAM were requested only at the first token of a long sequence, every existing test would still pass, and only this constraint would be broken.</li>
+</ul>
+<p>The serving layer is the same. Strata's server serves one sequence at a time, first come, first served. When the prompt plus the output cap exceeds the context length, it rejects the request outright with a 400 instead of silently truncating it. [S15] The first choice trades simplicity for state that never gets mixed up; the second trades one error message for users never receiving a truncated result without knowing it.</p>
+<p class="bridge"><strong>If you studied CS:</strong> industry has a practice called the "architecture decision record" (ADR): each important decision gets a short one-page document with its context, the decision and its consequences. In your course report, you can write each design choice as a small card in the format of Figure 28-2.</p>
+
+<h2 id="sec-3">28.3 Three kinds of project: pick one</h2>
+<p>Course projects come in three kinds; pick one based on what you have at hand. All three are graded by the same standard: the quality of the evidence and the completeness of the analysis and engineering, not the price of your graphics card.</p>
+<p><strong>Project A: a tiny engine that needs no graphics card.</strong> Start from <code>labs/tiny_inference.py</code>, which ships with this book. With tiny fixed random weights and a character vocabulary, it chains encoding, normalization, recurrent and attention layers, expert routing, the output and greedy word picking into one complete line. Random weights produce no meaningful language; the goal of this project is to understand how the machinery runs, not to pretend you trained a chat model. Section 28.5 gives a step-by-step route.</p>
+<p><strong>Project B: start from one measurable optimization.</strong> Pick one local direction: decoding quantized blocks, page-table gathers, the cache policy, chunk size, draft-window control, or chunked parsing of streamed output. Submit the derivation, a baseline, the change, negative cases, the results and the limitations. Change one factor at a time; do not flip five switches at once and then show only one total time. Students without a graphics card build a CPU reference implementation and a mathematical simulation; students with one can do a real reproduction on a fixed Strata commit.</p>
+<p><strong>Project C: a multi-user design review.</strong> Submit a design for "running several sequences at once", rather than forcing out a production service at the end of the term. The first step of the design is to decide who owns each piece of data; see Figure 28-3.</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="Figure 28-3: data ownership in a multi-user design: weights are shared read-only, each sequence has its own state, and the scratch area is shared over time">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle">Multi-user design, step 1: who owns which data</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="34" width="360" height="62" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="58" font-size="13" font-weight="600" text-anchor="middle">Read-only, shared by all sequences</text>
+<text class="f-text" fill="#182f2b" x="200" y="82" font-size="12" text-anchor="middle">Model weights, expert data</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="108" width="360" height="62" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="132" font-size="13" font-weight="600" text-anchor="middle">One copy per sequence</text>
+<text class="f-on" fill="#ffffff" x="200" y="156" font-size="12" text-anchor="middle">KV cache, GDN recurrent state, PLE history</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="182" width="360" height="62" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="206" font-size="13" font-weight="600" text-anchor="middle">Scratch (temporary work area)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="230" font-size="12" text-anchor="middle">Only one layer uses it at a time: shareable</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="274" font-size="12" text-anchor="middle">Strata's SessionState: everything but the weights</text>
+</svg><figcaption>Figure 28-3　Data ownership in three parts. Strata puts "everything a sequence needs that is not a weight" into SessionState; the GDN layers' work area is shared by all 36 layers, while the state is one copy per layer. [S13]</figcaption></figure>
+<p>The design document must list: which objects are shared read-only, which are per-sequence state, who owns the scratch area, how scheduling and the VRAM budget are divided, and how cancellation, restore, observability and rollback work. Then use the concurrency acceptance scenarios from Chapter 25 to try to refute your own design. Extra credit goes to a small runnable prototype of the scheduler or of state isolation. Any capability you have not verified must be written as "not implemented": an interface showing five users is not the same as five inference streams really running.</p>
+<p class="bridge"><strong>If you studied CS:</strong> this is exactly the process model from Operating Systems: several processes share a read-only code segment, and each has its own private stack and heap. The KV cache is each sequence's "private memory". Sharing it without protection is two processes overwriting each other's data.</p>
+
+<h2 id="sec-4">28.4 What to deliver: label each component with its evidence</h2>
+<p>The most common problem in project reports is not wrong code; it is calling "written" "done". So every component in the report must state how far its evidence has come:</p>
+<div class="table-wrap"><table><thead><tr><th>Status</th><th>Meaning</th><th>Evidence you can show</th></tr></thead><tbody>
+<tr><td>Code written</td><td>Written and tested, but not yet wired into the main path</td><td>Unit test output</td></tr>
+<tr><td>On the main path</td><td>The main path really calls it</td><td>The log of one complete run that shows it being called</td></tr>
+<tr><td>Real data</td><td>Real input went through it and produced a complete result</td><td>One complete record: input, intermediate values and output, every field filled in</td></tr>
+<tr><td>Simulated, empty or estimated</td><td>Visible in the interface, but backed by fake data, empty fields or estimates</td><td>Must be said plainly and labeled "Teaching estimate"</td></tr>
+</tbody></table></div>
+<p>A component can easily be "code written and on the main path" without having produced any real data yet. That state must be written down as it is, not papered over with the word "done". Strata's source has a good example. The CPU and the GPU are supposed to overlap their work, but if the GPU has already finished a layer by the time the CPU gets its task, the whole pipeline has really degraded into serial execution. Every token is still computed correctly, and the time per layer shows no difference. So the author added a counter that tracks in how many layers the CPU got its task while the GPU was still running. It tells you whether the overlap mechanism is "really working" or "just for show". <span class="ev ev-code">Code fact</span>[S13]</p>
+<p>The report itself follows this order. First pose a question that an experiment could refute, for example: "with the same input and quality gate, does raising the budget for hot experts in VRAM reduce the CPU's compute time?" Then give, in turn, the theory, where it lives in the source, the method, the data, the interpretation and the limitations. Every figure states its units, sample count and measurement conditions; source links point to a fixed commit, not to the ever-changing main branch; raw data and failure logs are all kept. Grading follows this table:</p>
+<div class="table-wrap"><table><thead><tr><th>Dimension</th><th>Points</th><th>Checkable evidence</th></tr></thead><tbody>
+<tr><td>Theory and derivation</td><td>20</td><td>Formulas, units, dependencies and assumptions are correct</td></tr>
+<tr><td>Source and contracts</td><td>20</td><td>Points to real code; tells current code apart from outdated comments</td></tr>
+<tr><td>Code and tests</td><td>25</td><td>Runs; has an independent reference answer, negative cases and edge-case tests</td></tr>
+<tr><td>Experiments and quality</td><td>20</td><td>Paired or alternating comparison, raw data, a quality gate, failures counted too</td></tr>
+<tr><td>Writing and replication</td><td>15</td><td>States the environment, steps and limitations so others can re-check</td></tr>
+</tbody></table></div>
+<p>There are two red lines. Present a teaching simulation as a hardware measurement and the whole "Experiments and quality" dimension scores zero. Leave a state leak unexplained and the whole "Code and tests" dimension scores zero; no amount of performance can make up for a correctness defect. The self-check below lets you grade yourself before you hand it in.</p>
+<div class="viz" data-viz="rubric-check"><figure class="fig"><svg viewBox="0 0 400 256" role="img" aria-label="Figure 28-4: the five rubric weights: theory 20, source 20, code and tests 25, experiments 20, writing 15, plus the two red lines">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="14" font-weight="600" text-anchor="middle">How the 100 points are split</text>
+<text class="f-text" fill="#182f2b" x="10" y="50" font-size="12">Theory and derivation</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="36" width="140" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="328" y="51" font-size="13">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">Source and contracts</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="70" width="140" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="328" y="85" font-size="13">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="12">Code and tests</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="104" width="175" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="363" y="119" font-size="13">25</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="12">Experiments and quality</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="138" width="140" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="328" y="153" font-size="13">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="186" font-size="12">Writing and replication</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="172" width="105" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="293" y="187" font-size="13">15</text>
+<text class="f-warn" fill="#9e5d24" x="10" y="222" font-size="12">Red line: simulation as measured → Experiments = 0</text>
+<text class="f-warn" fill="#9e5d24" x="10" y="246" font-size="12">Red line: unexplained state leak → Code and tests = 0</text>
+</svg><figcaption>Figure 28-4　How the rubric's points are distributed. "Code and tests" carries the most; each red line can wipe out a whole dimension. In the interactive version you can tick items one by one and grade yourself.</figcaption></figure></div>
+
+<h2 id="sec-5">28.5 Hands-on: get the first vertical slice through</h2>
+<p>Take Project A as the example. The first step is not writing a new feature; it is running the existing chain once and looking closely at every field it produces. In this book's repository, run:</p>
+<p><code>python3 labs/tiny_inference.py --prompt "hello" --tokens 8</code></p>
+<p>The output from an actual run while this book was being written contains these things: the model geometry (4 layers, 8 dimensions, 2 of 4 experts picked); a model fingerprint <code>model_id</code> computed from all the weights; the prompt's IDs <code>[8, 5, 12, 12, 15]</code>; the 8 generated IDs and their text <code>"mzjsldhx"</code>; and <code>"draft_matches_greedy": true</code>, which shows that the draft demo's result matches one-at-a-time generation exactly. The text means nothing, because the weights are random; but every field was really computed. This is your first piece of "real data" evidence.</p>
+<p>Next, add one stretch at a time, in the spirit of the vertical slice. For each stretch, first write a test that fails, then write the implementation:</p>
+<ol>
+<li><strong>See the shapes and ownership.</strong> Print each tensor's shape in every layer, and map out which parts are read-only weights and which are changing state.</li>
+<li><strong>Save and restore, chunked prefill.</strong> Save a session, restore it and keep generating; the result must match an uninterrupted run. Split the prompt into several chunks; the result must match processing it in one go.</li>
+<li><strong>Draft and verify.</strong> Change the draft demo's candidates. Once a draft token is rejected at any position, throw away the rest of the draft; the output must match greedy generation.</li>
+<li><strong>Measure.</strong> Measure speed only at the end, and write it up as a record using Chapter 27's method. Note: this script's timings cannot stand in for Strata's performance.</li>
+</ol>
+<p>The five tasks in <code>labs/README.md</code> roughly follow this route. Before you dive in, get a feel for it with the planner below: with the same number of weeks, what do you have on deadline day if you build horizontally versus slice vertically?</p>
+<div class="viz" data-viz="slice-planner"><figure class="fig"><svg viewBox="0 0 400 330" role="img" aria-label="Figure 28-5: progress at week 10. Built horizontally, no feature is complete enough to demo; with vertical slices first, two features already run end to end">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">Horizontal: at week 10</text>
+<text class="f-muted" fill="#5c6d66" x="89" y="46" font-size="12" text-anchor="middle">Code</text>
+<text class="f-muted" fill="#5c6d66" x="131" y="46" font-size="12" text-anchor="middle">Tests</text>
+<text class="f-muted" fill="#5c6d66" x="173" y="46" font-size="12" text-anchor="middle">Wire</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="46" font-size="12" text-anchor="middle">Proof</text>
+<text class="f-text" fill="#182f2b" x="10" y="72" font-size="12">Core</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12">Save</text>
+<text class="f-text" fill="#182f2b" x="10" y="124" font-size="12">Chunk</text>
+<text class="f-text" fill="#182f2b" x="10" y="150" font-size="12">Draft</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="56" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="56" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="56" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="56" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="82" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="82" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="82" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="82" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="108" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="108" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="108" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="108" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="134" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="134" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="134" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="134" width="38" height="22" rx="3"/>
+<text class="f-warn" fill="#9e5d24" x="250" y="76" font-size="13" font-weight="600">Demo-ready: 0</text>
+<text class="f-text" fill="#182f2b" x="250" y="102" font-size="12">Code for all 4</text>
+<text class="f-text" fill="#182f2b" x="250" y="128" font-size="12">No evidence at all</text>
+<text class="f-text" fill="#182f2b" x="10" y="190" font-size="13" font-weight="600">Vertical slices first: at week 10</text>
+<text class="f-muted" fill="#5c6d66" x="89" y="216" font-size="12" text-anchor="middle">Code</text>
+<text class="f-muted" fill="#5c6d66" x="131" y="216" font-size="12" text-anchor="middle">Tests</text>
+<text class="f-muted" fill="#5c6d66" x="173" y="216" font-size="12" text-anchor="middle">Wire</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="216" font-size="12" text-anchor="middle">Proof</text>
+<text class="f-text" fill="#182f2b" x="10" y="242" font-size="12">Core</text>
+<text class="f-text" fill="#182f2b" x="10" y="268" font-size="12">Save</text>
+<text class="f-text" fill="#182f2b" x="10" y="294" font-size="12">Chunk</text>
+<text class="f-text" fill="#182f2b" x="10" y="320" font-size="12">Draft</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="226" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="226" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="226" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="196" y="226" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="252" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="252" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="252" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="196" y="252" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="278" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="278" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="278" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="278" width="38" height="22" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="304" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="112" y="304" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="304" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="304" width="38" height="22" rx="3"/>
+<text class="f-text" fill="#182f2b" x="250" y="246" font-size="13" font-weight="600">Demo-ready: 2</text>
+<text class="f-text" fill="#182f2b" x="250" y="272" font-size="12">Evidence by week 4</text>
+<text class="f-text" fill="#182f2b" x="250" y="298" font-size="12">Drafts not started</text>
+</svg><figcaption>Figure 28-5　The same 10 weeks, the same 16 cells of work (one week per cell). Built horizontally, the cells are packed full, yet not one feature can be demoed; sliced vertically, two features already have real evidence.</figcaption></figure></div>
+<p>The planner's "one cell per week" and "a wrong assumption hidden in the interface" are teaching assumptions, not statistics about any real project. What it wants you to see is a structural difference: a vertical slice exposes problems as soon as the first feature is wired in, when the scope of rework is smallest.</p>
+
+<h2 id="sec-6">28.6 Textbooks have versions too</h2>
+<p>Every code fact in this book was checked against one fixed Strata commit: <code>99f3dbd0b21d1401b3769e0c0d963913607f380b</code>, researched on 2026-10-04. Strata is still iterating fast, and the numbers, defaults and interfaces may change in new versions. When the book needs an upgrade, follow the order in Figure 28-6.</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figure 28-6: the four steps of upgrading the textbook: pin a commit, watch upstream changes, compare the contracts first, then refresh the affected chapters">
+<rect class="f-accent" fill="#136d5a" x="20" y="10" width="360" height="56" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="33" font-size="13" font-weight="600" text-anchor="middle">This book is pinned to one commit</text>
+<text class="f-on" fill="#ffffff" x="200" y="55" font-size="12" text-anchor="middle">99f3dbd…, researched on 2026-10-04</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 66V84"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="86" width="360" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="109" font-size="13" font-weight="600" text-anchor="middle">Upstream main keeps moving</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="131" font-size="12" text-anchor="middle">Numbers, defaults, interfaces may change</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 142V160"/>
+<rect class="f-soft" fill="#e5f1df" x="20" y="162" width="360" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="185" font-size="13" font-weight="600" text-anchor="middle">Compare the contracts first</text>
+<text class="f-text" fill="#182f2b" x="200" y="207" font-size="12" text-anchor="middle">Geometry, state, quantization, scheduling, API</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 218V236"/>
+<rect class="f-soft" fill="#e5f1df" x="20" y="238" width="360" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="261" font-size="13" font-weight="600" text-anchor="middle">Then refresh affected chapters and labs</text>
+<text class="f-text" fill="#182f2b" x="200" y="283" font-size="12" text-anchor="middle">Every change cites new source line numbers</text>
+</svg><figcaption>Figure 28-6　The order for upgrading the textbook: first check whether the contracts changed, then revise the affected chapters. The course is not rewritten every time main updates.</figcaption></figure>
+<p>Why compare the "contracts" first? Because once a contract changes, every derivation and experiment that depends on it is invalid. Strata itself sees it this way: <code>layout.hpp</code> says that every field of the model geometry is a number some kernel depends on, so changing it changes a kernel's contract; it is not tuning a parameter. <span class="ev ev-code">Code fact</span>[S04] During a term you can maintain two versions: a stable one that stays fixed for the term, and a research one that tracks upstream.</p>
+<p>Two more things need saying. First, Strata's code is released under the MIT license [S19]. That license covers the code in the repository; it does not replace the separate licenses of the model weights and other third-party components. Second, this book is independently written teaching material and does not represent an endorsement by the original project. It is a complete first edition you can teach from and study on your own, but it has not yet been externally reviewed by a publisher or by several instructors. Before public release, we suggest cross-review by an instructor in systems and one in model numerics, then using feedback from trial lectures to check the difficulty for beginners.</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>Get one vertical slice through first: one token travels from input to output and leaves real data you can check; then add features layer by layer. Every part green does not mean the system is wired up.</li>
+<li>Write down five things for every trade-off: the decision, the gain, the cost, how you verify it, and when to revisit it. Numbers need units and conditions.</li>
+<li>When you deliver, label each component's evidence stage: code written, on the main path, real data, or simulated. Never let the word "done" paper over any layer.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "It is most efficient to finish and test every module first, then put them together at the end."</strong></p>
+<p>Building in modules is fine; the mistake is "put them together at the end". The interface assumptions between modules are only tested when the modules are really connected. That is what happened to Strata's PLE module: every part passed its comparison test, yet the main path never called them, and nobody found out until the whole-model acceptance check. [S13] The later you wire things up, the more code gets written on a wrong assumption, and the bigger the rework. Wire up one thin line first and build on it; the total work is often smaller.</p></div>
+
+<details class="deep"><summary>Go deeper: report structure, observability, and a final check of your understanding</summary>
+<h3>The structure of a solid report</h3>
+<p>First pose a question you are willing to have an experiment refute; then write, in turn, the theory, where it lives in the source, the method, the data, the interpretation and the limitations. Each conclusion must say which kind it is: a code fact, an experimental result, or a guess. Every figure needs units, sample counts and measurement conditions; source links use a fixed commit hash, not just main; raw performance data and failure logs are all kept; the hashes of the model file and dependencies go into a manifest. Do not hand in just pretty screenshots.</p>
+<h3>How the rubric's red lines are enforced</h3>
+<p>Pass a teaching simulation off as a hardware measurement and none of that experiment's conclusions earn points, however careful the rest of the work is: readers can no longer tell which numbers to trust. If there is an unexplained state leak, performance points cannot offset the correctness defect. What the two red lines have in common is that they break "the evidence can be trusted" itself.</p>
+<h3>Observability: expose the mechanism that is "not actually working"</h3>
+<p>Strata's session code has two designs worth copying. One is the "synchronize every layer" debug mode. It catches bugs such as "a kernel read a buffer that only a later layer writes", which are normally invisible; its price is the synchronization overhead, so it is a runtime parameter, turned on when needed. The other is that overlap counter. If the CPU–GPU overlap degrades into serial execution, neither the return values nor the per-layer times reveal it; only a dedicated count of "layers in which the CPU got its task while the GPU was still running" can catch it. [S13] In your project, every mechanism that claims "speed-up", "overlap" or "cache hits" should come with a counter that proves it is really working.</p>
+<h3>Constraints must be catchable by tests</h3>
+<p>Strata requires no VRAM allocation while generating tokens, so all of a session's state is sized for the maximum length and allocated once, at the start. The comment points out a trap: if one allocation happened at "the first token of a longer sequence", every existing test would still pass. [S13] In other words, a constraint without a dedicated test to check it is only a wish. When you write the design document, put next to every constraint "which test fails if this is broken".</p>
+<h3>A check of your understanding as you leave this book</h3>
+<p>You should be able to explain in your own words: why a 40 GB model file does not necessarily need 40 GB of VRAM; why verifying several tokens at once is not knowing the future in advance; why the same pointer can point to different layers' data; why a fixed-size state does not mean you can roll back to anywhere; why more threads do not mean more sessions can be served; and why a faster number must carry its full conditions. These ideas carry over to any inference engine. Strata is a door into real systems, not a destination whose parameters you must memorize.</p>
+</details>

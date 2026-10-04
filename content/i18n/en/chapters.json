@@ -1,5 +1,472 @@
 [
   {
+    "id": "01",
+    "title": "From one token, see the whole computer",
+    "deck": "You type a sentence into the chat box. What happens inside your computer? First, draw the whole map.",
+    "part": "I · Computing foundations",
+    "courses": [
+      "Intro to Computing",
+      "Software Engineering"
+    ],
+    "prereq": "None. Having used a chat AI such as ChatGPT is enough.",
+    "goals": [
+      "Explain what the model, the inference engine and the app are each responsible for",
+      "Draw the path a sentence takes from input to output",
+      "Tell whether a number is a code fact, an upstream report or an estimate"
+    ],
+    "quiz": [
+      {
+        "text": "The README says \"each word it writes needs only 10 experts\". According to the source code, how many expert picks does generating one token take in total?",
+        "choices": [
+          "10",
+          "480",
+          "24,576"
+        ],
+        "correct": 1,
+        "why": "10 is the number picked in each layer. 48 layers each pick 10, for 480 in total; 24,576 is the total number of experts, not the number used each time."
+      },
+      {
+        "text": "A browser experiment shows \"120 token/s\". What is this number?",
+        "choices": [
+          "Strata's measured speed on your graphics card",
+          "An estimate computed from teaching assumptions",
+          "A speed any computer can reach"
+        ],
+        "correct": 1,
+        "why": "The browser experiment does not run the real model and does not time anything on your hardware. It is a teaching estimate and must not be called a measurement."
+      },
+      {
+        "text": "A source comment says \"no cache here yet\". What should you do next?",
+        "choices": [
+          "Conclude right away that the feature does not exist",
+          "Trace the current calling code and the default configuration",
+          "Delete that code"
+        ],
+        "correct": 1,
+        "why": "Comments can be stuck at an old stage of development. Only the current call chain, default configuration and tests let you draw a conclusion."
+      }
+    ],
+    "problem": "A friend says: \"Strata runs a 125-billion-parameter model on a 12 GB graphics card, so it must compress the model to under 12 GB.\" What is wrong with this sentence? Use this chapter to rewrite it as an accurate one.",
+    "answer": "Quantization does compress the model: in the standard format each parameter takes about 2.25 bits. But all the experts together still take about 34 GB, far more than 12 GB. Strata relies on tiered storage: the parts every token needs and the most used experts sit in VRAM, all the experts sit in RAM, and experts not on the GPU are mostly computed by the CPU right there in RAM. An accurate version: Strata spreads the model across the GPU, RAM and SSD, and keeps only the most used parts on the GPU.",
+    "level": "Intro"
+  },
+  {
+    "id": "02",
+    "title": "Tokens, conditional probability and sampling",
+    "deck": "The model never just says the next word: it first produces a probability table, then rolls the dice.",
+    "part": "I · Computing foundations",
+    "courses": [
+      "Probability",
+      "Information Theory",
+      "Programming"
+    ],
+    "prereq": "Chapter 1. Being able to multiply and divide decimals, and having seen powers of e, is enough.",
+    "goals": [
+      "Use the chain rule to explain how a model generates text one token at a time",
+      "Work out softmax by hand, and explain what temperature and \"subtracting the max\" each do",
+      "Tell a distribution apart from a draw, and explain why the seed and the order of the sampling chain affect the result"
+    ],
+    "quiz": [
+      {
+        "text": "You send the model the same sentence, changing only the role tags in the chat template. Is the model still reading the same question?",
+        "choices": [
+          "Yes, the words you typed did not change",
+          "No, the template is input too, so the ID sequence changed",
+          "It depends on the temperature"
+        ],
+        "correct": 1,
+        "why": "The template wraps around your words, and everything is cut into IDs together. Change the tags and the ID sequence changes; to the model, it is a different question."
+      },
+      {
+        "text": "If you subtract the same number (say, the maximum) from every score, what happens to the probabilities softmax computes?",
+        "choices": [
+          "Nothing changes, they just become less likely to overflow",
+          "They all get smaller",
+          "The ranking gets shuffled"
+        ],
+        "correct": 0,
+        "why": "e^(z−m) = e^z ÷ e^m, so the numerator and denominator are divided by the same number and the ratio stays the same. After subtracting the max, the largest term is e^0 = 1, so nothing overflows."
+      },
+      {
+        "text": "With temperature 0 and a fixed seed, will asking the same question twice always give a word-for-word identical answer?",
+        "choices": [
+          "Always identical",
+          "Not necessarily: a tiny floating-point rounding difference can swap a token",
+          "Always different"
+        ],
+        "correct": 1,
+        "why": "Temperature 0 only guarantees picking the top score at every step. Different kernels sum in different orders, so the last digits of the scores can differ, and when candidates score almost the same, a token can be swapped. Strata's docs record such a case: you have to turn off several settings to repeat byte for byte."
+      }
+    ],
+    "problem": "Scores z = [2, 1, 0], temperature T = 1. ① Compute the three probabilities and the cumulative probabilities. ② Which entry do the random numbers u = 0.5 and u = 0.95 each pick? ③ Why can you not judge whether two runs had the same scores just by comparing their final text?",
+    "answer": "① Subtract the maximum 2 to get [0, −1, −2]; the exponentials are about [1, 0.3679, 0.1353], the sum is 1.5032, the probabilities are about [0.6652, 0.2447, 0.0900], and the cumulative values are [0.6652, 0.9100, 1]. ② u = 0.5 is below 0.6652, so it picks the first entry; u = 0.95 falls in [0.9100, 1), so it picks the third. ③ Different scores can still pick the same token, so the same text does not mean the same scores; and scores that differ only slightly can swap a token at some step, after which the whole rest of the text forks. You should compare the probability tables directly, under the same history.",
+    "level": "Intro"
+  },
+  {
+    "id": "03",
+    "title": "A tensor is memory with coordinates",
+    "deck": "Linear algebra answers \"what to compute\"; memory layout answers \"which cell to fetch the number from\".",
+    "part": "I · Computing foundations",
+    "courses": [
+      "Linear Algebra",
+      "Data Structures",
+      "Computer Organization"
+    ],
+    "prereq": "Chapter 1. Knowing what a vector and a table are is enough.",
+    "goals": [
+      "Multiply a matrix by a vector by hand, and explain the difference between GEMV and GEMM",
+      "Use the shape and strides to compute the memory address of any element",
+      "Explain why the layout belongs in the interface and why shapes are checked at load time"
+    ],
+    "quiz": [
+      {
+        "text": "W has 2 rows and 3 columns, and x has 3 numbers. How many numbers are in y = Wx, and how many multiply-adds does it take?",
+        "choices": [
+          "3 numbers, 6 multiply-adds",
+          "2 numbers, 6 multiply-adds",
+          "2 numbers, 5 multiply-adds"
+        ],
+        "correct": 1,
+        "why": "W has 2 rows, so you take 2 dot products and get 2 numbers; each dot product has 3 multiply-adds, for 2 × 3 = 6 in total."
+      },
+      {
+        "text": "Two tensors have exactly the same shape. Can you use one's memory directly as the other?",
+        "choices": [
+          "Yes, the same shape is enough",
+          "Not necessarily: the strides (layout) and the meaning of the data may differ",
+          "Yes, as long as both are float"
+        ],
+        "correct": 1,
+        "why": "The shape only says which coordinates exist; the strides decide which cell each coordinate maps to. Strata's GDN state has the same shape in the reference implementation and in the kernel, but a different layout."
+      },
+      {
+        "text": "A three-dimensional array of shape (2, 3, 2) is stored in row-major order. What is the address of element (1, 2, 0)?",
+        "choices": [
+          "8",
+          "10",
+          "11"
+        ],
+        "correct": 1,
+        "why": "The strides are (6, 2, 1), so the address = 1×6 + 2×2 + 0×1 = 10. The (i, j, h) layout gives 8, which is just as valid; that is exactly why using the wrong layout raises no error."
+      }
+    ],
+    "problem": "You are writing the interface notes for an \"expert compute\" function. It takes a float* input and hands back a float* output. Write down at least five contracts that must be stated, and point out which of them the C++ type float* itself cannot express.",
+    "answer": "At least: ① the shape (2560 numbers in, 2560 numbers out); ② the layout or strides (contiguous or not, which axis is fastest); ③ whether the input is already normalized; ④ whether the output has already been multiplied by the routing weight (Strata says the expert pool does not multiply; it happens only once, when combining); ⑤ who owns the buffer, how long it can be used, and whether its address is reused (Strata uses the same block of pinned memory for every layer's input: the address stays the same while the content changes). You should also state whether the pointer points to CPU memory or VRAM. float* only says \"points to floating-point numbers\"; it expresses none of the above, not even the length, so only interface notes, semantic types and tests can guard them.",
+    "level": "Intro"
+  },
+  {
+    "id": "04",
+    "title": "Quantization: fewer bits, not less error",
+    "deck": "Store fewer bits and get a smaller model; the price is error, and the error has to be measured.",
+    "part": "I · Computing foundations",
+    "courses": [
+      "Numerical Analysis",
+      "Information Theory",
+      "Computer Organization"
+    ],
+    "prereq": "Chapter 3. Knowing how to round and what binary is, is enough.",
+    "goals": [
+      "Explain where FP32, FP16 and BF16 spend their bits, and how they trade range against precision",
+      "Quantize one symmetric block by hand: the scale, the codes, the restored values and the error",
+      "Work out the real bit width of a quantization format, and explain why Strata's experts take 2.25 bits"
+    ],
+    "quiz": [
+      {
+        "text": "32 four-bit codes plus one 16-bit scale. How many bits does each weight really take on average?",
+        "choices": [
+          "4 bits",
+          "4.5 bits",
+          "16 bits"
+        ],
+        "correct": 1,
+        "why": "(32 × 4 + 16) ÷ 32 = 4.5. The scale takes space too, so the nominal bit width is not the real bit width."
+      },
+      {
+        "text": "A number is 70000. What happens if you store it in FP16 and in BF16?",
+        "choices": [
+          "Both can store it, and accurately",
+          "FP16 overflows to infinity; BF16 can store it, but not very accurately",
+          "Both overflow"
+        ],
+        "correct": 1,
+        "why": "FP16 has only 5 exponent bits, so its maximum is 65504. BF16 has 8 exponent bits and the same range as FP32, but only 7 mantissa bits, so 70000 is stored as 70144."
+      },
+      {
+        "text": "A group of 16 small weights also contains one very large outlier, and they share one scale for 4-bit quantization. What happens?",
+        "choices": [
+          "Nothing much; only the outlier itself has some error",
+          "The scale is stretched, and many small weights are rounded to 0",
+          "Every weight's error becomes 0"
+        ],
+        "correct": 1,
+        "why": "The scale is set by the number with the largest absolute value in the block. The outlier makes the marks coarse, and the small numbers fall onto level 0. Smaller blocks reduce the damage, at the cost of storing more scales."
+      }
+    ],
+    "problem": "Someone says: \"Strata's 4-bit KV cache just shrinks the chat history by half, with no loss of quality at all.\" What kind of evidence would this claim need? Propose two tests you could actually run, and say what result the upstream docs report.",
+    "answer": "Quantization changes the values of K and V, and in a long conversation attention reads them again and again, so errors may build up; \"no loss at all\" therefore needs strong evidence. Test one: fix the same history (teacher forcing) and compare, at each step, the probability distributions (for example with KL divergence) or the perplexity under 8-bit and 4-bit KV, covering short, medium and long contexts. Test two: compare output quality on the same set of real tasks (long-document Q&A, code edits, multi-turn chat, \"needle in a haystack\"), with the tolerance and the failure cases written down in advance. The upstream docs report that 4-bit KV halves the memory and runs about 4% faster at 128K, but perplexity on long documents rises by 8%–12%, while the needle-in-a-haystack test still passes. So it is a trade-off with a cost, not lossless.",
+    "level": "Intro"
+  },
+  {
+    "id": "05",
+    "title": "Performance first principles: bandwidth, compute, and critical path",
+    "deck": "Why does a high-powered GPU produce tokens so slowly? Three ways to measure where the time goes.",
+    "part": "I · Computing foundations",
+    "courses": [
+      "Computer Organization",
+      "Parallel Computing",
+      "Performance Modeling"
+    ],
+    "prereq": "Chapters 3 and 4. Understanding \"bytes per second\" is enough.",
+    "goals": [
+      "Use \"latency + data size ÷ bandwidth\" and roofline to lower-bound a computation's time",
+      "Explain why decode is bandwidth-limited but prefill uses the full compute throughput",
+      "Apply Amdahl's law and critical path to decide if an optimization is worth doing"
+    ],
+    "quiz": [
+      {
+        "text": "One step takes 20% of one token's time. You speed it up 2×. How much faster is the whole system?",
+        "choices": [
+          "2×",
+          "about 1.11×",
+          "1.2×"
+        ],
+        "correct": 1,
+        "why": "Amdahl's law: new time = 0.8 + 0.2 ÷ 2 = 0.9, so overall speedup = 1 ÷ 0.9 ≈ 1.11×. Even infinite speedup caps at 1 ÷ 0.8 = 1.25×."
+      },
+      {
+        "text": "Decoding one token at a time, weights in FP16. What is the bottleneck?",
+        "choices": [
+          "Not enough compute",
+          "Not enough bandwidth to move data",
+          "Disk too slow"
+        ],
+        "correct": 1,
+        "why": "Each weight does 2 operations but moves 2 bytes, so intensity ≈ 1, far left of the ridge. Most of the GPU is idle waiting for data."
+      },
+      {
+        "text": "In Strata, while the CPU computes unmatched experts on one layer, can the GPU start the next layer?",
+        "choices": [
+          "Yes, GPU starts when idle",
+          "No, the next layer needs this layer's merged output",
+          "Depends on VRAM size"
+        ],
+        "correct": 1,
+        "why": "Layers are strictly serial through the residual chain. The source comment says the CPU phase \"cannot be hidden\" in that chain; the fix is to put more experts in VRAM cache."
+      }
+    ],
+    "problem": "Teaching scenario: generating one token requires reading 0.6 GB from main memory; sustained memory bandwidth is 40 GB/s. What is the lower bound on transfer time? Can you conclude \"this machine generates 66.7 tokens per second\"? Why or why not?",
+    "answer": "Lower bound is 0.6 ÷ 40 = 0.015 seconds, or 15 ms; reciprocal is 66.7. But this is only the lower bound for \"this one read\": it does not account for GPU arithmetic, other data transfers, kernel launch overhead, CPU–GPU synchronization, sampling, or the non-overlappable dependency chain. Real speed might be lower; it could also be higher if some data sits in faster VRAM or speculative decoding produces more than one token per step. So this can only be called \"theoretical lower bound for this transfer\", never \"end-to-end speed\" and certainly not \"measured\".",
+    "level": "Intro"
+  },
+  {
+    "id": "06",
+    "title": "Model loading: from a file to tensors you can trust",
+    "deck": "Opening a file, reading it into memory and proving the bytes are right are three different things.",
+    "part": "II · Model and state",
+    "courses": [
+      "Operating Systems",
+      "Software Engineering",
+      "Data Structures"
+    ],
+    "prereq": "The memory hierarchy from Chapter 1; arrays and shapes from Chapter 3; quantization formats from Chapter 4 (knowing \"how many bits each number takes\" is enough).",
+    "goals": [
+      "Explain how mmap, page faults and the page cache relate, and why \"the mapping succeeded\" does not mean \"the data is in RAM\"",
+      "Write the overflow-safe range check o ≤ F and n ≤ F − o, and show how the addition form can be fooled",
+      "Tell checksums from cryptographic hashes, and name the steps where Strata checks its bytes"
+    ],
+    "quiz": [
+      {
+        "text": "You map a 30 GB model file with mmap. Right after the call returns, which statement is most accurate?",
+        "choices": [
+          "All 30 GB have been read into RAM",
+          "Only the mapping between addresses and the file exists; data is read in on first access",
+          "The file has been copied into VRAM"
+        ],
+        "correct": 1,
+        "why": "mmap only records the mapping. The first access to a page causes a page fault; only then does the operating system read that page from the SSD and keep it in the page cache."
+      },
+      {
+        "text": "With 8-bit unsigned integers, the file length is F = 128 and a tensor has offset o = 200 and length n = 100. Which check wrongly lets it through?",
+        "choices": [
+          "o + n ≤ F",
+          "o ≤ F and n ≤ F − o",
+          "Both let it through"
+        ],
+        "correct": 0,
+        "why": "200 + 100 = 300 goes past 255 and wraps to 44; 44 ≤ 128 holds, so the out-of-bounds tensor gets through. The safe form checks o ≤ F first, which already fails, so it rejects at once."
+      },
+      {
+        "text": "Two neighboring bytes in a downloaded file have swapped places. Which check is most likely to miss it?",
+        "choices": [
+          "A checksum that adds up all the bytes",
+          "A SHA-256 hash",
+          "A byte-by-byte comparison with the original"
+        ],
+        "correct": 0,
+        "why": "Addition does not care about order, so swapping two bytes leaves the sum unchanged. SHA-256 is extremely sensitive to any change, and a byte-by-byte comparison catches it too, of course."
+      }
+    ],
+    "problem": "An early version of Strata gave a \"random access\" hint when it opened the expert file on Windows. Speed dropped to 1.93 GB/s, each token took 344 ms, and it never warmed up. Explain why using how the page cache works, and say why \"expert choices look random\" does not mean \"suited to a random access hint\".",
+    "answer": "The \"random access\" hint makes the system turn off read-ahead and drop pages it has read as soon as it can, because it assumes that in a big file read at random, what was read will not be read again. But the expert file is accessed like this: the experts each token picks are scattered, yet the bytes read for one token are almost all read again for the next. A cache's value depends on whether what was read gets read again (reuse), not on whether a single access is sequential. With pages dropped as fast as they come in, every access becomes a page fault and speed falls to SSD level. The right approach is to give no hint and let the page cache keep the pages that are used again and again; with enough RAM, go further and copy the experts into RAM and lock the pages.",
+    "level": "Core"
+  },
+  {
+    "id": "07",
+    "title": "One model layer: normalization, residuals and module contracts",
+    "deck": "48 editors take turns writing suggested changes in the margin: how one layer reads, computes and writes back.",
+    "part": "II · Model and state",
+    "courses": [
+      "Linear Algebra",
+      "Numerical Analysis",
+      "Software Engineering"
+    ],
+    "prereq": "Matrix multiplication from Chapter 3; the idea of experts from Chapter 10 (you can also come back to it when you reach MoE).",
+    "goals": [
+      "Explain the two halves of a layer: read the residual → mixer or MoE → write back, and tell which layers are QSA and which are GDN",
+      "Compute L2 and RMS normalization by hand, and explain why the two differ by a factor of √d",
+      "Give an example of an interface error that is \"right in shape, normal in value, wrong in meaning\", and explain how a combination test catches it"
+    ],
+    "quiz": [
+      {
+        "text": "Strata's rule is \"layers with number % 4 == 3 are QSA layers\", with layers numbered from 0. Which statement is right?",
+        "choices": [
+          "A QSA layer comes once every 3 layers",
+          "The last layer of every group of 4 is QSA, 12 of the 48 layers in all",
+          "Only layer 3 is QSA"
+        ],
+        "correct": 1,
+        "why": "The layer numbers with remainder 3 are 3, 7, 11 … 47, and zero-based 3 is the 4th layer when people count. So it is once every 4 layers, 12 layers in all; the other 36 are GDN."
+      },
+      {
+        "text": "x = [3, 4]. L2 normalization gives [0.6, 0.8]. About what does RMS normalization give?",
+        "choices": [
+          "[0.6, 0.8], the same as L2",
+          "About [0.85, 1.13], √2 times the L2 result",
+          "About [0.3, 0.4], half the L2 result"
+        ],
+        "correct": 1,
+        "why": "RMS = √((9 + 16) ÷ 2) ≈ 3.54, so 3 ÷ 3.54 ≈ 0.85 and 4 ÷ 3.54 ≈ 1.13. L2 divides by 5 and RMS divides by 5 ÷ √2, so RMS is √2 times larger; in d dimensions it is √d times larger."
+      },
+      {
+        "text": "An expert's routing weight is 0.2. If the expert pool has already multiplied by 0.2 once and the combine step multiplies again, what is this expert's final coefficient?",
+        "choices": [
+          "0.2",
+          "0.4",
+          "0.04"
+        ],
+        "correct": 2,
+        "why": "0.2 × 0.2 = 0.04, so the contribution is wrongly shrunk 5×. The result is still a normal number and raises no error, so the defenses are the contract (multiply only once, at the combine) and whole-layer comparison tests."
+      }
+    ],
+    "problem": "Why can a set of unit tests in which \"every operator is correct on its own\" still not prove that a layer is right? Give an example using one of the contracts in this chapter, and say what tests should be added.",
+    "answer": "Unit tests check only each operator's output for given inputs; they cannot check \"who is responsible for what\" between operators. For example, GDN's single-step kernel expects the β it receives to have already passed through sigmoid; if the layer forgets to do it, the kernel still computes a row of normal numbers and every unit test passes. In the same way, routing weights applied once by the expert pool and again by the combine step, the previous layer's expert results paired with this layer's weights, or L2 and RMS normalization mixed up all produce only \"plausible-looking\" numbers. Add combination tests: fix the input and the history state, and compare the whole-layer output, plus intermediate checkpoints such as the half-layer outputs and inject, item by item against an independent reference implementation. Strata's per-layer residual record and half-layer record exist for exactly this purpose.",
+    "level": "Core"
+  },
+  {
+    "id": "08",
+    "title": "Attention, GQA and sparse selection",
+    "deck": "Looking back through the book with a question: how attention is computed, why it gets pricier as text grows, and how Strata's model looks at a little less.",
+    "part": "II · Model and state",
+    "courses": [
+      "Linear Algebra",
+      "Algorithm Design",
+      "Computer Organization"
+    ],
+    "prereq": "Softmax from Chapter 2; vector dot products from Chapter 3; \"the skeleton of a layer\" from Chapter 7.",
+    "goals": [
+      "Compute one attention step by hand: dot-product scores, divide by √d, softmax, weighted sum",
+      "Explain the causal mask and O(n²), and use 12 layers × 2 KV heads × 256 dimensions to show that the KV cache for a 32K context is 768 MiB",
+      "Explain why QSA's \"at most 2051 positions per step\" and \"all the KV must still be kept\" are both true, and tell optimizations that only change the location from those that change the set"
+    ],
+    "quiz": [
+      {
+        "text": "Two earlier positions have values [2, 0] and [0, 4], and both scaled scores are 0. What is the attention output?",
+        "choices": [
+          "[2, 4]",
+          "[1, 2]",
+          "[0, 0]"
+        ],
+        "correct": 1,
+        "why": "The two scores are equal, so softmax gives weights ½ and ½, and the output = ½ × [2, 0] + ½ × [0, 4] = [1, 2]. Attention mixes in proportion; it neither picks one nor simply adds them up."
+      },
+      {
+        "text": "Each QSA layer in Strata's model has 24 query heads and 2 KV heads. Which head count do you multiply by when sizing the KV cache?",
+        "choices": [
+          "24",
+          "2",
+          "48"
+        ],
+        "correct": 1,
+        "why": "The cache stores keys and values, and the 24 query heads share these 2 sets. So each token stores 2 × 256 × 2 (K and V) × 2 bytes = 2 KiB per layer, 24,576 bytes across the 12 layers."
+      },
+      {
+        "text": "QSA looks at no more than 2051 positions for each token it generates. Can we therefore keep only the KV of the last 2051 tokens?",
+        "choices": [
+          "Yes, it never looks at more than that",
+          "No, the next token may pick any old position",
+          "Yes, as long as the context is under 262K"
+        ],
+        "correct": 1,
+        "why": "Each step looks at a picked working set, not a fixed window of the most recent tokens. Different queries pick different old positions, so all the KV must be kept; it can be moved to RAM, but not deleted."
+      }
+    ],
+    "problem": "How many MiB are 805,306,368 bytes? The comment in Strata's qsa.hpp writes it as \"805 MiB\". What is wrong with that? In a VRAM and RAM budget of tens of GB, how large an error can this kind of mix-up cause?",
+    "answer": "805,306,368 ÷ 2^20 = 768 MiB. 805 is the decimal MB you get by dividing by 10^6; the comment treats MB as MiB. 1 MiB = 1.048576 MB, so the two differ by about 4.9%; GiB and GB differ by about 7.4%. In a budget of 12 GB of VRAM and tens of GB of RAM, that means an error of hundreds of MB to several GB, enough to decide \"can we fit a few hundred more experts\" or \"will we run out of VRAM\". When you budget capacity, write the unit for every item, and stick to either powers of 2 or powers of 10.",
+    "level": "Core"
+  },
+  {
+    "id": "09",
+    "title": "GDN: remembering the history in a fixed-size state",
+    "deck": "No flipping through notes, just erasing and rewriting a whiteboard: how the outer product, the Delta rule and gated decay squeeze the history into a 128 × 128 matrix.",
+    "part": "II · Model and state",
+    "courses": [
+      "Linear Algebra",
+      "Discrete Mathematics",
+      "Parallel Computing"
+    ],
+    "prereq": "Dot products and matrices from Chapter 3; L2 normalization and sigmoid from Chapter 7; attention from Chapter 8 (for comparison).",
+    "goals": [
+      "Write a rank-one update with an outer product, and explain why the same key reads the value back",
+      "Work one step of a one-dimensional GDN by hand, and explain why \"decay, then write\" and the reverse give different results",
+      "Show that the state of the 36 GDN layers is about 112 MiB and does not grow with the context, and explain why it cannot simply be rolled back"
+    ],
+    "quiz": [
+      {
+        "text": "The whiteboard is all 0. With key [1, 0], first write [2, 3], then write [5, 1]. What do the Delta rule (α = β = 1) and plain addition each read back?",
+        "choices": [
+          "Both read back [5, 1]",
+          "The Delta rule reads back [5, 1], plain addition reads back [7, 4]",
+          "The Delta rule reads back [7, 4], plain addition reads back [5, 1]"
+        ],
+        "correct": 1,
+        "why": "Before the second write, the Delta rule reads out the old value [2, 3] and writes only the difference [3, −2], so the first row becomes [5, 1]. Plain addition adds [5, 1] straight onto [2, 3], giving [7, 4]."
+      },
+      {
+        "text": "How big is the main state of the 36 GDN layers in Strata's model (128 × 128 × 48 FP32 numbers per layer) in total?",
+        "choices": [
+          "108 MiB, regardless of context length",
+          "108 GiB",
+          "108 MiB per token"
+        ],
+        "correct": 0,
+        "why": "Each layer is 128 × 128 × 48 × 4 bytes = 3 MiB, so 36 layers make 108 MiB; add about 4.2 MiB of convolution history. It is this size from the very first token and does not grow with the context."
+      },
+      {
+        "text": "Within one token, different columns of the whiteboard can be computed in parallel. Does this mean different tokens can also update the state at the same time, independently?",
+        "choices": [
+          "Yes, all tokens can be computed together",
+          "No, step t + 1 needs the state from step t",
+          "It depends on whether there are enough threads"
+        ],
+        "correct": 1,
+        "why": "The parallelism is over the columns within one step: each column reads and writes only itself. Along time it is a chain: the new state depends on the old one, so it must go step by step."
+      }
+    ],
+    "problem": "Using this chapter's one-dimensional example (S = 2, α = 0.5, k = 1, v = 3, β = 0.25), explain why, after speculative decoding rejects a draft word, you cannot just move the position counter back. How does Strata handle it?",
+    "answer": "Once the draft word has gone through GDN, it has already rewritten the state from 2 to 1.5; moving the position counter back does not turn the state back into 2. Nor can the recurrence generally be run backward: both the decay and the Delta write erase part of the old information. The right approach is to save a snapshot, or to start from a state known to be correct and replay only the accepted words. Strata's verify window leaves the GDN state untouched during the check; once it is settled that the first n words are accepted, it replays those n words from the inputs saved in the window, pushing the recurrent state and the convolution history forward. The KV cache is different: the keys and values at rejected positions are simply overwritten when those positions are processed later.",
+    "level": "Core"
+  },
+  {
     "id": "10",
     "title": "MoE: why huge models run on small graphics cards",
     "deck": "Having many parameters does not mean using many parameters at every step.",
@@ -674,5 +1141,317 @@
     "problem": "You added a new GPU backend to Strata and ran one decode successfully on one card with one model pack. Write a support statement that does not overclaim, listing at least the build conditions to record, the scope that was verified, and the parts explicitly not tested.",
     "answer": "Build conditions: the source commit, the compiler and its version, the list of target architectures, every compile switch, the dependency library versions (such as the pinned ggml commit), and the runtime environment variables. Verified scope: the device model and driver, the model pack and quantization format, the KV format, whether only decode or also prefill was tested, the context length and how many tokens were run; label the evidence level clearly as \"compiles\", \"built-in tests pass\", \"tensor-level error against a reference implementation\" or \"end-to-end quality\". Untested parts: list other architectures, other model packs, long contexts, multiple GPUs, another operating system and so on, one by one, as \"untested\". Do not write \"fully supported\", and do not promise bit-identical results with other backends.",
     "level": "Core"
+  },
+  {
+    "id": "23",
+    "title": "From tokens to an API: templates, SSE and tool calls",
+    "deck": "An answer that appears word by word depends on three gates that each \"collect first, then process\".",
+    "part": "V · Serving and scaling",
+    "courses": [
+      "Computer Networks",
+      "Compilers",
+      "Software Engineering"
+    ],
+    "prereq": "Chapter 1 (tokens and tokenization); Chapter 2 (sampling) helps but is not required.",
+    "goals": [
+      "Explain how Strata's serving layer divides the work: the HTTP service, the text front end, and an engine boundary with only one interface, generate",
+      "Rebuild a streamed answer in the right order: incremental UTF-8 decoding, cutting SSE events at blank lines, parsing complete JSON",
+      "Explain why tags and tool calls in the model's output must also be held and collected, and why model output is untrusted input"
+    ],
+    "quiz": [
+      {
+        "text": "Is each chunk of bytes a client reads from the network always one complete SSE event?",
+        "choices": [
+          "Always: the server writes one event at a time",
+          "Not necessarily: a chunk boundary can fall anywhere",
+          "Only Chinese gets cut apart, English does not"
+        ],
+        "correct": 1,
+        "why": "The network and the operating system decide the chunk size, so a chunk can end in the middle of a Chinese character, a piece of JSON or an event. English text gets cut too; it just never shows \"half a character\", because one English letter takes only 1 byte."
+      },
+      {
+        "text": "The UTF-8 encoding of the Chinese character 中 is E4 B8 AD. If a chunk of bytes ends with E4, what should a correct decoder do?",
+        "choices": [
+          "Decode E4 as the replacement character � and read on",
+          "Hold E4 until the next chunk brings the 2 missing bytes",
+          "Drop E4, because it is not a whole character"
+        ],
+        "correct": 1,
+        "why": "E4 in binary is 1110 0100; the three leading 1s say the character has 3 bytes in all. When the chunk ends, 2 continuation bytes are still missing, so hold E4 and join it with the next chunk. Decode it as � or drop it, and the character is lost for good."
+      },
+      {
+        "text": "If you count the SSE events Strata sends back, do you know exactly how many tokens the model generated?",
+        "choices": [
+          "Yes, one token per event",
+          "No, the two have no fixed relation",
+          "Only if there are no tool calls"
+        ],
+        "correct": 1,
+        "why": "The first event only announces that the assistant starts speaking; keep-alive comments appear while a long prompt is read; a token that brings only half a Chinese character has no text to send; and nothing may go out while a tag is held. To count tokens, read the usage field at the end."
+      }
+    ],
+    "problem": "Each time a client receives a chunk of bytes, it decodes the chunk into a string, then parses every data line in it as JSON. Everything works in local testing, but users report that characters sometimes go missing and errors sometimes appear. Explain why, and give the correct order of processing.",
+    "answer": "In local testing the whole answer often arrives in one or two chunks, so the problem stays hidden; on a slow network or behind a proxy the chunks get smaller and the boundaries fall in the middle of characters or events. Decoding each chunk on its own turns a split Chinese character into garbage; parsing an incomplete data line as JSON raises an error, and that event is lost. The correct order is three gates: first use an incremental UTF-8 decoder to join bytes into whole characters, holding incomplete bytes; then collect the text in a buffer and cut out a complete event only at a blank line, skipping comments that start with a colon; finally parse the complete data as JSON. How to test it: cut the same stream into chunks of every size from 1 to 32 bytes; the restored result must be exactly the same every time.",
+    "level": "Core"
+  },
+  {
+    "id": "24",
+    "title": "Lifecycle, cancellation and security boundaries",
+    "deck": "\"Stop answering\" is a signal that has to cross the network, two processes and the GPU; authentication decides who may ask at all.",
+    "part": "V · Serving and scaling",
+    "courses": [
+      "Operating Systems",
+      "Distributed Systems",
+      "Software Engineering"
+    ],
+    "prereq": "Chapter 23 (the serving layer and SSE); knowing the two phases from Chapter 1, prefill (\"reading the prompt\") and decode (\"writing the answer\").",
+    "goals": [
+      "Draw the state machine of a request's lifecycle and explain why \"cancelling\" is a separate state",
+      "Explain how Strata cancels cooperatively: the watcher thread, the cancel flag, engine checkpoints, STOP, and draining to DONE",
+      "Explain what listening only on this computer by default, API keys and constant-time comparison each defend against"
+    ],
+    "quiz": [
+      {
+        "text": "You click \"Stop\" on the web page and the text on screen freezes. Does that show the GPU has stopped computing for this request?",
+        "choices": [
+          "Yes: once the page stops, the GPU stops",
+          "No: the cancel signal has to be passed down layer by layer and confirmed",
+          "Only for short answers"
+        ],
+        "correct": 1,
+        "why": "The web page is only the top layer. The server first has to notice the connection is gone and set the cancel flag, then write STOP to the engine; the engine still has to reach its next checkpoint, and the server releases the FIFO only after it reads this request's DONE."
+      },
+      {
+        "text": "Why does cancelling during prefill often take much longer than cancelling during decode?",
+        "choices": [
+          "The network is slower during prefill",
+          "The engine checks only before each chunk starts, so it must finish the chunk in hand",
+          "The server does not check the cancel flag during prefill"
+        ],
+        "correct": 1,
+        "why": "During decode every token is a checkpoint, so it stops quickly. Prefill runs in chunks, and should_stop is checked once before each chunk starts; a chunk can hold up to 32768 tokens, and reading it can take well over ten seconds."
+      },
+      {
+        "text": "Strata compares API keys with hmac.compare_digest instead of an ordinary string equality check. What does this mainly defend against?",
+        "choices": [
+          "Getting a wrong comparison result",
+          "An attacker guessing the key one character at a time by timing the comparison",
+          "Slow comparisons"
+        ],
+        "correct": 1,
+        "why": "An ordinary comparison returns at the first differing character, so the longer the correctly guessed prefix, the longer it takes, and that leaks information. A constant-time comparison always compares the whole string, so its time has nothing to do with how many characters were right."
+      }
+    ],
+    "problem": "Write at least four checkable conditions for \"cancellation complete\", and explain why the wait for the engine to confirm it stopped must have a time limit.",
+    "answer": "Conditions: ① once cancellation starts, no new token is committed to the client; ② the engine has stopped and written this request's own DONE (or was declared lost and its process ended); ③ this request's leftover output is not read by the next request, and its usage is not booked to another request; ④ the FIFO and other resources are released exactly once; ⑤ the client gets a clear \"cancelled\" or \"failed\" outcome, not \"success\". The wait must be time-limited because Strata holds the FIFO lock the whole time it waits for the STOP echo: if the engine is frozen, an unbounded wait leaves every later request queuing forever. When the limit is reached, the engine is declared lost and its process is ended, so the VRAM and RAM come back with the process, and the next request restarts the engine.",
+    "level": "Core"
+  },
+  {
+    "id": "25",
+    "title": "From one sequence to many users: a scheduler design class",
+    "deck": "Upstream Strata serves one sequence at a time. This chapter is a design class: use scheduling algorithms and queueing theory to work out \"how long the wait is\", then see what must be isolated for multiple sequences.",
+    "part": "VI · Verification and practice",
+    "courses": [
+      "Operating Systems",
+      "Queueing Theory",
+      "Distributed Systems"
+    ],
+    "prereq": "Chapters 23 and 24 (the serving layer, the FIFO and the request lifecycle); expert routing from Chapter 10 and the KV cache from Chapter 17 help.",
+    "goals": [
+      "Tell apart connections, queued requests, active sequences and sequences per computation, and explain upstream Strata's current FIFO, one-sequence setup",
+      "Compare FIFO, SJF and round-robin on waiting time and first-word time for the same requests, and use Little's law and M/M/1 to explain how utilization drives waiting",
+      "Explain the idea of continuous batching, and which state must be isolated and which budget must be reserved atomically before going multi-sequence"
+    ],
+    "quiz": [
+      {
+        "text": "Five people open the web page at the same time and ask the same upstream Strata a question. How many sequences are generating right now?",
+        "choices": [
+          "Five: the HTTP server is multi-threaded",
+          "One: the other requests queue at the FIFO lock",
+          "It depends on how much VRAM the GPU has"
+        ],
+        "correct": 1,
+        "why": "The multi-threaded HTTP server lets all five connect, but there is a FIFO lock in front of the engine, and upstream serves one sequence at a time. Connections and active sequences are two different numbers."
+      },
+      {
+        "text": "Three requests arrive together, with lengths 8, 3 and 5. Which policy gives the shortest average waiting time?",
+        "choices": [
+          "FIFO, in order of arrival",
+          "SJF, shortest first",
+          "Round-robin with a time slice of 1"
+        ],
+        "correct": 1,
+        "why": "SJF runs them in the order 3, 5, 8, with waits of 0, 3 and 8, about 3.67 on average; FIFO averages about 6.33; round-robin lets everyone see a first word early, but its average wait is 7. The price of SJF is knowing the lengths in advance, and it may starve long requests."
+      },
+      {
+        "text": "Under the M/M/1 model, if a server's utilization rises from 80% to 95%, roughly how does the average time in the system change?",
+        "choices": [
+          "A little longer, in proportion to utilization",
+          "It becomes 4 times as long",
+          "Almost no change"
+        ],
+        "correct": 1,
+        "why": "Average time in system W = service time ÷ (1 − ρ). At 80% it is 5 times the service time; at 95%, 20 times: exactly 4 times as long. The closer to full load, the more steeply waiting grows."
+      }
+    ],
+    "problem": "You want Strata to serve two sequences at the same time. In the upstream code, the 36 GDN layers share one set of scratch space, the 12 QSA layers also share one set, and a comment says they \"never run at the same time\". Explain what this means for a multi-sequence rework, and write the test assertions for two requests arriving at the same moment for the last slot.",
+    "answer": "The shared scratch space is correct only because of a hidden premise: \"at any moment there is only one sequence, and layers run one after another\". When two sequences really compute at the same time, the premise breaks: both sides write to the same scratch space at once, and their data get mixed into each other. A rework must dig out every such single-sequence assumption one by one: either scheduling guarantees the two sequences never use it at the same time (mutual exclusion), or each concurrent sequence gets its own scratch space, counted in the VRAM budget. Test assertions for the last slot: exactly one request gets a valid budget and becomes the active sequence, and the other queues or is clearly rejected; nothing is reserved twice, and a retry must not create two sessions; after completion or cancellation the budget is released exactly once; an old request must not write into the new slot's state.",
+    "level": "Extension"
+  },
+  {
+    "id": "26",
+    "title": "Correctness testing: from one formula to a whole session",
+    "deck": "Fluent text is the best liar. A test needs an independent reference answer, and it must first say what \"equal\" means.",
+    "part": "VI · Verification and practice",
+    "courses": [
+      "Software Testing",
+      "Numerical Analysis",
+      "Scientific Method"
+    ],
+    "prereq": "Chapter 4 (floating-point numbers) and Chapter 10 (experts and top-k). Having read Chapters 18 and 20 makes the metamorphic-test examples easier to follow.",
+    "goals": [
+      "Name the five layers of testing for an inference engine and the kind of bug each layer catches",
+      "Compare floating-point results with \"relative tolerance + absolute tolerance\", and judge when they must match bit for bit",
+      "Use differential tests and deliberately planted bugs to check whether a test really works"
+    ],
+    "quiz": [
+      {
+        "text": "Two engines do floating-point additions in different orders, and the last few digits of their results differ. How should a test compare them?",
+        "choices": [
+          "They must be bit-for-bit equal; any difference is a bug",
+          "Compare with a relative plus an absolute tolerance, and check separately whether the chosen word is the same",
+          "As long as neither side crashed, the test passes"
+        ],
+        "correct": 1,
+        "why": "Floating-point addition is not associative, so a different order changes the last few digits anyway, and a bit-for-bit comparison raises false alarms. But checking only \"did not crash\" tests nothing. A tolerance comparison lets legitimate order differences through; the chosen word can flip at near-ties, so record it separately."
+      },
+      {
+        "text": "A unit test checks \"weighted sum\" using only weight 1.0. Why can it not catch the bug \"the weight is applied twice\"?",
+        "choices": [
+          "Because 1.0 squared is still 1.0, so the bug does not show on this input",
+          "Because unit tests cannot test addition",
+          "Because floating-point error hides the bug"
+        ],
+        "correct": 0,
+        "why": "Applying the weight twice turns w into w². At w = 1.0 the two are identical, so of course the test passes. Switch to uneven weights such as 0.7 and 0.3 and the result changes from 1.6 to 0.76, exposing the bug at once. A test with inputs that are too \"tidy\" is born blind to some kinds of bugs."
+      },
+      {
+        "text": "When comparing the expert cache on and off, why does Strata feed both sides the same reference text and compare position by position, instead of letting each side generate on its own and comparing afterwards?",
+        "choices": [
+          "Because generating separately is too slow",
+          "Because after the first divergence the two sides have different context, so later positions cannot be compared",
+          "Because the reference text is shorter"
+        ],
+        "correct": 1,
+        "why": "In free generation, once a single word differs, the input to every later step changes, and the difference spreads all the way down. Teacher forcing shows both sides the same context at every position, so a divergence stays locked where it happened. Only then can you count \"at how many positions the top word is the same\"."
+      }
+    ],
+    "problem": "Strata's KV cache is stored in pages, and a page table locates each slot. Design a metamorphic test for \"changing the paging scheme does not change the attention output\", and explain how to confirm that the test really works.",
+    "answer": "Build an uneven set of K/V values and a fixed query, and first compute a reference output with the simplest contiguous storage. Then store the same data with 1, 4 and 512 slots per page, shuffle the order of the physical pages at random while updating the page table, and compute attention. Require the selected logical slots and the output to match the reference. Since only the storage location changed and the order of operations did not, you can demand bit-for-bit equality (Strata's test demands exactly that). Finally, add a negative case: shuffle the physical pages without updating the page table, and the test must fail. If the negative case also passes, the test never actually read the page table.",
+    "level": "Core"
+  },
+  {
+    "id": "27",
+    "title": "Performance experiments: never move a number away from its conditions",
+    "deck": "Run the same machine three times in a row and the speed can differ by almost a factor of two. A performance number needs its conditions, sample count and statistical method before it can stand up to questions.",
+    "part": "VI · Verification and practice",
+    "courses": [
+      "Statistics",
+      "Performance Engineering",
+      "Scientific Method"
+    ],
+    "prereq": "Chapter 5 (bandwidth and throughput), Chapter 19 (speculative decoding), Chapter 25 (queueing and scheduling) and Chapter 26 (testing).",
+    "goals": [
+      "Read the conditions behind a performance number and judge whether two numbers can be compared directly",
+      "Summarize a set of measurements with the median, percentiles and standard deviation, and explain why one outlier can drag the mean away",
+      "Design a measurement plan with warm-up, repetition and A/B alternation, and write down the formulas for TTFT and \"speed\""
+    ],
+    "quiz": [
+      {
+        "text": "Five requests take 8, 9, 10, 11 and 100 milliseconds. What is their median?",
+        "choices": [
+          "27.6",
+          "10",
+          "100"
+        ],
+        "correct": 1,
+        "why": "Sorted, the number right in the middle is 10. 27.6 is the mean, pulled up by that one 100-millisecond run; 100 is the maximum, which with fewer than 20 samples is also the p95 under the nearest-rank method."
+      },
+      {
+        "text": "To compare configurations A and B, you run A 3 times in a row, then B 3 times in a row. What is the most likely problem?",
+        "choices": [
+          "No problem: the same number of runs is fair",
+          "All the slowness of a just-started machine falls on A, so B looks much faster than it really is",
+          "B is sure to slow down because the machine heats up"
+        ],
+        "correct": 1,
+        "why": "Caches, compute graphs and the file cache all need to \"warm up\", so the first few runs are usually slower. Finish A first and all that slowness lands on A. Warm up first, then alternate A and B, so changes in the machine's state are spread over both sides."
+      },
+      {
+        "text": "Strata's server handles one sequence at a time, and requests are served first come, first served. Five users send requests at once. Which metric gets worse first for the users who arrive later?",
+        "choices": [
+          "Time to first token (TTFT)",
+          "The decode speed between tokens",
+          "The quality of the model's answers"
+        ],
+        "correct": 0,
+        "why": "A later request must first wait in the queue until the earlier requests finish. The waiting time counts toward TTFT, so TTFT grows. Once its turn comes, the decode speed is the same as when used alone, and the answer quality does not change."
+      }
+    ],
+    "problem": "Someone says, \"this card runs at 90 token/s\". Add a minimal checkable note to that statement: which conditions and statistics must it state at the very least?",
+    "answer": "State: the GPU, CPU, RAM and driver; the engine version (commit hash) and build flags; the model file and quantization (ideally with a hash); the actual number of input and output tokens; the KV cache, chunking and draft settings, and whether the caches were cold or warm; the number of requests active at the same time; the sampling parameters; the formula for \"speed\" and where timing starts and stops (for example N ÷ decode time); how many warm-up runs, how many timed repetitions and in what order; report the median and the min–max range, and list the first run on its own; attach every run's raw record, the number of failures and the quality-check results. Without these, it is just one observation that was never properly described.",
+    "level": "Core"
+  },
+  {
+    "id": "28",
+    "title": "Capstone project: build an explainable inference machine",
+    "deck": "Open up one thin vertical slice first, then add features layer by layer. What you deliver is not just code that runs, but the reason for every trade-off and the evidence for every component.",
+    "part": "VI · Verification and practice",
+    "courses": [
+      "Software Engineering",
+      "System Design",
+      "Research Methods"
+    ],
+    "prereq": "Finish the learning track you chose; Chapters 26 (testing) and 27 (measurement) are required.",
+    "goals": [
+      "Plan a course project \"vertical slice first\", so the first feature produces checkable real data as early as possible",
+      "Write up an engineering trade-off as \"decision, gain, cost, verification, when to revisit\"",
+      "Label each component with its evidence stage, and check your report against the rubric"
+    ],
+    "quiz": [
+      {
+        "text": "Every part of Strata's PLE module passed its comparison test, yet the whole-model acceptance check failed. What is the most direct reason?",
+        "choices": [
+          "The comparison tests' tolerance was set too loose",
+          "The model's main path never called these parts",
+          "The graphics card did not have enough VRAM"
+        ],
+        "correct": 1,
+        "why": "The source comment says it plainly: the parts were all built and passed their comparison tests, but the model code never called them. Part-level tests can only prove that a part itself is correct, not that it is wired into the system. Only a test that walks the whole main path can catch this."
+      },
+      {
+        "text": "A course project has 10 weeks and 4 features, and each feature goes through 4 steps: write the code, write the tests, wire it into the main path, and leave evidence. To have something to demo at the deadline, which approach is safer?",
+        "choices": [
+          "Write all the features' code first, then write all the tests and do all the wiring together",
+          "Get one feature running completely from input to output, then do the next",
+          "Write the code for the hardest feature first"
+        ],
+        "correct": 1,
+        "why": "With vertical slices first, the first feature runs end to end by week 4, and two do by week 10; built horizontally, none does by week 10. Vertical slices also expose a wrong interface assumption when the first feature is wired in, so the rework is smallest."
+      },
+      {
+        "text": "One of your components is fully written and wired into the main path, but it has not yet produced a complete record from real input. What should the report say?",
+        "choices": [
+          "Write \"done\"",
+          "Write \"wired into the main path, no real data yet\"",
+          "Leave this component out for now"
+        ],
+        "correct": 1,
+        "why": "Label evidence honestly by stage: code written, on the main path, real data, or simulated. \"Done\" makes readers think it has already produced real results; leaving it out hides your progress. Only by stating exactly which step it stopped at can readers judge."
+      }
+    ],
+    "problem": "Write an optimization hypothesis that you are willing to have an experiment refute, and say which result would make you give it up.",
+    "answer": "Example: keeping the model file, the input, the quality gate and the draft policy fixed, raising the budget for hot experts in VRAM should cut the time the CPU spends computing experts and raise end-to-end decode speed. Run the experiment with Chapter 27's method: after warm-up, repeat with A/B alternation and report the median and the range. If the hit rate rises but the extra swap-in overhead or resource contention leaves end-to-end speed no better, or the quality gate fails, give up this configuration and analyze which factor the model left out.",
+    "level": "Capstone"
   }
 ]

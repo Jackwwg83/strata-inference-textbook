@@ -1,0 +1,234 @@
+<div class="hook"><span class="eyebrow">Start with three numbers</span>
+<p>Strata's README says that on an RTX 5070, the Q2_0 version writes 94 tokens per second. <span class="ev ev-report">Upstream report</span>[S01] That number looks very certain.</p>
+<p>Now look at a test a community member sent in: one RTX 3090, running the Coder model with a 32K-long prompt, the same settings three times in a row, all within 30 seconds. The three output speeds were 52.7, 66.8 and 97.4 tokens per second. <span class="ev ev-report">Upstream report</span> The fastest is almost twice the slowest. So how fast is this machine, really? This chapter is about how to measure so that a speed number survives tough questions.</p></div>
+<p class="tldr"><strong>In one line:</strong> a performance number means something only when it carries its conditions, its sample count and its statistical method. Warm up first, then repeat; report the median and the spread; list the first run on its own; and state which formula you used to compute "speed".</p>
+
+<h2 id="sec-1">27.1 One machine, three speeds in 30 seconds</h2>
+<p>First, the raw records of those three runs. They come from a community test report in the Strata repository: engine version 0.1.26, one RTX 3090, the Coder model, a 32K-long prompt. <span class="ev ev-report">Upstream report</span> (<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/bench/results/2026-09-29-rtx3090-epyc-milan/README.md" target="_blank" rel="noopener noreferrer">RTX 3090 test report</a>)</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="Figure 27-1: the same machine run three times in a row; output speeds are 52.7, 66.8 and 97.4 tokens per second, with a median of 66.8 and a mean of 72.3">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">Same machine, same settings, 32K prompt: three runs</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40 110H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 106V114M137.1 106V114M234.3 106V114M331.4 106V114"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="128" font-size="12" text-anchor="middle">40</text>
+<text class="f-muted" fill="#5c6d66" x="137.1" y="128" font-size="12" text-anchor="middle">60</text>
+<text class="f-muted" fill="#5c6d66" x="234.3" y="128" font-size="12" text-anchor="middle">80</text>
+<text class="f-muted" fill="#5c6d66" x="331.4" y="128" font-size="12" text-anchor="middle">100</text>
+<circle class="f-accent" fill="#136d5a" cx="101.7" cy="92" r="6"/>
+<circle class="f-accent" fill="#136d5a" cx="170.2" cy="92" r="6"/>
+<circle class="f-accent" fill="#136d5a" cx="318.8" cy="92" r="6"/>
+<text class="f-text" fill="#182f2b" x="101.7" y="72" font-size="13" text-anchor="middle">Run 1: 52.7</text>
+<text class="f-text" fill="#182f2b" x="170.2" y="50" font-size="13" text-anchor="middle">Run 2: 66.8</text>
+<text class="f-text" fill="#182f2b" x="318.8" y="72" font-size="13" text-anchor="middle">Run 3: 97.4</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M170.2 100V146"/>
+<text class="f-text" fill="#182f2b" x="165" y="146" font-size="13" text-anchor="end">Median 66.8</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M196.9 100V166"/>
+<text class="f-text" fill="#182f2b" x="202" y="166" font-size="13" text-anchor="start">Mean 72.3</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="12">Time to first token: 12.87, 12.79, 12.80 s</text>
+</svg><figcaption>Figure 27-1　Output speed of the three runs (tokens per second). The fastest is almost twice the slowest, yet the time to first token in the same batch of runs is remarkably steady. Data from the upstream RTX 3090 community report.</figcaption></figure>
+<p>Why such a big gap? The raw records hold clues <span class="ev ev-report">Upstream report</span>:</p>
+<ul>
+<li><strong>The outputs were too short.</strong> The three runs generated only 48, 26 and 45 tokens; the model finished early and stopped. Each decode phase took less than 1 second (911, 389 and 462 milliseconds). Over such short times, any small wobble gets magnified.</li>
+<li><strong>Each run wrote different text.</strong> The three answers all started differently. Strata speeds things up with speculative decoding: guess a few tokens first, then verify them in one go. The more guesses land, the faster it goes. The three runs accepted 31 of 38 drafts, 12 of 21, and 33 of 37. Run 2 guessed worst, yet its speed came out in the middle, so more than one factor drives speed.</li>
+<li><strong>The input drifted too.</strong> All three were nominally "32K prompts", but their real lengths were 28,317, 31,630 and 31,601 tokens. The report recorded the real lengths on purpose, because "nominal length labels drift".</li>
+</ul>
+<p>The report's own conclusion is restrained: run each cell three times, report the median, and also list the first run's value; and mark the whole set of results as "preliminary". That is exactly the habit this chapter teaches.</p>
+<p>First, two words. <dfn>Throughput</dfn> is how much work gets done per unit of time; here it is how many tokens come out per second, written token/s, and bigger is better. <dfn>Latency</dfn> is how long you wait for one thing to finish, such as the time from sending a request to seeing the first word, and smaller is better. People often mix the two up, but they answer different questions.</p>
+
+<h2 id="sec-2">27.2 A number must carry its conditions</h2>
+<p>The "94 token/s" in the README has a full source in Strata's detailed documentation. The document states its conditions first, then gives the table <span class="ev ev-report">Upstream report</span>[S03]; see Figure 27-2.</p>
+<figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="Figure 27-2: the list of conditions for Strata's speed table: GPU, CPU and RAM, operating system, engine version, quantization, input, output and settings">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="14" font-weight="600" text-anchor="middle">A performance number's "ID card"</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="380" height="222" rx="10"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="58" font-size="13">GPU</text><text class="f-text" fill="#182f2b" x="128" y="58" font-size="13">RTX 5070 (12 GB)</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="84" font-size="13">CPU and RAM</text><text class="f-text" fill="#182f2b" x="128" y="84" font-size="13">Ryzen 5 7600, 64 GB DDR5-5200</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="110" font-size="13">OS</text><text class="f-text" fill="#182f2b" x="128" y="110" font-size="13">Windows</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="136" font-size="13">Engine</text><text class="f-text" fill="#182f2b" x="128" y="136" font-size="13">0.1.26 (some cells reuse older)</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="162" font-size="13">Quantization</text><text class="f-text" fill="#182f2b" x="128" y="162" font-size="13">Q2_0, IQ2_XS and three more</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="188" font-size="13">Input</text><text class="f-text" fill="#182f2b" x="128" y="188" font-size="13">One coding prompt per length</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="214" font-size="13">Output</text><text class="f-text" fill="#182f2b" x="128" y="214" font-size="13">Generate 256 tokens</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="240" font-size="13">Settings</text><text class="f-text" fill="#182f2b" x="128" y="240" font-size="13">Installer defaults, MTP draft on</text>
+<text class="f-warn" fill="#9e5d24" x="200" y="280" font-size="12" text-anchor="middle">Leave one out, and no one can compare against it</text>
+</svg><figcaption>Figure 27-2　The conditions of the speed table in Strata's detailed documentation. Each one can change the result, so each one must be written down. [S03]</figcaption></figure>
+<p>The document has a few more details worth learning from <span class="ev ev-report">Upstream report</span>[S03]:</p>
+<ul>
+<li><strong>It flags mixed versions.</strong> Most of the table is from 0.1.26, but a few cells in the 262K column were not retested; they reuse numbers from 0.1.22 or 0.1.14 and are marked with a separate symbol. Numbers that share a table did not necessarily come from the same experiment.</li>
+<li><strong>It says the numbers change with the content.</strong> Output speed also depends on the text itself: the more guesses speculative decoding lands, the faster it goes. So the same prompt with a different answer can differ in speed by several percent.</li>
+<li><strong>It runs comparisons back to back.</strong> When the document compares 0.1.14 with 0.1.12, it runs them back to back on the same 4K prompt and gets 88.5 and 85.7 token/s.</li>
+</ul>
+<p>Back to the 3090 from the start. The README estimates that an RTX 3090 "can write roughly 100–140 tokens per second". [S01] The community report measured less than that, but the two sets of conditions are far apart. The report used a virtual machine; both graphics cards on the test machine had their power manually capped at 280 W; the tester generated the prompts from the source code; and several requests ended early. The report itself says that until it gets the upstream prompts and test method, every comparison with upstream is "for reference only". <span class="ev ev-report">Upstream report</span> Neither number is wrong. They just cannot be compared directly.</p>
+<p class="bridge"><strong>If you studied CS:</strong> this is the first rule of performance evaluation in Computer Architecture: describe the test environment, and change only one variable at a time. In science it is called "controlling variables". A benchmark score without conditions is as useless as a physical quantity without units.</p>
+
+<h2 id="sec-3">27.3 One slow request drags the average away</h2>
+<p>You measured the same thing several times and got a list of numbers. Which number should stand for it? The most common answer is the average, but it has a big flaw. The primer below explains.</p>
+<aside class="primer" id="c27-statistics">
+<h3>Mean, percentiles and variance</h3>
+<p>Take the times of a batch of requests: 8, 9, 10, 11 and 100 milliseconds. The first four are normal; the last one may have run into another program grabbing resources.</p>
+<p>The <dfn>mean</dfn> adds everything up and divides by the count: (8 + 9 + 10 + 11 + 100) ÷ 5 = 27.6 milliseconds. Yet none of the five runs is anywhere near 27.6; the 100 dragged it away. The <dfn>median</dfn> is the number right in the middle once the list is sorted, here 10 milliseconds. Even if the 100 became 10,000, the median would not move. This "not bothered by a few extreme values" property is called robustness.</p>
+<p>A <dfn>percentile</dfn> answers "how slow are most requests". p95 means: 95% of requests are no slower than this. User experience is often set by the slow end: the slowest 1 out of every 20 requests is the one users remember best. There are several conventions for computing p95. This book uses the simplest, the "nearest rank" method: sort from small to large and take item number ⌈0.95 × n⌉. Note: with fewer than 20 samples, p95 is simply the maximum. If you run only 5 times and report p95, you are really reporting "the slowest run".</p>
+<p><dfn>Variance</dfn> and <dfn>standard deviation</dfn> measure how spread out the data are. Sample standard deviation = √( Σ(xᵢ − mean)² ÷ (n − 1) ). For the numbers above it is about 40.5 milliseconds, bigger than the typical value itself. That is a warning: the data contain an outlier, and the mean cannot be trusted.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Median" target="_blank" rel="noopener noreferrer">Wikipedia: Median</a> · <a href="https://en.wikipedia.org/wiki/Percentile" target="_blank" rel="noopener noreferrer">Wikipedia: Percentile</a> · <a href="https://en.wikipedia.org/wiki/Standard_deviation" target="_blank" rel="noopener noreferrer">Wikipedia: Standard deviation</a> · <a href="https://docs.python.org/3/library/statistics.html" target="_blank" rel="noopener noreferrer">Python docs: statistics (including the two methods of quantiles)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 176" role="img" aria-label="Figure 27-3: five times of 8, 9, 10, 11 and 100 milliseconds. The median is 10, the mean is 27.6, and p95 equals the maximum, 100">
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M20 96H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 92V100M105.7 92V100M191.4 92V100M277.1 92V100M362.9 92V100"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="114" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="105.7" y="114" font-size="12" text-anchor="middle">25</text>
+<text class="f-muted" fill="#5c6d66" x="191.4" y="114" font-size="12" text-anchor="middle">50</text>
+<text class="f-muted" fill="#5c6d66" x="277.1" y="114" font-size="12" text-anchor="middle">75</text>
+<text class="f-muted" fill="#5c6d66" x="362.9" y="114" font-size="12" text-anchor="middle">100 ms</text>
+<circle class="f-accent" fill="#136d5a" cx="47.4" cy="80" r="4.5"/>
+<circle class="f-accent" fill="#136d5a" cx="50.9" cy="70" r="4.5"/>
+<circle class="f-accent" fill="#136d5a" cx="54.3" cy="80" r="4.5"/>
+<circle class="f-accent" fill="#136d5a" cx="57.7" cy="70" r="4.5"/>
+<circle class="f-warn" fill="#9e5d24" cx="362.9" cy="76" r="5.5"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M54.3 46V90M114.6 46V90"/>
+<text class="f-text" fill="#182f2b" x="54.3" y="38" font-size="13" text-anchor="middle">Median 10</text>
+<text class="f-text" fill="#182f2b" x="118" y="38" font-size="13" text-anchor="start">Mean 27.6</text>
+<text class="f-text" fill="#182f2b" x="390" y="38" font-size="13" text-anchor="end">p95 = max = 100</text>
+<text class="f-text" fill="#182f2b" x="10" y="146" font-size="12">One slow run: mean jumps to 27.6, median stays 10</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="166" font-size="12">SD ≈ 40.5 ms, larger than a typical value: an outlier</text>
+</svg><figcaption>Figure 27-3　Five samples, three statistics, three stories. Reporting the median and then describing the slow end with p95 or the maximum is far more honest than reporting a mean alone.</figcaption></figure>
+<p>Look back at the three runs in Figure 27-1: median 66.8, mean 72.3, and the "p95" is the fastest run, 97.4. (Here bigger is better, so to see the slow end you must look at the minimum, 52.7.) Taken alone, none of the three numbers is complete. The upstream report gives the median, then attaches the first run's value along with the raw records.</p>
+<p class="bridge"><strong>If you studied CS:</strong> in Probability and Statistics, the median's "breakdown point" is 50%: as long as fewer than half of the data points become arbitrary values, the median cannot run off to infinity. The mean's breakdown point is 0: a single bad data point can drag it away. And performance data are exactly where a few extreme values show up most easily.</p>
+
+<h2 id="sec-4">27.4 The first run is always slow: warm-up and repetition</h2>
+<p>Many systems run slower the first time than later. In Strata, several things "warm up" with use:</p>
+<ul>
+<li><strong>The expert cache.</strong> Which experts sit in VRAM adjusts with the conversation, fitting the current content better the more you use it. <span class="ev ev-report">Upstream report</span>[S02]</li>
+<li><strong>The draft controller.</strong> It starts with an estimate of "how many draft tokens will land", then learns as it goes within each session. <span class="ev ev-code">Code fact</span>[S09]</li>
+<li><strong>The compute graph.</strong> The GPU compute graph of the verification window is recorded only on first use. <span class="ev ev-code">Code fact</span>[S08]</li>
+<li><strong>The operating system's file cache.</strong> A file you just read stays in RAM, and the second read is much faster.</li>
+</ul>
+<p>Some things work the other way and make later runs "unrealistically fast". Strata keeps the conversation and, on a follow-up, reads only the new part. [S02] If a speed test keeps sending the same prompt, from the second run on prefill costs almost nothing, and what you measure is no longer the speed of "reading a 32K prompt". That is why every request in that 3090 report uses a different ID and never reuses a conversation. <span class="ev ev-report">Upstream report</span></p>
+<p>Another community report writes up its method more fully; see Figure 27-4. It tests the IQ2_XS quantization on an RTX 5090 with engine 0.1.29. First it sends a very short warm-up request, not counted in the results. Then, on the same loaded engine, it runs each length three times in a row, in the order 4K, 32K, 128K. Every request reads its full prompt, with 0 reused tokens, and each table cell reads "median [min–max]". <span class="ev ev-report">Upstream report</span> (<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/bench/results/2026-09-30-community-rtx-5090/README.md" target="_blank" rel="noopener noreferrer">RTX 5090 test report</a>)</p>
+<figure class="fig"><svg viewBox="0 0 400 238" role="img" aria-label="Figure 27-4: the run order of the RTX 5090 report. One warm-up is not counted, then three runs per length. The first 4K run is clearly slower, and the report keeps it">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">Community test: RTX 5090, engine 0.1.29, IQ2_XS</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="10" y="32" width="56" height="34" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="38" y="54" font-size="12" text-anchor="middle">Warm-up</text>
+<rect class="f-warn" fill="#9e5d24" x="72" y="32" width="32" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="88" y="54" font-size="13" text-anchor="middle">1</text>
+<rect class="f-accent" fill="#136d5a" x="107" y="32" width="32" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="123" y="54" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="142" y="32" width="32" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="158" y="54" font-size="13" text-anchor="middle">3</text>
+<rect class="f-soft" fill="#e5f1df" x="177" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="193" y="54" font-size="13" text-anchor="middle">1</text>
+<rect class="f-soft" fill="#e5f1df" x="212" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="228" y="54" font-size="13" text-anchor="middle">2</text>
+<rect class="f-soft" fill="#e5f1df" x="247" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="263" y="54" font-size="13" text-anchor="middle">3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="282" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="298" y="54" font-size="13" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="317" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="333" y="54" font-size="13" text-anchor="middle">2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="352" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="368" y="54" font-size="13" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="38" y="84" font-size="12" text-anchor="middle">dropped</text>
+<text class="f-text" fill="#182f2b" x="123" y="84" font-size="13" text-anchor="middle">4K</text>
+<text class="f-text" fill="#182f2b" x="228" y="84" font-size="13" text-anchor="middle">32K</text>
+<text class="f-text" fill="#182f2b" x="333" y="84" font-size="13" text-anchor="middle">128K</text>
+<text class="f-text" fill="#182f2b" x="20" y="120" font-size="13" font-weight="600">The three 4K runs</text>
+<text class="f-text" fill="#182f2b" x="20" y="144" font-size="13">TTFT: 1.183 s → 0.974 s → 0.973 s</text>
+<text class="f-text" fill="#182f2b" x="20" y="166" font-size="13">Decode speed: 161.3 → 184.8 → 179.4 token/s</text>
+<text class="f-text" fill="#182f2b" x="20" y="188" font-size="13">Expert cache hit rate: 97.8% → 99.3% → 98.9%</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="222" font-size="12">Slow first run kept; reported as median [min–max]</text>
+</svg><figcaption>Figure 27-4　One very short warm-up did not "warm up" everything: the first counted 4K run was still slower. The report did not delete it; it let the run show up in the range.</figcaption></figure>
+<p>Note that warm-up request: its prompt had only 19 tokens, and it output only 2. A request that short could not warm everything up. The first counted 4K run had about 0.2 seconds more time to first token and decoded about 10% slower. The report did not quietly drop that run; it says "the slower first 4K run is kept in the range". <span class="ev ev-report">Upstream report</span> That is more honest than deleting it, and it leaves readers the material to judge for themselves.</p>
+<aside class="primer" id="c27-benchmark-method">
+<h3>Warm-up and benchmarking method</h3>
+<p>A <dfn>benchmark</dfn> runs the same task over and over under controlled conditions to measure its performance. To make the results trustworthy, a few basics matter:</p>
+<p><strong>Warm-up.</strong> Before the timed runs, run a few times so the caches, compute graphs and file cache settle into a steady state; these runs do not count. Decide in advance how many warm-up runs and what content to use, and write it in the report. If what you care about is precisely the cold start (say, a user opening the app for the first time), measure the cold start on its own; do not mix it with the warm state.</p>
+<p><strong>Repetition.</strong> One run is one sample. Only by repeating can you see how big the wobble is. Fix the number of repetitions in advance; do not "run until you like the result".</p>
+<p><strong>Interleaving.</strong> When comparing A and B, do not finish all of A and then run B. Alternate: A, B, A, B. Otherwise changes in how warm the machine is, its temperature and its background tasks all land on one side.</p>
+<p><strong>Keep the raw data.</strong> Report the median and the range, and attach the raw record of every run, including the failed and abnormal ones.</p>
+<p>There is one case where you may look only at the fastest run: timing a small piece of <strong>deterministic</strong> code. The Python <code>timeit</code> docs recommend looking at the minimum, because slower results are usually caused by interference from other processes, and the minimum gives the lower bound for how fast the machine runs that code. But the speed of an inference service also depends on the input text, how many draft tokens land and how many cache hits occur. These are not "interference"; they are what real users will actually run into.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Software_performance_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Software performance testing</a> · <a href="https://docs.python.org/3/library/timeit.html" target="_blank" rel="noopener noreferrer">Python docs: timeit</a> · <a href="https://en.wikipedia.org/wiki/Benchmark_(computing)" target="_blank" rel="noopener noreferrer">Wikipedia: Benchmark (computing)</a></p>
+</aside>
+<p>What does each of warm-up, repetition and interleaving fix? The experiment below lets you design the measurement yourself. Its advantage is that it "knows the truth": B really is 5% faster than A, so you can see directly whether your plan measures it correctly.</p>
+<div class="viz" data-viz="bench-warmup"><figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="Figure 27-5: three run orders. With A then B, the cold start falls entirely on A; alternating spreads it over both sides; adding a warm-up throws it away">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">First 3 runs on a cold machine are slow: who pays?</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="12">A then B</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="34" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="103" y="52" font-size="13" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="118" y="34" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="52" font-size="13" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="146" y="34" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="159" y="52" font-size="13" text-anchor="middle">A</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="174" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="187" y="52" font-size="13" text-anchor="middle">A</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="215" y="52" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="243" y="52" font-size="13" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="258" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="52" font-size="13" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="299" y="52" font-size="13" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="314" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="327" y="52" font-size="13" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="342" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="355" y="52" font-size="13" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="10" y="102" font-size="12">Alternate</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="84" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="103" y="102" font-size="13" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="118" y="84" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="102" font-size="13" text-anchor="middle">B</text>
+<rect class="f-warn" fill="#9e5d24" x="146" y="84" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="159" y="102" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="174" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="187" y="102" font-size="13" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="215" y="102" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="243" y="102" font-size="13" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="258" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="102" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="299" y="102" font-size="13" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="314" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="327" y="102" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="342" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="355" y="102" font-size="13" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="10" y="146" font-size="12">Alternate</text>
+<text class="f-text" fill="#182f2b" x="10" y="160" font-size="12">+ warm-up</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#9e5d24" stroke-dasharray="3 3" x="90" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="103" y="152" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#9e5d24" stroke-dasharray="3 3" x="118" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="131" y="152" font-size="13" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#9e5d24" stroke-dasharray="3 3" x="146" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="159" y="152" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="174" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="187" y="152" font-size="13" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="215" y="152" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="243" y="152" font-size="13" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="258" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="152" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="299" y="152" font-size="13" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="314" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="327" y="152" font-size="13" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="342" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="355" y="152" font-size="13" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="10" y="196" font-size="12">Warning color: cold runs. Dashed: warm-up, dropped</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">Row 1: A absorbs every cold run; B looks faster</text>
+</svg><figcaption>Figure 27-5　The run order decides who pays for the cold start. Alternating spreads it over both sides; adding a warm-up throws it away entirely. In the experiment below, the truth is that B is 5% faster.</figcaption></figure></div>
+
+<h2 id="sec-5">27.5 Define the clock first: TTFT and "tokens per second"</h2>
+<p>Even with a sound method, the word "speed" itself can be computed in several ways. After a user sends a request, several stretches of time pass: queueing, prefill ("reading the prompt"), the first token appearing, the later tokens arriving one by one, and the end. Where you start the stopwatch and where you stop it give completely different numbers; see Figure 27-6.</p>
+<div class="viz" data-viz="rate-clock"><figure class="fig"><svg viewBox="0 0 400 248" role="img" aria-label="Figure 27-6: the timeline of one streamed request, and three speed formulas: end-to-end, by decode time, and by gaps">
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="36" width="70" height="26" rx="4"/>
+<text class="f-text" fill="#182f2b" x="55" y="54" font-size="13" text-anchor="middle">Queue</text>
+<rect class="f-soft" fill="#e5f1df" x="90" y="36" width="140" height="26" rx="4"/>
+<text class="f-text" fill="#182f2b" x="160" y="54" font-size="12" text-anchor="middle">Prefill (reading)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" d="M230 32V66M245 32V66M260 32V66M275 32V66M290 32V66M305 32V66M320 32V66M335 32V66M350 32V66M365 32V66M380 32V66"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="84" font-size="12">Request sent</text>
+<text class="f-muted" fill="#5c6d66" x="230" y="84" font-size="12" text-anchor="middle">First token</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="84" font-size="12" text-anchor="end">Last token</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M20 92V98H228V92M232 92V98H380V92"/>
+<text class="f-text" fill="#182f2b" x="124" y="114" font-size="12" text-anchor="middle">TTFT (time to first token)</text>
+<text class="f-text" fill="#182f2b" x="306" y="114" font-size="12" text-anchor="middle">Decode time</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="12">Speed ① end-to-end = N ÷ total request time</text>
+<text class="f-text" fill="#182f2b" x="20" y="168" font-size="12">Speed ② = N ÷ decode time</text>
+<text class="f-text" fill="#182f2b" x="20" y="190" font-size="12">Speed ③ = (N − 1) ÷ decode time; undefined at N = 1</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="218" font-size="12">None is wrong; each answers a different question.</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="236" font-size="12">A report must say which one it used.</text>
+</svg><figcaption>Figure 27-6　One request, one timeline, three "speeds". N is the number of output tokens. In the animated version you can adjust the queue, the output length and the draft acceptance rate.</figcaption></figure></div>
+<p><dfn>TTFT</dfn> (time to first token) is the time from sending a request to the first token appearing. It includes queueing and prefill, and it decides how long the user "waits before seeing anything happen". The RTX 5090 report defines it precisely: start the clock just before sending the HTTP request, stop at the first non-empty piece of text, and ignore empty role messages and keep-alive messages. <span class="ev ev-report">Upstream report</span></p>
+<p>Output speed has even more formulas. Speeds ② and ③ in the figure above differ by just a "minus 1", but for short outputs the gap is not small: with only 26 output tokens, the two differ by 26 ÷ 25 − 1 = 4%. <span class="ev ev-est">Teaching estimate</span> With only 1 output token, speed ③ is not defined at all; forcing it means dividing by 0.</p>
+<p>A "live speedometer" has its own subtleties. A comment in Strata's server source says the live speed shown in the interface is a rate over a time window, not "the average since the first token". The latter is about 1 ÷ elapsed time right after the first token appears; it once showed a five-digit number on the monitoring screen, then read too low for the following second. The window in the code is 2 seconds; when less than 0.25 seconds have passed, it counts as 0.25 seconds. <span class="ev ev-code">Code fact</span>[S15]</p>
+<p>When several users share the system, two more things must be kept apart. <dfn>System throughput</dfn> is how many tokens per second all requests together produce; <dfn>per-stream speed</dfn> is the speed each user sees. Five users at a combined 100 tokens per second does not mean 100 tokens per second each. Strata's server handles one sequence at a time, and requests queue first come, first served. [S15] So for Strata, "five people at once" means the last four are waiting in line: their TTFT grows, while their decode speed stays the same. Chapter 25 covered the cost of this kind of queueing.</p>
+
+<h2 id="sec-6">27.6 Hands-on: write one measurement up as a checkable record</h2>
+<p>This book ships a measurement protocol, <code>labs/benchmark_protocol.md</code>, and a record template, <code>labs/benchmark_template.csv</code>. The template has 31 columns, from the repository version, build flags and model-file hash to queueing, TTFT, decode time, peak VRAM and whether quality passed; each run fills one row. The template contains not a single real benchmark result: a cell that was never measured on real hardware should stay empty.</p>
+<ol>
+<li><strong>Play with this chapter's two experiments first.</strong> In the measurement experiment, find a plan that reliably measures the 5%, and note the repetitions, warm-ups and run order you used. In "three speeds", drag the output length to 1 and see which formulas break.</li>
+<li><strong>Then open the interactive experiment "Why short requests keep waiting" in Chapter 25.</strong> It compares, under first-come-first-served and round-robin scheduling, each request's time to first token and its completion time. Notice: total throughput barely changes, yet each person's experience differs a lot. That is exactly why "per-stream" and "total throughput" must be reported separately.</li>
+<li><strong>Finally, write a record.</strong> If you have a computer that can run Strata, follow the protocol and run one A/B: change one setting at a time, alternate A and B, repeat each group at least 5 times after warm-up, and put every run's raw data into the template. If you do not have such a computer, practice on the upstream RTX 3090 report: copy each run's numbers out of its raw JSON, recompute the median yourself, and list which template columns the report is missing.</li>
+</ol>
+<p>The times in both of this chapter's interactive experiments are teaching assumptions, not Strata measurements. They demonstrate a measurement method, not the speed of any graphics card.</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>A performance number must carry its conditions: hardware, model and quantization, engine version, input and output lengths, cold or warm caches, and concurrency. Numbers from different conditions cannot be compared directly.</li>
+<li>Warm up first, then repeat, and alternate A and B. Report the median and the range, list the first run on its own, and keep the raw data and the failed runs.</li>
+<li>Define the clock before talking about "speed": TTFT, end-to-end speed and decode speed each answer a different question, and system throughput is not each user's speed.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "Only the fastest run shows what the machine can really do."</strong></p>
+<p>When you time a small piece of deterministic code, the fastest run does mean something: the Python <code>timeit</code> docs say the minimum gives a lower bound on how fast the machine runs that code. But an inference service's speed also depends on what text it wrote this time, how many draft tokens landed and how many cache hits occurred. The fastest value in Figure 27-1, 97.4, was just the luckiest of three runs. Every day, users experience speeds near the median and remember the slowest few. Reporting only the fastest run is cherry-picking the data that flatter you.</p></div>
+
+<details class="deep"><summary>Go deeper: experimental units, representative scenarios, paired comparison and quality gates</summary>
+<h3>An experimental unit is a full set of conditions</h3>
+<p>Record at least: repository version (commit hash), executable and build flags, model-file hash, quantization, CPU and GPU models, RAM channels and frequency, driver version, context length, input token count, output cap, KV cache mode, prefill chunk size, draft settings, cold or warm caches, the definition of concurrency, sampling parameters and the random seed. Miss one key variable and two sets of numbers may no longer be comparable. Strata's detailed documentation mixes cells from different engine versions in one table, and adds the results of a new kernel in a separate paragraph. [S03] That document is good for practicing "reading a performance table", but you cannot treat all its cells as one unified experiment, let alone as this book's own measurements.</p>
+<h3>Define each clock boundary</h3>
+<p>End-to-end TTFT: from sending the request to the first output token. Queue time: from entering the queue to being allowed to run. Prefill time: from starting to process new input to the needed history state being ready. Decode time: the generation process, counted between clearly defined start and end points. Completion time: from sending the request to the final success or failure state. Both decode rates, <code>N ÷ decode time</code> and <code>(N − 1) ÷ (last token time − first token time)</code>, may be reported, but the definition must be written down and never quietly swapped between systems. At N = 1 the latter is undefined, and should be shown as "undefined", not as a huge rate.</p>
+<h3>Three representative scenarios for a coding assistant</h3>
+<p><strong>Understanding a cold repository</strong>: a long system prompt, tool definitions, code context and the first answer; mainly look at cold prefill, TTFT and peak memory. <strong>Incremental edits</strong>: a large prefix can be reused, with only new error messages and code diffs added; look at whether the cache works and how fast the tail is processed. <strong>Tool loops and branching</strong>: short generations, tool output, continuation and opening a new branch; look at state restore, cancellation and protocol semantics. Input lengths can be 1K, 4K, 16K, 32K, 64K, 128K and a near-full window that is actually supported, with explicit room left for output. Do not use the whole "maximum context" for the prompt and then ask for extra generation. Check the legal limits for a specific model and configuration against the real engine: Strata's server flatly rejects a request whose "prompt plus output cap exceeds the context", returning 400, and never truncates. [S15]</p>
+<h3>Single-stream and multi-stream tests answer different questions</h3>
+<p>A single-stream test looks at each user's immediate experience. A multi-stream test must also report the number of active streams, total throughput, per-stream TTFT and token-gap p50 / p95, failure rate, queueing and fairness. Sparse arrivals and synchronized peaks also differ: a multi-stream scaling test should fix the arrival process, the distribution of request lengths and the cold or warm state, and keep the raw timestamps of every request. Averaging several already computed rates usually does not equal total tokens divided by total time.</p>
+<h3>Pairing, alternation and intervals</h3>
+<p>Pair your A/B comparisons when you can: run the same prompt once on A and once on B and compare the difference, rather than running three different prompts on each and comparing medians. When comparing different layer split points, that RTX 3090 report warns that the prompts of each run were generated independently, so the ranking is "not a paired comparison" and the medians should be read with care. <span class="ev ev-report">Upstream report</span> Strata's documentation also suggests adding switches such as <code>--pcie-frac 0</code> for A/B tests, so that the same prompt gives the same answer every time; otherwise the answer changes, and the speed changes with it. [S03] With very few samples, p95 is highly unstable, so always give the sample count and the raw records. To give a confidence interval, you can resample the raw samples with the bootstrap. Removing outliers needs a rule written down in advance, and the reason for each removal must be kept. Picking the fastest run and reporting it has no generalizable statistical meaning.</p>
+<h3>Pass the quality gate first, then compare speed</h3>
+<p>Speculative decoding, quantization, KV cache formats, prefix caching and CPU / GPU dispatch can all change the execution path. "20% faster" is not a successful optimization if the answers got half as long, or if failed requests were left out of the count. When Strata's documentation reports a speed-up, it also reports how close the result stays to the FP16 reference (the KL divergence under teacher forcing). [S03] Record each run with <code>labs/benchmark_template.csv</code>; the A/B procedure and the conditions for refusing a release are in <code>labs/benchmark_protocol.md</code>. Cells with no real hardware data stay blank; this book has not filled in any guessed GPU benchmark scores.</p>
+</details>
