@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>访问统计 · 从 Strata 学推理系统</title>
+<style>
+:root{--bg:#f6f7f3;--surface:#fff;--ink:#16332a;--ink2:#46594f;--muted:#6b7b72;--line:#e1e6df;--grid:#edf0eb;--mark:#136d5a;--mark-hover:#0d5243;--warn:#9a3412;--sans:system-ui,-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+@media (prefers-color-scheme:dark){:root{--bg:#101714;--surface:#17211d;--ink:#e6efe9;--ink2:#b7c6bd;--muted:#8c9d93;--line:#2a3832;--grid:#22302a;--mark:#5fbf9d;--mark-hover:#86d4b7;--warn:#fdba74}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+a{color:var(--mark)}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 16px 60px}
+header{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:center;justify-content:space-between;margin-bottom:22px}
+h1{font-size:22px;margin:0;font-weight:650;letter-spacing:-.01em}
+h1 small{display:block;font-size:12px;color:var(--muted);font-weight:400;letter-spacing:0}
+h2{font-size:15px;margin:0 0 2px;font-weight:650}
+.sub{color:var(--muted);font-size:12px;margin:0 0 14px}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+button,select,input{font:inherit;color:inherit}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--surface)}
+.seg button{border:0;background:none;padding:6px 12px;cursor:pointer;color:var(--ink2)}
+.seg button[aria-pressed=true]{background:var(--mark);color:#fff}
+@media (prefers-color-scheme:dark){.seg button[aria-pressed=true]{color:#0c1512}}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:6px 12px;cursor:pointer}
+.btn:focus-visible,.seg button:focus-visible,input:focus-visible{outline:2px solid var(--mark);outline-offset:2px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 18px 14px;min-width:0}
+.grid{display:grid;gap:14px}
+.tiles{grid-template-columns:1.4fr repeat(4,1fr);margin-bottom:14px}
+.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media (max-width:900px){.tiles{grid-template-columns:repeat(2,1fr)}.tiles .hero{grid-column:1/-1}.two,.three{grid-template-columns:1fr}}
+.tile .label{color:var(--muted);font-size:12px}
+.tile .value{font-size:28px;font-weight:650;line-height:1.25;margin-top:4px}
+.tile.hero .value{font-size:52px}
+.tile .note{color:var(--muted);font-size:11px;margin-top:2px}
+.chart{position:relative;width:100%}
+.chart svg{display:block;width:100%;height:auto;overflow:visible}
+.chart .axis{font-size:11px}
+.chart .axis{fill:var(--muted);font-size:10px;font-variant-numeric:tabular-nums}
+.chart .gridline{stroke:var(--grid);stroke-width:1}
+.chart .baseline{stroke:var(--line);stroke-width:1}
+.chart .bar{fill:var(--mark)}
+.chart .hit{fill:transparent;cursor:default}
+.chart .hit:hover+.bar,.chart .bar.on{fill:var(--mark-hover)}
+.tip{position:absolute;pointer-events:none;background:var(--ink);color:var(--surface);font-size:12px;padding:6px 9px;border-radius:7px;white-space:nowrap;transform:translate(-50%,-100%);margin-top:-8px;opacity:0;transition:opacity .08s}
+.tip.on{opacity:1}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--grid);vertical-align:middle}
+th{color:var(--muted);font-weight:500;font-size:12px}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.rank td:first-child{width:46%}
+.inline-bar{height:8px;border-radius:0 4px 4px 0;background:var(--mark);min-width:2px}
+.empty{color:var(--muted);font-size:13px;padding:10px 0}
+details{margin-top:8px}
+summary{cursor:pointer;color:var(--muted);font-size:12px}
+.login{max-width:380px;margin:12vh auto 0}
+.login input{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--surface);margin:10px 0}
+.err{color:var(--warn);font-size:13px;min-height:20px}
+.foot{color:var(--muted);font-size:12px;margin-top:22px;line-height:1.8}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.scroll{overflow-x:auto}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<script>
+'use strict';
+const TOKEN_KEY = 'strata-admin-token';
+const OPT_OUT = 'strata-no-track';
+const TZ = 'Asia/Shanghai';
+const app = document.getElementById('app');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = n => Number(n || 0).toLocaleString('zh-CN');
+const regionName = (() => { try { const d = new Intl.DisplayNames(['zh-CN'], { type: 'region' }); return c => { try { return d.of(c) || c; } catch { return c; } }; } catch { return c => c; } })();
+let days = 30, last = null, resizeTimer = 0;
+window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => last && render(last), 150); });
+
+function store(kind, key, value) {
+  try {
+    const s = kind === 'session' ? sessionStorage : localStorage;
+    if (value === undefined) return s.getItem(key);
+    if (value === null) s.removeItem(key); else s.setItem(key, value);
+  } catch { return null; }
+}
+
+function loginView(message) {
+  app.innerHTML = `<div class="card login"><h1>访问统计<small>从 Strata 学推理系统 · 管理后台</small></h1>
+    <form id="login"><label for="pw" class="sub" style="display:block;margin:14px 0 0">管理口令</label>
+    <input id="pw" type="password" autocomplete="current-password" required>
+    <div class="err" role="alert">${esc(message || '')}</div>
+    <button class="btn" type="submit">进入</button></form>
+    <p class="foot">口令只保存在当前标签页，关闭即失效。</p></div>`;
+  document.getElementById('login').onsubmit = e => {
+    e.preventDefault();
+    store('session', TOKEN_KEY, document.getElementById('pw').value);
+    load();
+  };
+  document.getElementById('pw').focus();
+}
+
+async function load() {
+  const token = store('session', TOKEN_KEY);
+  if (!token) return loginView();
+  let res;
+  try {
+    res = await fetch('/api/stats?days=' + days, { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' });
+  } catch {
+    return loginView('网络错误，无法连接统计接口。');
+  }
+  if (res.status === 401) { store('session', TOKEN_KEY, null); return loginView('口令不对。'); }
+  if (!res.ok) return loginView('统计接口出错（HTTP ' + res.status + '）。');
+  render(await res.json());
+}
+
+// Every day in the window, in the dashboard timezone, so empty days show as zero.
+function dayRange(n, generatedAt) {
+  const out = [];
+  const end = new Date(generatedAt);
+  for (let i = n - 1; i >= 0; i--) out.push(new Date(end.getTime() - i * 86400000).toLocaleDateString('sv-SE', { timeZone: TZ }));
+  return out;
+}
+
+function niceMax(v) {
+  if (v <= 4) return 4;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
+  return 10 * p;
+}
+
+// Single-series column chart. Bars grow from one baseline, 4px rounded tip, width capped at 24px.
+function columns(id, items, opts) {
+  // Draw at the real container width so axis text keeps its true size on phones.
+  const W = Math.max(300, Math.min(1120, app.clientWidth - 70)), H = W < 520 ? 190 : 220, L = 34, R = 6, T = 10, B = 26;
+  const max = niceMax(Math.max(0, ...items.map(d => d.value)));
+  const band = (W - L - R) / Math.max(1, items.length);
+  const bw = Math.max(2, Math.min(24, band - 2));
+  const y = v => T + (H - T - B) * (1 - v / max);
+  const ticks = [0, max / 2, max];
+  const every = Math.ceil(items.length / Math.max(4, Math.min(opts.maxLabels || 12, Math.floor(W / 46))));
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(opts.label)}">`;
+  for (const t of ticks) svg += `<line class="gridline" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text class="axis" x="${L - 6}" y="${y(t) + 3}" text-anchor="end">${fmt(t)}</text>`;
+  items.forEach((d, i) => {
+    const cx = L + band * i + band / 2, top = y(d.value), h = (H - B) - top;
+    const r = Math.min(4, h, bw / 2);
+    const x0 = cx - bw / 2, x1 = cx + bw / 2, base = H - B;
+    const path = h > 0 ? `M${x0},${base}V${top + r}Q${x0},${top} ${x0 + r},${top}H${x1 - r}Q${x1},${top} ${x1},${top + r}V${base}Z` : '';
+    svg += `<rect class="hit" data-i="${i}" x="${L + band * i}" y="${T}" width="${band}" height="${H - T - B}"/>`;
+    svg += `<path class="bar" d="${path}"/>`;
+    if (i % every === 0) svg += `<text class="axis" x="${cx}" y="${H - 8}" text-anchor="middle">${esc(d.label)}</text>`;
+  });
+  svg += `<line class="baseline" x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}"/></svg>`;
+  return `<div class="chart" id="${id}">${svg}<div class="tip" role="status"></div></div>`;
+}
+
+function bindTips(id, items, text) {
+  const box = document.getElementById(id);
+  if (!box) return;
+  const tip = box.querySelector('.tip');
+  const svg = box.querySelector('svg');
+  box.querySelectorAll('.hit').forEach(hit => {
+    const i = Number(hit.dataset.i);
+    const show = () => {
+      const r = hit.getBoundingClientRect(), b = box.getBoundingClientRect(), s = svg.getBoundingClientRect();
+      tip.innerHTML = text(items[i]);
+      tip.style.left = (r.left - b.left + r.width / 2) + 'px';
+      tip.style.top = (s.top - b.top + 8) + 'px';
+      tip.classList.add('on');
+      hit.nextElementSibling.classList.add('on');
+    };
+    const hide = () => { tip.classList.remove('on'); hit.nextElementSibling.classList.remove('on'); };
+    hit.addEventListener('mouseenter', show);
+    hit.addEventListener('mouseleave', hide);
+    hit.addEventListener('click', show);
+  });
+}
+
+function rankTable(rows, nameHead, name, valueHead = '访客') {
+  if (!rows.length) return '<div class="empty">暂无数据</div>';
+  const max = Math.max(...rows.map(r => r.visitors));
+  return `<table class="rank"><thead><tr><th>${nameHead}</th><th></th><th class="num">${valueHead}</th></tr></thead><tbody>${rows.map(r =>
+    `<tr><td>${esc(name(r))}</td><td style="width:40%"><div class="inline-bar" style="width:${(r.visitors / max * 100).toFixed(1)}%"></div></td><td class="num">${fmt(r.visitors)}</td></tr>`).join('')}</tbody></table>`;
+}
+
+function dataTable(head, rows) {
+  return `<details><summary>查看数据表</summary><div class="scroll"><table><thead><tr>${head.map((h, i) => `<th class="${i ? 'num' : ''}">${h}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map((c, i) => `<td class="${i ? 'num' : ''}">${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div></details>`;
+}
+
+const TYPE = { pageview: '浏览', chapter_done: '学完', quiz_answer: '答题' };
+const DEVICE = { desktop: '桌面', mobile: '手机', tablet: '平板' };
+
+function render(s) {
+  last = s;
+  const dayMap = new Map(s.daily.map(d => [d.day, d]));
+  const daily = dayRange(s.days, s.generatedAt).map(day => ({ day, label: day.slice(5), value: dayMap.get(day)?.visitors || 0, pageviews: dayMap.get(day)?.pageviews || 0 }));
+  const chMap = new Map(s.chapters.map(c => [c.chapter, c]));
+  const chapters = Array.from({ length: 28 }, (_, i) => String(i + 1).padStart(2, '0')).map(id => {
+    const c = chMap.get(id) || { readers: 0, views: 0, completions: 0 };
+    return { id, label: id, value: c.readers, views: c.views, completions: c.completions };
+  });
+  const completions = chapters.reduce((a, c) => a + c.completions, 0);
+  const optedOut = store('local', OPT_OUT) === '1';
+  app.innerHTML = `
+  <header>
+    <h1>访问统计<small>从 Strata 学推理系统 · 数据截至 ${esc(new Date(s.generatedAt).toLocaleString('zh-CN', { timeZone: TZ }))}（北京时间）</small></h1>
+    <div class="controls">
+      <div class="seg" role="group" aria-label="时间范围">${[7, 30, 90].map(n => `<button data-days="${n}" aria-pressed="${n === s.days}">${n} 天</button>`).join('')}</div>
+      <button class="btn" id="refresh">刷新</button>
+      <button class="btn" id="optout">${optedOut ? '✓ 本浏览器不计入统计' : '把本浏览器排除出统计'}</button>
+      <button class="btn" id="logout">退出</button>
+    </div>
+  </header>
+  <section class="grid tiles">
+    <div class="card tile hero"><div class="label">今日访客</div><div class="value">${fmt(s.summary.todayVisitors)}</div><div class="note">按"IP + 浏览器 + 日期"哈希去重</div></div>
+    <div class="card tile"><div class="label">浏览量</div><div class="value">${fmt(s.summary.pageviews)}</div><div class="note">近 ${s.days} 天</div></div>
+    <div class="card tile"><div class="label">访客·天</div><div class="value">${fmt(s.summary.visitorDays)}</div><div class="note">每天去重后相加</div></div>
+    <div class="card tile"><div class="label">学完章节</div><div class="value">${fmt(completions)}</div><div class="note">读者手动标记</div></div>
+    <div class="card tile"><div class="label">事件总数</div><div class="value">${fmt(s.summary.events)}</div><div class="note">浏览 + 学完 + 答题</div></div>
+  </section>
+  <section class="card" style="margin-bottom:14px">
+    <h2>每日访客</h2><p class="sub">近 ${s.days} 天，北京时间按天统计；悬停看浏览量</p>
+    ${columns('c-daily', daily, { label: '每日访客柱状图', maxLabels: 10 })}
+    ${dataTable(['日期', '访客', '浏览量'], daily.slice().reverse().map(d => [d.day, fmt(d.value), fmt(d.pageviews)]))}
+  </section>
+  <section class="card" style="margin-bottom:14px">
+    <h2>各章读者</h2><p class="sub">每章被多少访客打开过（按天去重）。从左往右下降的地方，就是读者流失的地方</p>
+    ${columns('c-chapters', chapters, { label: '各章读者柱状图', maxLabels: 28 })}
+    ${dataTable(['章节', '读者', '浏览量', '学完'], chapters.map(c => [c.id, fmt(c.value), fmt(c.views), fmt(c.completions)]))}
+  </section>
+  <section class="grid three" style="margin-bottom:14px">
+    <div class="card"><h2>来源网站</h2><p class="sub">访客从哪个站点点进来</p>${rankTable(s.referrers, '站点', r => r.host)}</div>
+    <div class="card"><h2>国家 / 地区</h2><p class="sub">来自 Vercel 边缘节点的地理信息</p>${rankTable(s.countries, '国家 / 地区', r => regionName(r.country))}</div>
+    <div class="card"><h2>城市</h2><p class="sub">前 10</p>${rankTable(s.cities, '城市', r => r.city + (r.country ? ' · ' + regionName(r.country) : ''))}</div>
+  </section>
+  <section class="grid three" style="margin-bottom:14px">
+    <div class="card"><h2>交互实验</h2><p class="sub">打开次数</p>${rankTable(s.labs.map(l => ({ ...l, visitors: l.opens })), '实验', r => r.lab, '打开')}</div>
+    <div class="card"><h2>设备</h2><p class="sub">&nbsp;</p>${rankTable(s.devices, '设备', r => DEVICE[r.device] || r.device)}</div>
+    <div class="card"><h2>浏览器</h2><p class="sub">WeChat = 微信内置浏览器</p>${rankTable(s.browsers, '浏览器', r => r.browser)}</div>
+  </section>
+  <section class="grid two">
+    <div class="card"><h2>自测答题</h2><p class="sub">按章节；正确率低的章节可能讲得不够清楚</p>${s.quiz.length ? `<table><thead><tr><th>章节</th><th class="num">答题</th><th class="num">正确率</th></tr></thead><tbody>${s.quiz.map(q => `<tr><td>第 ${esc(q.chapter)} 章</td><td class="num">${fmt(q.answers)}</td><td class="num">${(q.correct / q.answers * 100).toFixed(0)}%</td></tr>`).join('')}</tbody></table>` : '<div class="empty">暂无数据</div>'}</div>
+    <div class="card"><h2>最近事件</h2><p class="sub">最新 20 条，不含访客标识</p>${s.recent.length ? `<div class="scroll"><table><thead><tr><th>时间</th><th>事件</th><th>页面</th><th>地区</th><th>设备</th></tr></thead><tbody>${s.recent.map(e => `<tr><td class="mono">${esc(new Date(e.ts).toLocaleString('zh-CN', { timeZone: TZ, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))}</td><td>${esc(TYPE[e.type] || e.type)}${e.detail ? ' · ' + esc(e.detail.replace(':correct', ' 对').replace(':incorrect', ' 错')) : ''}</td><td class="mono">${esc(e.route)}</td><td>${esc([e.city, e.country && regionName(e.country)].filter(Boolean).join(' · '))}</td><td>${esc((DEVICE[e.device] || e.device) + ' · ' + e.browser)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">暂无数据</div>'}</div>
+  </section>
+  <p class="foot">隐私边界：不存 IP，不设 cookie，不收集笔记内容；访客标识每天轮换，不能跨天关联同一个人。开启"请勿追踪"或 GPC 的浏览器、爬虫和无头浏览器不计入。北京时间按天统计。</p>`;
+  bindTips('c-daily', daily, d => `${esc(d.day)}<br>访客 ${fmt(d.value)} · 浏览 ${fmt(d.pageviews)}`);
+  bindTips('c-chapters', chapters, c => `第 ${c.id} 章<br>读者 ${fmt(c.value)} · 浏览 ${fmt(c.views)} · 学完 ${fmt(c.completions)}`);
+  app.querySelectorAll('[data-days]').forEach(b => b.onclick = () => { days = Number(b.dataset.days); load(); });
+  document.getElementById('refresh').onclick = load;
+  document.getElementById('logout').onclick = () => { store('session', TOKEN_KEY, null); loginView(); };
+  document.getElementById('optout').onclick = () => { store('local', OPT_OUT, optedOut ? null : '1'); render(s); };
+}
+
+load();
+</script>
+</body>
+</html>

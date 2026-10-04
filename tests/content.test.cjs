@@ -77,3 +77,12 @@ test('client analytics is same-origin, opt-out aware and covers the three event 
  assert.ok(cfg.headers.some(h=>h.source==='/api/(.*)'&&h.headers.some(x=>x.key==='Cache-Control'&&x.value==='no-store')));
  assert.ok(cfg.headers.some(h=>h.source==='/admin'&&h.headers.some(x=>x.key==='X-Robots-Tag')));
 });
+test('admin dashboard is built, self-contained and reads the stats API with a bearer token',()=>{
+ const p=path.join(root,'dist/admin.html');assert.ok(fs.existsSync(p),'npm run build must emit admin.html');
+ const html=fs.readFileSync(p,'utf8');
+ assert.ok(!/<script[^>]+src=|<link[^>]+href="https?:/i.test(html),'no external assets');
+ assert.ok(html.includes("'/api/stats?days='"));assert.ok(html.includes("'Bearer '"));
+ assert.ok(html.includes('sessionStorage'),'token lives only in the session');
+ assert.ok(html.includes("'strata-no-track'"),'owner can exclude this browser');
+ assert.match(html,/<meta name="robots" content="noindex/);
+});

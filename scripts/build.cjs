@@ -52,6 +52,7 @@ const staticBook = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8
 const dist = path.join(root,'dist');fs.mkdirSync(dist,{recursive:true});
 fs.writeFileSync(path.join(dist,'index.html'),html);
 fs.writeFileSync(path.join(dist,'fullbook.html'),staticBook);
+fs.copyFileSync(path.join(root,'src/admin.html'),path.join(dist,'admin.html'));
 fs.mkdirSync(path.join(dist,'labs'),{recursive:true});
 for(const n of ['tiny_inference.py','test_tiny_inference.py','README.md','benchmark_template.csv','benchmark_protocol.md']) fs.copyFileSync(path.join(root,'labs',n),path.join(dist,'labs',n));
 fs.mkdirSync(path.join(dist,'licenses'),{recursive:true});
