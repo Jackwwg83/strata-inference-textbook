@@ -1,17 +1,210 @@
-<h2 id="sec-1">8.1 从“按相关性加权”理解注意力</h2>
-<p>把当前查询记作 q，历史键和值记作 kᵢ、vᵢ。分数为 q·kᵢ/√d，再经过 softmax 得到权重 aᵢ，输出是 Σaᵢvᵢ。q 与 k 用于决定“看哪里”，v 用于提供被汇总的信息。把 K 与 V 对调，一般不是等价计算。</p>
-<p>取两个分数 [0,0]，注意力权重各 1/2；对应值 [2,0] 和 [0,4]，输出为 [1,2]。若第一个分数增加到 ln3，则权重变为 [3/4,1/4]，输出 [1.5,1]。注意力输出是数值加权，不是从库里原封不动复制一句话。</p>
-<h2 id="sec-2">8.2 因果掩码为什么尤其影响 prefill？</h2>
-<p>生成第 t 个位置时不能读取未来位置。单 token decode 的已提交历史自然在过去；批量计算 prompt 时，虽然未来 token 已在输入缓冲里，每一行仍必须只能读到允许的历史。把整个 chunk 的最终 KV 状态对所有查询开放，会造成未来信息泄漏。</p>
-<p>Strata 的 QSA 接口说明了 decode 与 prefill 的掩码责任不同；indexer 对完整块与不完整尾部的处理也必须满足因果条件。[S18] 能通过单 token 测试的代码，未必能通过多行 prefill 的因果测试。</p>
-<h2 id="sec-3">8.3 GQA：查询头多，不代表 KV 头同样多</h2>
-<p>本案例几何中 Q 头数为 24，KV 头数为 2，head_dim 为 256。[S04] 24 个查询头共享 2 组 K/V。QSA 中映射是 <code>q_head / (n_head/n_head_kv)</code>，即整数除以 12，不是对 2 取模。[S18]</p>
-<p>忽略元数据，12 层、T 个位置的 FP16 KV 容量为 <code>12×T×2×256×2(K,V)×2字节 = 24576T 字节</code>。T=32768 时为 <strong>805,306,368 字节 = 768 MiB</strong>。上游旧注释把这个量写成约 805 MiB；那是把十进制 MB 与二进制 MiB 混淆了，本教材采用逐项计算值。[S18]</p>
-<h2 id="sec-4">8.4 QSA 的“full-attention 层”不是“总读全历史”</h2>
-<p>在模型层分类里，它与 GDN 相对，被叫作 full-attention 类层；在具体长上下文路径里，它有 indexer、选择和 gather。源码给出的选择宽度为 <code>min(n_kv, 2048+4−1)</code>，即最多 2051 个位置的该接口预算，包含未满块的尾部。[S18] 不要把分类名称误当成实现必然读取全部 KV。</p>
-<p>它的路径是：追加 KV → 更新 indexer → 打分与选择 → 按页表 gather → GQA → 输出门。选择哪些位置属于模型 / 算法语义；把相同的被选数据放在另一个存储层属于系统实现，两者不能混淆。</p>
-<h2 id="sec-5">8.5 FlashAttention 与稀疏注意力的区别</h2>
-<p>FlashAttention 论文说明了通过分块、重计算和 IO 组织来计算精确注意力的方向；它不是简单删掉低分历史。[R03] 稀疏选择改变的是参与注意力的集合。一个引擎可以同时使用选择和高效的选后注意力内核，但两项优化的正确性论证不同。</p>
-<p>本书借此训练一个判断：改变数据的位置、布局和分块通常可以追求相同语义；改变数据集合或精度则需要单独说明质量影响。不能笼统地称所有加速“无损”。</p>
-<h2 id="sec-6">8.6 实验与验收</h2>
-<p>把页表随机置换，只要逻辑 token 到物理页的映射同时更新，最终 gather 值应保持一致。构造两个接近的 indexer 分数，观察轻微误差何时改变 top-k 边界。验收要分别比较选中 ID、选中数据和最后输出，不把三个问题压成一个“误差很小”。</p>
+<div class="hook"><span class="eyebrow">你一定这样问过</span>
+<p>你贴了一大段代码，然后问：“第 3 行那个变量后来在哪儿被改了？”模型要回答，就得回头去翻前文，而且要知道该看哪里。一万个字的前文，它不可能每个字都同等用力地看。</p>
+<p>“带着问题回头翻，越相关的地方看得越多”，就是<dfn>注意力</dfn>。这一章先用一个能手算的小例子讲清注意力怎么算，再看它为什么随上下文变长而越来越贵，最后看 Strata 的模型用了哪两招来省力：让 24 个查询头共用 2 套笔记，以及每次只挑最多 2051 个位置来看。</p></div>
+<p class="tldr"><strong>一句话：</strong>注意力 = 用当前词的“查询”给前文每个位置打分，softmax 变成权重，再按权重混合各位置的“值”。全注意力的工作量随长度平方增长；Strata 的模型只有 12 层做注意力，24 个查询头共用 2 组键值，每次最多看 2051 个选中的位置。</p>
+
+<h2 id="sec-1">8.1 注意力：带着问题回头翻书</h2>
+<p>想象你在图书馆找资料。你心里有个问题，这是<dfn>查询</dfn>（query，记作 q）。每本书的书脊上贴着标签，这是<dfn>键</dfn>（key，k）。书里的内容，是<dfn>值</dfn>（value，v）。你拿问题和每个标签比一比，越相关的书翻得越仔细，最后把读到的内容按“仔细程度”揉在一起，形成答案。</p>
+<aside class="primer" id="c08-attention">
+<h3>注意力机制：Q、K、V</h3>
+<p>在模型里，前文每个位置都有一个向量。注意力层用三个学出来的矩阵，把它分别变成三份：键 k（“我是什么”）、值 v（“我能提供什么”），当前位置还会变出查询 q（“我在找什么”）。计算分四步：</p>
+<ol>
+<li><strong>打分</strong>：查询和每个键做<dfn>点积</dfn>：sᵢ = q · kᵢ = q₁kᵢ₁ + q₂kᵢ₂ + …。两个向量方向越一致，点积越大。</li>
+<li><strong>缩放</strong>：每个分数除以 √d，d 是向量的长度（维数）。维数越大，点积天然越大；不缩放的话，下一步的 softmax 会变得极端，几乎只盯着一个位置。</li>
+<li><strong>softmax</strong>：wᵢ = e<sup>sᵢ</sup> ÷ Σⱼ e<sup>sⱼ</sup>。分数变成权重，个个为正，加起来等于 1。</li>
+<li><strong>加权求和</strong>：输出 = Σ wᵢ · vᵢ。</li>
+</ol>
+<p>手算一个最小的例子。前文只有两个位置，值分别是 [2, 0] 和 [0, 4]。如果缩放后的分数都是 0，权重就是 e⁰ ÷ (e⁰ + e⁰) = ½ 和 ½，输出是 ½ × [2, 0] + ½ × [0, 4] = [1, 2]。把第一个分数提高到 ln 3 ≈ 1.10，权重变成 3 ÷ (3 + 1) = ¾ 和 ¼，输出变成 [1.5, 1]。</p>
+<p>注意两点。第一，输出是<strong>混合</strong>出来的新向量，不是从前文原封不动“复制”一句话。第二，k 决定“看哪里”，v 决定“看到什么”，二者分工不同，对调一般不等价。</p>
+<p>实际模型会同时开很多组 q、k、v，叫<dfn>多头注意力</dfn>：每个“头”各自找各自关心的东西，最后再合起来。</p>
+<p>和本章的关系：Strata 的模型每个 QSA 层有 24 个查询头，每个头 256 维，所以缩放时除以 √256 = 16。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/注意力机制" target="_blank" rel="noopener noreferrer">维基百科：注意力机制</a> · <a href="https://zh.wikipedia.org/zh-cn/Softmax函数" target="_blank" rel="noopener noreferrer">维基百科：Softmax 函数</a> · <a href="https://www.3blue1brown.com/lessons/attention" target="_blank" rel="noopener noreferrer">3Blue1Brown：注意力（动画讲解）</a> · <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener noreferrer">The Illustrated Transformer</a> · <a href="https://arxiv.org/abs/1706.03762" target="_blank" rel="noopener noreferrer">Attention Is All You Need（原始论文）</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 312" role="img" aria-label="图 8-1：注意力的四步。当前词给出查询，前文给出键和值；打分、缩放、softmax、加权求和">
+<rect class="f-soft" fill="#e5f1df" x="10" y="8" width="180" height="50" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="29" font-size="13" font-weight="600" text-anchor="middle">当前词</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="48" font-size="12" text-anchor="middle">变出查询 q：我在找什么</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="8" width="180" height="50" rx="8"/>
+<text class="f-text" fill="#182f2b" x="300" y="29" font-size="13" font-weight="600" text-anchor="middle">前文每个位置</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="48" font-size="12" text-anchor="middle">各带一个键 k 和值 v</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 58V70H200V80M300 58V70H200"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="82" width="280" height="38" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="106" font-size="13" text-anchor="middle">① 打分：q 和每个 k 做点积</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="136" width="280" height="38" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="160" font-size="13" text-anchor="middle">② 缩放：除以 √d（d 是维数）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="190" width="280" height="38" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="214" font-size="13" text-anchor="middle">③ softmax：分数变权重，和为 1</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="244" width="280" height="56" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="268" font-size="13" font-weight="600" text-anchor="middle">④ 加权求和：Σ 权重 × v</text>
+<text class="f-on" fill="#ffffff" x="200" y="289" font-size="12" text-anchor="middle">得到这个头的输出向量</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 120V134M200 174V188M200 228V242"/>
+</svg><figcaption>图 8-1　注意力的四步。前两步决定“看哪里”，第三步把“看多少”变成比例，最后一步按比例取内容。</figcaption></figure>
+<p>下面的模拟器把向量缩到二维，让你能在平面上“看见”点积：查询箭头和哪个键箭头方向接近，哪个词就分到更多注意力。</p>
+<div class="viz" data-viz="attention-step"><figure class="fig"><svg viewBox="0 0 400 284" role="img" aria-label="图 8-2：二维玩具例子。查询指向小猫和毛线球之间，两者各分到约一半权重，输出是它们的值的混合">
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M30 110H190M110 30V190"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" d="M110 110L171.6 110M110 110L93.2 59.6M110 110L140.8 62.4M110 110L65.2 126.8"/>
+<circle class="f-muted" fill="#5c6d66" cx="171.6" cy="110" r="3.5"/><circle class="f-muted" fill="#5c6d66" cx="93.2" cy="59.6" r="3.5"/><circle class="f-muted" fill="#5c6d66" cx="140.8" cy="62.4" r="3.5"/><circle class="f-muted" fill="#5c6d66" cx="65.2" cy="126.8" r="3.5"/>
+<text class="f-text" fill="#182f2b" x="178" y="122" font-size="12">小猫</text>
+<text class="f-text" fill="#182f2b" x="88" y="52" font-size="12" text-anchor="end">追着</text>
+<text class="f-text" fill="#182f2b" x="122" y="48" font-size="12">毛线球</text>
+<text class="f-text" fill="#182f2b" x="60" y="144" font-size="12" text-anchor="end">跑</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3.5" d="M110 110L181.2 65.5"/>
+<circle class="f-accent" fill="#136d5a" cx="181.2" cy="65.5" r="5"/>
+<text class="f-accent" fill="#136d5a" x="188" y="72" font-size="13" font-weight="600">q</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="24" font-size="12">注意力权重</text>
+<text class="f-text" fill="#182f2b" x="220" y="52" font-size="12">小猫</text><rect class="f-accent" fill="#136d5a" x="270" y="41" width="50" height="14"/><text class="f-text" fill="#182f2b" x="390" y="52" font-size="12" text-anchor="end">0.50</text>
+<text class="f-text" fill="#182f2b" x="220" y="86" font-size="12">追着</text><rect class="f-accent" fill="#136d5a" x="270" y="75" width="2" height="14"/><text class="f-text" fill="#182f2b" x="390" y="86" font-size="12" text-anchor="end">0.02</text>
+<text class="f-text" fill="#182f2b" x="220" y="120" font-size="12">毛线球</text><rect class="f-accent" fill="#136d5a" x="270" y="109" width="47" height="14"/><text class="f-text" fill="#182f2b" x="390" y="120" font-size="12" text-anchor="end">0.47</text>
+<text class="f-text" fill="#182f2b" x="220" y="154" font-size="12">跑</text><rect class="f-accent" fill="#136d5a" x="270" y="143" width="0.5" height="14"/><text class="f-text" fill="#182f2b" x="390" y="154" font-size="12" text-anchor="end">0.00</text>
+<text class="f-text" fill="#182f2b" x="10" y="220" font-size="12">q 指向“小猫”和“毛线球”之间，两者各分到约一半</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="242" font-size="12">值：小猫 [3, 0]，毛线球 [1, 3]，其余两个几乎不参与</text>
+<text class="f-text" fill="#182f2b" x="10" y="266" font-size="12">输出 ≈ 0.50×[3, 0] + 0.47×[1, 3] + … ≈ [1.98, 1.46]</text>
+</svg><figcaption>图 8-2　查询夹在两个键之间时，注意力把两份值按比例混合。查询转向哪边，混合的比例就偏向哪边。</figcaption></figure></div>
+<p>QSA 层里的 q、k、v 来自三个投影矩阵 <code>attn_q</code>、<code>attn_k</code>、<code>attn_v</code>。<span class="ev ev-code">代码事实</span>[S18] 键在存进缓存之前，会按它的位置做一次“旋转”，这叫<dfn>旋转位置编码</dfn>（RoPE）：同样的词出现在不同位置，键就略有不同，模型由此知道先后顺序；值从不旋转（<code>qsa.hpp</code> 第 180 行）。注意力算完后，结果还要乘一个 sigmoid 输出门，再交给后面的投影。[S18]</p>
+
+<h2 id="sec-2">8.2 每多一个字，要多看一眼：O(n²)</h2>
+<p>注意力有一条铁律：生成第 t 个词时，只能看第 1 到第 t 个位置，不能偷看后面。这叫<dfn>因果掩码</dfn>：把“未来”的位置遮住，见图 8-3。生成回答时，后面的词本来就还没有，遮不遮无所谓。可读题时（prefill，第 1 章），整段提问一起算，后面的词其实已经在内存里了，每一行都必须明确遮住自己右边的位置，否则模型就“剧透”了自己。</p>
+<figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="图 8-3：6 个词的因果掩码。第 i 行只能看第 1 到第 i 列，右上角全部被遮住，共 21 个格子可看">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">列：被看的位置（键）</text>
+<text class="f-text" fill="#182f2b" x="125" y="36" font-size="12" text-anchor="middle">猫</text><text class="f-text" fill="#182f2b" x="155" y="36" font-size="12" text-anchor="middle">追</text><text class="f-text" fill="#182f2b" x="185" y="36" font-size="12" text-anchor="middle">着</text><text class="f-text" fill="#182f2b" x="215" y="36" font-size="12" text-anchor="middle">毛</text><text class="f-text" fill="#182f2b" x="245" y="36" font-size="12" text-anchor="middle">线</text><text class="f-text" fill="#182f2b" x="275" y="36" font-size="12" text-anchor="middle">球</text>
+<text class="f-text" fill="#182f2b" x="100" y="61" font-size="12" text-anchor="end">猫</text><text class="f-text" fill="#182f2b" x="100" y="91" font-size="12" text-anchor="end">追</text><text class="f-text" fill="#182f2b" x="100" y="121" font-size="12" text-anchor="end">着</text><text class="f-text" fill="#182f2b" x="100" y="151" font-size="12" text-anchor="end">毛</text><text class="f-text" fill="#182f2b" x="100" y="181" font-size="12" text-anchor="end">线</text><text class="f-text" fill="#182f2b" x="100" y="211" font-size="12" text-anchor="end">球</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="136" font-size="12">行：</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="152" font-size="12">查询</text>
+<rect class="f-accent" fill="#136d5a" x="111" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="141" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="171" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="231" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="41" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="71" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="71" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="171" y="71" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="71" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="231" y="71" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="71" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="101" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="101" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="171" y="101" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="101" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="231" y="101" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="101" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="131" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="131" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="171" y="131" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="201" y="131" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="231" y="131" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="131" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="161" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="161" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="171" y="161" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="201" y="161" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="231" y="161" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="161" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="171" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="201" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="231" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="261" y="191" width="28" height="28"/>
+<text class="f-text" fill="#182f2b" x="304" y="80" font-size="12">高亮：可以看</text>
+<text class="f-text" fill="#182f2b" x="304" y="100" font-size="12">浅底：未来，</text>
+<text class="f-text" fill="#182f2b" x="304" y="118" font-size="12">必须遮住</text>
+<text class="f-text" fill="#182f2b" x="20" y="242" font-size="12">可看的格子：1 + 2 + … + 6 = 6 × 7 ÷ 2 = 21</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="262" font-size="12">n 个词就是 n(n+1)/2 格：长度翻倍，格子约翻 4 倍</text>
+</svg><figcaption>图 8-3　因果掩码是一个下三角。可看的格子数约是 n²/2，这就是注意力“越长越贵”的根源。</figcaption></figure>
+<aside class="primer" id="c08-complexity">
+<h3>计算复杂度与 O(n²)</h3>
+<p>估算一个算法“有多慢”，我们不数秒，而是问：输入变大时，工作量怎样增长？这叫<dfn>时间复杂度</dfn>，用<dfn>大 O 记号</dfn>写。O(n) 表示工作量和 n 成正比：输入翻倍，工作量翻倍。O(n²) 表示和 n 的平方成正比：输入翻倍，工作量翻 4 倍；输入变 10 倍，工作量变 100 倍。</p>
+<p>大 O 只看增长的“形状”，忽略常数和低次项。n(n+1)/2 = n²/2 + n/2，n 很大时 n/2 可以忽略，常数 ½ 也不影响形状，所以它是 O(n²)。</p>
+<p>算一下注意力：读一段 n 个词的提问，因果掩码下要算 n(n+1)/2 个“查询-位置”配对。n = 1,000 时约 50 万对；n = 262,144（Strata 支持的最长上下文）时约 344 亿对，每层、每个头都要算一遍。O(n²) 在短文本上不显眼，在长文本上会压倒一切。</p>
+<p>和本章的关系：降低复杂度的办法只有两类：减少每一对的成本（常数变小，形状不变），或者减少要算的对数（形状变了）。8.4 节的选择属于后者，第 9 章的 GDN 走得更远，把“回看历史”变成 O(1) 的状态更新。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/时间复杂度" target="_blank" rel="noopener noreferrer">维基百科：时间复杂度</a> · <a href="https://zh.wikipedia.org/zh-cn/大O符号" target="_blank" rel="noopener noreferrer">维基百科：大 O 符号</a> · <a href="https://oi-wiki.org/basic/complexity/" target="_blank" rel="noopener noreferrer">OI Wiki：复杂度简介</a></p>
+</aside>
+<p class="bridge"><strong>学过计算机的同学：</strong>读题阶段的注意力就是两重循环 <code>for i in 1..n: for j in 1..i: score(q[i], k[j])</code>，和冒泡排序一样是三角形的工作量。生成阶段每个新词只做一行，是 O(n)；但生成 m 个词，加起来又回到 O(n·m)。</p>
+<p>拖动下面的滑块，看上下文从 1K 涨到 262K 时，全注意力和“每次最多看 2051 个位置”的 QSA 各要算多少对：</p>
+<div class="viz" data-viz="attention-cost"><figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="图 8-4：262K 上下文下，最后一个 token 全注意力看 262,144 个位置，QSA 看 2051 个；读完整段，全注意力约 344 亿对，QSA 约 5.4 亿对">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12">最后一个 token 要看几个位置：全注意力</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="22" width="144.3" height="16"/><text class="f-text" fill="#182f2b" x="160" y="35" font-size="12">262,144</text>
+<text class="f-text" fill="#182f2b" x="10" y="64" font-size="12">最后一个 token 要看几个位置：QSA</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="70" width="55.4" height="16"/><text class="f-text" fill="#182f2b" x="71" y="83" font-size="12">2,051</text>
+<text class="f-text" fill="#182f2b" x="10" y="112" font-size="12">读完整段提问的配对数：全注意力</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="118" width="360.4" height="16"/><text class="f-on" fill="#ffffff" x="364" y="131" font-size="12" text-anchor="end">约 344 亿</text>
+<text class="f-text" fill="#182f2b" x="10" y="160" font-size="12">读完整段提问的配对数：QSA</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="166" width="284.1" height="16"/><text class="f-on" fill="#ffffff" x="288" y="179" font-size="12" text-anchor="end">约 5.4 亿</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 196H390M10 192V200M136.7 192V200M263.3 192V200M390 192V200"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="214" font-size="12">10²</text>
+<text class="f-muted" fill="#5c6d66" x="136.7" y="214" font-size="12" text-anchor="middle">10⁵</text>
+<text class="f-muted" fill="#5c6d66" x="263.3" y="214" font-size="12" text-anchor="middle">10⁸</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="214" font-size="12" text-anchor="end">10¹¹</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="234" font-size="12">n = 262,144；对数刻度，每 3 格数量乘 1000</text>
+</svg><figcaption>图 8-4　上下文 262K 时，“每次最多看 2051 个位置”让读完整段的配对数少了约 64 倍。注意横轴是对数刻度。</figcaption></figure></div>
+<p>这个数只数了注意力本身的配对，没算“挑位置”要花的功夫。挑选并不免费，但便宜得多，8.4 节细说。</p>
+
+<h2 id="sec-3">8.3 GQA：24 个提问者，共用 2 套笔记</h2>
+<p>注意力要回看前文，前文每个位置的 k 和 v 就得存着，这叫 <dfn>KV 缓存</dfn>（第 17 章细讲它怎样分页管理）。上下文越长，KV 缓存越大。省空间的第一招，是让多个查询头<strong>共用</strong>同一组键和值，这叫<dfn>分组查询注意力</dfn>（GQA）。</p>
+<p>Strata 的模型每个 QSA 层有 24 个查询头，却只有 2 个 KV 头，每个头 256 维。<span class="ev ev-code">代码事实</span>[S04] 24 个查询头分成两组：第 0–11 号用第 0 个 KV 头，第 12–23 号用第 1 个，见图 8-5。源码特别强调，映射是<strong>整数除法</strong> h ÷ 12，不是取余 h % 2；两种写法都能跑出“形状正确”的结果，但只有一种是这个模型。[S18]</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="图 8-5：24 个查询头分成两组，每组 12 个共用一个 KV 头。每个 token 每层只存 2 组键值，而不是 24 组">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="12" text-anchor="middle">24 个查询头（编号 0–23）</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="34" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="48" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="62" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="76" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="90" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="104" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="118" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="132" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="146" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="160" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="174" y="28" width="12" height="24"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="214" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="228" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="242" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="256" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="284" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="298" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="312" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="326" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="340" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="354" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="368" y="28" width="12" height="24"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M20 58V64H186V58M103 64V84M214 58V64H380V58M297 64V84"/>
+<text class="f-muted" fill="#5c6d66" x="103" y="76" font-size="12" text-anchor="end">0–11 号</text>
+<text class="f-muted" fill="#5c6d66" x="297" y="76" font-size="12" text-anchor="end">12–23 号</text>
+<rect class="f-accent" fill="#136d5a" x="38" y="86" width="130" height="36" rx="6"/>
+<text class="f-on" fill="#ffffff" x="103" y="109" font-size="13" text-anchor="middle">KV 头 0</text>
+<rect class="f-accent" fill="#136d5a" x="232" y="86" width="130" height="36" rx="6"/>
+<text class="f-on" fill="#ffffff" x="297" y="109" font-size="13" text-anchor="middle">KV 头 1</text>
+<text class="f-text" fill="#182f2b" x="20" y="150" font-size="12">查询头 h 用第 ⌊h ÷ 12⌋ 个 KV 头（整数除法）</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="12">每个 token、每层要存的键和值：</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="186" width="25" height="16"/>
+<text class="f-text" fill="#182f2b" x="52" y="199" font-size="12">GQA：2 × 256 × 2 × 2 字节 = 2 KiB</text>
+<rect class="f-warn" fill="#9e5d24" x="20" y="212" width="300" height="16"/>
+<text class="f-text" fill="#182f2b" x="20" y="246" font-size="12">若 24 个头各存一份：24 KiB，是 GQA 的 12 倍</text>
+</svg><figcaption>图 8-5　24 个查询头只配 2 个 KV 头：问题可以各问各的，笔记两组人共用。KV 缓存因此小了 12 倍。</figcaption></figure>
+<p>算一笔账。每个 token、每个 QSA 层要存：2 个 KV 头 × 256 维 × 2（K 和 V 各一份）× 2 字节（FP16）= 2,048 字节。12 个 QSA 层合计 24,576 字节。32K（32,768 个 token）的上下文就是 805,306,368 字节，正好 768 MiB。<span class="ev ev-est">教学推演</span></p>
+<p>有意思的是，<code>qsa.hpp</code> 的注释把这个量写成了“805 MiB”。[S18] 805,306,368 ÷ 2<sup>20</sup> = 768，805 是把字节数除以 10<sup>6</sup> 得到的十进制 MB。MB 和 MiB 差 4.9%，小数目上无所谓，几十 GB 的预算上就是好几 GB 的出入。本书用逐项计算的 768 MiB。</p>
+<p>如果 48 层都做注意力、24 个头各存一份 K/V，每个 token 要存 48 倍的字节。262K 上下文时，这是约 288 GiB 和约 6 GiB 的差别。<span class="ev ev-est">教学推演</span> 实际运行时，Strata 默认在 4K 以上用 8 位 KV，从 64K 起还会把大部分 KV 放在内存里，显存只留注意力常读的那部分。上游说明这不改变注意力读到的数值，只改变 KV 放在哪。<span class="ev ev-report">上游报告</span>[S03]</p>
+
+<h2 id="sec-4">8.4 QSA：只挑 2051 个位置来看</h2>
+<p>GQA 省的是存储。省计算的第二招更直接：<strong>不看全部，只看挑出来的</strong>。Strata 的 QSA 层每生成一个 token，先用一个便宜的<dfn>索引器</dfn>给前文所有位置打分，挑出最多 2051 个，然后只在这些位置上做真正的注意力。完整流程见图 8-6。</p>
+<figure class="fig"><svg viewBox="0 0 400 344" role="img" aria-label="图 8-6：QSA 一步的六个阶段：追加键值、索引器打分、选出前 2051 个、按页表收集、只在选中位置上做注意力、乘输出门">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="4" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="22" font-size="13" font-weight="600" text-anchor="middle">① 追加 K、V</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="40" font-size="12" text-anchor="middle">新 token 的键和值写进分页的 KV 缓存</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="60" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="78" font-size="13" font-weight="600" text-anchor="middle">② 索引器打分</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="96" font-size="12" text-anchor="middle">每 4 个位置合成一把 128 维的小钥匙</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="116" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="134" font-size="13" font-weight="600" text-anchor="middle">③ 选出分数最高的 2051 个位置</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="152" font-size="12" text-anchor="middle">上下文不到 2051 时就是全选</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="172" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="190" font-size="13" font-weight="600" text-anchor="middle">④ 按页表收集</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="208" font-size="12" text-anchor="middle">把选中位置的 K、V 抄进一块连续的暂存区</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="228" width="360" height="44" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="246" font-size="13" font-weight="600" text-anchor="middle">⑤ 注意力</text>
+<text class="f-on" fill="#ffffff" x="200" y="264" font-size="12" text-anchor="middle">24 个查询头只在选中的位置上做 softmax</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="284" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="302" font-size="13" font-weight="600" text-anchor="middle">⑥ 输出门</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="320" font-size="12" text-anchor="middle">结果乘 sigmoid(gate)，交给输出投影</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 48V58M200 104V114M200 160V170M200 216V226M200 272V282"/>
+</svg><figcaption>图 8-6　QSA 的一步。②③ 决定“看哪些位置”，属于模型的算法；④ 决定“从哪里取”，属于系统实现。两类改动的正确性要分开论证。</figcaption></figure>
+<p>几个关键细节，都来自 <code>qsa.hpp</code>：</p>
+<ul>
+<li><strong>2051 是怎么来的。</strong>选择宽度是 min(n_kv, 2048 + 4 − 1)，n_kv 是已缓存的位置数。2048 是“按块选”的预算，每块 4 个位置；多出的 3 个，是还没凑满一块的尾巴。上下文不超过 2051 时，选择就是“全选”，而且必须和全选<strong>一模一样</strong>，不能近似。<span class="ev ev-code">代码事实</span>[S18]</li>
+<li><strong>索引器很便宜。</strong>它每 4 个位置只存一把 128 维的钥匙（4 个原始键的平均，再归一化、旋转）。<span class="ev ev-code">代码事实</span>[S18] 打分时，4 个索引头各自算点积、各自过 ReLU，再相加，<strong>没有</strong> softmax，也<strong>没有</strong>除以 √d（<code>qsa.hpp</code> 第 252–265 行）。和真正的注意力相比（每个位置 2 个 256 维的 KV 头，24 个查询头），它要碰的数据少得多。</li>
+<li><strong>挑前 k 名，并列按编号。</strong>选择返回分数最高的那些位置；分数相同时编号小的优先，结果按编号升序排列。[S18] 从 n 个数里挑前 k 名的算法，见第 10 章的<a href="#chapter/10/c10-top-k">「top-k 选择」</a>专栏。</li>
+<li><strong>没选中的就是不存在。</strong>没被收集的位置，在注意力里的权重<strong>正好是 0</strong>，哪怕它本来分数最高。源码的做法是把这些位置的掩码设成负无穷，e<sup>−∞</sup> = 0。[S18]</li>
+</ul>
+<p>这和常听说的 FlashAttention 不是一回事。FlashAttention 通过分块、重新计算和精心安排显存读写，<strong>精确地</strong>算出完整的注意力，只是更快。[R03] QSA 的选择改变了参与计算的位置集合，算的已经是另一个函数。一个引擎可以两者都用：先选，再用高效的内核算选中的部分；但两种优化的正确性要分别论证。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这是“近似检索 + 精确计算”的两段式，和数据库里“先用索引粗筛候选行，再回表精确比较”是同一个思路。区别在于：数据库的索引筛选不丢正确结果，这里的选择却可能漏掉某个位置。所以它是模型规定的计算的一部分，引擎必须按原样实现，不能自行换一种“差不多”的选法。</p>
+
+<h2 id="sec-5">8.5 位置变了，还是集合变了？</h2>
+<p>推理引擎里有两类优化，听起来都是“少读一些 KV”，性质却完全不同：</p>
+<ul>
+<li><strong>只改位置</strong>：同样的 KV 字节，从显存挪到内存，或者换一种分页布局。注意力读到的数值不变，结果应该逐位一致。Strata 的 KV 流式存放就属于这类：上游写明“注意力读到完全相同的数值，只是 KV 放的地方变了”。<span class="ev ev-report">上游报告</span>[S03]</li>
+<li><strong>改了集合</strong>：删掉一部分历史位置，或者换一种选择规则。这改变了模型的输入，必须单独评估质量。</li>
+</ul>
+<p>QSA 的选择属于模型本身的规则；而“每步只看 2051 个”<strong>不等于</strong>“只需要存 2051 个”。下一个 token 可能选中完全不同的旧位置，所以全部 KV 都得留着，能变的只是放在哪一层存储里。</p>
+<p>选择边界也很敏感。第 2051 名和第 2052 名的分数可能只差一点点，一个极小的数值误差就能换掉一个位置，而换掉的是注意力的一整份输入。所以 Strata 的索引键用 FP32 存，而不是更省的 FP16：注释算过，FP16 会让每个分数产生约 2<sup>−11</sup> 的相对扰动，而选择边界恰恰是这种扰动最要命的地方；FP32 的代价是 12 个 QSA 层每个 token 共 1.5 KiB。[S18] 计划里的 8 位索引键，要先用“选择翻转率”的实测数据证明自己。[S18]</p>
+<p>因果掩码也要分阶段看。<code>qsa.hpp</code> 明确把自己限定为“只服务生成阶段”：生成时，缓存里的每个位置天然都在当前查询之前，掩码的唯一内容是尾巴的映射。读题阶段的掩码是逐行的：查询 i 只能看最后一个位置不超过 i 的整块，外加尾巴里的位置，属于另一条代码路径。[S18] 能通过单 token 测试的代码，未必能通过多行读题的因果测试。</p>
+
+<h2 id="sec-6">8.6 动手：给长上下文算预算</h2>
+<p>打开本章的交互实验「历史状态预算器」。它用本章的几何（12 个 QSA 层、2 个 KV 头、256 维）计算 KV 缓存、显存里驻留的窗口，以及第 9 章要讲的 GDN 状态。建议的任务：</p>
+<ol>
+<li>把上下文从 32K 改成 128K，确认主 KV 正好变成 4 倍；再把字节换算成 GiB，检查自己有没有混用 GB 和 GiB。</li>
+<li>把同时活跃的对话从 1 条改成 5 条，看哪些量跟着翻 5 倍，哪些不变。</li>
+</ol>
+<p>再回到本章的两个交互图：在「注意力的一步」里，把 q 慢慢从“小猫”转向“毛线球”，记下两者权重相等时的角度；在「往回看要花多少力气」里，找出 QSA 开始比全注意力省事的上下文长度，并用 2051 解释它。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>注意力 = 查询和每个键做点积 → 除以 √d → softmax 成权重 → 按权重混合值。输出是混合出来的，不是复制出来的。</li>
+<li>全注意力的工作量是 O(n²)：读一段 n 个词的提问要算 n(n+1)/2 对。Strata 的模型只有 12 层做注意力，24 个查询头共用 2 个 KV 头，KV 缓存因此小了 48 倍。</li>
+<li>QSA 每步最多只看 2051 个选中的位置（不到就全看），没选中的权重正好是 0。但全部 KV 仍要保留，因为下一步可能选中任何一个旧位置。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“稀疏注意力每次只看 2000 个位置，所以 KV 缓存只需要存 2000 个 token。”</strong></p>
+<p>每一步看的是“工作集”，不是“全集”。下一个 token 的查询不同，选中的位置也可能完全不同。所以 KV 缓存仍要为每个历史位置留一份；可以把不常读的部分挪到内存里，但不能删。删掉就改变了模型能看到的信息。</p></div>
+
+<details class="deep"><summary>深入一层：被冻结的参数、页表置换测试、选择边界的验收方法</summary>
+<h3>CUDA 图会把“每个 token 都变的参数”冻住</h3>
+<p>为了省掉几十次内核启动的开销，Strata 把每一层录成一张 CUDA 图（第 15 章细讲），之后每个 token 重放这张图。陷阱是：图在录制时会把内核的<strong>参数值</strong>一起录下来。<code>qsa.hpp</code> 审计了这个问题，找出 5 个入口点的 6 个参数每个 token 都会变：新位置 pos、已缓存的位置数 n_kv、已完成的块数、选择宽度等。[S18]</p>
+<p>如果直接录制，后果比崩溃还糟：<code>kv_append</code> 会把每个 token 都写到第 0 个位置，打分和选择永远只看 1 个位置，注意力在整段对话里只看一个格子。输出仍然是有限的、看似合理的数字，症状和“模型不用上下文”一模一样，很容易被误判成 KV 缓存、选择或权重的问题。[S18]</p>
+<p>修复是一块放在显存里的“步进状态”：每个 token 只写一次 [pos, n_kv = pos + 1, 完成的块数, 选择宽度]，所有内核从这里读，参数列表因此在 token 之间保持不变。四个数由同一个函数从 pos 算出，调用者没法只更新其中一个。[S18]</p>
+<h3>页表置换测试：布局不许泄漏进结果</h3>
+<p>KV 缓存按页存放，逻辑位置 t 的第 h 个头，物理上在 <code>(table[t / page_size] × n_head_kv + h) × page_size + t % page_size</code>。同一页里，一个头的连续位置挨在一起，这是注意力最想要的访问方式。为了保证布局不影响结果，测试用页大小 1、4、512 跑同一组数据，并且随机打乱页表，要求注意力输出<strong>完全相同</strong>。[S18] 这正是“只改位置”类优化的验收标准。</p>
+<h3>尾巴位置一定会被选中</h3>
+<p>还没凑满一块的最后几个位置，没有自己的池化钥匙。索引器给它们加上 10<sup>9</sup> 的分数，保证它们一定入选；这和 llama.cpp 在生成阶段的因果输入一致（<code>qsa.hpp</code> 第 258–261 行）。这也解释了选择宽度为什么是 2048 + 3：最多 3 个尾巴位置，加上整块的预算。</p>
+<h3>怎样验收一个选择实现</h3>
+<p>“所有分数误差都小于 10<sup>−4</sup>”不足以证明两次计算选中了同样的位置。验收要分三层比较：选中的位置编号是否一致（精确比较）；收集到的 K、V 数据是否一致；最后的注意力输出是否在容差内。还要专门构造分数非常接近的样本，观察微小扰动何时改变 top-k 的边界；构造分数并列的样本，验证“编号小的优先”的规则。把三个问题压成一句“误差很小”，会掩盖真正的差异。</p>
+<h3>“无损”要说清楚是哪一种</h3>
+<p>改变数据的位置、布局和分块，通常可以做到逐位相同；改变参与计算的集合或数值精度，则需要单独说明对质量的影响。例如上游的 4 位 KV 缓存能省一半显存，但长文档上的困惑度上升了 8%–12%，所以默认仍是 8 位。<span class="ev ev-report">上游报告</span>[S03] 不能笼统地说所有加速都“无损”。</p>
+</details>
