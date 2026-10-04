@@ -1,0 +1,177 @@
+<div class="hook"><span class="eyebrow">직관에 어긋나는 일</span>
+<p>Strata는 그래픽 카드와 프로세서를 동시에 일하게 해요. 일꾼을 두 명 쓰는 셈이니 속도가 크게 빨라질 것 같지요. 그런데 업스트림 개발 기록에는 이런 일이 있어요. 토큰 하나당 CPU가 하는 전문가 계산을 18.2 ms에서 10.2 ms로 줄였어요. CPU 일이 정말로 거의 절반이 됐어요. 그런데 토큰 하나를 만드는 전체 시간은 꿈쩍도 하지 않았어요. <span class="ev ev-report">업스트림 보고</span>(<code>include/strata/core/hit_hook.hpp</code> 주석)</p>
+<p>아낀 8 ms는 어디로 갔을까요? 이 장은 CPU와 GPU의 성격에서 시작해서 「누가 누구를 기다리는가」로 넘어가고, 마지막에 한 단어로 모여요. 바로 임계 경로예요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 전문가 계산은 대부분 바이트를 읽는 일이에요. 그래서 CPU는 메모리에 있는 전문가를 그 자리에서 계산해요. 같은 층에서는 히트한 전문가를 GPU가, 미스한 전문가를 CPU가 맡아 동시에 계산해요. 하지만 층과 층 사이에는 데이터 의존성이 있어서 줄을 서야 해요. 그래서 CPU 일은 숨길 수 없고, 캐시로 줄이는 수밖에 없어요.</p>
+
+<h2 id="sec-1">13.1 두 가지 프로세서, 두 가지 성격</h2>
+<p>CPU는 만능 장인 몇 명에 가까워요. GPU는 천 명이 넘는 일꾼이 있는 공장 라인이에요. 장인은 수가 적지만, 복잡하고 한 걸음씩 보며 진행해야 하는 일도 혼자 해내요. 공장은 사람이 많아서 「모두가 같은 단순 동작을 동시에 하는」 일을 가장 잘해요. 그림 13-1이 그 모습을 간단히 그린 거예요.</p>
+<aside class="primer" id="c13-cpu-gpu">
+<h3>CPU와 GPU: SIMD와 SIMT</h3>
+<p><dfn>CPU</dfn>(중앙 처리 장치)는 코어 수가 많지 않아요. 업스트림이 속도를 잰 Ryzen 5 7600은 코어가 6개예요. <span class="ev ev-report">업스트림 보고</span>[S03] 코어 하나하나는 아주 「똑똑」해요. 큰 캐시가 있고, 분기를 예측하고, 순서를 바꿔 실행(비순차 실행)할 수 있어서 제어 흐름이 복잡한 프로그램에 잘 맞아요. CPU도 숫자 여러 개를 한 번에 계산할 수 있어요. <dfn>SIMD</dfn>(단일 명령 다중 데이터) 명령 하나가 한 줄로 늘어선 숫자들에 같은 연산을 동시에 해요. AVX-512 명령의 레지스터는 512비트라서 32비트 부동소수점 16개를 한 번에 담아요. 즉 「레인」이 16개예요. Strata의 CPU 전문가 커널은 AVX-512나 AVX2로 짰어요. <span class="ev ev-report">업스트림 보고</span>[S02]</p>
+<p><dfn>GPU</dfn>(그래픽 처리 장치)는 칩 면적 대부분을 단순한 계산 유닛에 써요. 흔한 게이밍 그래픽 카드에도 수천 개가 있어요. 실행 방식은 <dfn>SIMT</dfn>(단일 명령 다중 스레드)예요. NVIDIA GPU는 스레드 32개를 한 그룹(워프, warp)으로 묶어요. 한 그룹이 같은 명령을 동시에 실행하고, 각 스레드는 자기 데이터를 처리해요.[R01] 대역폭이 훨씬 높은 VRAM도 붙어 있어요. RTX 5070의 VRAM은 약 672 GB/s이고, 듀얼 채널 DDR5-5200 RAM은 약 83 GB/s예요(1장에 비교가 있어요).</p>
+<p>둘의 공통점은 이래요. <strong>서로 상관없는 같은 일을 한꺼번에 많이 해야</strong> 힘을 낼 수 있어요. 단계마다 앞 단계의 결과를 기다려야 하면, 레인이 아무리 많아도 한 칸씩 갈 수밖에 없어요. 아래 시뮬레이터에서 직접 확인해 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="그림 13-1: CPU는 강한 코어 몇 개이고 코어마다 16레인 SIMD가 있어요. GPU는 단순한 계산 유닛 수천 개이고, 32개가 한 그룹으로 같은 명령을 실행해요">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="15" font-weight="600" text-anchor="middle">CPU: 강한 코어 6개</text>
+<rect class="f-accent" fill="#136d5a" x="14" y="34" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="73" y="34" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="132" y="34" width="54" height="54" rx="6"/>
+<rect class="f-accent" fill="#136d5a" x="14" y="94" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="73" y="94" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="132" y="94" width="54" height="54" rx="6"/>
+<text class="f-on" fill="#ffffff" x="41" y="66" font-size="14" text-anchor="middle">코어</text><text class="f-on" fill="#ffffff" x="100" y="66" font-size="14" text-anchor="middle">코어</text><text class="f-on" fill="#ffffff" x="159" y="66" font-size="14" text-anchor="middle">코어</text>
+<text class="f-on" fill="#ffffff" x="41" y="126" font-size="14" text-anchor="middle">코어</text><text class="f-on" fill="#ffffff" x="100" y="126" font-size="14" text-anchor="middle">코어</text><text class="f-on" fill="#ffffff" x="159" y="126" font-size="14" text-anchor="middle">코어</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="174" font-size="14" text-anchor="middle">코어마다 SIMD 16레인</text>
+<text class="f-text" fill="#182f2b" x="300" y="20" font-size="15" font-weight="600" text-anchor="middle">GPU: 작은 유닛 수천 개</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="214" y="34" width="172" height="114"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.8" d="M214 48H386M214 62H386M214 76H386M214 90H386M214 104H386M214 118H386M214 132H386M228 34V148M242 34V148M256 34V148M270 34V148M284 34V148M298 34V148M312 34V148M326 34V148M340 34V148M354 34V148M368 34V148"/>
+<rect class="f-accent" fill="#136d5a" x="214" y="34" width="172" height="14"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="174" font-size="14" text-anchor="middle">한 줄 = 한 그룹, 동기 실행</text>
+<text class="f-text" fill="#182f2b" x="200" y="210" font-size="14" text-anchor="middle">CPU: 복잡하고 한 걸음씩 가는 일에 강해요</text>
+<text class="f-text" fill="#182f2b" x="200" y="236" font-size="14" text-anchor="middle">GPU: 같은 동작을 엄청 많이 하는 일에 강해요</text>
+</svg><figcaption>그림 13-1　두 가지 설계 철학. CPU는 코어가 적고 강하며, 코어마다 SIMD 레인 묶음이 있어요. GPU는 유닛이 많고 단순하며, 그룹으로 같은 명령을 실행해요. 개념도이며 비율은 맞지 않아요.</figcaption></figure>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/SIMD" target="_blank" rel="noopener noreferrer">위키백과: SIMD</a> · <a href="https://en.wikipedia.org/wiki/Single_instruction,_multiple_threads" target="_blank" rel="noopener noreferrer">Wikipedia: Single instruction, multiple threads</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA CUDA Programming Guide</a></p>
+</aside>
+<div class="viz" data-viz="simd-lanes"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="그림 13-2: 숫자 16개를 하나씩 더하면 16단계예요. SIMD로 한 번에 16개를 하면 1단계예요. 하지만 누적 체인은 레인이 16개여도 16단계예요">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">숫자 16개를 처리하면 몇 단계일까요?</text>
+<text class="f-text" fill="#182f2b" x="20" y="56" font-size="14">하나씩</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="42" width="256" height="20"/>
+<text class="f-text" fill="#182f2b" x="376" y="80" font-size="14" text-anchor="end">16단계</text>
+<text class="f-text" fill="#182f2b" x="20" y="112" font-size="14">SIMD 16레인</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="98" width="16" height="20"/>
+<text class="f-text" fill="#182f2b" x="144" y="113" font-size="14">1단계</text>
+<text class="f-text" fill="#182f2b" x="20" y="160" font-size="14">누적 체인</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="146" width="256" height="20"/>
+<text class="f-text" fill="#182f2b" x="376" y="184" font-size="14" text-anchor="end">16단계</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="214" font-size="14">누적 체인: 칸마다 앞 칸의 결과를 기다려야 해서</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="232" font-size="14">레인이 아무리 많아도 쓸 수 없어요</text>
+</svg><figcaption>그림 13-2　병렬로 할 수 있는지는 데이터 사이에 의존성이 있느냐에 달렸어요. 서로 상관없는 덧셈 16개는 한 단계에 끝나요. 꼬리에 꼬리를 무는 누적은 한 단계씩 가야 해요.</figcaption></figure></div>
+<p class="bridge"><strong>CS를 배운 분께:</strong> SIMD는 벡터 명령이에요(x86의 SSE와 AVX, ARM의 NEON). GPU의 SIMT는 「하드웨어가 스레드 그룹을 자동으로 넓은 벡터 하나로 묶어 실행한다」고 이해하면 돼요. 분기 방향이 갈리면 그룹 안의 스레드는 나뉘어 차례로 실행돼요.</p>
+
+<h2 id="sec-2">13.2 CPU가 전문가를 계산할 수 있는 이유: 대부분은 바이트 읽기</h2>
+<p>GPU가 그렇게 빠른데, Strata는 왜 CPU에게 전문가를 계산시킬까요? 전문가 계산에서 어려운 건 계산이 아니라 읽기이기 때문이에요. 전문가 하나는 1.38 MB이고, 파라미터마다 곱하고 더하는 횟수는 한두 번뿐이에요. 계산 유닛은 대부분의 시간 동안 데이터가 메모리에서 오기를 기다려요. 업스트림의 CPU 전문가 풀 주석이 아주 직설적으로 말해요. 전문가 커널은 메모리 대역폭에 묶여 있고, 코어 6개에서 측정한 값은 약 42.55 GB/s이며, 속도는 코어 수에 거의 비례해요. <span class="ev ev-code">코드 사실</span>(<code>include/strata/kernels/cpu/pool.hpp</code>)</p>
+<p>병목이 바이트 읽기라면, 바이트가 덜 이동하게 하면 돼요. 10장에서 계산했듯이, 미스한 전문가를 PCIe로 그래픽 카드에 옮기면 토큰 하나당 옮기는 데만 10 ms 넘게 걸려요. 반대로 「일」을 데이터 곁으로 보내면 전송량이 훨씬 줄어요. 그림 13-3을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="그림 13-3: 전문가 10개를 GPU로 옮기면 13.8 MB를 전송해야 해요. 일을 CPU에 맡기면 입력 10 KB를 보내고 결과 100 KB를 받아 오기만 하면 돼요">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">방법 1: 전문가를 GPU로 옮기기</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="34" width="110" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="61" font-size="14" text-anchor="middle">RAM</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="34" width="110" height="44" rx="6"/>
+<text class="f-on" fill="#ffffff" x="325" y="61" font-size="14" text-anchor="middle">GPU</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M132 56H262"/>
+<path class="f-muted" fill="#5c6d66" d="M268 56l-9-5v10z"/>
+<text class="f-warn" fill="#9e5d24" x="200" y="100" font-size="14" text-anchor="middle">10 × 1.38 MB = 13.8 MB가 PCIe를 지나요</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="15" font-weight="600">방법 2: 일을 CPU에 맡기기</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="158" width="110" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="185" font-size="14" text-anchor="middle">CPU + RAM</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="158" width="110" height="44" rx="6"/>
+<text class="f-on" fill="#ffffff" x="325" y="185" font-size="14" text-anchor="middle">GPU</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M268 170H138"/>
+<path class="f-muted" fill="#5c6d66" d="M132 170l9-5v10z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M132 192H262"/>
+<path class="f-muted" fill="#5c6d66" d="M268 192l-9-5v10z"/>
+<text class="f-text" fill="#182f2b" x="200" y="226" font-size="14" text-anchor="middle">보냄: 이 층의 입력 2560개 수 ≈ 10 KB</text>
+<text class="f-text" fill="#182f2b" x="200" y="250" font-size="14" text-anchor="middle">받음: 10 × 2560개 수 ≈ 100 KB</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="284" font-size="14" text-anchor="middle">전문가의 1.38 MB는 제자리에 두고 CPU가 읽어요</text>
+</svg><figcaption>그림 13-3　데이터를 옮길까, 계산을 옮길까. 전문가는 가만히 있고 입력과 결과만 오가면 PCIe를 지나는 바이트가 100배 넘게 줄어요. <span class="ev ev-est">교육용 추정</span></figcaption></figure>
+<p>인터페이스는 이렇게 약속돼 있어요. 층마다 GPU가 정규화한 입력, 선택된 전문가 10개의 번호, 그 가중치를 CPU 쪽에 넘기고, 10 × 2560개 수가 돌아오기를 기다려요. <span class="ev ev-code">코드 사실</span>[S06] 수 하나는 4바이트예요. 입력은 약 10 KB, 결과는 약 100 KB라서 13.8 MB보다 100배 넘게 작아요. <span class="ev ev-est">교육용 추정</span></p>
+<p>CPU 쪽은 <dfn>전문가 풀</dfn>이에요. 물리 코어마다 작업 스레드를 하나씩 두고, 첫 번째 코어는 메인 루프에 남겨요. 층마다 전문가 10개를 이 스레드들에 나눠 동시에 계산해요. 호스트는 결과 10개를 모두 모아 더해야 다음 층을 시작할 수 있어요. 그래서 모든 층이 하나의 「배리어」가 돼요. <span class="ev ev-code">코드 사실</span>(<code>pool.hpp</code>)</p>
+<p class="bridge"><strong>운영체제를 배운 분께:</strong> 스레드는 논리 프로세서가 아니라 물리 코어에 고정해요. 물리 코어 하나의 하이퍼스레드 두 개는 같은 실행 유닛과 캐시를 나눠 써요. 메모리를 읽는 스레드 둘이 몰리면 대역폭이 반으로 줄어요. 소스 주석에는 실측도 남아 있어요. 메인 루프 스레드를 자기 코어에 고정하지 않았더니 전문가 풀이 36.32 GB/s에서 26.9 GB/s로 떨어졌어요. <span class="ev ev-report">업스트림 보고</span>(<code>pool.hpp</code> 주석)</p>
+<p>업스트림 개발 중의 측정에 따르면, 전문가 캐시가 생기기 전에는 CPU가 토큰 하나당 전문가 데이터 663.6 MB를 읽어야 했어요. 약 40 GB/s로 계산하면 16.2 ms예요. 당시 토큰 하나는 약 53 ms였어요. <span class="ev ev-report">업스트림 보고</span>[S05] CPU의 이 몫이 기계 전체에서 가장 큰 비용이었어요.</p>
+
+<h2 id="sec-3">13.3 한 층 안에서: 히트는 GPU, 미스는 CPU, 동시에</h2>
+<p>전문가 캐시가 생기면 한 층의 전문가 10개는 세 무리로 나뉘어요. <span class="ev ev-code">코드 사실</span>(<code>src/core/expert_source.cpp</code>, <code>src/program/generate.cpp</code>)</p>
+<ol>
+<li>VRAM에 있는 전문가(히트)는 GPU가 바로 계산해요.</li>
+<li>미스 중에서 일정한 비율만큼은 GPU가 PCIe를 통해 고정 메모리에서 읽어 가서 계산해요. 이 비율의 기본값은 Q2_0 모델이 0.2, 다른 네이티브 형식이 0.55예요.</li>
+<li>나머지 미스는 CPU가 그 자리에서 계산해요.</li>
+</ol>
+<p>순서가 중요해요. GPU 몫을 먼저 정하고 먼저 공개해서 GPU가 먼저 움직이게 한 다음, CPU가 자기 몫을 시작해요. <span class="ev ev-code">코드 사실</span>(<code>expert_source.cpp</code> 주석) 업스트림 문서에는, PCIe 몫을 0으로 두면 모든 미스가 CPU로 돌아가고 생성 속도가 느려진다고 나와요. <span class="ev ev-report">업스트림 보고</span>[S03]</p>
+<p>아래 시뮬레이터는 한 층을 타임라인으로 그려요. 숫자는 교육용 추정이에요. 전문가 하나는 1.38 MB이고, CPU는 40 GB/s, VRAM은 672 GB/s, PCIe는 63 GB/s로 읽는다고 보았어요. 어텐션과 라우팅은 0.25 ms, 병합은 0.05 ms로 가정했어요.</p>
+<div class="viz" data-viz="layer-timeline"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="그림 13-4: 히트율 65%, PCIe 몫 20%일 때 한 층의 타임라인. GPU가 먼저 어텐션과 라우팅을 계산하고, 그다음 GPU와 CPU가 동시에 전문가를 계산해요. CPU 분기가 더 길어서 임계 경로예요">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">한 층의 타임라인 (히트 65%, PCIe 몫 20%)</text>
+<text class="f-text" fill="#182f2b" x="20" y="58" font-size="14">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="40" width="160" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="230" y="40" width="25" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="293" y="40" width="32" height="26"/>
+<text class="f-on" fill="#ffffff" x="150" y="58" font-size="14" text-anchor="middle">어텐션 + 라우팅</text>
+<text class="f-text" fill="#182f2b" x="20" y="108" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="230" y="90" width="63" height="26"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M293 32V124"/>
+<text class="f-text" fill="#182f2b" x="20" y="152" font-size="14">↑ 0.25 ms에 라우팅이 끝나고 전문가를 분배해요</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="14">GPU 분기 0.039 ms, CPU 분기 0.098 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="200" font-size="14">점선: 양쪽이 합류하는 곳, CPU 쪽이 더 느려요</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="232" font-size="14" font-weight="600">이 층 = 0.25 + max(0.098, 0.039) + 0.05</text>
+</svg><figcaption>그림 13-4　한 층 안의 병렬. 합류 시점은 느린 쪽이 정해요. CPU 분기가 더 길면 GPU가 아무리 빨라도 기다려야 해요. <span class="ev ev-est">교육용 추정</span></figcaption></figure></div>
+<p>업스트림의 첫 버전은 「누가 먼저인가」에서 넘어졌어요. 당시 GPU가 히트를 계산하는 단계가 CPU 전문가 풀의 <strong>뒤</strong>에 놓여 있었어요. CPU 일은 정말로 절반으로 줄었어요(18.2에서 10.2 ms로). 하지만 GPU의 절반이 「옆」에서 「뒤」로 옮겨 갔을 뿐이라서, 전체 경로는 조금도 짧아지지 않았어요. 나중에 두 단계로 고쳤어요. GPU가 별도 버퍼에서 히트한 전문가를 먼저 계산하기 시작하고, 같은 시간에 CPU가 미스한 전문가를 계산해요. CPU 결과가 GPU로 올라오면 두 몫을 더해요. 버퍼 하나와 덧셈 한 번을 더 쓰고, 진짜 병렬을 얻었어요. <span class="ev ev-report">업스트림 보고</span>(<code>hit_hook.hpp</code> 주석) 시뮬레이터에서 「양쪽 동시 계산」을 꺼 보면 이 일을 재현할 수 있어요.</p>
+
+<h2 id="sec-4">13.4 층과 층 사이: 의존성이 병렬을 막아요</h2>
+<p>한 층 안에서는 병렬로 할 수 있어요. 그러면 CPU가 l번째 층을 계산하는 동안 GPU가 먼저 l + 1번째 층을 시작할 수 있을까요? 안 돼요. l + 1번째 층의 입력은 l번째 층이 전문가 10개를 병합한 결과예요. 이 연결은 꼬리에 꼬리를 물어요. 그림 13-5를 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="그림 13-5: 각 층 안에서는 전문가 10개를 CPU와 GPU가 나눠 동시에 계산할 수 있어요. 하지만 l+1번째 층의 입력은 l번째 층의 병합이 끝나야 나오므로 층과 층 사이는 줄을 서야 해요">
+<rect class="f-accent" fill="#136d5a" x="20" y="10" width="360" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="32" font-size="14" text-anchor="middle">l번째 층: 어텐션 + 라우팅 (GPU)</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="56" width="174" height="40" rx="7"/>
+<text class="f-text" fill="#182f2b" x="107" y="81" font-size="14" text-anchor="middle">히트 전문가 (GPU)</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="206" y="56" width="174" height="40" rx="7"/>
+<text class="f-text" fill="#182f2b" x="293" y="81" font-size="14" text-anchor="middle">미스 전문가 (CPU)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="108" width="360" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="130" font-size="14" text-anchor="middle">10개 결과 병합, 본줄기에 되쓰기</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" d="M200 142V166"/>
+<path class="f-muted" fill="#5c6d66" d="M200 172l-6-9h12z"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="174" width="360" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="196" font-size="14" text-anchor="middle">l+1번째 층: 입력은 앞 층의 결과예요</text>
+<text class="f-text" fill="#182f2b" x="20" y="236" font-size="14">가로 방향(같은 층 안): 병렬로 할 수 있어요</text>
+<text class="f-text" fill="#182f2b" x="20" y="260" font-size="14">세로 방향(층과 층 사이): 줄을 서야 해요</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="288" font-size="14" font-weight="600">48개 층이 사슬 하나로 이어진 것이 임계 경로</text>
+</svg><figcaption>그림 13-5　데이터 의존성이 병렬화의 한계를 정해요. 같은 층의 전문가끼리는 서로 상관없지만, 층과 층은 꼬리에 꼬리를 물어요.</figcaption></figure>
+<aside class="primer" id="c13-dependence">
+<h3>데이터 의존성과 임계 경로</h3>
+<p>두 계산 중 뒤의 계산이 앞의 결과를 써야 하면 <dfn>데이터 의존성</dfn>이 있다고 해요(더 정확히는 「쓰기 후 읽기」 의존성이에요). 의존성이 있는 두 단계는 앞뒤로만 할 수 있어요. 의존성이 없을 때만 동시에 할 수 있어요.</p>
+<p>모든 계산을 그래프 하나로 그려 보세요. 계산 하나가 점이고, 의존성이 화살표예요. 시작점에서 끝점까지 가장 긴 화살표 사슬을 <dfn>임계 경로</dfn>(critical path)라고 해요. 일꾼이 몇 명이든 전체 일은 아무리 빨라도 이 시간만큼 걸려요. 빨라지는 방법은 둘뿐이에요. 임계 경로에 있는 어떤 단계를 짧게 만들거나, 임계 경로에 있는 어떤 단계를 옆으로 빼서 다른 단계와 병렬로 하는 거예요.</p>
+<p>거꾸로, 임계 경로에 <strong>없는</strong> 단계를 줄이는 건 아무 소용이 없어요. 처음에 나온 일이 바로 그래요. CPU는 8 ms를 덜 일했지만, 그 8 ms가 빠진 자리를 GPU의 몫이 채워서 임계 경로 길이는 그대로였어요. 5장의 암달의 법칙과 같은 이치예요. 일부만 최적화하면 전체 이득은 나머지 부분에 묶여요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%ED%81%AC%EB%A6%AC%ED%8B%B0%EC%BB%AC_%ED%8C%A8%EC%8A%A4_%EB%B6%84%EC%84%9D%EB%B2%95" target="_blank" rel="noopener noreferrer">위키백과: 크리티컬 패스 분석법</a> · <a href="https://ko.wikipedia.org/wiki/%EB%8D%B0%EC%9D%B4%ED%84%B0_%EC%9D%98%EC%A1%B4%EC%84%B1" target="_blank" rel="noopener noreferrer">위키백과: 데이터 의존성</a> · <a href="https://en.wikipedia.org/wiki/Critical_path_method" target="_blank" rel="noopener noreferrer">Wikipedia: Critical path method</a></p>
+</aside>
+<p>Strata의 소스 코드는 이 점을 결론으로 적어 두었어요. 한 층은 GPU 계산 그래프 두 개로 나뉘어요. 앞 그래프는 어텐션에서 라우팅과 공유 전문가까지 계산해요. 뒤 그래프는 전문가 결과를 병합해서 본줄기에 되써요. 이 그래프는 CPU가 결과를 돌려준 뒤에야 시작할 수 있어요. 그래야 l번째 층의 전문가 결과가 l번째 층 자신의 라우팅 가중치와 짝이 맞아요. 대가는 이래요. CPU와 GPU가 겹칠 수 있는 시간이 공유 전문가의 짧은 구간만 남아요. 주석은 이렇게 적었어요. 층마다 한 번씩 도는 CPU 전문가 풀은 엄격하게 직렬인 잔차 사슬 뒤에 숨을 수 없다. <span class="ev ev-code">코드 사실</span>[S13]</p>
+<p>캐시 주석에는 숫자도 있어요. 당시 파이프라인은 CPU 작업 19.035 ms 중 1.055 ms만 숨겼어요. 96%가 임계 경로에 드러나 있었던 거예요. 「잔차 사슬이 엄격하게 직렬이기 때문」이에요. 그래서 유일한 출구는 읽는 바이트를 줄이는 것이에요. 전문가 일부를 VRAM에 넣어 두고, CPU는 미스한 것만 읽게 해요. <span class="ev ev-report">업스트림 보고</span>[S05] 12장의 전문가 캐시가 존재하는 이유가 바로 이거예요.</p>
+
+<h2 id="sec-5">13.5 진짜로 병렬이었다는 걸 어떻게 증명할까</h2>
+<p>「CPU와 GPU가 모두 바쁘다」는 「동시에 바쁘다」와 같지 않아요. 그림 13-6의 두 경우는 양쪽의 바쁜 시간 합이 같은데, 전체 시간은 많이 달라요.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="그림 13-6: 진짜 병렬에서는 GPU가 아직 계산하는 동안 CPU가 일을 시작해요. 가짜 병렬에서는 GPU가 이미 끝난 뒤에야 CPU가 시작해요. 양쪽의 바쁜 시간은 같지만 전체 시간은 더 길어요">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">진짜 병렬</text>
+<text class="f-text" fill="#182f2b" x="20" y="54" font-size="14">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="38" width="160" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="88" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="150" y="72" width="140" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="88" font-size="14">끝</text>
+<text class="f-text" fill="#182f2b" x="20" y="132" font-size="15" font-weight="600">가짜 병렬</text>
+<text class="f-text" fill="#182f2b" x="20" y="164" font-size="14">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="148" width="160" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="198" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="230" y="182" width="140" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="228" font-size="14">CPU가 시작할 때 GPU는 이미 놀고 있어요: 직렬과 같아요</text>
+</svg><figcaption>그림 13-6　바쁜 시간은 같지만 겹침이 달라요. 이용률만 보면 이 두 경우를 구분할 수 없어요.</figcaption></figure>
+<p>Strata의 세션 코드는 이 점을 따로 세어요. 층마다 호스트가 「도어벨」(GPU가 「라우팅을 골랐어요」라고 보내는 신호)을 볼 때, GPU의 계산 그래프가 아직 실행 중인지를 봐요. 아직 실행 중이면 CPU에게 GPU와 겹치는 구간이 있다는 뜻이에요. 이미 끝났다면 CPU는 GPU가 놀 때 일하는 셈이라서 파이프라인 전체가 직렬과 같아요. 이 카운터의 이름은 <code>rings_mid_graph</code>예요. 주석은 이것을 「도어벨이 장식인지 판별하는」 진단값이라고 불러요. <span class="ev ev-code">코드 사실</span>[S13]</p>
+<p>주석은 왜 필요한지도 짚어요. 두 경우 모두 올바른 토큰을 계산하고 층당 시간도 같아요. 차이는 「겹침이 아무것도 숨기지 못했다」는 데서만 드러나요. 다른 카운터는 계산 그래프를 시작한 때부터 도어벨을 볼 때까지의 밀리초를 기록해요. CPU가 쓸 수 있는 구간은 「층의 길이에서 이 값을 뺀 것」이에요. <span class="ev ev-code">코드 사실</span>[S13] 설정에 「겹침 켜기」라고 적혀 있는 건 의도일 뿐이고, 행동은 이벤트 타임라인이 말해 줘요.</p>
+
+<h2 id="sec-6">13.6 직접 해 보기: 균형점 찾기</h2>
+<p>먼저 이 장의 「한 층 안에서」 시뮬레이터를 써 보세요. 히트율을 0%로, 다시 65%로 끌어 보면서 임계 경로가 CPU에서 어디로 바뀌는지 보세요. 「양쪽 동시 계산」을 꺼서 업스트림 첫 버전의 교훈을 재현해 보세요. 「최적 몫으로 설정」을 눌러서 두 분기가 어떻게 같은 길이가 되는지 보세요. 그다음 「한 번에 16개 계산」에서 세 가지 알고리즘을 모두 실행해 보세요.</p>
+<p>그다음 이 장의 인터랙티브 실험 「CPU / GPU 작업 분담」를 열어 보세요. 분기는 둘뿐이에요. CPU와 「PCIe를 거쳐 GPU에 맡기기」예요. 양쪽의 유효 속도와 분배 비율을 바꿔서, 전체 시간이 가장 짧은 비율을 찾아보세요. 실험 과제: PCIe 분기의 유효 속도를 절반으로 줄이고, 최적 분배가 왜 더 이상 「반반」이 아닌지 설명해 보세요. 실험과 시뮬레이터는 두 분기가 서로 자원을 뺏지 않는다고 가정해요. 실제 기계에서는 CPU가 전문가를 읽을 때와 PCIe가 고정 메모리를 읽을 때 같은 메모리 대역폭을 써요.</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>전문가 계산은 대부분 바이트 읽기예요. CPU가 메모리에 있는 전문가를 그 자리에서 계산하면, PCIe를 지나는 건 10 KB 입력과 100 KB 결과뿐이에요.</li>
+<li>같은 층에서는 히트한 전문가는 GPU가, 미스 일부는 PCIe를 거쳐 GPU가, 나머지는 CPU가 맡아 동시에 계산해요. 합류할 때는 느린 쪽을 기다려요.</li>
+<li>층과 층 사이에는 데이터 의존성이 있어요. 48개 층이 임계 경로 하나예요. CPU 일은 숨길 수 없고 캐시로 줄이는 수밖에 없어요. 임계 경로에 없는 단계를 최적화해 봐야 소용이 없어요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: 「CPU와 GPU가 함께 계산하면 속도가 두 배가 된다. CPU가 일을 절반 덜 하면 전체 시간도 그만큼 줄어든다.」</strong></p>
+<p>아낀 부분이 임계 경로에 있을 때만 전체 시간이 줄어요. 업스트림은 CPU 일을 18.2 ms에서 10.2 ms로 줄였지만 토큰은 하나도 빨라지지 않았어요. GPU의 몫이 CPU 뒤로 밀렸기 때문이에요. <span class="ev ev-report">업스트림 보고</span> 마찬가지로 「GPU 이용률 100%」도 아무것도 증명하지 못해요. 헛돌며 기다리는 중일 수도 있고, 병렬로 할 수 있는 일을 하고 있을 수도 있어요. 봐야 할 것은 임계 경로와 이벤트 타임라인이에요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 분배 공식, 공식이 틀리는 이유, 동시성의 함정</summary>
+<h3>두 분기의 분배 공식</h3>
+<p>남은 전문가 데이터의 양을 D라 하고, 비율 f를 「PCIe를 거치는 GPU 분기」에 맡기고 나머지를 CPU에 맡긴다고 해요. CPU 분기의 지속 처리 능력을 초당 Bc 바이트, PCIe 분기를 초당 Bp 바이트로 환산하고, 둘이 서로 영향을 주지 않는다고 가정해요.</p>
+<div class="equation">T(f) ≈ max((1 − f)·D / Bc, f·D / Bp) + T병합</div>
+<p>두 분기가 같은 길이일 때 가장 빠르고, 풀면 f = Bp ÷ (Bc + Bp)예요. Bc = 40, Bp = 20이면 f = 1/3이에요. 「반반」이 아니에요. <span class="ev ev-est">교육용 추정</span> 여기서 Bp는 PCIe의 표기 대역폭이 아니라, 이 분기의 모든 비용을 포함한 유효 속도예요.</p>
+<h3>실제 최적점이 여기 있지 않은 이유</h3>
+<p>공식은 두 분기가 각자 자원을 쓴다고 가정해요. 하지만 실제 기계에서는 서로 뺏어요. CPU가 전문가를 읽는 것과 GPU가 PCIe로 고정 메모리를 읽는 것은 같은 메모리 채널 묶음을 지나요. PCIe는 긴 컨텍스트의 KV 페이지를 동시에 옮기고 있을 수도 있어요. 전문가 크기, 같은 전문가를 검증 윈도우 하나에서 토큰 몇 개가 재사용하는지, GPU 시작 오버헤드, 호스트 스레드의 코어 고정도 양쪽의 유효 속도를 바꿔요. 그래서 Strata의 기본 몫(Q2_0은 0.2, 다른 네이티브 형식은 0.55)은 이 공식이 아니라 실측에서 나왔어요. <span class="ev ev-code">코드 사실</span>(<code>generate.cpp</code>) 공식은 가설을 세우는 데 쓰기 좋아요. 튜닝할 때는 분기마다 완료 시간, 옮긴 바이트, 전체 시간을 기록하고, 다른 작업 묶음에서 다시 검증해야 해요.</p>
+<h3>계산이 맞나요: 시간은 맞는데 결과가 틀릴 때</h3>
+<p><code>hit_hook.hpp</code>에는 교과서에 실릴 만한 동시성 오류가 기록돼 있어요. 첫 버전의 「GPU가 히트를 먼저 계산」 단계는 전문가 풀 콜백 안에서 정해지는 히트 목록을 읽었는데, 그 콜백은 이 단계보다 <strong>나중에</strong> 실행됐어요. 그래서 <strong>앞 층</strong>의 목록을 읽어서, 앞 층의 전문가를 이 층 자리에서 계산했어요. 프로그램은 평소처럼 토큰을 내놓았고 시간도 정상이었어요. 하지만 표준 답과 비교하니 평균 KL 발산이 9.69×10⁻²에서 1.03으로 올랐고, 가장 가능성 높은 토큰의 일치율은 0.867에서 0.333으로 떨어졌어요. 이 층의 라우터가 공개한 번호를 이 단계가 직접 받게 해서 고쳤어요. <span class="ev ev-code">코드 사실</span>(<code>hit_hook.hpp</code>)</p>
+<h3>스레드 풀의 경쟁 상태</h3>
+<p>CPU 전문가 풀은 작업 묶음이 끝나기를 기다릴 때 처음에는 「완료 카운트 = 작업 수」만 기다렸어요. 하지만 VRAM이 큰 카드에서는 대부분의 전문가가 히트해서 작업 스레드가 자주 잠들어요. 작업 묶음이 너무 작으면 잠든 스레드가 깨기도 전에 묶음이 끝나요. 깨어난 스레드가 <strong>다음 묶음</strong>에서 작업을 가로채 같은 작업을 두 번 하거나, 호스트가 카운트를 0으로 만든 뒤에야 카운트를 더할 수 있어요. 그러면 「완료 카운트 = 작업 수」가 영원히 성립하지 않고 GPU는 계속 기다려요. 작업을 가져올 때마다 묶음 번호를 붙여서 고쳤어요. 작업 포인터는 「묶음 | 작업 수 | 순번」을 담은 64비트 워드예요. 가져오기는 compare-and-swap으로 하고, 묶음 번호가 맞을 때만 성공해요. 늦게 온 스레드는 자연스럽게 작업을 못 가져와요. <span class="ev ev-code">코드 사실</span>(<code>pool.hpp</code>) 업스트림 문서는 이 멈춤을 issue #29로 기록했고, 엔진 0.1.12에서 고쳤어요.</p>
+<h3>주석과 설계가 어긋나는 곳</h3>
+<p><code>session.hpp</code>의 뒷부분에는 더 이른 시기의 주석이 있어요. 「겹침은 한 층의 지연에서 나온다. 전문가 풀의 결과는 다음 층이 소비한다」는 내용이에요. <span class="ev ev-code">코드 사실</span>(<code>session.hpp</code>) 그런데 앞쪽의 계산 그래프 두 개에 대한 주석은 정반대로 말해요. l번째 층의 전문가가 l + 1번째 층의 라우팅 가중치와 짝이 되지 않게, 병합은 이 층에 남아야 한다고요. <span class="ev ev-code">코드 사실</span>[S13] 이런 모순을 만나면 현재의 호출 순서와 테스트를 기준으로 삼으세요.</p>
+<h3>GPU와 CPU가 같은 전문가를 계산해도 마지막 몇 비트가 다를 수 있어요</h3>
+<p>GPU와 CPU 커널은 반올림 방식이 달라요. 어느 전문가를 누가 계산할지는 캐시 상태와 PCIe 몫에 따라 정해져요. 그래서 같은 프롬프트를 되풀이해 실행해도 답이 바이트 단위로 같지 않을 수 있어요. 업스트림 문서에 따르면, 재현 가능한 결과가 필요할 때는 PCIe 몫을 0으로 두는 등의 스위치를 쓸 수 있어요. 대가는 생성이 느려지는 거예요. <span class="ev ev-report">업스트림 보고</span>[S03]</p>
+</details>

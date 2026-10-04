@@ -1,0 +1,188 @@
+<div class="hook"><span class="eyebrow">겪어 본 적 있을 거예요</span>
+<p>Strata를 처음 켜면 컴퓨터가 1~2분 동안 버벅거리고, 마우스도 잘 안 따라와요. README가 미리 알려 줘요. 모델을 시작할 때 35~55 GB를 메모리로 읽고, 그중 일부를 그래픽 카드가 쓰도록 「잠가」 둬요. 그동안 컴퓨터가 느려지거나 응답이 없어지는 건 정상이니 기다리면 된다고요. <span class="ev ev-report">업스트림 보고</span>[S01]</p>
+<p>메모리는 왜 「잠가」야 할까요? 잠그면 그래픽 카드가 무엇을 할 수 있고, 안 잠그면 어떤 일이 생길까요? 이 장은 운영체제의 가장 기본적인 속임수에서 시작해요. 프로그램이 보는 메모리 주소는 사실 「가짜」예요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 운영체제는 메모리 페이지를 언제든 옮길 수 있어요. 그런데 그래픽 카드의 DMA 엔진은 작업을 시작할 때 받은 물리 주소만 알아요. 그래서 옮길 메모리는 먼저 페이지를 고정해야 해요. 옮기기는 비동기라서 함수가 돌아왔다고 데이터가 도착한 게 아니에요. 완료 신호를 기다려야 해요. 버퍼 두 개를 번갈아 써서 「한쪽은 옮기고 한쪽은 계산」하면 옮기는 시간을 숨길 수 있어요. 단, 덮어쓰기 전에는 매번 「다 썼음」 신호를 기다려야 해요.</p>
+
+<h2 id="sec-1">14.1 지금 보는 메모리 주소는 「가짜」예요</h2>
+<p>프로그램 안의 포인터, 예를 들어 <code>0x7f3a_0000_1000</code>은 메모리 모듈 위의 실제 위치가 아니에요. 이것은 <dfn>가상 주소</dfn>예요. 운영체제와 CPU가 함께 가상 주소를 <dfn>물리 주소</dfn>로 번역해야 비로소 메모리 모듈을 실제로 읽어요. 이 번역 단계 덕분에 프로그램마다 자기가 큰 연속 메모리를 혼자 쓰는 줄 알아요. 운영체제도 뒤에서 마음대로 조정할 수 있게 돼요.</p>
+<aside class="primer" id="c14-virtual-memory">
+<h3>가상 메모리와 페이징</h3>
+<p>운영체제는 메모리를 크기가 고정된 조각으로 나눠요. 이것을 <dfn>페이지</dfn>라고 하고, 가장 흔한 크기는 4 KiB예요. 프로그램의 가상 주소 공간도 페이지 단위로 자르고, 물리 메모리도 같은 크기로 잘라요. 물리 쪽 조각은 <dfn>페이지 프레임</dfn>이라고 해요. 프로그램마다 <dfn>페이지 테이블</dfn>이 하나씩 있어서 「가상 페이지 → 물리 페이지 프레임」을 기록해요. CPU는 메모리에 접근할 때마다 이 테이블부터 찾아봐요. 그림 14-1을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 320" role="img" aria-label="그림 14-1: 프로그램의 가상 페이지 4개가 페이지 테이블을 거쳐 흩어진 물리 페이지 프레임으로 매핑돼요. 그중 한 페이지는 잠시 디스크로 스왑 아웃돼 있어요">
+<text class="f-text" fill="#182f2b" x="70" y="20" font-size="15" font-weight="600" text-anchor="middle">가상 페이지</text>
+<text class="f-text" fill="#182f2b" x="320" y="20" font-size="15" font-weight="600" text-anchor="middle">물리 페이지 프레임</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="32" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="54" font-size="14" text-anchor="middle">페이지 0</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="72" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="94" font-size="14" text-anchor="middle">페이지 1</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="112" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="134" font-size="14" text-anchor="middle">페이지 2</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="152" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="174" font-size="14" text-anchor="middle">페이지 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="32" width="100" height="22"/><text class="f-muted" fill="#5c6d66" x="320" y="48" font-size="14" text-anchor="middle">프레임 0</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="56" width="100" height="22"/><text class="f-on" fill="#ffffff" x="320" y="72" font-size="14" text-anchor="middle">프레임 1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="80" width="100" height="22"/><text class="f-muted" fill="#5c6d66" x="320" y="96" font-size="14" text-anchor="middle">프레임 2</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="104" width="100" height="22"/><text class="f-on" fill="#ffffff" x="320" y="120" font-size="14" text-anchor="middle">프레임 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="128" width="100" height="22"/><text class="f-muted" fill="#5c6d66" x="320" y="144" font-size="14" text-anchor="middle">프레임 4</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="152" width="100" height="22"/><text class="f-on" fill="#ffffff" x="320" y="168" font-size="14" text-anchor="middle">프레임 5</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M120 49L268 115M120 89L268 67M120 169L268 163M120 129L200 214"/>
+<rect class="f-warn" fill="#9e5d24" x="140" y="214" width="150" height="30" rx="5"/>
+<text class="f-on" fill="#ffffff" x="215" y="234" font-size="14" text-anchor="middle">SSD (스왑 아웃)</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="272" font-size="14">프로그램에는 연속된 4페이지로 보이지만</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="292" font-size="14">실제 위치는 흩어져 있어요.</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="312" font-size="14">페이지 2는 지금 메모리에 없고, 쓸 때 읽어 와요</text>
+</svg><figcaption>그림 14-1　페이지 테이블이 가상 페이지를 물리 페이지 프레임으로 번역해요. 운영체제는 이 테이블을 언제든 고칠 수 있어요. 페이지를 다른 프레임으로 옮기거나 SSD로 스왑 아웃해요.</figcaption></figure>
+<p>이 구조에는 세 가지 장점이 있어요. 프로그램끼리 서로 격리돼요. 메모리가 모자라면 자주 안 쓰는 페이지를 SSD로 <dfn>스왑 아웃</dfn>했다가 필요할 때 다시 읽어 와요. 물리 메모리를 조각조각 나눠 할당해도 프로그램에는 연속된 주소로 보여요. 대가도 있어요. 같은 가상 페이지가 지금 어느 프레임에 있는지는 운영체제가 정하고, 언제든 바뀔 수 있어요.</p>
+<p>접근할 때마다 페이지 테이블을 찾으면 너무 느려요. 그래서 CPU 안에 번역 결과를 캐시하는 작은 부품이 있어요. 이것이 <dfn>TLB</dfn>(변환 색인 버퍼)예요. 몇천 개밖에 못 담아요. Strata 소스는 이런 계산을 해 두었어요. 33.97 GB의 전문가 가중치를 4 KB 페이지로 자르면 830만 페이지예요. 어떤 TLB도 못 담아서, 전문가를 읽을 때마다 계속 테이블을 찾게 돼요. 2 MB 큰 페이지로 바꾸면 1만 6천 페이지 남짓이면 돼요. <span class="ev ev-code">코드 사실</span>(<code>include/strata/core/pinned.hpp</code>) 아쉽게도 Windows에서는 일반 사용자 계정에 큰 페이지를 쓸 권한이 기본으로 없어요. 그래서 일반 페이지가 흔한 경우이고, 엔진은 시작할 때 어느 쪽을 받았는지 알려 줘요. <span class="ev ev-code">코드 사실</span>(<code>pinned.hpp</code>)</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EA%B0%80%EC%83%81_%EB%A9%94%EB%AA%A8%EB%A6%AC" target="_blank" rel="noopener noreferrer">위키백과: 가상 메모리</a> · <a href="https://ko.wikipedia.org/wiki/%EB%A9%94%EB%AA%A8%EB%A6%AC_%ED%8E%98%EC%9D%B4%EC%A7%95" target="_blank" rel="noopener noreferrer">위키백과: 메모리 페이징</a> · <a href="https://ko.wikipedia.org/wiki/%EB%B3%80%ED%99%98_%EC%83%89%EC%9D%B8_%EB%B2%84%ED%8D%BC" target="_blank" rel="noopener noreferrer">위키백과: 변환 색인 버퍼(TLB)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-paging.pdf" target="_blank" rel="noopener noreferrer">OSTEP 18장: 페이징</a></p>
+</aside>
+<p class="bridge"><strong>운영체제를 배운 분께:</strong> 「페이지 테이블 + TLB + 페이지 폴트」 이야기 그대로예요. 이 장이 관심 있는 건 그 부작용이에요. 페이지 테이블은 언제든 바뀌는데, 외부 장치는 그 사실을 몰라요.</p>
+
+<h2 id="sec-2">14.2 그래픽 카드가 직접 옮기게 하기: DMA와 페이지 고정</h2>
+<p>데이터를 RAM에서 그래픽 카드로 보낼 때 CPU가 바이트를 하나하나 옮길 필요는 없어요. 그래픽 카드에는 전용 <dfn>복사 엔진</dfn>이 있어요. CPU는 「어디서, 얼마나, 어디로 옮길지」만 알려 주면 돼요. 그러면 복사 엔진이 PCIe 버스를 따라 데이터를 알아서 끌어가요. 이렇게 「장치가 메모리를 직접 읽고 쓰는」 방식을 <dfn>DMA</dfn>(직접 메모리 접근)라고 해요.</p>
+<aside class="primer" id="c14-dma">
+<h3>DMA: 장치가 메모리에 직접 접근해요</h3>
+<p>DMA가 없으면 CPU가 모든 바이트를 메모리에서 읽어 장치에 써 줘야 해요. 그동안 다른 일은 하나도 못 해요. DMA가 있으면 CPU는 「옮기기 지시서」 하나만 보내요. 장치의 DMA 엔진이 지시서대로 옮기고, 끝나면 CPU에게 알려요. 디스크, 네트워크 카드, 그래픽 카드가 모두 이렇게 일해요.</p>
+<p>핵심은 이거예요. DMA 엔진은 CPU의 페이지 테이블을 거치지 않고 <strong>물리 주소</strong>만 알아요. 드라이버가 작업 시작 전에 가상 주소를 번역해서 물리 페이지 프레임 번호 목록을 넘겨줘요. 옮기는 도중에 운영체제가 어떤 페이지를 옮겨 버리면 DMA 엔진은 그 사실을 모르고 원래 프레임을 그대로 읽어요. 그런데 그 프레임에는 지금 다른 프로그램의 데이터가 들어 있을 수 있어요.</p>
+<p>그래서 DMA가 쓰는 메모리는 먼저 <dfn>페이지 고정</dfn>(pinning, 「페이지 잠금」이라고도 해요)을 해야 해요. 이 페이지들은 잠금을 풀기 전까지 옮기지도, 스왑 아웃하지도 말라고 운영체제에게 알리는 거예요. CUDA에서는 고정 메모리를 바로 요청할 수도 있고, 이미 있는 메모리를 고정 메모리로 「등록」할 수도 있어요. 일반(페이징 가능) 메모리를 복사할 때는 드라이버가 보통 데이터를 자기 소유의 고정 중계 영역에 먼저 복사한 뒤 DMA로 옮겨요. 복사가 한 번 더 들어가는 거예요.[R01]</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EC%A7%81%EC%A0%91_%EB%A9%94%EB%AA%A8%EB%A6%AC_%EC%A0%91%EA%B7%BC" target="_blank" rel="noopener noreferrer">위키백과: 직접 메모리 접근</a> · <a href="https://en.wikipedia.org/wiki/Direct_memory_access" target="_blank" rel="noopener noreferrer">Wikipedia: Direct memory access</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA CUDA Programming Guide</a> · <a href="https://man7.org/linux/man-pages/man2/mlock.2.html" target="_blank" rel="noopener noreferrer">Linux 매뉴얼: mlock</a></p>
+</aside>
+<p>글만으로는 「페이지가 옮겨진다」는 게 추상적이에요. 아래 시뮬레이터는 옮기기 한 번을 천천히 보여 줘요. 「옮기는 도중 메모리가 부족해지는」 상황을 직접 만들어 볼 수 있어요.</p>
+<div class="viz" data-viz="pin-dma"><figure class="fig"><svg viewBox="0 0 400 356" role="img" aria-label="그림 14-2: 페이지를 고정하지 않으면 DMA가 시작된 뒤 운영체제가 페이지 2를 프레임 3에서 프레임 6으로 옮겨요. DMA는 옛 번호대로 프레임 3을 읽어서 다른 프로그램의 데이터를 읽어요">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="8" width="380" height="84" rx="8"/>
+<text class="f-text" fill="#182f2b" x="24" y="32" font-size="15" font-weight="600">① 시작: 페이지 2는 프레임 3에 있어요</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="56" font-size="14">DMA는 프레임 번호</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="76" font-size="14">2, 5, 3, 7을 적어 둬요</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="100" width="380" height="84" rx="8"/>
+<text class="f-text" fill="#182f2b" x="24" y="124" font-size="15" font-weight="600">② 절반쯤 옮겼을 때 메모리가 부족해져요</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="148" font-size="14">시스템이 페이지 2를 프레임 6으로 옮기고</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="168" font-size="14">프레임 3은 다른 프로그램에 줘요</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="192" width="380" height="84" rx="8"/>
+<text class="f-on" fill="#ffffff" x="24" y="216" font-size="15" font-weight="600">③ DMA는 여전히 프레임 3을 읽어요</text>
+<text class="f-on" fill="#ffffff" x="24" y="240" font-size="14">다른 프로그램의 데이터를 읽는데도</text>
+<text class="f-on" fill="#ffffff" x="24" y="260" font-size="14">오류는 나지 않아요</text>
+<text class="f-text" fill="#182f2b" x="10" y="304" font-size="14">페이지를 고정하면 옮기는 동안</text>
+<text class="f-text" fill="#182f2b" x="10" y="324" font-size="14">시스템이 이 페이지들을 옮기지 않아요.</text>
+<text class="f-text" fill="#182f2b" x="10" y="344" font-size="14">DMA가 처음 받은 번호대로 읽고 써도 안전해요.</text>
+</svg><figcaption>그림 14-2　DMA는 페이지 테이블을 보지 않아요. DMA가 쓰는 메모리를 운영체제가 옮겨 버리면, DMA는 남의 데이터를 읽게 돼요.</figcaption></figure></div>
+<p>Strata는 전문가 가중치를 모두 고정 메모리에 둬요. <span class="ev ev-report">업스트림 보고</span>[S02] 소스의 설명은 더 직설적이에요. 이 「전문가 영역」이 엔진의 진짜 워킹 세트이고, 복사 엔진이 대역폭을 끝까지 쓰려면 고정돼 있어야 한다고요. <span class="ev ev-code">코드 사실</span>(<code>pinned.hpp</code>) 구체적인 방법은 이래요. 큰 메모리 덩어리를 먼저 예약하고, 그 어느 페이지에도 손대기 전에 덩어리 전체를 CUDA 고정 메모리로 등록해요. 그리고 그래픽 카드의 주소 공간에 매핑해요. 전체 등록이 실패하면 구간별로 등록하고, 남은 부분에는 운영체제의 「상주」 잠금을 써서 적어도 스왑 아웃은 막아요. <span class="ev ev-code">코드 사실</span>(<code>src/core/pinned.cu</code>) 업스트림의 문제 해결 표에도 있어요. Windows에서 로그에 전체 등록 「메모리 부족」이 나오는 건 정상이고, 엔진이 층 단위로 나눠 잠그는 방식으로 바꿔요.</p>
+<p>페이지를 고정하고 나면 데이터가 그래픽 카드로 가는 길은 세 가지예요. 그림 14-3을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 326" role="img" aria-label="그림 14-3: 그래픽 카드로 가는 세 가지 길. 일반 메모리는 CPU가 중계 영역에 먼저 복사한 뒤 DMA로 옮겨요. 고정 메모리는 바로 DMA로 옮길 수 있어요. 그래픽 카드 주소 공간에 매핑된 고정 메모리는 GPU 커널이 PCIe로 직접 읽을 수 있어요">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">① 일반 메모리</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="34" width="90" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="65" y="56" font-size="14" text-anchor="middle">원본 데이터</text>
+<rect class="f-soft" fill="#e5f1df" x="150" y="34" width="90" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="195" y="56" font-size="14" text-anchor="middle">중계 영역</text>
+<rect class="f-accent" fill="#136d5a" x="290" y="34" width="90" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="335" y="56" font-size="14" text-anchor="middle">VRAM</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M110 51H146M240 51H286"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="90" font-size="14">CPU가 한 번 복사하고, 그다음 DMA</text>
+<text class="f-text" fill="#182f2b" x="20" y="126" font-size="15" font-weight="600">② 고정 메모리</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="138" width="90" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="65" y="160" font-size="14" text-anchor="middle">고정 영역</text>
+<rect class="f-accent" fill="#136d5a" x="290" y="138" width="90" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="335" y="160" font-size="14" text-anchor="middle">VRAM</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M110 155H286"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="194" font-size="14">복사 엔진이 직접 옮겨요. CPU는 관여하지 않아요</text>
+<text class="f-text" fill="#182f2b" x="20" y="230" font-size="15" font-weight="600">③ 매핑된 고정 메모리</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="242" width="90" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="65" y="264" font-size="14" text-anchor="middle">고정 영역</text>
+<rect class="f-accent" fill="#136d5a" x="290" y="242" width="90" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="335" y="264" font-size="14" text-anchor="middle">GPU 커널</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="5 4" d="M110 259H286"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="296" font-size="14">GPU가 계산하면서 PCIe로 바로 읽어요.</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="316" font-size="14">VRAM에 먼저 복사하지 않아요</text>
+</svg><figcaption>그림 14-3　페이지 고정 덕분에 ② 번 길이 가능해요. 매핑까지 하면 ③ 번 길도 생겨요. ③ 번 길은 복사를 없애지만, 읽을 때마다 PCIe를 지나야 해요.</figcaption></figure>
+<p>Strata의 전문가 소스 인터페이스는 뒤의 두 길을 모두 겉으로 드러내요. <code>pinned()</code>는 「이 전문가가 고정되고 등록된 메모리에 있어서, CPU가 먼저 복사하지 않고 바로 DMA를 할 수 있는가」에 답해요. <code>device_alias()</code>는 이 전문가의 그래픽 카드 주소 공간 안 주소를 알려 줘서, GPU가 PCIe로 직접 읽을 수 있게 해요. <span class="ev ev-code">코드 사실</span>[S06] 주의하세요. 「GPU가 읽을 수 있다」는 「이미 VRAM에 있다」와 달라요. ③ 번 길로 가면 읽을 때마다 PCIe를 지나야 하고, 여전히 버스 대역폭에 묶여요.</p>
+<p>고정하지 못한 전문가는 어떻게 할까요? 긴 프롬프트를 읽을 때 엔진에는 보조 스레드 몇 개가 있어요. 이 스레드들이 미리 고정 버퍼 묶음에 복사해 두었다가 복사 엔진에 넘겨요. <span class="ev ev-report">업스트림 보고</span>[S03] 소스 주석에 따르면 예전에는 복사를 시작한 스레드가 직접 복사했어요. 그러면 매번 약 2 MB를 복사하는 동안 GPU는 줄 선 일이 없어서 놀았어요. IQ3_S에서 32K 프롬프트를 읽을 때 이렇게 헛되이 쓴 시간이 약 15초였어요. <span class="ev ev-report">업스트림 보고</span>(<code>src/prefill/prefill.cpp</code> 주석)</p>
+
+<h2 id="sec-3">14.3 「제출됨」은 「완료됨」이 아니에요</h2>
+<p>복사 엔진에게 옮기라고 시킨 뒤, CPU는 옆에서 끝나기를 기다려야 할까요? 기다려도 되고 안 기다려도 돼요. 이것이 두 가지 호출 방식이에요.</p>
+<aside class="primer" id="c14-async">
+<h3>동기와 비동기</h3>
+<p><dfn>동기</dfn> 호출은 함수가 돌아왔을 때 일이 이미 끝나 있어요. 창구에서 업무를 볼 때 끝날 때까지 서서 기다리는 것과 같아요. <dfn>비동기</dfn> 호출은 함수가 일을 「제출」하고 바로 돌아와요. 일은 뒤에서 진행돼요. 인터넷으로 주문하면 주문만 넣고 다른 일을 하러 가고, 택배가 오면 알려 주는 것과 같아요.</p>
+<p>비동기의 장점은 멍하니 기다리지 않아도 된다는 거예요. 그림 14-4를 보세요. 대가도 있어요. 함수가 돌아왔을 때 일이 끝났다고 가정하면 안 돼요. 결과를 쓰려면 분명한 <dfn>완료 신호</dfn>를 기다려야 해요. CUDA에서 같은 <dfn>스트림</dfn>(stream)에 제출한 일은 순서대로 실행돼요. 스트림을 넘나들거나 호스트가 결과를 읽어야 할 때는 <dfn>이벤트</dfn>(event)를 써요. 스트림에 이벤트를 기록해 두고 그 이벤트가 「완료」되면, 그 앞에 제출한 일은 모두 끝난 거예요.[R01]</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="그림 14-4: 동기 호출은 복사가 끝나야 돌아와요. 비동기 호출은 바로 돌아오고 복사는 뒤에서 진행돼요. 결과를 쓰기 전에는 완료 이벤트를 기다려야 해요">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">동기</text>
+<text class="f-text" fill="#182f2b" x="20" y="54" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="70" y="38" width="160" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="150" y="55" font-size="14" text-anchor="middle">복사 끝까지 대기</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="38" width="150" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="305" y="55" font-size="14" text-anchor="middle">다른 일</text>
+<text class="f-text" fill="#182f2b" x="20" y="108" font-size="15" font-weight="600">비동기</text>
+<text class="f-text" fill="#182f2b" x="20" y="140" font-size="14">CPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="124" width="200" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="170" y="141" font-size="14" text-anchor="middle">제출 후 바로 다른 일</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="14">복사</text>
+<rect class="f-soft" fill="#e5f1df" x="70" y="160" width="160" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="150" y="177" font-size="14" text-anchor="middle">백그라운드 복사</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M230 156V196"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="216" font-size="14">점선: 완료 이벤트. 이 뒤에야 결과를 쓸 수 있어요</text>
+</svg><figcaption>그림 14-4　비동기 호출은 기다림을 뒤로 숨겨요. 하지만 「돌아옴」과 「완료됨」은 다른 일이에요.</figcaption></figure>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EB%B9%84%EB%8F%99%EA%B8%B0_%EC%9E%85%EC%B6%9C%EB%A0%A5" target="_blank" rel="noopener noreferrer">위키백과: 비동기 입출력</a> · <a href="https://ko.wikipedia.org/wiki/%EC%83%9D%EC%82%B0%EC%9E%90-%EC%86%8C%EB%B9%84%EC%9E%90_%EB%AC%B8%EC%A0%9C" target="_blank" rel="noopener noreferrer">위키백과: 생산자-소비자 문제</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/threads-cv.pdf" target="_blank" rel="noopener noreferrer">OSTEP 30장: 조건 변수(생산자와 소비자)</a></p>
+</aside>
+<p>Strata의 소스 코드에는 「돌아옴은 완료가 아니다」라는 경고가 곳곳에 있어요.</p>
+<ul>
+<li><strong>전문가 캐시 채우기</strong>는 평소에는 비동기예요. 복사와, 그것을 읽는 계산이 같은 스트림에 줄 서 있어서 순서가 저절로 지켜지기 때문이에요. 부팅할 때 목록대로 캐시를 채울 때는 이 보장이 없어요. 첫 버전은 비동기로 채웠고, 바이트 단위 검증이 곧바로 「슬롯 0의 0번째 바이트부터 달라요」라고 오류를 냈어요. 그래서 전용 블로킹 버전이 생겼어요. <span class="ev ev-code">코드 사실</span>[S05]</li>
+<li><strong>검증 윈도우의 커밋</strong>은 계산 그래프가 끝나기를 기다리지 않고 돌아올 수 있어요. 그래서 다음 단계의 드래프트 생성이 동시에 진행돼요. 하지만 다른 스트림이나 호스트에서 세션 상태를 읽거나 쓰는 코드(새 요청, 저장, 스냅샷 등)는 모두 먼저 <code>wait_commit()</code>을 호출해야 해요. <span class="ev ev-code">코드 사실</span>[S08]</li>
+<li><strong>층마다 도는 메인 루프</strong>는 「스트림 전체가 끝나기를 기다리는」 함수를 부르지 않고 이벤트 하나를 조회해요. 소스 주석에는 함정 하나도 적혀 있어요. 토큰마다 고정 버퍼를 한 번씩 해제했는데, 고정 메모리를 해제하면 장치 전체가 암묵적으로 동기화돼요. 그래서 토큰이 끝날 때마다 장치 전체 대기가 한 번씩 더 생겼어요. 세션을 시작할 때 한 번 할당해서 계속 쓰는 것으로 고쳤어요. <span class="ev ev-code">코드 사실</span>(<code>include/strata/core/session.hpp</code>)</li>
+</ul>
+<p>11장의 디스크 읽기도 같은 발상이에요. 토큰이 정해지는 즉시 읽기 요청 16개를 제출하고, 1번째 층에서 필요하기 직전에야 결과를 가져와요.</p>
+
+<h2 id="sec-4">14.4 더블 버퍼링: 한쪽은 옮기고, 한쪽은 계산하고</h2>
+<p>비동기 옮기기를 가장 흔히 쓰는 방법은 옮기기와 계산을 겹치는 거예요. 데이터 블록이 줄줄이 있다고 해 봐요. 블록마다 먼저 그래픽 카드로 옮기고(3 ms), 그다음 계산해요(5 ms). 버퍼가 하나뿐이면 「다 옮기고 나서 계산, 다 계산하고 나서 옮기기」밖에 못 해요. 버퍼가 두 개면 한 블록은 계산하고, 그동안 다른 버퍼에서 다음 블록을 옮길 수 있어요. 이것을 <dfn>더블 버퍼링</dfn>이라고 해요.</p>
+<p>계산해 볼게요. 블록이 4개면 직렬로는 4 × (3 + 5) = 32 ms가 걸려요. 더블 버퍼링이면 첫 블록의 옮기기와 마지막 블록의 계산은 겹칠 수 없고, 중간의 각 단계는 느린 쪽 기준이에요. 3 + (4 − 1) × max(3, 5) + 5 = 23 ms예요. 이 공식이 성립하려면 복사 엔진과 계산 유닛이 정말로 독립된 두 자원이어야 해요.</p>
+<div class="viz" data-viz="double-buffer"><figure class="fig"><svg viewBox="0 0 400 242" role="img" aria-label="그림 14-5: 데이터 4블록, 복사 3 ms, 계산 5 ms. 버퍼 1개는 직렬로 32 ms가 걸리고, 버퍼 2개는 겹쳐서 23 ms가 걸려요">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">버퍼 1개: 32 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="54" font-size="14">복사</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="38" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="144" y="38" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="224" y="38" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="304" y="38" width="30" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="88" font-size="14">계산</text>
+<rect class="f-accent" fill="#136d5a" x="94" y="72" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="174" y="72" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="254" y="72" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="334" y="72" width="50" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="134" font-size="15" font-weight="600">버퍼 2개: 23 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="166" font-size="14">복사</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="150" width="30" height="24"/><rect class="f-warn" fill="#9e5d24" x="94" y="150" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="144" y="150" width="30" height="24"/><rect class="f-warn" fill="#9e5d24" x="194" y="150" width="30" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="200" font-size="14">계산</text>
+<rect class="f-accent" fill="#136d5a" x="94" y="184" width="50" height="24"/><rect class="f-warn" fill="#9e5d24" x="144" y="184" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="194" y="184" width="50" height="24"/><rect class="f-warn" fill="#9e5d24" x="244" y="184" width="50" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="234" font-size="14">두 가지 색 = 버퍼 두 개, 번갈아 써요</text>
+</svg><figcaption>그림 14-5　더블 버퍼링은 옮기는 시간을 계산 뒤로 숨겨요. 세 번째 블록은 첫 번째 블록의 계산이 끝나 버퍼가 비어야 옮기기를 시작할 수 있다는 점을 보세요.</figcaption></figure></div>
+<p>시뮬레이터가 가장 보여 주고 싶은 건 「신호를 기다리지 않고 덮어쓰는」 순간이에요. 더블 버퍼링이 옳은 건 「메모리를 두 개 할당해서」가 아니라 두 가지 신호 덕분이에요. <strong>복사가 끝나야 읽을 수 있고</strong>, <strong>다 쓰고 나야 쓸 수 있어요</strong>. 버퍼 하나하나가 작은 상태 기계예요. 그림 14-6을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="그림 14-6: 버퍼의 생애. 비어 있을 때 쓸 수 있어요. 복사 끝 이벤트가 있어야 읽을 수 있어요. 계산 다 썼음 이벤트가 있어야 비어 있음으로 돌아갈 수 있어요">
+<rect class="f-soft" fill="#e5f1df" x="130" y="8" width="140" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="33" font-size="15" font-weight="600" text-anchor="middle">비어 있음</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="260" y="104" width="130" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="325" y="129" font-size="15" font-weight="600" text-anchor="middle">복사 중</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="196" width="140" height="40" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="221" font-size="15" font-weight="600" text-anchor="middle">계산 중</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="104" width="130" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="75" y="129" font-size="15" font-weight="600" text-anchor="middle">회수 대기</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M270 36Q330 50 326 100M326 146Q320 196 274 214M128 214Q80 196 76 148M76 102Q80 50 128 36"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="70" font-size="14">복사 제출</text>
+<text class="f-warn" fill="#9e5d24" x="332" y="176" font-size="14">복사 끝</text>
+<text class="f-warn" fill="#9e5d24" x="332" y="194" font-size="14">이벤트</text>
+<text class="f-warn" fill="#9e5d24" x="18" y="176" font-size="14">다 썼음</text>
+<text class="f-warn" fill="#9e5d24" x="18" y="194" font-size="14">이벤트</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="70" font-size="14">재사용</text>
+<text class="f-text" fill="#182f2b" x="200" y="264" font-size="14" text-anchor="middle">다 썼음 이벤트 없이는 비어 있음으로 못 돌아가요</text>
+</svg><figcaption>그림 14-6　버퍼 하나의 일생. 이벤트 두 개가 네 상태를 이어 줘요. 둘 중 하나라도 빠지면 아직 안 옮겨진 데이터를 읽거나, 아직 안 다 쓴 데이터를 덮어쓸 수 있어요.</figcaption></figure>
+<p>Strata는 긴 프롬프트를 읽을 때 이런 링 버퍼를 써요. VRAM에 없는 전문가는 고정된 링 슬롯 묶음을 거쳐, 별도의 복사 스트림에서 그래픽 카드로 보내져요. <span class="ev ev-code">코드 사실</span>[S12] 슬롯마다 이벤트가 두 개 붙어요. 하나는 「복사 끝」, 하나는 「다 썼음」이에요. <span class="ev ev-code">코드 사실</span>(<code>prefill.cpp</code>) 앞에서 말한 보조 복사 스레드도 같은 규칙을 따라요. j번째 작업은 j mod 16번째 고정 버퍼(기본 16개)에 쓰고, 그 전에 j − 16번째 작업이 이 버퍼에서 시작한 DMA가 끝나기를 먼저 기다려야 써 넣을 수 있어요. <span class="ev ev-code">코드 사실</span>(<code>prefill.cpp</code>)</p>
+<p>링을 얼마나 크게 할지도 고민거리예요. 소스 주석에 측정이 하나 기록돼 있어요(Q2_0, 블록당 토큰 8192개). 링 슬롯을 96개에서 384개로 늘리자 프롬프트 읽기가 초당 토큰 1,153개에서 1,294개로 올랐어요. 다음 층의 전문가가 이 층의 어텐션 계산 중에 미리 도착할 수 있었기 때문이에요. 반대로 많은 전문가를 호스트 복사에 의존해야 할 때는 큰 링이 오히려 더 느려요. 병목이 호스트 복사라서, 늘어난 슬롯이 캐시 자리만 차지하기 때문이에요. <span class="ev ev-report">업스트림 보고</span>(<code>prefill.cpp</code> 주석) 여러 GPU로 층을 나눌 때는 단계마다 고정된 인계 버퍼도 두 개씩 있어요. 다음 단계가 c번째 블록을 읽는 동안 이 단계는 이미 c + 1번째 블록을 처리해요. <span class="ev ev-code">코드 사실</span>[S12] 이것이 더블 버퍼링이에요.</p>
+
+<h2 id="sec-5">14.5 페이지 고정은 공짜가 아니에요</h2>
+<p>페이지 고정이 이렇게 좋다면 메모리를 전부 고정하면 안 될까요? 안 돼요. 고정한 페이지는 운영체제가 옮길 수도, 스왑 아웃할 수도 없고, 메모리가 부족해도 회수할 수 없어요. 많이 고정할수록 시스템, 다른 프로그램, 파일 캐시에게 남는 여유가 줄어요.[R02]</p>
+<p>Strata는 이 점에 신중해요. 저메모리 「상주」 모드는 시스템에 4 GB의 빈 메모리를 남겨 둬요. <span class="ev ev-report">업스트림 보고</span>[S03] Windows에서는 그래픽 카드에 매핑된 고정 메모리가 「공유 VRAM」 예산도 차지해요. 소스에는 63 GB짜리 컴퓨터 사례가 있어요. 드라이버가 거부할 때까지 구간별로 잠갔더니 28 GiB를 잠갔고, 그러자 그 예산이 가득 차서 이후 VRAM 할당이 전부 「메모리 부족」이 났어요. 그래서 엔진은 선택적인 상한 설정을 제공해요. 하지만 기본값은 아니에요. 64 GB 컴퓨터에서는 더 많이 잠가도 문제가 없다고 실측됐고, 상한을 두면 프롬프트 읽기가 약 20% 느려지기 때문이에요. <span class="ev ev-code">코드 사실</span>(<code>pinned.cu</code>) 이런 트레이드오프에는 어디서나 통하는 답이 없어요. 기계에 맞춰 재 봐야 해요.</p>
+<p>재미있는 비교가 하나 더 있어요. 긴 컨텍스트의 KV 페이지 캐시(12장에서 언급했어요)는 KV 데이터 전체를 고정되고 그래픽 카드에 매핑된 메모리에 두고, VRAM에는 일부 페이지만 둬요. 그리고 「페이지 번호 → VRAM 슬롯」 표로 누가 VRAM에 있는지 기록해요. <span class="ev ev-code">코드 사실</span>(<code>include/strata/kernels/kv_stream.hpp</code>) 이건 거의 미니 가상 메모리예요. 페이지 테이블, 페이지 폴트, 교체를 모두 GPU가 스스로 해요.</p>
+
+<h2 id="sec-6">14.6 직접 해 보기: 경쟁 상태를 매번 재현하기</h2>
+<p>이 장에는 따로 인터랙티브 실험이 없어요. 시뮬레이터 두 개가 실험대예요. 「더블 버퍼링」에서 버퍼 1개, 2개, 3개로 한 번씩 재생하고 총 시간을 적어 보세요. 2개로 돌아와 「신호 안 기다리고 덮어쓰기」를 켜고, 어느 블록이 ✗로 표시되는지 보세요. 그다음 복사를 느리게, 계산을 빠르게 바꿔서 다시 해 보세요. 이번에는 왜 「우연히」 오류가 안 났을까요? 「가끔은 맞고 가끔은 틀리는」 이런 오류가 가장 잡기 어려워요.</p>
+<p>「DMA와 페이지 고정」에서는 「페이지 고정」을 끈 채로, 그리고 켠 채로 한 번씩 해 보세요. 4단계와 5단계에서 페이지 테이블과 DMA가 쥔 프레임 번호를 비교해 보세요.</p>
+<p>마지막으로 종이 위의 실험이에요. 배열 두 개로 더블 버퍼링을 흉내 내고, 소비자가 다 읽기 전에 생산자가 배열을 일부러 덮어쓰게 하는 테스트를 써 보세요. 테스트가 실패하는지 확인해요. 그다음 「다 썼음」 신호를 더하고 테스트가 통과하는지 확인해요. 마지막으로 「완료 이벤트」를 몇 단계 일부러 늦춰서, 시스템이 반쯤 새것이고 반쯤 낡은 데이터를 몰래 읽지 않고 제대로 기다리는지 확인해요.</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>프로그램의 주소는 가상이고, 운영체제는 언제든 페이지를 옮길 수 있어요. DMA는 물리 주소만 알아서, DMA가 쓰는 메모리는 페이지를 고정해야 해요. Strata의 전문가 영역은 모두 고정되고 그래픽 카드에 매핑돼요.</li>
+<li>비동기 호출에서 「돌아옴」은 「완료」가 아니에요. 결과를 쓰려면 완료 이벤트를, 버퍼를 재사용하려면 「다 썼음」 이벤트를 기다려요.</li>
+<li>더블 버퍼링은 옮기는 시간을 계산 뒤로 숨겨요. 총 시간 ≈ 첫 블록 복사 + (블록 수 − 1) × 느린 구간 + 마지막 블록 계산이에요. 페이지 고정에는 대가가 있으니 시스템에 여유를 남겨야 해요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: 「비동기 복사 함수가 돌아왔으니 데이터가 도착했고, 원본 버퍼도 바로 고쳐도 된다.」</strong></p>
+<p>함수가 돌아왔다는 건 일이 제출됐다는 뜻일 뿐이에요. 복사는 아직 시작도 안 했을 수 있어요. 이때 원본 버퍼를 고치면 그래픽 카드가 새것과 낡은 것이 섞인 데이터를 받을 수 있어요. 원본을 해제하면 복사가 이미 남이 쓰는 메모리를 읽을 가능성이 더 커요. 재사용해도 되는지는 완료 신호만 알려 줘요. 중간에 「0.1초 기다리기」를 넣는 것도 해결책이 아니에요. 느린 기계에서는 여전히 틀리고, 빠른 기계에서는 괜히 느려져요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 생산자-소비자 프로토콜, 스트림의 순서 경계, 메모리 예산</summary>
+<h3>가장 작은 생산자-소비자 프로토콜</h3>
+<p>생산자가 바이트를 채우고 나서 「준비됨」을 공개해요. 소비자는 「준비됨」을 보고 읽은 뒤 「다 썼음」을 공개해요. 생산자는 「다 썼음」을 본 뒤에야 덮어쓸 수 있어요. 교육용 상태 기계는 이래요. 비어 있음 → 채우는 중 → 준비됨 → 읽는 중 → 비어 있음. 「준비됨」에서 바로 「비어 있음」으로 돌아갈 수 없어요. 장치를 넘나드는 순서 보장을 일반 변수나 <code>volatile</code>로 대신할 수도 없어요. 어떤 펜스, 이벤트, 스트림 의미론을 쓸지는 대상 플랫폼의 규칙을 따라야 해요.[R01]</p>
+<h3>스트림의 순서는 보장하는 범위 안에서만 성립해요</h3>
+<p>같은 스트림에 순서대로 제출한 연산에는 저절로 선후 관계가 생겨요. 서로 다른 스트림 사이, 호스트 읽기와 기본 스트림 사이에는 순서를 마음대로 가정하면 안 돼요. 전문가 캐시의 부팅 채우기가 바로 여기서 넘어졌어요. 데이터는 논블로킹 스트림에서 복사했고 검증은 레거시 스트림에서 읽었어요. 둘 사이에 순서가 없어서, 검증이 아직 복사가 안 끝난 슬롯을 읽었어요. <span class="ev ev-code">코드 사실</span>[S05] 검증 윈도우의 비동기 커밋도 마찬가지예요. 호출하는 쪽이 기다림을 건너뛸 수 있는 조건은 뒤따르는 일이 같은 스트림에 있고, 드래프트 생성이 그 커밋이 쓰는 것을 읽지 않는 거예요. 다른 스트림이나 호스트가 세션 상태를 읽어야 하면 먼저 기다려야 해요. <span class="ev ev-code">코드 사실</span>[S08]</p>
+<h3>같은 동시성 교훈을 두 번 썼어요</h3>
+<p>보조 복사 스레드는 작업을 가져올 때 「묶음 번호 | 작업 수 | 순번」으로 묶은 원자 변수를 써요. 묶음 번호가 맞을 때만 작업을 가져올 수 있어서, 늦게 온 스레드는 다음 묶음의 작업을 가져갈 수 없어요. 소스 주석에 따르면 이것은 CPU 전문가 풀이 멈췄던 일(issue #29)의 교훈이에요. <span class="ev ev-code">코드 사실</span>(<code>prefill.cpp</code>) 13장에서 그 멈춤의 전말을 다뤘어요.</p>
+<h3>메모리 예산을 이중으로 세지 마세요</h3>
+<p>튼튼한 메모리 예산은 여러 양을 구분해야 해요. 예약된 것(주소는 차지했지만 아직 실제로 할당되지 않음), 커밋된 것(시스템이 줄 수 있다고 약속함), 상주하는 것(지금 물리 메모리에 있음), 고정된 것(스왑 아웃 금지), 그래픽 카드에 별도 사본이 있는 것이에요. 이 양들은 같은 물리 페이지를 가리킬 수 있어서 단순히 더하면 이중으로 세게 돼요. 겹치는지부터 확인한 뒤에 합계를 내세요.[R02] 호스트에는 서비스 프로세스, 파일 캐시, 페이지 테이블, 입력 버퍼, 복구 가능한 세션 상태도 있어서 물리 메모리 전부를 전문가에게 나눠 줄 수는 없어요.</p>
+<h3>검수: 드문 오류를 매번 재현되게 만들기</h3>
+<p>테스트는 순탄한 길만 가면 안 돼요. 일부러 이런 상황을 만들어야 해요. 소비자가 「다 썼음」을 한참 안 돌려줄 때 생산자가 한 바퀴 돌아와 덮어쓰지는 않는가. 완료 이벤트를 일부러 늦췄을 때 시스템이 기다리는가, 반쯤 만들어진 데이터를 읽는가. 라운드마다 데이터에 증가하는 세대 번호를 붙여서, 소비자가 읽은 세대가 기대한 세대와 같아야 하게 하기. 타임아웃이 난 뒤에는 이 버퍼를 다시 쓰면 안 돼요. 11장의 디스크 읽기 모듈에는 「읽기마다 일부러 지연」하는 장애 주입이 내장돼 있어요. 바로 이런 검수를 위해서예요.</p>
+</details>
