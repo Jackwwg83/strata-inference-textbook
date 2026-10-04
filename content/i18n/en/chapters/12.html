@@ -1,0 +1,216 @@
+<div class="hook"><span class="eyebrow">Picking up where Chapter 10 left off</span>
+<p>Chapter 10 said that Strata keeps the most often picked experts in VRAM, leaves the rest in RAM for the CPU to compute in place, and swaps the experts in VRAM when the topic changes. That sounds smooth. But once you sit down to write the code, the questions pile up. Whom do you load at the start? VRAM has a few thousand slots in total; how do you split them across 48 layers? When do you swap, and whom? And what if, halfway through a swap, a token needs exactly that expert?</p>
+<p>These are all old cache problems. This chapter uses Strata's expert cache to work through them one by one.</p></div>
+<p class="tldr"><strong>In one line:</strong> the expert cache starts full, filled by historical frequency, with a range of slots for each layer. After that, every 4 rounds it swaps cold experts out and hot ones in by "decayed count". During a swap it first removes the table entry, waits for the bytes to finish copying, and only then registers the new expert, so the GPU never reads a slot that is half new and half old.</p>
+
+<h2 id="sec-1">12.1 Hit rate: first, name the denominator</h2>
+<p>The first number to look at for any cache is the <dfn>hit rate</dfn>: what share of the things you need are already in the cache. For the expert cache, a "hit" means the picked expert is already in VRAM and the GPU computes it directly. A "miss" means the CPU has to read that expert's 1.38 MB from RAM and compute it there.</p>
+<p>Upstream measured this while building the cache. With 4,105 experts in VRAM, the per-expert hit rate was 0.6447, and ten-fold held-out evaluation gave a range from 0.6110 to 0.6750. <span class="ev ev-report">Upstream report</span>[S05] The same comment records another number: the share of layers where <strong>all</strong> 10 experts hit is only 0.0456. <span class="ev ev-report">Upstream report</span>[S05] Both numbers are called "hit rate", yet they differ by more than ten times, because their denominators differ. See Figure 12-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 280" role="img" aria-label="Figure 12-1: in the same run, the per-expert hit rate is 64.5%, all 10 experts of a layer hit only 4.6% of the time, and if the experts were independent it would be only about 1.2%">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="13">4,105 slots, held-out evaluation (upstream)</text>
+<text class="f-text" fill="#182f2b" x="20" y="52" font-size="14">Single-expert hits</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="60" width="300" height="22"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="60" width="193" height="22"/>
+<text class="f-text" fill="#182f2b" x="328" y="77" font-size="14">64.5%</text>
+<text class="f-text" fill="#182f2b" x="20" y="114" font-size="14">All 10 in a layer hit: measured</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="122" width="300" height="22"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="122" width="14" height="22"/>
+<text class="f-text" fill="#182f2b" x="328" y="139" font-size="14">4.6%</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="14">All 10 in a layer hit: if independent</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="184" width="300" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="20" y="184" width="4" height="22"/>
+<text class="f-text" fill="#182f2b" x="328" y="201" font-size="14">1.2%</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="232" font-size="13">0.645¹⁰ ≈ 1.2%. The measured rate is higher,</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="251" font-size="13">so experts picked in the same layer tend to</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="270" font-size="13">run hot together and cold together</text>
+</svg><figcaption>Figure 12-1　Two numbers, both called "hit rate". Counted per expert it is 64.5%; counted as "the whole layer hits" it is only 4.6%. When you report a hit rate, say what the denominator is first.</figcaption></figure>
+<p>This shapes the design directly. If a fast path works only when the whole layer hits, a 64.5% per-expert hit rate does not help: such layers are only 4.6% of the total. The upstream comment draws the conclusion: do not design GPU kernels that group work by "whole layer"; let some experts of a layer run on the GPU and others on the CPU. <span class="ev ev-code">Code fact</span>[S05]</p>
+<aside class="primer" id="c12-hit-rate">
+<h3>Hit rate and working set</h3>
+<p><dfn>Hit rate</dfn> = hits ÷ accesses. It looks simple. The hard part is how to count "one access": per token, per "layer × token", per expert call, per distinct expert, or per byte? Change the denominator and the number can move by an order of magnitude. When you report a hit rate, also state the cache size, whether it was a cold start or warmed up, and what data you measured on.</p>
+<p>A useful idea is the <dfn>working set</dfn>: the set of things actually used over a recent stretch of time. Say that over the last 100 tokens, layer 7 picked 60 different experts in total. Those 60 are layer 7's working set right now. If the cache can hold the working set, the hit rate is high. If it cannot, items get pushed out right after they come in, and the cache keeps moving data back and forth. This is called <dfn>thrashing</dfn>.</p>
+<p>The working set drifts over time. The experts busy while you write code are not the ones busy while you write prose. So a cache has to answer two questions: who is in the working set now (statistics), and how to keep up as it changes (the replacement policy, see 12.4).</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Thrashing_%28computer_science%29" target="_blank" rel="noopener noreferrer">Wikipedia: Thrashing (computer science)</a> · <a href="https://en.wikipedia.org/wiki/Working_set" target="_blank" rel="noopener noreferrer">Wikipedia: Working set</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-beyondphys-policy.pdf" target="_blank" rel="noopener noreferrer">OSTEP Chapter 22: Swapping policies</a></p>
+</aside>
+
+<h2 id="sec-2">12.2 Whom to load first: a list ranked by past frequency</h2>
+<p>The laziest start is "first come, first served": once the run begins, the first few thousand distinct experts that get picked take the slots in turn, and once the slots are full nothing changes. The problem is that who shows up first depends entirely on the first prompt of this conversation. Upstream measured a hit rate of only 0.4864 this way. <span class="ev ev-report">Upstream report</span>[S05]</p>
+<p>Strata prepares an <dfn>expert profile</dfn> in advance instead. It counts how often each (layer, expert) pair is picked over a long access trace, ranks them from most to least frequent, and fills VRAM from that list at startup. With the same 4,105 slots, the held-out hit rate is 0.6447. <span class="ev ev-report">Upstream report</span>[S05] See Figure 12-2.</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="Figure 12-2: filling first come, first served gives a hit rate of 0.4864; filling from the frequency list gives 0.6447">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">Same slots, two starting fills (upstream)</text>
+<text class="f-text" fill="#182f2b" x="20" y="52" font-size="14">First come: first S distinct experts</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="60" width="300" height="24"/>
+<rect class="f-warn" fill="#9e5d24" x="20" y="60" width="146" height="24"/>
+<text class="f-text" fill="#182f2b" x="328" y="78" font-size="14">0.486</text>
+<text class="f-text" fill="#182f2b" x="20" y="116" font-size="14">Frequency list (profile)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="124" width="300" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="124" width="193" height="24"/>
+<text class="f-text" fill="#182f2b" x="328" y="142" font-size="14">0.645</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="180" font-size="14">CPU work is proportional to 1 − hit rate</text>
+</svg><figcaption>Figure 12-2　Whom you load first makes a big difference. The list comes from statistics on one access trace; the evaluation must use a different trace the list has never seen.</figcaption></figure>
+<p>The comment stresses one point: the list is read from a file, so you can "build the list from this prompt and score it on another prompt", and only then do you know whether it generalizes. <span class="ev ev-code">Code fact</span>[S05] Using the same trace both to build the list and to score it is an open-book exam, and the score comes out too high. The comment notes that the README once published 0.6573, a number measured "in sample"; 0.6447 is the held-out result. <span class="ev ev-report">Upstream report</span>[S05]</p>
+<p class="bridge"><strong>If you studied machine learning:</strong> this is the rule that training and test sets must be kept apart. "Counting what is popular" in a cache policy is also a kind of fitting, and it can overfit too.</p>
+
+<h2 id="sec-3">12.3 Don't let the first layers grab everything: a range of slots per layer</h2>
+<p>How should the slots be split across 48 layers? Upstream fell into a trap here that teaches a lot. The early admission rule was: all layers share one counter, slots are handed out in order of arrival, and when they run out, they run out. A token walks from layer 0 onward and picks 10 experts in each layer, so 256 slots are gone by about layer 26. The later layers never get a slot, and for the whole run the cache helps only the first few layers. <span class="ev ev-code">Code fact</span>[S05]</p>
+<figure class="fig"><svg viewBox="0 0 400 286" role="img" aria-label="Figure 12-3: with global first come, first served, the first 26 layers take all 256 slots and the hit rate is 2.97%; with a range per layer, an estimate on the same trace reaches 21.4% with 8 slots per layer">
+<text class="f-text" fill="#182f2b" x="20" y="20" font-size="15" font-weight="600">Global first come, first served</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="34" width="190" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="210" y="34" width="170" height="40"/>
+<text class="f-on" fill="#ffffff" x="115" y="59" font-size="14" text-anchor="middle">Layers 0–25 take all</text>
+<text class="f-muted" fill="#5c6d66" x="295" y="59" font-size="14" text-anchor="middle">Later layers: 0</text>
+<text class="f-text" fill="#182f2b" x="20" y="98" font-size="14">Measured, 256 slots: 1,781 ÷ 60,000 = 2.97%</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="15" font-weight="600">Per layer: each uses only its own range</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="160" width="360" height="40"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M65 160V200M110 160V200M155 160V200M200 160V200M245 160V200M290 160V200M335 160V200"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="222" font-size="14">Layer 0 ………………………… Layer 47</text>
+<text class="f-text" fill="#182f2b" x="20" y="250" font-size="14">Same trace, estimated: 8 per layer → 21.4%</text>
+<text class="f-text" fill="#182f2b" x="20" y="274" font-size="14">64 per layer → 70.4%</text>
+</svg><figcaption>Figure 12-3　The cache is not short of capacity; it is short of fairness. Global first come, first served hands every slot to the layers that show up first.</figcaption></figure>
+<p>The numbers in the comment are striking. With 256 slots, the run had 1,781 hits out of 60,000 accesses, a hit rate of 2.97%. On the same routing trace, an estimate gives 21.4% with 8 slots per layer and 70.4% with 64 per layer. The comment's conclusion: the cache was never short of capacity; it was short of fair allocation. <span class="ev ev-report">Upstream report</span>[S05]</p>
+<p>The fix is direct. With per-layer admission on, layer l may use only slots l·q up to (l+1)·q, where q is the total number of slots divided by the number of layers, and the last layer takes the remainder. <span class="ev ev-code">Code fact</span>[S05] The fix changes only "who may use which slot" and nothing else. The lesson matters more than the fix: a low hit rate does not always mean the cache is too small. First check whether the allocation has got tangled up with the order of access.</p>
+
+<h2 id="sec-4">12.4 Hot experts change: LRU, LFU and decayed counts</h2>
+<p>The list only covers the start. As the chat goes on, the topic changes, and so do the hot experts. To keep up, the cache must decide "whom to push out". This is called the <dfn>replacement policy</dfn>. First, a few classic ones.</p>
+<aside class="primer" id="c12-cache-replacement">
+<h3>Cache replacement policies: LRU, LFU and others</h3>
+<p>The cache is full and something new must come in, so something old has to leave. Which one?</p>
+<ul>
+<li><dfn>OPT</dfn> (the optimal policy): evict the item whose next use is furthest in the future. It is the best score possible in theory, but it needs to know the future, so it serves only as a reference.</li>
+<li><dfn>FIFO</dfn> (first in, first out): evict whatever came in earliest. It is simple, but it also throws out old items that are still used a lot. The rotating pointer in Chapter 11 is one FIFO per set.</li>
+<li><dfn>LRU</dfn> (least recently used): evict the item unused for the longest time. The reasoning: "what was used recently will probably be used again soon". It reacts fast, but it fears a "one-time scan": a run of cold items used once each can push out every hot one.</li>
+<li><dfn>LFU</dfn> (least frequently used): evict the item with the lowest total count. It shrugs off the odd cold item, but its memory is too good: an old favorite that built up a big count keeps its seat even after the topic has changed.</li>
+<li><dfn>CLOCK</dfn> (second chance): give each slot a "recently used" bit. A pointer sweeps around; when it meets a slot with the bit set, it clears the bit and lets that slot stay; only a slot without the bit gets replaced. It approximates LRU at very low cost, and operating systems often use it for paging.</li>
+</ul>
+<p>LFU's flaw has a classic patch: let the counts <dfn>decay</dfn> over time, for example by multiplying every count by 0.7 at regular intervals. Old credit then fades slowly, and a new favorite gets a chance to overtake an old one. This kind of trick is often called "aging".</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Page_replacement_algorithm" target="_blank" rel="noopener noreferrer">Wikipedia: Page replacement algorithm</a> · <a href="https://en.wikipedia.org/wiki/Cache_replacement_policies" target="_blank" rel="noopener noreferrer">Wikipedia: Cache replacement policies</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-beyondphys-policy.pdf" target="_blank" rel="noopener noreferrer">OSTEP Chapter 22: Swapping policies</a></p>
+</aside>
+<p>Strata's expert cache uses exactly this "decayed count". The rules live in the generation program, and all the numbers check out: <span class="ev ev-code">Code fact</span> (<code>src/program/generate.cpp</code>, <code>src/core/expert_source.cpp</code>)</p>
+<ol>
+<li><strong>Count</strong>: every time a layer picks an expert, that expert's count goes up by 1, whether or not it is in VRAM.</li>
+<li><strong>Adjust on a schedule</strong>: by default, adjust once every 4 rounds. One round is one forward pass of the big model, which verifies a batch of drafts and produces one or more tokens.</li>
+<li><strong>Swap only when it is worth it</strong>: within one layer, an expert outside VRAM is a candidate only if its count is at least 2. A candidate must lead the coldest expert in VRAM by more than 1.5 before an actual swap happens. One adjustment swaps at most 96 experts.</li>
+<li><strong>Everyone fades</strong>: after the adjustment, every count is multiplied by 0.7.</li>
+</ol>
+<p>What does multiplying by 0.7 mean? If an expert stops being picked, its count halves about every 2 adjustments (0.7² ≈ 0.49). Turned around, a single "pick", counting all the fading that follows, contributes 1 + 0.7 + 0.49 + … = 1 ÷ (1 − 0.7) ≈ 3.3 in total. The source comment uses exactly this sum to describe accumulated "heat". <span class="ev ev-est">Teaching estimate</span> Figure 12-4 draws the fading.</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="Figure 12-4: once an expert stops being picked, its count is multiplied by 0.7 at each adjustment: 10, 7, 4.9, 3.4, 2.4, 1.7, dropping below 2 after the 5th adjustment">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">How an unpicked expert's count fades</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="4 3" d="M30 182H390"/>
+<text class="f-warn" fill="#9e5d24" x="390" y="44" font-size="14" text-anchor="end">Dashed line: threshold 2</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="86" width="40" height="120"/>
+<rect class="f-accent" fill="#136d5a" x="100" y="122" width="40" height="84"/>
+<rect class="f-accent" fill="#136d5a" x="160" y="147" width="40" height="59"/>
+<rect class="f-accent" fill="#136d5a" x="220" y="165" width="40" height="41"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="280" y="177" width="40" height="29"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="340" y="186" width="40" height="20"/>
+<text class="f-text" fill="#182f2b" x="60" y="78" font-size="14" text-anchor="middle">10</text>
+<text class="f-text" fill="#182f2b" x="120" y="114" font-size="14" text-anchor="middle">7</text>
+<text class="f-text" fill="#182f2b" x="180" y="139" font-size="14" text-anchor="middle">4.9</text>
+<text class="f-text" fill="#182f2b" x="240" y="157" font-size="14" text-anchor="middle">3.4</text>
+<text class="f-text" fill="#182f2b" x="300" y="169" font-size="14" text-anchor="middle">2.4</text>
+<text class="f-text" fill="#182f2b" x="360" y="168" font-size="14" text-anchor="middle">1.7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M30 206H390"/>
+<text class="f-muted" fill="#5c6d66" x="60" y="226" font-size="14" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="120" y="226" font-size="14" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="180" y="226" font-size="14" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="240" y="226" font-size="14" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="226" font-size="14" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="360" y="226" font-size="14" text-anchor="middle">5</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="246" font-size="14" text-anchor="middle">Adjustments (default: one every 4 rounds)</text>
+</svg><figcaption>Figure 12-4　Each adjustment multiplies by 0.7, so the count halves about every 2 adjustments. An old favorite fades slowly, and only then can a new favorite overtake it. <span class="ev ev-est">Teaching estimate</span></figcaption></figure>
+<p>So how does this rule beat LRU and LFU? The simulator below shrinks one layer to 24 experts, with 4 picked per token and room for only 6 in VRAM, and runs all three policies on the same routing sequence. From token 30 on, the topic changes; you can also insert a "cold burst".</p>
+<div class="viz" data-viz="cache-race"><figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="Figure 12-5: results of three policies in the teaching model. Overall hit rate: LRU 40%, LFU 37%, decayed count 44%. In the first 15 tokens after the topic shift: LRU 26 hits, LFU 5, decayed count 10">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="13">Teaching model: 60 tokens, topic shift at 30</text>
+<text class="f-text" fill="#182f2b" x="20" y="50" font-size="14" font-weight="600">Overall hit rate</text>
+<text class="f-text" fill="#182f2b" x="20" y="78" font-size="14">LRU</text>
+<rect class="f-accent" fill="#136d5a" x="136" y="64" width="160" height="18"/>
+<text class="f-text" fill="#182f2b" x="304" y="78" font-size="14">40%</text>
+<text class="f-text" fill="#182f2b" x="20" y="104" font-size="14">LFU</text>
+<rect class="f-accent" fill="#136d5a" x="136" y="90" width="148" height="18"/>
+<text class="f-text" fill="#182f2b" x="292" y="104" font-size="14">37%</text>
+<text class="f-text" fill="#182f2b" x="20" y="130" font-size="14">Decayed count</text>
+<rect class="f-accent" fill="#136d5a" x="136" y="116" width="176" height="18"/>
+<text class="f-text" fill="#182f2b" x="320" y="130" font-size="14">44%</text>
+<text class="f-text" fill="#182f2b" x="20" y="166" font-size="14" font-weight="600">Hits in the 15 tokens after the shift</text>
+<text class="f-text" fill="#182f2b" x="20" y="194" font-size="14">LRU</text>
+<rect class="f-warn" fill="#9e5d24" x="136" y="180" width="156" height="18"/>
+<text class="f-text" fill="#182f2b" x="300" y="194" font-size="14">26</text>
+<text class="f-text" fill="#182f2b" x="20" y="220" font-size="14">LFU</text>
+<rect class="f-warn" fill="#9e5d24" x="136" y="206" width="30" height="18"/>
+<text class="f-text" fill="#182f2b" x="174" y="220" font-size="14">5</text>
+<text class="f-text" fill="#182f2b" x="20" y="246" font-size="14">Decayed count</text>
+<rect class="f-warn" fill="#9e5d24" x="136" y="232" width="60" height="18"/>
+<text class="f-text" fill="#182f2b" x="204" y="246" font-size="14">10</text>
+</svg><figcaption>Figure 12-5　LRU reacts fastest; LFU is held back by the counts the old topic built up; decayed count catches up a few steps later and has the best total. The numbers come from this book's teaching model, not from Strata measurements.</figcaption></figure></div>
+<p>The simulator has only one layer and 24 experts, so its numbers do not carry over to Strata directly. What it wants you to see is personality. LRU is sharp but easily thrown off by cold data; LFU is steady but will not forget; decayed count strikes a balance between them with "scheduled adjustment + thresholds + fading". Why adjust only once every 4 rounds instead of swapping on every miss? Each swap moves 1.38 MB over PCIe, so swapping in and out often has a cost of its own. The two thresholds (a count of 2, a lead of 1.5) are there for the same reason: do not move data over a tiny difference. <span class="ev ev-est">Teaching estimate</span></p>
+<p>Strata actually has several caches, each with its own policy; see Figure 12-6.</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="Figure 12-6: three caches and three replacement policies in Strata: the PLE row cache rotates within each set, the expert cache uses decayed counts, and long-context KV pages use CLOCK">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="8" width="380" height="84" rx="9"/>
+<text class="f-text" fill="#182f2b" x="24" y="34" font-size="15" font-weight="600">PLE row cache (RAM)</text>
+<text class="f-text" fill="#182f2b" x="24" y="58" font-size="14">Policy: one rotating pointer per set</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="80" font-size="14">90-byte rows; lookups must be fast</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="102" width="380" height="84" rx="9"/>
+<text class="f-on" fill="#ffffff" x="24" y="128" font-size="15" font-weight="600">Expert cache (VRAM)</text>
+<text class="f-on" fill="#ffffff" x="24" y="152" font-size="14">Policy: decayed count, every 4 rounds</text>
+<text class="f-on" fill="#ffffff" x="24" y="174" font-size="14">Each swap moves 1.38 MB, so swap sparingly</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="196" width="380" height="84" rx="9"/>
+<text class="f-text" fill="#182f2b" x="24" y="222" font-size="15" font-weight="600">KV pages (VRAM, contexts of 64K+)</text>
+<text class="f-text" fill="#182f2b" x="24" y="246" font-size="14">Policy: CLOCK (second chance)</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="268" font-size="14">The GPU picks victim pages each step</text>
+</svg><figcaption>Figure 12-6　One engine, three caches, three policies. How big the cached items are, how often they change and where the decision is made determine which policy fits.</figcaption></figure>
+<p>The long-context KV page cache (covered in Chapter 17) keeps some of the pages in VRAM. At each step, one thread block on the GPU runs a CLOCK sweep to pick the slots to replace, then copies the missing pages in from pinned memory. <span class="ev ev-code">Code fact</span> (<code>include/strata/kernels/kv_stream.hpp</code>) The upstream docs say the installer turns it on when the context is 64K or more and RAM can hold it. <span class="ev ev-report">Upstream report</span>[S03]</p>
+
+<h2 id="sec-5">12.5 During the swap: copy first, register after</h2>
+<p>Once you have decided whom to swap, you still have to actually swap. This step is where "looks fine" bugs breed most easily. The expert cache has two things: a <dfn>residency table</dfn> that records which slot each (layer, expert) pair is in, or that it is not in VRAM; and the real bytes inside the slots. The GPU looks only at the table: if the table says #112 is in slot 5, the GPU reads slot 5.</p>
+<p>The copy is <dfn>asynchronous</dfn>: the function that starts the copy returns at once while the bytes are still travelling over PCIe (covered in Chapter 14). If you first write "#112 is in slot 5" in the table and only then start the copy, and a token picks #112 in between, the GPU reads bytes that are half new and half old. The simulator below slows this down:</p>
+<div class="viz" data-viz="expert-swap"><figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figure 12-7: the correct order for one swap: remove the outgoing expert's table entry, copy asynchronously, wait for the copy-done event, then register the incoming expert">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="8" width="360" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="36" y="31" font-size="15" font-weight="600">① Unmap #331: entry set to "none"</text>
+<text class="f-muted" fill="#5c6d66" x="36" y="52" font-size="14">If picked now, #331 runs on the CPU</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="72" width="360" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="36" y="95" font-size="15" font-weight="600">② Async copy #112 → slot 5</text>
+<text class="f-muted" fill="#5c6d66" x="36" y="116" font-size="14">#112 picked mid-copy: still on the CPU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="136" width="360" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="36" y="159" font-size="15" font-weight="600">③ Copy-done event arrives</text>
+<text class="f-muted" fill="#5c6d66" x="36" y="180" font-size="14">Slot 5 now holds all of #112</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="200" width="360" height="54" rx="9"/>
+<text class="f-on" fill="#ffffff" x="36" y="223" font-size="15" font-weight="600">④ Map #112 → slot 5</text>
+<text class="f-on" fill="#ffffff" x="36" y="244" font-size="14">If picked now, #112 runs on the GPU</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="284" font-size="14">Wrong order: GPU reads mixed bytes mid-copy</text>
+</svg><figcaption>Figure 12-7　A table entry points to a slot only after all the bytes have arrived. The outgoing expert leaves the table first; the incoming expert is registered last.</figcaption></figure></div>
+<p>Strata's adaptive cache does exactly this. As soon as a swap starts, the outgoing expert is marked "not in VRAM" in the table; the source comment says "evicted from this moment: the CPU computes it in the meantime". The incoming expert first goes on a "pending" list, and it is written into the table only when the completion event recorded after the copy arrives. <span class="ev ev-code">Code fact</span> (<code>src/program/generate.cpp</code>)</p>
+<p>There is a sneakier version of this bug. Upstream once used a non-blocking "has the copy finished yet?" query to decide whether to register: if finished, register; if not, try again next time. As a result, the same expert might be computed by the GPU in one round and by the CPU in the next, depending only on how fast the copy went. The GPU and the CPU round differently, so the same prompt could give different answers on two runs. The default now waits for the copy to land before the next round starts. <span class="ev ev-code">Code fact</span> (<code>src/program/generate.cpp</code>) The upstream docs also warn that to get byte-for-byte identical repeat results, you must turn off a few switches, adaptive swapping among them. <span class="ev ev-report">Upstream report</span>[S03]</p>
+<p>The low-RAM "resident" mode adds one more constraint: RAM holds only the experts the graphics card does not have. So the bytes of the outgoing expert must first be copied from VRAM back to RAM, into the space the incoming expert frees up. Only then does the RAM copy keep "exactly filling in" what the GPU is missing. <span class="ev ev-report">Upstream report</span>[S03] The interface has a function just for this. <span class="ev ev-code">Code fact</span>[S06]</p>
+<p class="bridge"><strong>If you studied operating systems:</strong> this is the same idea as paging, where you "mark the page table entry invalid first, and reuse the page frame only after the write-back finishes". Every change to a mapping must wait until the data it depends on is really in place.</p>
+<p>How do you prove that a slot holds the expert the table claims? The cache provides a byte-by-byte comparison function: read the slot back to the host and compare it with the original in RAM, one byte at a time. The comment calls this "the only thing that proves the cache holds the expert it claims". If the table index is right but the bytes are wrong, the result is a plausible-looking token, and that is exactly the kind of bug this project has paid for most. <span class="ev ev-code">Code fact</span>[S05]</p>
+
+<h2 id="sec-6">12.6 Hands-on: race the three policies</h2>
+<p>First, in "Three replacement policies race", run all 60 tokens and note what the three strips of hit cells look like after token 30. Then turn on "cold burst" and run again, and see whose slots get scrambled. Next, in "One swap in and out", walk through the wrong order once and feel why "right label, wrong bytes" is the most dangerous case.</p>
+<p>Finally, open this chapter's lab, "Cache traces and conflicts". Compare LRU, LFU, FIFO and 8-way rotation on the same access sequence. The policies in the lab are textbook versions, not Strata's decayed count. What they let you practise is this: with the same capacity, how far apart can different policies' hit rates be, and how do you build an access sequence that makes one particular policy lose?</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>Name the denominator of a hit rate first: counted per expert it is 64.5%, counted as "the whole layer hits" it is only 4.6%. Evaluate a list on a trace it has never seen.</li>
+<li>Start full from a frequency list, with a range of slots for each layer. Global first come, first served lets the first layers grab every slot, and the hit rate drops to 3%.</li>
+<li>After that, swap by decayed count every 4 rounds (a count of 2, a lead of 1.5, everything × 0.7). During a swap, remove the table entry first, and register only after the copy has finished.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "A low hit rate means the cache is too small; just add VRAM."</strong></p>
+<p>Not necessarily. An early upstream version hit only 2.97% with 256 slots, while on the same access trace, 8 slots per layer would reach 21.4%. <span class="ev ev-report">Upstream report</span>[S05] The capacity barely changed; what changed was "who gets the slots". When the hit rate is low, first check whether the allocation is fair, whether the policy is tangled up with the access order and whether you are counting the right thing. Talk about more capacity after that.</p></div>
+
+<details class="deep"><summary>Go deeper: historical comments, correctness invariants and how to evaluate</summary>
+<h3>How "the cache never evicts" and "the cache swaps" can both be true</h3>
+<p>The top of <code>expert_cache.hpp</code> says that this file is only slot storage plus a residency table and does no computing yet, so turning the cache on can only make things slower. <span class="ev ev-code">Code fact</span>[S05] Its admission function also says plainly that it "never evicts", because the eviction policy must be chosen from measurements, and a placeholder policy would lead every downstream design to plan around the wrong hit rate. <span class="ev ev-code">Code fact</span>[S05] These comments were written early in development. Today's engine really does swap experts, but the swapping does not happen in this class: the generation program picks swap pairs by decayed count, copies the new expert's bytes straight into the old expert's slot, and then updates the residency table. When reading the code, keep "what this class does not do" apart from "what the whole system does not do".</p>
+<h3>Conditions every swap must keep</h3>
+<ul>
+<li>Every valid entry in the table points to a slot that is already completely filled.</li>
+<li>A slot that a computation is reading must not be overwritten.</li>
+<li>After a swap-out, the old mapping is invalid at once; the swap-in mapping takes effect only after the bytes have landed.</li>
+<li>Expert blocks of different sizes (some quantization formats differ per layer) must not cross slot boundaries; once slots are sized for one layer, they are never handed to another layer. <span class="ev ev-code">Code fact</span>[S05]</li>
+<li>In resident mode, the outgoing expert's bytes are copied back to RAM first, so the RAM copy keeps "exactly filling in" what the GPU is missing.</li>
+</ul>
+<h3>Sync or async: why the startup fill blocks</h3>
+<p>Normal fills are asynchronous, because the copy and the kernel that later reads it sit on the same stream, so the order holds naturally. The startup fill from the list has no such guarantee: the source data sits in ordinary RAM, and the byte-by-byte check reads it back on a separate "legacy stream", which has no ordering with the non-blocking streams. The first version used an asynchronous fill, and the check reported "slot 0 differs from the original at byte 0" and refused to run. The comment says: that is the check doing its job. So a dedicated blocking fill was added. <span class="ev ev-code">Code fact</span>[S05]</p>
+<h3>The list can be saved</h3>
+<p>The upstream docs say that from engine 0.1.36 on there is an optional feature: save the ranking the adaptive cache has learned as a new list, and start from it next time. The order is: experts in VRAM right now come first, then by the heat accumulated in this run, then by position in the original list. <span class="ev ev-code">Code fact</span>[S05] The file is first written to a temporary file and then renamed over the old one, so even a process crash leaves no half-written file behind. <span class="ev ev-code">Code fact</span>[S05]</p>
+<h3>How to compare policies fairly</h3>
+<p>When you report a cache policy, state at least: the total cache capacity and the per-layer split, the denominator of the hit rate, cold start versus warmed up, where the access trace came from, whether the list and the evaluation used different traces, how long recovery takes after a topic shift, and how many bytes per second are swapped in and out. A bare "70% hit rate" can neither be reproduced nor used to estimate a VRAM budget.</p>
+</details>

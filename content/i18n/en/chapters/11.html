@@ -1,0 +1,260 @@
+<div class="hook"><span class="eyebrow">You may have noticed</span>
+<p>Your phone keyboard is good at finishing your sentences: type "the weather today" and it offers "is nice" or "looks bad" right away. It does not understand weather at all. It has simply remembered which words tend to show up next to each other.</p>
+<p>The model Strata runs has a "phrase memory" like this too, and it is frighteningly large: a 28.8 GB table that lives on the SSD. <span class="ev ev-report">Upstream report</span>[S02] For every token the model generates, it fetches 16 rows from that table. This chapter answers three questions: how the row numbers are computed, how to fetch rows from the SSD quickly and cheaply, and how to keep rows you have already fetched for next time.</p></div>
+<p class="tldr"><strong>In one line:</strong> the model hashes the last 2 and the last 3 tokens to get 16 row numbers. Each row is only 90 bytes, yet the SSD is read in 4 KiB pages. Rows already read go into an 8-way set-associative row cache; when a set is full, a rotating pointer picks which row to replace.</p>
+
+<h2 id="sec-1">11.1 The model's "phrase memory"</h2>
+<p>First, what does the table store? It is indexed by <dfn>n-gram</dfn>: "n tokens in a row". The last 2 tokens form a bigram, and the last 3 tokens form a trigram. If the context is "I like cats", the bigram is "like cats" and the trigram is "I like cats".</p>
+<p>In the Strata source, the module that uses this table is called PLE, and it works in layer 1 of the model (counting from 0). <span class="ev ev-code">Code fact</span>[S13] Figure 11-1 shows the flow for each token. The bigram and the trigram each have 8 "heads", and each head computes one row number, 16 in total. Each row holds 160 numbers, so 16 rows joined together give exactly 2560 numbers, the model's main width. <span class="ev ev-code">Code fact</span> (<code>include/strata/kernels/ngram.hpp</code>)</p>
+<figure class="fig"><svg viewBox="0 0 400 378" role="img" aria-label="Figure 11-1: the last three tokens are split into a bigram and a trigram; 8 heads each compute 8 row numbers, 16 rows in total, 160 numbers per row, joined into 2560 numbers for layer 1">
+<rect class="f-soft" fill="#e5f1df" x="40" y="6" width="320" height="52" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="28" font-size="15" font-weight="600" text-anchor="middle">Last three tokens: I like cats</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="49" font-size="14" text-anchor="middle">oldest to newest</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 58V68H102V80M200 68H298V80"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="82" width="185" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="102" y="104" font-size="15" font-weight="600" text-anchor="middle">Bigram: like cats</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="125" font-size="13" text-anchor="middle">8 heads → 8 row numbers</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="82" width="185" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="298" y="104" font-size="14" font-weight="600" text-anchor="middle">Trigram: I like cats</text>
+<text class="f-muted" fill="#5c6d66" x="298" y="125" font-size="13" text-anchor="middle">8 heads → 8 row numbers</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M102 136V148H298V136M200 148V160"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="162" width="360" height="54" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="185" font-size="15" font-weight="600" text-anchor="middle">16 row numbers → big table on the SSD</text>
+<text class="f-on" fill="#ffffff" x="200" y="206" font-size="14" text-anchor="middle">320,001,536 rows × 90 bytes = 28.8 GB</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 216V240"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="242" width="320" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="265" font-size="15" font-weight="600" text-anchor="middle">Fetch 16 rows, 160 numbers each</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="286" font-size="14" text-anchor="middle">Joined: 16 × 160 = 2560 numbers</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 296V320"/>
+<rect class="f-soft" fill="#e5f1df" x="40" y="322" width="320" height="48" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="351" font-size="15" font-weight="600" text-anchor="middle">PLE in layer 1 mixes them in</text>
+</svg><figcaption>Figure 11-1　The table lookup for each token. The three tokens are split into two kinds of n-gram, each computing 8 row numbers; the 16 rows fetched are joined into one vector as wide as the model.</figcaption></figure>
+<p>The table itself is part of the model's parameters. It is named <code>per_layer_token_embd</code> and has 320,001,536 rows. At 90 bytes per row, the whole table is 28.8 GB (26.8 GiB). <span class="ev ev-code">Code fact</span> (<code>ple_reader.hpp</code>) That is far bigger than 12 GB of VRAM, and it is not loaded into RAM either. It just stays on the SSD.</p>
+<aside class="primer" id="c11-ngram">
+<h3>n-gram language models</h3>
+<p>The simplest way to guess the next word is to "look at the last few words". If, in your text collection, "I like" is followed by "cats" 30% of the time and by "you" 20% of the time, you guess in those proportions. Guessing the n-th word from only the n−1 words before it is an <dfn>n-gram language model</dfn>. With n = 2 it is a bigram model; with n = 3, a trigram model.</p>
+<p>The trouble is the number of combinations. With a vocabulary of V tokens, there are V³ possible trigrams. With V = 100,000, that is 10¹⁵ trigrams. Most of them will never appear even once in your lifetime, and you cannot store an entry for each one.</p>
+<p>The model Strata runs borrows the n-gram idea but does it differently. It does not store "the probability of the next word". Instead, it stores a short run of trained numbers for each n-gram and hands them to the neural network. It also does not give every combination its own row: it uses hashing to squeeze an astronomical number of combinations into 320 million rows (next section). So this table is more like a notebook of phrases than a complete language model.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/N-gram" target="_blank" rel="noopener noreferrer">Wikipedia: N-gram</a> · <a href="https://en.wikipedia.org/wiki/Word_n-gram_language_model" target="_blank" rel="noopener noreferrer">Wikipedia: Word n-gram language model</a></p>
+</aside>
+
+<h2 id="sec-2">11.2 How three tokens become 16 row numbers</h2>
+<p>The table does not contain the words "I like cats", only row numbers. The step from tokens to row numbers is a <dfn>hash</dfn>: it stirs any input into a number that looks random but comes out the same every time. Strata's hash has three steps: <span class="ev ev-code">Code fact</span> (<code>ngram.hpp</code>, <code>src/kernels/ngram.cpp</code>)</p>
+<ol>
+<li><strong>Multiply</strong>: multiply each token ID by a large fixed constant, a different constant for each of the three positions.</li>
+<li><strong>XOR</strong>: combine the products bit by bit with "exclusive or" (same bits give 0, different bits give 1). The result is a <dfn>mixed value</dfn>. The bigram mixes two numbers; the trigram mixes three.</li>
+<li><strong>Take the remainder</strong>: each head divides the mixed value by its own modulus, keeps the remainder, and adds the head's starting row in the big table. Every head's modulus is around 20 million, and none is a power of 2: for example 20000003, 20000023 and 20000033.</li>
+</ol>
+<p>Two details are worth remembering. First, a position with no earlier text is recorded as −1, and an "end of conversation" token cuts off all the history before it. The two history tokens are part of the sequence state and are stored "oldest first". <span class="ev ev-code">Code fact</span>[S13] Second, this hash runs on the CPU. It needs 64-bit integer multiplication and XOR, and a source comment quotes the reference implementation: the GPU compute framework ggml has neither operation. <span class="ev ev-code">Code fact</span> (<code>ngram.hpp</code>)</p>
+<p>The simulator below replays the three steps with small numbers: the multipliers become 31, 17 and 7, the moduli range from 11 to 37, and each kind of n-gram has only 4 heads. The rules are the same as Strata's; the numbers are small enough to work out by hand.</p>
+<div class="viz" data-viz="ngram-hash"><figure class="fig"><svg viewBox="0 0 400 322" role="img" aria-label="Figure 11-2: a toy hash. The three tokens I, like and cats first give the bigram mixed value 626 and the trigram mixed value 593; the remainders for 8 moduli then give 8 row numbers">
+<text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="14" text-anchor="middle">Context (old → new); toy IDs in brackets</text>
+<rect class="f-soft" fill="#e5f1df" x="30" y="28" width="100" height="36" rx="7"/><text class="f-text" fill="#182f2b" x="80" y="51" font-size="14" text-anchor="middle">I (5)</text>
+<rect class="f-soft" fill="#e5f1df" x="150" y="28" width="100" height="36" rx="7"/><text class="f-text" fill="#182f2b" x="200" y="51" font-size="14" text-anchor="middle">like (11)</text>
+<rect class="f-soft" fill="#e5f1df" x="270" y="28" width="100" height="36" rx="7"/><text class="f-text" fill="#182f2b" x="320" y="51" font-size="14" text-anchor="middle">cats (23)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="78" width="380" height="36" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="101" font-size="14" text-anchor="middle">Bigram: 23×31 ⊕ 11×17 = 713 ⊕ 187 = 626</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="122" width="380" height="36" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="145" font-size="14" text-anchor="middle">Trigram: 713 ⊕ 187 ⊕ 5×7 = 593</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="182" font-size="14">Toy table: 8 heads end to end, 180 rows</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="192" width="26" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="192" width="34" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="192" width="38" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="118" y="192" width="46" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="164" y="192" width="22" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="186" y="192" width="58" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="192" width="62" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="306" y="192" width="74" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="24" y="192" width="3" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="74" y="192" width="3" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="116" y="192" width="3" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="128" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="184" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="212" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="252" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="308" y="192" width="3" height="40"/>
+<text class="f-text" fill="#182f2b" x="33" y="252" font-size="14" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="63" y="252" font-size="14" text-anchor="middle">27</text>
+<text class="f-text" fill="#182f2b" x="99" y="252" font-size="14" text-anchor="middle">48</text>
+<text class="f-text" fill="#182f2b" x="141" y="252" font-size="14" text-anchor="middle">54</text>
+<text class="f-text" fill="#182f2b" x="175" y="252" font-size="14" text-anchor="middle">82</text>
+<text class="f-text" fill="#182f2b" x="215" y="252" font-size="14" text-anchor="middle">96</text>
+<text class="f-text" fill="#182f2b" x="275" y="252" font-size="14" text-anchor="middle">116</text>
+<text class="f-text" fill="#182f2b" x="343" y="252" font-size="14" text-anchor="middle">144</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="282" font-size="14">Heads 0–3 take 626, heads 4–7 take 593</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="306" font-size="14">626 mod 13 = 2; head 0 starts at 0 → row 2</text>
+</svg><figcaption>Figure 11-2　A toy hash: multiply, XOR, take the remainder. The same context always lands on the same rows, and the row numbers do not reveal which words they came from.</figcaption></figure></div>
+<p>Hashing has one consequence you cannot avoid: a <dfn>collision</dfn>, where two different n-grams produce the same row number. Do the math. This model's token IDs go up to at least 248,046 (the end-of-conversation token uses that ID) <span class="ev ev-code">Code fact</span> (<code>src/program/generate.cpp</code>), so there are more than 248,046² ≈ 61.5 billion possible bigrams, while one head has only about 20 million rows. On average, every row must "take in" more than 3,000 different bigrams. <span class="ev ev-est">Teaching estimate</span> Collisions are accepted by design.</p>
+<p>Then why does it still work? One reasonable reading: every head uses a different modulus, so when two n-grams collide on one head, they most likely go separate ways on the other heads, and the 16 rows the model receives will not all be the same. <span class="ev ev-est">Teaching estimate</span> Try a few more contexts in the simulator and you can see this for yourself.</p>
+<aside class="primer" id="c11-hash">
+<h3>Hash tables and hash functions</h3>
+<p>A library has a million books. Searching by title one book at a time is too slow. Try something else: set up ten thousand shelves, "stir" each title into a number from 0 to 9999, and put the book on that shelf. To find a book, stir its title the same way and walk straight to that shelf. The stirring rule is a <dfn>hash function</dfn>, the structure that stores things in slots this way is a <dfn>hash table</dfn>, and each slot is a <dfn>bucket</dfn>.</p>
+<p>A good hash function meets two requirements: the same input always gives the same bucket, and different inputs spread out as evenly as possible. The most common form is "stir, then take the remainder": <code>bucket = h(key) mod buckets</code>. If the number of buckets is a prime, every bit of the key affects the remainder. If it is a power of 2, the remainder looks only at the lowest few bits, and any difference in the high bits is thrown away.</p>
+<p>When there are fewer slots than keys, two keys must land in the same bucket. This is a <dfn>hash collision</dfn> (the pigeonhole principle: put 10 pigeons into 9 holes and at least one hole has more than one). An ordinary hash table also stores the keys, so on a collision it compares them one by one or moves one elsewhere, and lookups stay exact. Strata's n-gram table does not store keys. It lets collisions happen and relies on the many heads to make up for each other. This idea of "store only values, no keys, and use several hash functions" is much like the count-min sketch from data structures.</p>
+<p>One more small trap: why mix with XOR and not addition? A source comment spells it out: for two equal products, XOR gives 0 and addition gives double, a completely different result, yet both versions produce row numbers that "look valid". <span class="ev ev-code">Code fact</span> (<code>ngram.hpp</code>)</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Hash_table" target="_blank" rel="noopener noreferrer">Wikipedia: Hash table</a> · <a href="https://en.wikipedia.org/wiki/Hash_function" target="_blank" rel="noopener noreferrer">Wikipedia: Hash function</a> · <a href="https://en.wikipedia.org/wiki/Pigeonhole_principle" target="_blank" rel="noopener noreferrer">Wikipedia: Pigeonhole principle</a> · <a href="https://en.wikipedia.org/wiki/Count%E2%80%93min_sketch" target="_blank" rel="noopener noreferrer">Wikipedia: Count–min sketch</a></p>
+</aside>
+
+<h2 id="sec-3">11.3 A row is 90 bytes, so why read 4 KiB?</h2>
+<p>With the row numbers in hand, the next job is to fetch the rows from the SSD. Here is the catch: the SSD is not read byte by byte but <dfn>page</dfn> by page. Strata reads this table with "direct reads" that bypass the operating system's cache, and every read's start, length and memory address must be a whole multiple of 4096 bytes. <span class="ev ev-code">Code fact</span> (<code>include/strata/platform/direct_file.hpp</code>) To get one 90-byte row, you must read the entire 4096-byte page it sits in. See Figure 11-3.</p>
+<figure class="fig"><svg viewBox="0 0 400 316" role="img" aria-label="Figure 11-3: a row that sits entirely inside one page needs 1 page read; a row that crosses a page boundary needs 2. One token fetches 16 rows: only 1440 bytes are useful, but 64 KiB are read">
+<text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="14" text-anchor="middle">4 KiB pages (sketch; rows drawn wider)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="30" width="180" height="44"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="30" width="180" height="44"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="36" width="30" height="32"/>
+<text class="f-on" fill="#ffffff" x="85" y="57" font-size="14" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="186" y="36" width="30" height="32"/>
+<text class="f-on" fill="#ffffff" x="201" y="57" font-size="14" text-anchor="middle">B</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M200 24V82"/>
+<text class="f-muted" fill="#5c6d66" x="110" y="96" font-size="14" text-anchor="middle">page k (4096 B)</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="96" font-size="14" text-anchor="middle">page k+1 (4096 B)</text>
+<text class="f-text" fill="#182f2b" x="20" y="124" font-size="14">Row A: inside one page → read 1 page</text>
+<text class="f-text" fill="#182f2b" x="20" y="148" font-size="14">Row B: crosses the boundary → read 2 pages</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="172" font-size="14">Rows starting in the last 89 B cross: ~2.2%</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="186" width="380" height="122" rx="9"/>
+<text class="f-text" fill="#182f2b" x="24" y="211" font-size="14" font-weight="600">When none of a token's 16 rows is cached:</text>
+<text class="f-text" fill="#182f2b" x="24" y="236" font-size="14">Useful bytes: 16 × 90 = 1,440</text>
+<text class="f-text" fill="#182f2b" x="24" y="261" font-size="14">Actually read: 16 pages × 4,096 = 65,536</text>
+<text class="f-warn" fill="#9e5d24" x="24" y="290" font-size="14" font-weight="600">Read amplification: 65,536 ÷ 1,440 ≈ 45×</text>
+</svg><figcaption>Figure 11-3　The cost of reading by page. A row is only 90 bytes, yet at least one whole page must be read; a row that crosses a page boundary needs two pages.</figcaption></figure>
+<p>In the source, every read request has one of only two lengths: one page, or two pages (when the row crosses a page boundary). <span class="ev ev-code">Code fact</span>[S11] You can work out the share of crossing rows by hand: 4096 = 45 × 90 + 46, so any row that starts in the last 89 bytes of a page reaches into the next page. Row starts are spread roughly evenly within a page, so about 89 ÷ 4096 ≈ 2.2% of rows need two pages. <span class="ev ev-est">Teaching estimate</span></p>
+<p>A token's 16 rows land on 16 different pages. <span class="ev ev-code">Code fact</span> (<code>ple_reader.hpp</code>) With no cache, that means reading 16 × 4 KiB = 64 KiB, of which only 1,440 bytes are useful: a read amplification of about 45×. <span class="ev ev-est">Teaching estimate</span> When reading a long prompt, many rows may share a page. Strata merges requests for the same page into one, and sorts them by file position before reading, so the SSD sees something close to a sequential read. <span class="ev ev-code">Code fact</span> (<code>src/ngram/ple_reader.cpp</code>)</p>
+<p>64 KiB does not sound like much. The real trouble is <dfn>latency</dfn>: 16 small random reads, each one waiting for the SSD to respond. A source comment records a set of measurements from development (the comment does not name the hardware). An early version used memory mapping, so the 16 rows became 16 "page faults" waited on one after another, costing 2.10–2.61 milliseconds per token. After switching to direct reads with all 16 requests sent at once, it took about 311 microseconds. <span class="ev ev-report">Upstream report</span> (comment in <code>ngram.hpp</code>) The same comment warns that if something else in the process still maps the file, direct reads slow down to 1,575 microseconds per token.</p>
+
+<h2 id="sec-4">11.4 Keep a copy of rows you have read: the 8-way set-associative row cache</h2>
+<p>The same row is often needed again and again. A pair like "I like" may show up many times in one conversation. Upstream measured this on a fixed text collection: a cache of 1 million rows (the comment says about 95 MB) could save up to about 82% of the reads, and even within one long prompt, 20%–34% of the rows repeat. <span class="ev ev-report">Upstream report</span> (comment in <code>ple_reader.hpp</code>)</p>
+<p>So Strata keeps a <dfn>row cache</dfn> in RAM, 1,048,576 rows by default, about 94 MB at 90 bytes per row. <span class="ev ev-code">Code fact</span> (<code>ngram.hpp</code>) Its structure is <dfn>8-way set associative</dfn>: <span class="ev ev-code">Code fact</span>[S11]</p>
+<ul>
+<li>The cache is split into many <strong>sets</strong>, each with 8 slots (8 <strong>ways</strong>). At the default size there are 1,048,576 ÷ 8 = 131,072 sets.</li>
+<li>A row number is first stirred once (multiplied by a large fixed odd number, then a shift-and-XOR), then taken modulo the number of sets to decide which set it belongs to. It can live only in that set's 8 slots.</li>
+<li>A lookup compares only that set's 8 slots.</li>
+<li>If the row is not there, it is read from the SSD and written into the slot that the set's <dfn>replacement pointer</dfn> points at. The pointer then moves on by one, and after the 8th slot it wraps back to the 1st.</li>
+</ul>
+<p>This "rotating pointer" is cheap: each set needs only a small counter, and nobody has to track which row was used most recently. The price is that it ignores how often a row is used; whatever the pointer reaches gets replaced. When does that hurt? The simulator below shows a worst case.</p>
+<div class="viz" data-viz="row-cache"><figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="Figure 11-4: a row cache with 2 sets of 8 ways. Nine odd row numbers all crowd into set 1, and the rotating pointer always replaces the row needed next, so the hit rate is 0; a fully associative LRU cache with the same 16 slots hits 75%">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="14">2 sets × 8 ways; set = row mod 2 (sketch)</text>
+<text class="f-text" fill="#182f2b" x="12" y="44" font-size="14">Set 0: empty</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="59" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="106" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="153" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="247" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="294" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="341" y="52" width="44" height="30" rx="3"/>
+<text class="f-text" fill="#182f2b" x="12" y="108" font-size="14">Set 1: all 9 odd rows crowd in here</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="34" y="136" font-size="14" text-anchor="middle">#11</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="59" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="81" y="136" font-size="14" text-anchor="middle">#13</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="106" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="128" y="136" font-size="14" text-anchor="middle">#15</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="153" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="175" y="136" font-size="14" text-anchor="middle">#17</text>
+<rect class="f-accent" fill="#136d5a" x="200" y="116" width="44" height="30" rx="3"/><text class="f-on" fill="#ffffff" x="222" y="136" font-size="14" text-anchor="middle">#03</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="247" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="269" y="136" font-size="14" text-anchor="middle">#05</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="294" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="316" y="136" font-size="14" text-anchor="middle">#07</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="341" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="363" y="136" font-size="14" text-anchor="middle">#09</text>
+<path class="f-warn" fill="#9e5d24" d="M222 150l6 9h-12z"/>
+<text class="f-warn" fill="#9e5d24" x="222" y="176" font-size="14" text-anchor="middle">replacement pointer</text>
+<text class="f-text" fill="#182f2b" x="12" y="204" font-size="14">Accesses: #01 #03 … #17, repeated 4 times</text>
+<text class="f-text" fill="#182f2b" x="12" y="228" font-size="14">#01 misses → replaces #03 under the pointer,</text>
+<text class="f-text" fill="#182f2b" x="12" y="250" font-size="14">and #03 is exactly the next row needed.</text>
+<text class="f-warn" fill="#9e5d24" x="12" y="278" font-size="14" font-weight="600">Rotation: 0 hits; fully assoc. LRU: 27 (75%)</text>
+</svg><figcaption>Figure 11-4　A conflict miss. The 16 slots in total could hold all 9 rows, but every one of them is assigned to the same set, and that set has only 8 slots.</figcaption></figure></div>
+<p>This example is built on purpose. Real row numbers are stirred before they are assigned to a set, so they rarely crowd into one set this neatly. The "hot spot" trace in the simulator also shows that when accesses concentrate on a few rows, rotation and LRU reach about the same hit rate. The simplest policy buys you a lookup that checks only 8 slots and a memory footprint that never grows. That is a good deal. <span class="ev ev-est">Teaching estimate</span></p>
+<p class="bridge"><strong>If you studied CS:</strong> this is the set-associative structure of a CPU cache from computer architecture. "Row number → set number" matches the set-index bits of an address, and comparing 8 slots matches comparing 8 tags. The difference: this one is built in software, it caches rows of a table on the SSD, and each slot holds 90 bytes.</p>
+<aside class="primer" id="c11-set-assoc">
+<h3>Direct-mapped, set-associative, fully associative</h3>
+<p>A cache has far fewer slots than there are things to cache, so first you need a rule: which slots may a given item go into? There are three answers, shown in Figure 11-5.</p>
+<ul>
+<li><dfn>Direct-mapped</dfn>: each item has exactly one fixed slot. Lookup is the fastest, since you check only one slot. But when two popular items fight over the same slot, they keep kicking each other out.</li>
+<li><dfn>Fully associative</dfn>: an item can go in any slot. This is the most flexible, but every lookup must compare against every slot, which gets too slow when there are many slots.</li>
+<li><dfn>Set associative</dfn>: the compromise. A rule first assigns the item to a set, and within the set it may use any slot. With W slots per set, it is called W-way set associative.</li>
+</ul>
+<p>The three structures go with three kinds of miss. An item seen for the first time cannot be there: a <strong>compulsory miss</strong>. The cache is simply too small for everything: a <strong>capacity miss</strong>. Everything would fit in total, but one set is too crowded: a <strong>conflict miss</strong>. The example in Figure 11-4 is a pure conflict miss.</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="Figure 11-5: three ways to organize the same 8 slots. Direct-mapped has one place, 2-way set associative has one set of 2 places, and fully associative can use any of the 8">
+<text class="f-text" fill="#182f2b" x="66" y="18" font-size="14" font-weight="600" text-anchor="middle">Direct-mapped</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="14" font-weight="600" text-anchor="middle">2-way set-assoc.</text>
+<text class="f-text" fill="#182f2b" x="334" y="18" font-size="14" font-weight="600" text-anchor="middle">Fully assoc.</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="30" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="47" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="64" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="81" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="98" width="40" height="15"/>
+<rect class="f-accent" fill="#136d5a" x="46" y="115" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="132" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="149" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="176" y="30" width="23" height="32"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="30" width="23" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="176" y="64" width="23" height="32"/><rect class="f-accent" fill="#136d5a" x="201" y="64" width="23" height="32"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="176" y="98" width="23" height="32"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="98" width="23" height="32"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="176" y="132" width="23" height="32"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="132" width="23" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="30" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="30" width="42" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="64" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="64" width="42" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="98" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="98" width="42" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="132" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="132" width="42" height="32"/>
+<text class="f-muted" fill="#5c6d66" x="66" y="190" font-size="14" text-anchor="middle">13 mod 8 = 5</text>
+<text class="f-muted" fill="#5c6d66" x="66" y="214" font-size="14" text-anchor="middle">only slot 5</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="190" font-size="14" text-anchor="middle">13 mod 4 = 1</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="214" font-size="14" text-anchor="middle">2 slots of set 1</text>
+<text class="f-muted" fill="#5c6d66" x="334" y="190" font-size="14" text-anchor="middle">no math needed</text>
+<text class="f-muted" fill="#5c6d66" x="334" y="214" font-size="14" text-anchor="middle">any of 8 slots</text>
+</svg><figcaption>Figure 11-5　The same 8 slots, three ways to place an item. The highlighted slots are where row 13 may live. Strata's row cache is 131,072 sets × 8 ways.</figcaption></figure>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/CPU_cache" target="_blank" rel="noopener noreferrer">Wikipedia: CPU cache</a> · <a href="https://en.wikipedia.org/wiki/Cache_placement_policies" target="_blank" rel="noopener noreferrer">Wikipedia: Cache placement policies</a> · <a href="https://csapp.cs.cmu.edu/" target="_blank" rel="noopener noreferrer">Computer Systems: A Programmer's Perspective (CS:APP), Chapter 6</a></p>
+</aside>
+
+<h2 id="sec-5">11.5 Do not keep the model waiting: send requests early, let another thread collect</h2>
+<p>One problem is left. Even at 311 microseconds, the model does not want to stop and wait. Luckily, the 16 row numbers depend only on the token itself, so they can be computed as soon as the token is known, and the 16 rows are not needed until layer 1. Two pieces of work sit in between: turning the token into a vector (the embedding), and the computation of layer 0. That is the window in which the reading time can be "hidden". <span class="ev ev-code">Code fact</span> (<code>ple_reader.hpp</code>)</p>
+<p>So the read interface is split in two. As soon as a token comes out, the code calls <code>issue</code> (send the requests), which returns right away. Just before layer 1 needs the rows, it calls <code>collect</code> (get the results), and only then might it have to wait. See Figure 11-6.</p>
+<figure class="fig"><svg viewBox="0 0 400 274" role="img" aria-label="Figure 11-6: once the token is known, 16 read requests go out while the embedding and layer 0 compute as usual; the results are collected before layer 1. If the reads are fast enough there is no wait; if they are slow, you wait for the difference">
+<text class="f-muted" fill="#5c6d66" x="8" y="18" font-size="14">Time → (sketch, not to scale)</text>
+<text class="f-text" fill="#182f2b" x="8" y="52" font-size="14">Compute</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="72" y="32" width="67" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="105.5" y="52" font-size="14" text-anchor="middle">Embed</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="139" y="32" width="104" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="191" y="52" font-size="14" text-anchor="middle">Layer 0</text>
+<rect class="f-accent" fill="#136d5a" x="243" y="32" width="149" height="30" rx="4"/>
+<text class="f-on" fill="#ffffff" x="317.5" y="52" font-size="13" text-anchor="middle">Layer 1 (16 rows)</text>
+<text class="f-text" fill="#182f2b" x="8" y="102" font-size="14">SSD</text>
+<rect class="f-soft" fill="#e5f1df" x="72" y="82" width="156" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="150" y="102" font-size="13" text-anchor="middle">16 reads in flight</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M72 26V120M243 26V120"/>
+<text class="f-muted" fill="#5c6d66" x="72" y="138" font-size="14" text-anchor="middle">issue</text>
+<text class="f-muted" fill="#5c6d66" x="243" y="138" font-size="14" text-anchor="middle">collect</text>
+<text class="f-text" fill="#182f2b" x="8" y="170" font-size="14" font-weight="600">When reading is slow:</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="72" y="182" width="67" height="26" rx="4"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="139" y="182" width="104" height="26" rx="4"/>
+<rect class="f-warn" fill="#9e5d24" x="243" y="182" width="54" height="26" rx="4"/>
+<text class="f-on" fill="#ffffff" x="270" y="200" font-size="14" text-anchor="middle">wait</text>
+<rect class="f-accent" fill="#136d5a" x="297" y="182" width="95" height="26" rx="4"/>
+<rect class="f-soft" fill="#e5f1df" x="72" y="214" width="225" height="26" rx="4"/>
+<text class="f-text" fill="#182f2b" x="184.5" y="232" font-size="12" text-anchor="middle">Read outlasts embed + layer 0</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="264" font-size="14">You wait only for the part past the window</text>
+</svg><figcaption>Figure 11-6　Send the requests first, collect the results later. Reading and computing happen at the same time, so the read time "hides" behind the embedding and layer 0; if the read is slower than the window, you wait only for the difference.</figcaption></figure>
+<p>Who deals with the SSD? By default, a dedicated I/O thread. It submits the read requests and collects the "read done" notices; the side that calls <code>issue</code> only puts requests into a queue and wakes the thread up. According to a source comment, this keeps the roughly 11-microsecond system-call cost of each file read off the main loop. A mutex protects the queue and the state. <span class="ev ev-code">Code fact</span>[S11] By default at most 256 read requests can be in flight at once. During generation each token needs only 16; the limit is reached only when reading a large chunk of prompt. <span class="ev ev-code">Code fact</span> (<code>ngram.hpp</code>)</p>
+<p>One more detail may make you smile. Some SSDs drop into a power-saving state after about 250 milliseconds of idle time, and the next read then waits an extra 50–150 milliseconds. If generation hits the row cache for several rounds in a row, the SSD may "fall asleep". So the reader has a "stay awake" feature: when no read request has arrived for a while, it reads some page of the table just to keep the SSD awake. The generation program turns it on by default. <span class="ev ev-code">Code fact</span> (<code>ple_reader.hpp</code>) This "send it now, collect it later" asynchronous style is covered in depth in Chapter 14.</p>
+
+<h2 id="sec-6">11.6 Hands-on: cause a collision yourself</h2>
+<p>The two simulators in this chapter do different jobs. "n-gram hash" shows where row numbers come from and how collisions happen. "Row cache" shows how set associativity and the replacement pointer work. Start with a run of "conflict" in "Row cache", note the two hit rates, then switch to "hot spot" and compare.</p>
+<p>Then open this chapter's lab, "Cache traces and conflicts". With 16 slots and 9 odd keys that land in the same set, compare "fully associative LRU" with "8-way rotation". You can also write your own access traces: guess the hit rate first, then run it to check. Note that both the lab and the simulators assign sets by "row number mod sets" so that conflicts are easy to cause; Strata actually stirs the row number before assigning a set, so rows do not crowd together this easily.</p>
+<p>When you are done, think about one question: if the 8 ways become 1 way (direct-mapped), how does the hit rate change for the same "hot spot" trace?</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>For each token, the last 2 and the last 3 tokens are hashed (multiply, XOR, take the remainder) into 16 row numbers. The 16 rows fetched from the 28.8 GB table are joined into 2560 numbers. The table stores no keys, and collisions are allowed.</li>
+<li>The SSD is read in 4 KiB pages: even a 90-byte row costs a whole page, and a row that crosses a page boundary costs two. The hard part is the latency of 16 random reads, not bandwidth.</li>
+<li>Rows already read go into an 8-way set-associative row cache, and a full set replaces whatever its rotating pointer points at. Even when total capacity is enough, rows crowded into one set can cause conflict misses.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "With a 28.8 GB table on the SSD, SSD bandwidth must be the bottleneck."</strong></p>
+<p>Each token uses only 1,440 bytes. Even if none of the 16 rows is cached and each costs a whole page, generating 90 tokens per second reads only 64 KiB × 90 ≈ 5.9 MB per second. Common SSDs read several GB per second sequentially, three orders of magnitude more. <span class="ev ev-est">Teaching estimate</span> What you really have to deal with is latency: how long 16 small reads take, and whether they can overlap with computing. A source comment says it plainly: this is a latency problem, not a bandwidth problem. <span class="ev ev-code">Code fact</span> (<code>ngram.hpp</code>)</p></div>
+
+<details class="deep"><summary>Go deeper: three kinds of "lookup", where docs and code disagree, hashing traps and what to measure</summary>
+<h3>Three lookups that must not be drawn as one box</h3>
+<p>Strata has at least three things with "lookup" or "cache" in their names, and their correctness conditions are completely different. The <strong>n-gram table lookup</strong> is part of the model's numerical computation: it depends on the sequence history and reads trained table rows, so fetching a wrong row means computing a wrong answer. The <strong>prompt lookup draft</strong> guesses the next few tokens (at most 5) from text that already appeared earlier, and the big model still has to verify whether the guess is right. <span class="ev ev-report">Upstream report</span>[S02] The <strong>expert cache</strong> only decides whether an expert's weights are in VRAM right now; it does not change what is computed (Chapter 12). The names are similar, but a bug has very different effects: in the first, the output becomes wrong; in the second, things only get slower; in the third, the output may "look right but be wrong".</p>
+<p>The two history tokens that PLE uses are part of the sequence state, along with a convolution-style history buffer. <span class="ev ev-code">Code fact</span>[S13] They must be saved and restored with the conversation; they are not a log you can throw away.</p>
+<h3>Where comments, docs and code disagree</h3>
+<p>The comment at the top of <code>ple_reader.hpp</code> says the row cache uses "clock eviction", but <code>ple_reader.cpp</code> has one rotating pointer per set and none of the "recently used" bits that the clock algorithm needs. <span class="ev ev-code">Code fact</span>[S11] Clock without those bits degrades into plain rotation, so the two behave the same, but when you read the code, the implementation is what counts.</p>
+<p>Another one: the upstream docs say this table is "read through the operating system's cache". <span class="ev ev-report">Upstream report</span>[S02] Yet the current code's default mode is direct reading, and the comments explicitly require that this table take up no RAM, including the operating system's file cache. Memory mapping is kept only as a comparison baseline, and there is a separate option that locks the whole table into RAM. <span class="ev ev-code">Code fact</span> (<code>ngram.hpp</code>, <code>direct_file.hpp</code>) Docs often lag behind the code. When you hit a mismatch like this, trace it to the default configuration and the call path to confirm.</p>
+<h3>Every bug in the hash "looks right"</h3>
+<p>The comments in <code>ngram.hpp</code> list a string of traps: using addition instead of XOR; using "AND with a power of 2 minus 1" instead of the remainder (the moduli are not powers of 2, so these are different functions); the end-of-conversation cut must propagate to earlier positions; missing history is −1, while ID 0 is a real token; when the current token is itself the end token, it does not cut its own context; the history array is "oldest first", and reading it in the wrong direction still produces valid row numbers. <span class="ev ev-code">Code fact</span> (<code>ngram.hpp</code>, <code>src/kernels/ngram.cpp</code>) Every one of these mistakes yields row numbers inside the valid range, so a range check cannot catch them. The only way is to compare item by item against a "reference answer" from an independent implementation.</p>
+<p>There is also an offset trap: the table's data does not start at byte 0 of the file, because a file header comes first. Reading from 0 gives you "header + misaligned rows", which still decode into plausible-looking numbers. So the reader takes the offset from the file header it actually parsed, and checks that the table exactly fills the rest of the file. <span class="ev ev-code">Code fact</span> (<code>ngram.hpp</code>)</p>
+<h3>A new thread does not mean faster</h3>
+<p>Moving the system calls to an I/O thread shortens the "submit time" in the main loop, but the request itself is not necessarily faster. If the model needs the row right away, the waiting just moves somewhere else. Look at a timeline of three things: when a request is submitted, when it completes and when it is consumed. There is a real gain only if independent work can be done between submitting and consuming.</p>
+<h3>What numbers to check</h3>
+<p>The reader's statistics include: rows requested, row cache hits, rows merged into the same page, read requests sent, bytes read, time <code>collect</code> spent blocked, and the latency of each read (the last 65,536 reads are kept, for computing percentiles). <span class="ev ev-code">Code fact</span> (<code>ple_reader.hpp</code>) To evaluate a change, report at least: the row hit rate, the pages read, the ratio of useful bytes to bytes actually read, and the p50 and p95 of the wait time per token. Sequential read bandwidth alone cannot explain the performance of sparse random table lookups. The reader also supports fault injection that "deliberately delays every read", to verify that on a slow SSD the system waits, rather than quietly using data that has not finished reading.</p>
+</details>

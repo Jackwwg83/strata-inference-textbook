@@ -1,0 +1,179 @@
+<div class="hook"><span class="eyebrow">Something that defies intuition</span>
+<p>Strata keeps the graphics card and the processor busy at the same time. That sounds like hiring two workers, so it should be a lot faster. Yet the upstream development notes record this story: they cut the CPU's expert work per token from 18.2 milliseconds to 10.2 milliseconds, so the CPU really did almost half as much. And the result? The total time to generate a token did not move at all. <span class="ev ev-report">Upstream report</span> (comment in <code>include/strata/core/hit_hook.hpp</code>)</p>
+<p>Where did the 8 saved milliseconds go? This chapter starts with the personalities of the CPU and the GPU, moves on to "who waits for whom", and lands on one term: the critical path.</p></div>
+<p class="tldr"><strong>In one line:</strong> computing an expert is mostly reading bytes, so the CPU computes the experts in RAM right where they are. Within one layer, hit experts go to the GPU and missed ones to the CPU, and both sides compute at the same time. But each layer depends on the data of the one before, so layers must wait in line. The CPU's work cannot hide; the only fix is a cache that makes it smaller.</p>
+
+<h2 id="sec-1">13.1 Two processors, two personalities</h2>
+<p>A CPU is like a few all-round master craftsmen; a GPU is like an assembly-line workshop with over a thousand workers. The craftsmen are few, but each one can handle complex work alone, deciding the next move as they go. The workshop has many hands, and it is best at "everyone doing the same simple motion at once". Figure 13-1 is a sketch.</p>
+<aside class="primer" id="c13-cpu-gpu">
+<h3>CPU and GPU: SIMD and SIMT</h3>
+<p>A <dfn>CPU</dfn> (central processing unit) has few cores; the Ryzen 5 7600 in the upstream test machine has 6. <span class="ev ev-report">Upstream report</span>[S03] Each core is "smart": it has large caches, predicts branches and executes out of order, so it suits programs with complex control flow. A CPU can also compute several numbers at once: one <dfn>SIMD</dfn> (single instruction, multiple data) instruction applies the same operation to a whole row of numbers. An AVX-512 register is 512 bits wide and holds 16 32-bit floats, that is, 16 "lanes". Strata's CPU expert kernels are written with AVX-512 or AVX2. <span class="ev ev-report">Upstream report</span>[S02]</p>
+<p>A <dfn>GPU</dfn> (graphics processing unit) spends its chip area on a huge number of simple compute units; an ordinary gaming graphics card has thousands. Its way of running is called <dfn>SIMT</dfn> (single instruction, multiple threads): an NVIDIA GPU groups 32 threads together (one warp), and the whole group runs the same instruction at the same time, each thread on its own data. [R01] It also comes with far more memory bandwidth: the VRAM of an RTX 5070 delivers about 672 GB/s, while dual-channel DDR5-5200 RAM delivers about 83 GB/s (Chapter 1 compares them).</p>
+<p>What the two have in common: they show their strength only when they <strong>do many copies of the same work, each independent of the others</strong>. If every step must wait for the result of the step before, no number of lanes helps; the work moves one cell at a time. The simulator below lets you see this for yourself.</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="Figure 13-1: a CPU is a few powerful cores, each with 16 SIMD lanes; a GPU is thousands of simple compute units that run the same instruction in groups of 32">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="14" font-weight="600" text-anchor="middle">CPU: 6 strong cores</text>
+<rect class="f-accent" fill="#136d5a" x="14" y="34" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="73" y="34" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="132" y="34" width="54" height="54" rx="6"/>
+<rect class="f-accent" fill="#136d5a" x="14" y="94" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="73" y="94" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="132" y="94" width="54" height="54" rx="6"/>
+<text class="f-on" fill="#ffffff" x="41" y="66" font-size="14" text-anchor="middle">Core</text><text class="f-on" fill="#ffffff" x="100" y="66" font-size="14" text-anchor="middle">Core</text><text class="f-on" fill="#ffffff" x="159" y="66" font-size="14" text-anchor="middle">Core</text>
+<text class="f-on" fill="#ffffff" x="41" y="126" font-size="14" text-anchor="middle">Core</text><text class="f-on" fill="#ffffff" x="100" y="126" font-size="14" text-anchor="middle">Core</text><text class="f-on" fill="#ffffff" x="159" y="126" font-size="14" text-anchor="middle">Core</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="172" font-size="14" text-anchor="middle">Each core has</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="189" font-size="14" text-anchor="middle">16 SIMD lanes</text>
+<text class="f-text" fill="#182f2b" x="300" y="20" font-size="14" font-weight="600" text-anchor="middle">GPU: thousands of units</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="214" y="34" width="172" height="114"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.8" d="M214 48H386M214 62H386M214 76H386M214 90H386M214 104H386M214 118H386M214 132H386M228 34V148M242 34V148M256 34V148M270 34V148M284 34V148M298 34V148M312 34V148M326 34V148M340 34V148M354 34V148M368 34V148"/>
+<rect class="f-accent" fill="#136d5a" x="214" y="34" width="172" height="14"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="172" font-size="14" text-anchor="middle">One row = one group,</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="189" font-size="14" text-anchor="middle">all in lockstep</text>
+<text class="f-text" fill="#182f2b" x="200" y="214" font-size="14" text-anchor="middle">CPU: good at complex, step-by-step work</text>
+<text class="f-text" fill="#182f2b" x="200" y="238" font-size="14" text-anchor="middle">GPU: good at huge piles of identical work</text>
+</svg><figcaption>Figure 13-1　Two design ideas. A CPU has few, strong cores, each with a set of SIMD lanes; a GPU has many simple units that run the same instruction in groups. A sketch, not to scale.</figcaption></figure>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Single_instruction%2C_multiple_data" target="_blank" rel="noopener noreferrer">Wikipedia: Single instruction, multiple data</a> · <a href="https://en.wikipedia.org/wiki/Single_instruction,_multiple_threads" target="_blank" rel="noopener noreferrer">Wikipedia: Single instruction, multiple threads</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA CUDA Programming Guide</a></p>
+</aside>
+<div class="viz" data-viz="simd-lanes"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figure 13-2: adding 16 numbers one by one takes 16 steps; SIMD, 16 at a time, takes 1 step; a running sum takes 16 steps even with 16 lanes">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">How many steps for 16 numbers?</text>
+<text class="f-text" fill="#182f2b" x="20" y="56" font-size="14">One by one</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="42" width="256" height="20"/>
+<text class="f-text" fill="#182f2b" x="376" y="80" font-size="14" text-anchor="end">16 steps</text>
+<text class="f-text" fill="#182f2b" x="20" y="112" font-size="14">SIMD ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="98" width="16" height="20"/>
+<text class="f-text" fill="#182f2b" x="144" y="113" font-size="14">1 step</text>
+<text class="f-text" fill="#182f2b" x="20" y="160" font-size="14">Running sum</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="146" width="256" height="20"/>
+<text class="f-text" fill="#182f2b" x="376" y="184" font-size="14" text-anchor="end">16 steps</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="214" font-size="14">Running sum: each cell waits on the last,</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="232" font-size="14">so extra lanes do not help</text>
+</svg><figcaption>Figure 13-2　Whether work can run in parallel depends on whether the data depend on each other. Sixteen independent additions finish in one step; a running sum, where each link hangs on the last, can only go one step at a time.</figcaption></figure></div>
+<p class="bridge"><strong>If you studied CS:</strong> SIMD is simply vector instructions (SSE and AVX on x86, NEON on ARM). You can think of the GPU's SIMT as "hardware that automatically packs a group of threads into one wide vector and runs it". When threads in a group take different branches, the group has to run them in separate batches.</p>
+
+<h2 id="sec-2">13.2 Why a CPU can compute experts too: it is mostly reading bytes</h2>
+<p>The GPU computes so much faster, so why does Strata dare to let the CPU compute experts? Because the hard part of computing an expert is not the math, it is the reading. One expert is 1.38 MB, and each parameter is used in only one or two multiply-adds, so the compute units spend most of their time waiting for data to arrive from RAM. The comment on the upstream CPU expert pool says it bluntly: the expert kernels are limited by memory bandwidth, 6 cores measured about 42.55 GB/s, and the speed grows almost in proportion to the number of cores. <span class="ev ev-code">Code fact</span> (<code>include/strata/kernels/cpu/pool.hpp</code>)</p>
+<p>If the bottleneck is reading bytes, then make the bytes travel less. Chapter 10 worked it out: moving the missed experts to the graphics card over PCIe costs more than 10 milliseconds per token for the moving alone. Turn it around and send the "work" to where the data lives, and far less has to travel. See Figure 13-3.</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figure 13-3: moving 10 experts to the GPU means sending 13.8 MB; handing the work to the CPU means sending only 10 KB of input and getting back 100 KB of results">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">Option 1: move the experts to the GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="34" width="110" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="61" font-size="14" text-anchor="middle">RAM</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="34" width="110" height="44" rx="6"/>
+<text class="f-on" fill="#ffffff" x="325" y="61" font-size="14" text-anchor="middle">GPU</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M132 56H262"/>
+<path class="f-muted" fill="#5c6d66" d="M268 56l-9-5v10z"/>
+<text class="f-warn" fill="#9e5d24" x="200" y="100" font-size="14" text-anchor="middle">10 × 1.38 MB = 13.8 MB over PCIe</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="15" font-weight="600">Option 2: hand the work to the CPU</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="158" width="110" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="185" font-size="14" text-anchor="middle">CPU + RAM</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="158" width="110" height="44" rx="6"/>
+<text class="f-on" fill="#ffffff" x="325" y="185" font-size="14" text-anchor="middle">GPU</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M268 170H138"/>
+<path class="f-muted" fill="#5c6d66" d="M132 170l9-5v10z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M132 192H262"/>
+<path class="f-muted" fill="#5c6d66" d="M268 192l-9-5v10z"/>
+<text class="f-text" fill="#182f2b" x="200" y="226" font-size="14" text-anchor="middle">Send: this layer's 2560 inputs ≈ 10 KB</text>
+<text class="f-text" fill="#182f2b" x="200" y="250" font-size="14" text-anchor="middle">Get back: 10 × 2560 numbers ≈ 100 KB</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="284" font-size="14" text-anchor="middle">Each 1.38 MB expert stays put for the CPU</text>
+</svg><figcaption>Figure 13-3　Move the data, or move the computation? The experts stay where they are, only inputs and results travel, and the bytes crossing PCIe drop more than a hundredfold. <span class="ev ev-est">Teaching estimate</span></figcaption></figure>
+<p>The interface works like this: in every layer, the GPU hands the CPU side the normalized input, the IDs of the 10 chosen experts and their weights, then waits for 10 × 2560 numbers to come back. <span class="ev ev-code">Code fact</span>[S06] At 4 bytes per number, the input is about 10 KB and the results about 100 KB, more than a hundred times smaller than 13.8 MB. <span class="ev ev-est">Teaching estimate</span></p>
+<p>The CPU side is an <dfn>expert pool</dfn>: one worker thread per physical core, with the first core kept for the main loop. Each layer's 10 experts are shared out among these threads and computed at the same time. The host must collect all 10 results and add them up before the next layer can start, so every layer is a "barrier". <span class="ev ev-code">Code fact</span> (<code>pool.hpp</code>)</p>
+<p class="bridge"><strong>If you studied CS:</strong> the threads are pinned to physical cores, not to logical processors. The two hyperthreads of one physical core share the same execution units and caches; squeeze two memory-reading threads onto one core and the bandwidth halves. The source comment also records a measurement: when the main-loop thread was not pinned to its own core, the expert pool fell from 36.32 GB/s to 26.9 GB/s. <span class="ev ev-report">Upstream report</span> (comment in <code>pool.hpp</code>)</p>
+<p>According to upstream measurements during development, before the expert cache existed the CPU had to read 663.6 MB of expert data per token. At about 40 GB/s that takes 16.2 milliseconds, while a whole token took about 53 milliseconds at the time. <span class="ev ev-report">Upstream report</span>[S05] The CPU's share was the single biggest cost on the whole machine.</p>
+
+<h2 id="sec-3">13.3 Within one layer: hits to the GPU, misses to the CPU, both at once</h2>
+<p>With the expert cache in place, the 10 experts of a layer split into three groups: <span class="ev ev-code">Code fact</span> (<code>src/core/expert_source.cpp</code>, <code>src/program/generate.cpp</code>)</p>
+<ol>
+<li>Those in VRAM (hits): the GPU computes them directly.</li>
+<li>Of the misses, a share is picked out by a fixed ratio, and the GPU reads them over PCIe from pinned memory and computes them. The default ratio is 0.2 for Q2_0 models and 0.55 for other native formats.</li>
+<li>The remaining misses: the CPU computes them in place.</li>
+</ol>
+<p>The order matters: the GPU's share is decided and published first, so the GPU gets moving first, and only then does the CPU start its own share. <span class="ev ev-code">Code fact</span> (comment in <code>expert_source.cpp</code>) The upstream docs mention that setting the PCIe share to 0 sends every miss back to the CPU, and generation gets slower. <span class="ev ev-report">Upstream report</span>[S03]</p>
+<p>The simulator below draws one layer as a timeline. The numbers are a teaching estimate: each expert is 1.38 MB; the CPU reads at 40 GB/s, VRAM at 672 GB/s and PCIe at 63 GB/s; attention plus routing is assumed to take 0.25 milliseconds and the merge 0.05 milliseconds.</p>
+<div class="viz" data-viz="layer-timeline"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="Figure 13-4: timeline of one layer at a 65% hit rate and a 20% PCIe share. The GPU first computes attention and routing, then the GPU and CPU compute experts at the same time; the CPU branch is longer and is the critical path">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">One layer (hit rate 65%, PCIe share 20%)</text>
+<text class="f-text" fill="#182f2b" x="20" y="58" font-size="14">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="40" width="160" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="230" y="40" width="25" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="293" y="40" width="32" height="26"/>
+<text class="f-on" fill="#ffffff" x="150" y="58" font-size="14" text-anchor="middle">Attn + routing</text>
+<text class="f-text" fill="#182f2b" x="20" y="108" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="230" y="90" width="63" height="26"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M293 32V124"/>
+<text class="f-text" fill="#182f2b" x="20" y="152" font-size="14">↑ 0.25 ms: routing done, experts sent out</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="14">GPU branch 0.039 ms, CPU branch 0.098 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="200" font-size="14">Dashed line = join; the CPU side is slower</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="232" font-size="14" font-weight="600">Layer = 0.25 + max(0.098, 0.039) + 0.05</text>
+</svg><figcaption>Figure 13-4　Parallelism within one layer. The slower side sets the join point: as long as the CPU branch is longer, the GPU has to wait however fast it is. <span class="ev ev-est">Teaching estimate</span></figcaption></figure></div>
+<p>The first upstream version tripped over exactly this "who goes first". Back then, the GPU step that computes the hits was placed <strong>after</strong> the CPU expert pool. The CPU's work really did shrink by half (from 18.2 to 10.2 milliseconds), but the GPU's half merely moved from "beside" to "behind", and the path got no shorter at all. The fix split it into two steps: the GPU first starts computing the hit experts into a separate buffer while the CPU computes the misses; once the CPU's results reach the GPU, the two are added together. One extra buffer and one extra addition bought back real parallelism. <span class="ev ev-report">Upstream report</span> (comment in <code>hit_hook.hpp</code>) You can turn off "both sides at once" in the simulator and replay this story.</p>
+
+<h2 id="sec-4">13.4 Between layers: dependence blocks parallelism</h2>
+<p>If a layer can run in parallel inside, can the GPU start layer l + 1 while the CPU is still computing layer l? No. The input of layer l + 1 is exactly the result of layer l after its 10 experts are merged. The chain hangs together link by link, as Figure 13-5 shows.</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figure 13-5: inside each layer, the 10 experts can be split between the CPU and the GPU and computed at once; but layer l+1's input must wait for layer l to finish merging, so layers wait in line">
+<rect class="f-accent" fill="#136d5a" x="20" y="10" width="360" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="32" font-size="14" text-anchor="middle">Layer l: attention + routing (GPU)</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="56" width="174" height="40" rx="7"/>
+<text class="f-text" fill="#182f2b" x="107" y="81" font-size="14" text-anchor="middle">Hit experts (GPU)</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="206" y="56" width="174" height="40" rx="7"/>
+<text class="f-text" fill="#182f2b" x="293" y="81" font-size="14" text-anchor="middle">Missed ones (CPU)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="108" width="360" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="130" font-size="14" text-anchor="middle">Merge 10 results into the residual stream</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" d="M200 142V166"/>
+<path class="f-muted" fill="#5c6d66" d="M200 172l-6-9h12z"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="174" width="360" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="196" font-size="14" text-anchor="middle">Layer l+1: its input is layer l's result</text>
+<text class="f-text" fill="#182f2b" x="20" y="236" font-size="14">Across (one layer): can run in parallel</text>
+<text class="f-text" fill="#182f2b" x="20" y="260" font-size="14">Down (layer to layer): must wait in line</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="288" font-size="14" font-weight="600">The 48-layer chain is the critical path</text>
+</svg><figcaption>Figure 13-5　Data dependence decides how far parallelism can go. Experts in the same layer are independent of each other; layers are linked one to the next.</figcaption></figure>
+<aside class="primer" id="c13-dependence">
+<h3>Data dependence and the critical path</h3>
+<p>When one computation uses the result of another, there is a <dfn>data dependence</dfn> between them (more precisely, a "read after write" dependence). Two dependent steps can only run one after the other; only steps with no dependence can possibly run at the same time.</p>
+<p>Draw every computation as a graph: each computation is a node, each dependence an arrow. The longest chain of arrows from start to finish is the <dfn>critical path</dfn>. The whole job takes at least that long, however many workers you have. There are only two ways to go faster: shorten a step on the critical path, or move a step off the critical path so it runs in parallel with other steps.</p>
+<p>The flip side: shortening a step that is <strong>not</strong> on the critical path does nothing at all. That is exactly the story from the opening: the CPU did 8 milliseconds less work, but once those 8 milliseconds were gone, the GPU's share moved up to fill the gap, and the critical path stayed just as long. It is the same idea as Amdahl's law in Chapter 5: optimize only one part, and the overall gain is capped by the rest.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Analysis_of_parallel_algorithms" target="_blank" rel="noopener noreferrer">Wikipedia: Analysis of parallel algorithms (work, span and the critical path)</a> · <a href="https://en.wikipedia.org/wiki/Data_dependency" target="_blank" rel="noopener noreferrer">Wikipedia: Data dependency</a> · <a href="https://en.wikipedia.org/wiki/Critical_path_method" target="_blank" rel="noopener noreferrer">Wikipedia: Critical path method</a></p>
+</aside>
+<p>Strata's source code writes this down as a conclusion. Each layer is split into two GPU compute graphs. The first runs from attention through routing and the shared expert. The second merges the expert results and writes them back to the residual stream; it has to wait for the CPU to hand its results back before it can start, so that layer l's expert results are paired with layer l's own routing weights. The price: the only time left for the CPU and GPU to overlap is the short stretch of the shared expert. The comment says that a once-per-layer CPU expert pool cannot hide behind a strictly serial residual chain. <span class="ev ev-code">Code fact</span>[S13]</p>
+<p>The cache's comment gives the numbers: the pipeline at the time hid only 1.055 milliseconds of 19.035 milliseconds of CPU work, so 96% stayed exposed on the critical path, "because the residual chain is strictly serial". So the only way out is to read fewer bytes: put some experts in VRAM, and let the CPU read only the misses. <span class="ev ev-report">Upstream report</span>[S05] That is why the expert cache of Chapter 12 exists.</p>
+
+<h2 id="sec-5">13.5 How to prove it really runs in parallel</h2>
+<p>"The CPU and the GPU are both busy" is not the same as "they are busy at the same time". In the two cases of Figure 13-6, each side is busy for the same total time, yet the total time is very different.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figure 13-6: with true parallelism the CPU starts working while the GPU is still computing; with fake parallelism the CPU starts only after the GPU has finished. Both sides are busy for the same time, but the total is longer">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">True parallel</text>
+<text class="f-text" fill="#182f2b" x="20" y="54" font-size="14">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="38" width="160" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="88" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="150" y="72" width="140" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="88" font-size="14">done</text>
+<text class="f-text" fill="#182f2b" x="20" y="132" font-size="15" font-weight="600">Fake parallel</text>
+<text class="f-text" fill="#182f2b" x="20" y="164" font-size="14">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="148" width="160" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="198" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="230" y="182" width="140" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="228" font-size="14">CPU starts once the GPU is idle: serial</text>
+</svg><figcaption>Figure 13-6　Same busy time, different overlap. Utilization alone cannot tell these two cases apart.</figcaption></figure>
+<p>Strata's session code counts exactly this. In every layer, when the host sees the "doorbell" (the GPU's signal that "routing is chosen"), it checks whether the GPU compute graph is still running. If it is, the CPU has a window that overlaps the GPU; if it has already finished, the CPU is working while the GPU sits idle, and the whole pipeline is effectively serial. This counter is called <code>rings_mid_graph</code>, and the comment calls it the diagnostic that "tells whether the doorbell is just for show". <span class="ev ev-code">Code fact</span>[S13]</p>
+<p>The comment also spells out why it is needed: both cases produce the correct token, and each layer takes the same time; the only difference is that "the overlap hid nothing". Another counter records the milliseconds from launching the graph to seeing the doorbell, and the window the CPU can use is "the layer's duration minus that". <span class="ev ev-code">Code fact</span>[S13] "Overlap enabled" in a config file is only an intention; the event timeline is the behavior.</p>
+
+<h2 id="sec-6">13.6 Hands-on: find the balance point</h2>
+<p>Start with this chapter's "within one layer" simulator: drag the hit rate to 0%, then to 65%, and see where the critical path moves from the CPU; turn off "both sides at once" to replay the lesson of the first upstream version; press "Set best share" and watch the two branches become equally long. Then go to "16 at a time" and run all three algorithms.</p>
+<p>Next, open this chapter's lab, "CPU / GPU work split". It has just two branches: the CPU, and "handed to the GPU over PCIe". Change the effective rate of each side and the split ratio, and find the ratio with the shortest total time. Lab task: halve the effective rate of the PCIe branch and explain why the best split is no longer "half each". Note that both the lab and the simulator assume the two branches do not compete for resources; on a real machine, the CPU reading experts and PCIe reading pinned memory use the same memory bandwidth.</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>Computing an expert is mostly reading bytes. Let the CPU compute the experts in RAM in place, and only 10 KB of input and 100 KB of results cross PCIe.</li>
+<li>Within one layer, hit experts go to the GPU, some misses go to the GPU over PCIe, and the rest go to the CPU. Both sides compute at once, and the join waits for the slower side.</li>
+<li>Layers depend on each other's data, so the 48 layers form one critical path. The CPU's work cannot hide; only the cache can shrink it. Optimizing a step that is not on the critical path does nothing.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "If the CPU and GPU compute together, speed doubles; if the CPU does half the work, the total time drops a lot."</strong></p>
+<p>Total time gets shorter only if the part you saved is on the critical path. Upstream cut the CPU's work from 18.2 milliseconds to 10.2 milliseconds and the token got no faster at all, because the GPU's share was queued behind the CPU. <span class="ev ev-report">Upstream report</span> Likewise, "100% GPU utilization" proves nothing: the GPU may be spinning while it waits, or computing a share that could have run in parallel. What you need to look at is the critical path and the event timeline.</p></div>
+
+<details class="deep"><summary>Go deeper: the split formula, why it is off, and the traps of concurrency</summary>
+<h3>The split formula for two branches</h3>
+<p>Let D be the expert data still to be computed. A fraction f goes to "the GPU branch over PCIe" and the rest to the CPU. Express the sustained throughput of the CPU branch as Bc bytes per second and that of the PCIe branch as Bp bytes per second, and assume the two do not affect each other:</p>
+<div class="equation">T(f) ≈ max((1 − f)·D / Bc, f·D / Bp) + T<sub>merge</sub></div>
+<p>It is fastest when the two branches are equally long, which gives f = Bp ÷ (Bc + Bp). With Bc = 40 and Bp = 20, f = 1/3, not "half each". <span class="ev ev-est">Teaching estimate</span> Here Bp is not the nominal PCIe bandwidth; it is the effective rate that includes every cost of that branch.</p>
+<h3>Why the real optimum is not here</h3>
+<p>The formula assumes each branch uses its own resources, but on a real machine they compete: the CPU reading experts and the GPU reading pinned memory over PCIe go through the same memory channels; PCIe may also be carrying KV pages for a long context at the same time; and expert size, how many tokens in one verification window reuse the same expert, GPU launch overhead and how host threads are pinned to cores all change each side's effective rate. So Strata's default shares (0.2 for Q2_0, 0.55 for other native formats) come from measurement, not from this formula. <span class="ev ev-code">Code fact</span> (<code>generate.cpp</code>) The formula is good for forming a hypothesis; tuning needs a record of each branch's finish time, bytes moved and total time, then a re-check on a different set of tasks.</p>
+<h3>Is the result right? The timing adds up, but the answer is wrong</h3>
+<p><code>hit_hook.hpp</code> records a textbook concurrency bug. In the first version, the "GPU computes hits first" step read the hit list that is decided inside the expert pool's callback, but that callback ran after it. So it read the <strong>previous layer's</strong> list and computed the previous layer's experts into this layer's slots. The program kept producing tokens, the timing looked normal, but compared with the reference answer, the mean KL divergence rose from 9.69×10⁻² to 1.03, and agreement on the most likely token fell from 0.867 to 0.333. The fix was to have this step take the IDs published by this layer's router directly. <span class="ev ev-code">Code fact</span> (<code>hit_hook.hpp</code>)</p>
+<h3>A race inside the thread pool</h3>
+<p>When the CPU expert pool waited for a batch of tasks, it first waited only for "done count = task count". But on a card with lots of VRAM, most experts hit, so the worker threads were often asleep; if a batch was small enough, it finished before the sleeping threads woke up. A thread that woke late could grab a task from the <strong>next</strong> batch and do the same task twice, or bump the count after the host had reset it, so "done count = task count" never became true and the GPU waited forever. The fix tags every task claim with a batch number: the task pointer is one 64-bit word holding "batch | task count | index", and a claim uses compare-and-swap that succeeds only if the batch matches, so a late thread simply cannot claim anything. <span class="ev ev-code">Code fact</span> (<code>pool.hpp</code>) The upstream docs record this hang as issue #29, fixed in engine 0.1.12.</p>
+<h3>Where a comment and the design disagree</h3>
+<p>In the second half of <code>session.hpp</code> there is an older comment that says "the overlap comes from a one-layer delay: the expert pool's results are consumed by the next layer". <span class="ev ev-code">Code fact</span> (<code>session.hpp</code>) The earlier comment about the two compute graphs says the exact opposite: to avoid pairing layer l's experts with layer l + 1's routing weights, the merge must stay in the same layer. <span class="ev ev-code">Code fact</span>[S13] When you hit a contradiction like this, trust the current call order and the tests.</p>
+<h3>The GPU and the CPU may differ in the last few digits for the same expert</h3>
+<p>The GPU and CPU kernels round differently. Which processor computes which expert depends on the cache state and the PCIe share, so running the same prompt again may not give a byte-for-byte identical answer. The upstream docs say that if you want repeatable results you can set a few switches, such as a PCIe share of 0, at the cost of slower generation. <span class="ev ev-report">Upstream report</span>[S03]</p>
+</details>

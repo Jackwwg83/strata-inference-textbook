@@ -1,0 +1,182 @@
+<div class="hook"><span class="eyebrow">You may have run into this</span>
+<p>The first time you start Strata, your computer can freeze up for a minute or two, and even the mouse lags. The README warns you ahead of time: at startup the model reads 35–55 GB into RAM and "locks" part of it for the graphics card. If the computer slows down or even stops responding during this time, that is normal; just wait. <span class="ev ev-report">Upstream report</span>[S01]</p>
+<p>Why does memory need to be "locked"? What can the GPU do once it is locked, and what goes wrong if it is not? This chapter starts from the most basic trick an operating system plays: the memory addresses your program sees are actually "fake".</p></div>
+<p class="tldr"><strong>In one line:</strong> the operating system can move memory pages at any time, but the GPU's DMA engine only trusts the physical addresses it got when the job started, so memory to be copied must be pinned first. Copies are asynchronous: a function returning does not mean the data has arrived, so you wait for a completion signal. Two buffers taking turns, "copy one while computing the other", hide the copy time, as long as you wait for the "done using it" signal before every overwrite.</p>
+
+<h2 id="sec-1">14.1 The memory addresses you see are "fake"</h2>
+<p>A pointer in a program, such as <code>0x7f3a_0000_1000</code>, is not a real location on the memory stick. It is a <dfn>virtual address</dfn>. The operating system and the CPU work together to translate the virtual address into a <dfn>physical address</dfn>, and only then is the RAM actually read. This layer of translation lets every program believe it owns a large, contiguous stretch of memory, and it lets the operating system rearrange things freely behind the scenes.</p>
+<aside class="primer" id="c14-virtual-memory">
+<h3>Virtual memory and paging</h3>
+<p>The operating system cuts memory into fixed-size blocks called <dfn>pages</dfn>; 4 KiB is the most common size. A program's virtual address space is cut into pages, and physical memory is cut into <dfn>page frames</dfn> of the same size. Each program has a <dfn>page table</dfn> that records "virtual page → physical page frame". Every time the CPU touches memory, it looks up this table first; see Figure 14-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 320" role="img" aria-label="Figure 14-1: the program's four virtual pages map through the page table to scattered physical page frames; one page is swapped out to disk for now">
+<text class="f-text" fill="#182f2b" x="70" y="20" font-size="15" font-weight="600" text-anchor="middle">Virtual pages</text>
+<text class="f-text" fill="#182f2b" x="320" y="20" font-size="15" font-weight="600" text-anchor="middle">Physical frames</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="32" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="54" font-size="14" text-anchor="middle">Page 0</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="72" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="94" font-size="14" text-anchor="middle">Page 1</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="112" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="134" font-size="14" text-anchor="middle">Page 2</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="152" width="100" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="70" y="174" font-size="14" text-anchor="middle">Page 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="32" width="100" height="22"/><text class="f-muted" fill="#5c6d66" x="320" y="48" font-size="14" text-anchor="middle">Frame 0</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="56" width="100" height="22"/><text class="f-on" fill="#ffffff" x="320" y="72" font-size="14" text-anchor="middle">Frame 1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="80" width="100" height="22"/><text class="f-muted" fill="#5c6d66" x="320" y="96" font-size="14" text-anchor="middle">Frame 2</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="104" width="100" height="22"/><text class="f-on" fill="#ffffff" x="320" y="120" font-size="14" text-anchor="middle">Frame 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="128" width="100" height="22"/><text class="f-muted" fill="#5c6d66" x="320" y="144" font-size="14" text-anchor="middle">Frame 4</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="152" width="100" height="22"/><text class="f-on" fill="#ffffff" x="320" y="168" font-size="14" text-anchor="middle">Frame 5</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M120 49L268 115M120 89L268 67M120 169L268 163M120 129L200 214"/>
+<rect class="f-warn" fill="#9e5d24" x="140" y="214" width="150" height="30" rx="5"/>
+<text class="f-on" fill="#ffffff" x="215" y="234" font-size="14" text-anchor="middle">Disk (swapped out)</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="272" font-size="14">The program sees 4 contiguous pages,</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="292" font-size="14">but they are scattered in real memory.</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="312" font-size="14">Page 2 is out; it is read back when used.</text>
+</svg><figcaption>Figure 14-1　The page table translates virtual pages into physical page frames. The operating system can change this table at any time: it can move a page to another frame, or swap it out to disk.</figcaption></figure>
+<p>This brings three benefits: programs are isolated from each other; when memory runs short, rarely used pages can be <dfn>swapped out</dfn> to disk and read back when needed; and physical memory can be handed out in scattered bits while the program still sees contiguous addresses. The price: which frame a virtual page sits in right now is up to the operating system, and it can change at any moment.</p>
+<p>Looking up the page table on every access is too slow, so the CPU has a small part that caches translations, called the <dfn>TLB</dfn> (translation lookaside buffer). It holds only a few thousand entries. Strata's source code does the math: 33.97 GB of expert weights cut into 4 KB pages is 8.3 million pages, more than any TLB can hold, so reading each expert keeps hitting the page table. With 2 MB huge pages it needs only a little over 16,000 pages. <span class="ev ev-code">Code fact</span>(<code>include/strata/core/pinned.hpp</code>) Sadly, on Windows an ordinary user account has no permission to use huge pages by default, so normal pages are the common case, and the engine reports at startup which kind it got. <span class="ev ev-code">Code fact</span>(<code>pinned.hpp</code>)</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Virtual_memory" target="_blank" rel="noopener noreferrer">Wikipedia: Virtual memory</a> · <a href="https://en.wikipedia.org/wiki/Memory_paging" target="_blank" rel="noopener noreferrer">Wikipedia: Memory paging</a> · <a href="https://en.wikipedia.org/wiki/Translation_lookaside_buffer" target="_blank" rel="noopener noreferrer">Wikipedia: Translation lookaside buffer (TLB)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-paging.pdf" target="_blank" rel="noopener noreferrer">OSTEP Chapter 18: Paging</a></p>
+</aside>
+<p class="bridge"><strong>If you studied operating systems:</strong> this is the familiar "page table + TLB + page fault" package. This chapter cares about one side effect: the page table can change at any time, and external devices are not told.</p>
+
+<h2 id="sec-2">14.2 Let the GPU do the moving: DMA and pinning</h2>
+<p>Sending data from RAM to the GPU does not need the CPU to carry it byte by byte. The GPU has dedicated <dfn>copy engines</dfn>. The CPU only tells one "copy from here, this much, to there", and the engine pulls the data across the PCIe bus by itself. This way of letting "a device read and write memory directly" is called <dfn>DMA</dfn> (direct memory access).</p>
+<aside class="primer" id="c14-dma">
+<h3>DMA: devices access memory directly</h3>
+<p>Without DMA, the CPU has to read every byte out of memory itself and write it to the device, and it can do nothing else meanwhile. With DMA, the CPU only issues a "work order"; the device's DMA engine carries it out and tells the CPU when it is done. Disks, network cards and GPUs all rely on it.</p>
+<p>The key point: the DMA engine does not go through the CPU's page table. It only understands <strong>physical addresses</strong>. Before the job starts, the driver translates the virtual addresses and hands it a list of physical frame numbers. If the operating system moves a page halfway through, the DMA engine has no idea; it keeps reading the old frame, which may now hold another program's data.</p>
+<p>So memory used for DMA must first be <dfn>pinned</dfn> (also called "page-locked"): you tell the operating system that these pages may not be moved or swapped out until they are unpinned. In CUDA you can allocate pinned memory directly, or "register" an existing block of memory as pinned. When you copy from ordinary (pageable) memory, the driver usually has to copy the data into its own pinned staging area first and then let DMA move it, which adds one extra copy. [R01]</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Direct_memory_access" target="_blank" rel="noopener noreferrer">Wikipedia: Direct memory access</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA CUDA Programming Guide</a> · <a href="https://man7.org/linux/man-pages/man2/mlock.2.html" target="_blank" rel="noopener noreferrer">Linux manual: mlock</a></p>
+</aside>
+<p>In words alone, "a page gets moved away" is a bit abstract. The simulator below slows one copy down, and you can cause a "memory runs short halfway through" moment yourself:</p>
+<div class="viz" data-viz="pin-dma"><figure class="fig"><svg viewBox="0 0 400 288" role="img" aria-label="Figure 14-2: without pinning, after DMA starts the operating system moves page 2 from frame 3 to frame 6; DMA still reads frame 3 by its old number and gets another program's data">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="8" width="380" height="60" rx="8"/>
+<text class="f-text" fill="#182f2b" x="24" y="32" font-size="15" font-weight="600">① Start: page 2 is in frame 3</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="56" font-size="14">DMA writes down frames 2, 5, 3, 7</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="78" width="380" height="60" rx="8"/>
+<text class="f-text" fill="#182f2b" x="24" y="102" font-size="15" font-weight="600">② Halfway, memory runs short</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="126" font-size="14">OS moves page 2 to frame 6; frame 3 reused</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="148" width="380" height="60" rx="8"/>
+<text class="f-on" fill="#ffffff" x="24" y="172" font-size="15" font-weight="600">③ DMA still reads frame 3</text>
+<text class="f-on" fill="#ffffff" x="24" y="196" font-size="14">It gets another program's data, no error</text>
+<text class="f-text" fill="#182f2b" x="10" y="236" font-size="14">With pinning, the OS will not move these</text>
+<text class="f-text" fill="#182f2b" x="10" y="256" font-size="14">pages until the copy is done, so DMA can</text>
+<text class="f-text" fill="#182f2b" x="10" y="276" font-size="14">safely use the frames it got at the start.</text>
+</svg><figcaption>Figure 14-2　DMA does not look at the page table. Once the operating system moves memory that DMA is using, DMA reads someone else's data.</figcaption></figure></div>
+<p>All of Strata's expert weights live in pinned memory. <span class="ev ev-report">Upstream report</span>[S02] The source code says it more bluntly: this "expert arena" is the engine's real working set, and it must be pinned so the copy engines can run at full bandwidth. <span class="ev ev-code">Code fact</span>(<code>pinned.hpp</code>) Here is how: it first reserves one big block of memory and, before touching any page of it, registers the whole block as CUDA pinned memory and maps it into the GPU's address space. If registering the whole block fails, it registers it piece by piece, and the rest falls back to the operating system's "resident" lock, which at least keeps it from being swapped out. <span class="ev ev-code">Code fact</span>(<code>src/core/pinned.cu</code>) The upstream troubleshooting table also says that on Windows an "out of memory" from the whole-block registration in the log is normal; the engine then locks the memory layer by layer.</p>
+<p>Once memory is pinned, data has three roads to the GPU; see Figure 14-3.</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figure 14-3: three roads to the GPU. Ordinary memory is first copied by the CPU into a staging area and then sent by DMA; pinned memory can go by DMA directly; pinned memory mapped into the GPU's address space can be read by GPU kernels directly over PCIe">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">① Ordinary memory</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="34" width="90" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="65" y="56" font-size="14" text-anchor="middle">Source</text>
+<rect class="f-soft" fill="#e5f1df" x="150" y="34" width="90" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="195" y="56" font-size="14" text-anchor="middle">Staging</text>
+<rect class="f-accent" fill="#136d5a" x="290" y="34" width="90" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="335" y="56" font-size="14" text-anchor="middle">VRAM</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M110 51H146M240 51H286"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="90" font-size="14">The CPU copies it once, then DMA</text>
+<text class="f-text" fill="#182f2b" x="20" y="126" font-size="15" font-weight="600">② Pinned memory</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="138" width="90" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="65" y="160" font-size="14" text-anchor="middle">Pinned</text>
+<rect class="f-accent" fill="#136d5a" x="290" y="138" width="90" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="335" y="160" font-size="14" text-anchor="middle">VRAM</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M110 155H286"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="194" font-size="14">The copy engine moves it; no CPU work</text>
+<text class="f-text" fill="#182f2b" x="20" y="230" font-size="15" font-weight="600">③ Mapped pinned memory</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="242" width="90" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="65" y="264" font-size="14" text-anchor="middle">Pinned</text>
+<rect class="f-accent" fill="#136d5a" x="290" y="242" width="90" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="335" y="264" font-size="14" text-anchor="middle">GPU kernel</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="5 4" d="M110 259H286"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="296" font-size="14">Kernel reads over PCIe; no copy into VRAM</text>
+</svg><figcaption>Figure 14-3　Pinning makes road ② possible; mapping adds road ③. Road ③ skips the copy, but every read has to cross PCIe.</figcaption></figure>
+<p>Strata's expert source interface puts both of the last two roads in plain view. <code>pinned()</code> answers "is this expert in pinned, registered memory, so DMA can take it directly without a CPU copy first?" <code>device_alias()</code> gives this expert's address in the GPU's address space, so the GPU can read it directly over PCIe. <span class="ev ev-code">Code fact</span>[S06] Note that "the GPU can read it" does not mean "it is already in VRAM": on road ③ every read crosses PCIe and is still limited by the bus bandwidth.</p>
+<p>What about experts that could not be pinned? While reading a long prompt, the engine has a few helper threads that copy them ahead of time into a set of pinned buffers and then hand them to the copy engine. <span class="ev ev-report">Upstream report</span>[S03] A source comment says that the thread issuing the copy used to do this copy itself along the way; during each copy of about 2 MB the GPU had no queued work to do. Reading a 32K prompt on IQ3_S, that wasted about 15 seconds. <span class="ev ev-report">Upstream report</span>(<code>src/prefill/prefill.cpp</code> comment)</p>
+
+<h2 id="sec-3">14.3 "Submitted" does not mean "done"</h2>
+<p>Once the copy engine is told to move data, should the CPU stand by and wait until it finishes? It can wait or not. These are two ways of calling.</p>
+<aside class="primer" id="c14-async">
+<h3>Synchronous and asynchronous</h3>
+<p>A <dfn>synchronous</dfn> call: when the function returns, the work is done. Like going to a service counter and standing there until it is handled. An <dfn>asynchronous</dfn> call: the function only "submits" the work and returns at once, while the work goes on in the background. Like ordering online: once you place the order you go do other things, and you get a notice when the parcel arrives.</p>
+<p>The benefit of asynchrony is that you do not sit idle; see Figure 14-4. The price: when the function returns, you cannot assume the work is done. To use the result, you must wait for an explicit <dfn>completion signal</dfn>. In CUDA, work submitted on the same <dfn>stream</dfn> runs in order. Across streams, or when the host wants to read a result, you rely on an <dfn>event</dfn>: record an event on the stream, and once the event "completes", all the work submitted before it is done. [R01]</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="Figure 14-4: a synchronous call returns only after the copy finishes; an asynchronous call returns at once while the copy runs in the background, and you wait for the completion event before using the result">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">Synchronous</text>
+<text class="f-text" fill="#182f2b" x="20" y="54" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="70" y="38" width="160" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="150" y="55" font-size="14" text-anchor="middle">Waits for copy</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="38" width="150" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="305" y="55" font-size="14" text-anchor="middle">Other work</text>
+<text class="f-text" fill="#182f2b" x="20" y="108" font-size="15" font-weight="600">Asynchronous</text>
+<text class="f-text" fill="#182f2b" x="20" y="140" font-size="14">CPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="124" width="200" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="170" y="141" font-size="14" text-anchor="middle">Submits, moves on</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="14">Copy</text>
+<rect class="f-soft" fill="#e5f1df" x="70" y="160" width="160" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="150" y="177" font-size="14" text-anchor="middle">In background</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M230 156V196"/>
+<text class="f-muted" fill="#5c6d66" x="230" y="214" font-size="14" text-anchor="middle">Done event: safe to use from here</text>
+</svg><figcaption>Figure 14-4　An asynchronous call hides the waiting in the background, but "returned" and "done" are two different things.</figcaption></figure>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Asynchronous_I/O" target="_blank" rel="noopener noreferrer">Wikipedia: Asynchronous I/O</a> · <a href="https://en.wikipedia.org/wiki/Producer%E2%80%93consumer_problem" target="_blank" rel="noopener noreferrer">Wikipedia: Producer–consumer problem</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/threads-cv.pdf" target="_blank" rel="noopener noreferrer">OSTEP Chapter 30: Condition variables (producers and consumers)</a></p>
+</aside>
+<p>Strata's source code is full of "returned does not mean done" reminders:</p>
+<ul>
+<li><strong>Filling the expert cache</strong> is usually asynchronous, because the copy and the computation that later reads it sit on the same stream, so the order holds naturally. Filling the cache from a list at startup has no such guarantee. The first version used the asynchronous fill, and the byte-by-byte check failed at once: "slot 0 differs at byte 0". So a dedicated blocking version was added. <span class="ev ev-code">Code fact</span>[S05]</li>
+<li><strong>Committing a verify window</strong> can return before the compute graph finishes, so drafting the next step can run at the same time. But any code that reads or writes the session state from another stream or from the host (a new request, a save, a snapshot and so on) must first call <code>wait_commit()</code>. <span class="ev ev-code">Code fact</span>[S08]</li>
+<li><strong>The per-layer main loop</strong> does not call a function that "waits for the whole stream to finish"; it queries an event instead. A source comment also records a trap: a pinned buffer was freed once per token, and freeing pinned memory implicitly synchronizes the whole device, so every token ended with an extra full-device wait. The fix was to allocate once at the start of the session and reuse it. <span class="ev ev-code">Code fact</span>(<code>include/strata/core/session.hpp</code>)</li>
+</ul>
+<p>The SSD reads in Chapter 11 follow the same idea: as soon as a token is decided, 16 read requests are submitted, and the results are collected only right before layer 1 needs them.</p>
+
+<h2 id="sec-4">14.4 Double buffering: copy while you compute</h2>
+<p>The most common use of asynchronous copies is to overlap copying with computing. Suppose you have a series of data chunks to process: each chunk is first copied to the GPU (3 milliseconds) and then computed (5 milliseconds). With only one buffer you can only "copy, then compute, then copy again". With two, one buffer can be computed while the other is being filled with the next chunk. This is called <dfn>double buffering</dfn>.</p>
+<p>Let's do the math. For 4 chunks, running everything in series takes 4 × (3 + 5) = 32 milliseconds. With double buffering, the first chunk's copy and the last chunk's compute cannot overlap with anything, and every step in between costs whichever part is slower: 3 + (4 − 1) × max(3, 5) + 5 = 23 milliseconds. This formula holds only if the copy engine and the compute units really are two independent resources.</p>
+<div class="viz" data-viz="double-buffer"><figure class="fig"><svg viewBox="0 0 400 242" role="img" aria-label="Figure 14-5: 4 chunks, 3 milliseconds to copy and 5 to compute. One buffer runs in series for 32 milliseconds; two buffers overlap and finish in 23">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">1 buffer: 32 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="54" font-size="14">Copy</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="38" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="144" y="38" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="224" y="38" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="304" y="38" width="30" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="88" font-size="14">Calc</text>
+<rect class="f-accent" fill="#136d5a" x="94" y="72" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="174" y="72" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="254" y="72" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="334" y="72" width="50" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="134" font-size="15" font-weight="600">2 buffers: 23 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="166" font-size="14">Copy</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="150" width="30" height="24"/><rect class="f-warn" fill="#9e5d24" x="94" y="150" width="30" height="24"/><rect class="f-accent" fill="#136d5a" x="144" y="150" width="30" height="24"/><rect class="f-warn" fill="#9e5d24" x="194" y="150" width="30" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="200" font-size="14">Calc</text>
+<rect class="f-accent" fill="#136d5a" x="94" y="184" width="50" height="24"/><rect class="f-warn" fill="#9e5d24" x="144" y="184" width="50" height="24"/><rect class="f-accent" fill="#136d5a" x="194" y="184" width="50" height="24"/><rect class="f-warn" fill="#9e5d24" x="244" y="184" width="50" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="234" font-size="14">Two fills = two buffers, used in turn</text>
+</svg><figcaption>Figure 14-5　Double buffering hides the copying behind the computing. Note that chunk 3 can start copying only after chunk 1 finishes computing and frees its buffer.</figcaption></figure></div>
+<p>What the simulator most wants you to see is the moment of "overwrite without waiting for the signal". The correctness of double buffering does not come from "allocating two blocks of memory"; it comes from two signals: <strong>read only after the copy is done</strong>, and <strong>write only after it has been used</strong>. Each buffer is a small state machine; see Figure 14-6.</p>
+<figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="Figure 14-6: the life cycle of a buffer. It can be written when free; it can be read only after the copy-done event; it returns to free only after the compute-used event">
+<rect class="f-soft" fill="#e5f1df" x="130" y="8" width="140" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="33" font-size="15" font-weight="600" text-anchor="middle">Free</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="260" y="104" width="130" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="325" y="129" font-size="15" font-weight="600" text-anchor="middle">Copying in</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="196" width="140" height="40" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="221" font-size="15" font-weight="600" text-anchor="middle">Computing</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="104" width="130" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="75" y="129" font-size="15" font-weight="600" text-anchor="middle">To recycle</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M270 36Q330 50 326 100M326 146Q320 196 274 214M128 214Q80 196 76 148M76 102Q80 50 128 36"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="70" font-size="14">Submit copy</text>
+<text class="f-warn" fill="#9e5d24" x="394" y="186" font-size="14" text-anchor="end">"Copied" event</text>
+<text class="f-warn" fill="#9e5d24" x="18" y="186" font-size="14">"Used" event</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="70" font-size="14">Reusable</text>
+<text class="f-text" fill="#182f2b" x="200" y="264" font-size="14" text-anchor="middle">No "used" event, no return to Free</text>
+</svg><figcaption>Figure 14-6　The life of one buffer. Two events chain the four states together; drop either one, and you may read data that has not finished copying, or overwrite data still in use.</figcaption></figure>
+<p>Strata uses exactly this kind of ring buffer when it reads a long prompt: experts not in VRAM go up to the GPU through a ring of pinned slots, on a separate copy stream. <span class="ev ev-code">Code fact</span>[S12] Each slot has two events, one meaning "copy done" and one meaning "done using it". <span class="ev ev-code">Code fact</span>(<code>prefill.cpp</code>) The helper copy threads mentioned earlier follow the same rule: job j writes into pinned buffer j mod 16 (16 buffers by default), and before writing it must wait until the DMA that job j − 16 issued from this buffer has finished. <span class="ev ev-code">Code fact</span>(<code>prefill.cpp</code>)</p>
+<p>The size of the ring matters too. A source comment records one measurement (Q2_0, 8192 tokens per chunk): raising the ring from 96 slots to 384 lifted prompt reading from 1,153 to 1,294 tokens per second, because the next layer's experts can arrive while this layer's attention is computing. But when many experts need host copies, a big ring is actually slower, because the bottleneck is the host copy and the extra slots only take up cache space. <span class="ev ev-report">Upstream report</span>(<code>prefill.cpp</code> comment) When layers are split across several GPUs, each stage also has two pinned handoff buffers: while the next stage reads chunk c, this stage is already working on chunk c + 1. <span class="ev ev-code">Code fact</span>[S12] That is double buffering.</p>
+
+<h2 id="sec-5">14.5 Pinning is not free</h2>
+<p>If pinning is so good, why not pin all the memory? Because pinned pages can no longer be moved, swapped out or reclaimed by the operating system when memory is tight. The more you pin, the less slack is left for the system, other programs and the file cache. [R02]</p>
+<p>Strata is careful about this. The low-memory "resident" mode leaves 4 GB of free memory for the system. <span class="ev ev-report">Upstream report</span>[S03] On Windows, pinned memory mapped for the GPU also counts against a "shared GPU memory" budget. The source records a 63 GB machine that pinned piece by piece until the driver refused, ended up with 28 GiB pinned, filled that budget, and then every later VRAM allocation failed with "out of memory". So the engine offers an optional cap. It is not the default, though, because on a 64 GB machine pinning more caused no trouble in testing, and the cap makes prompt reading about 20% slower. <span class="ev ev-code">Code fact</span>(<code>pinned.cu</code>) There is no answer that fits every case; you have to measure on each machine.</p>
+<p>There is also a fun parallel: the KV page cache for long contexts (mentioned in Chapter 12) keeps the full KV data in pinned memory mapped for the GPU, keeps only some of the pages in VRAM, and uses a "page number → VRAM slot" table to record which pages are in VRAM. <span class="ev ev-code">Code fact</span>(<code>include/strata/kernels/kv_stream.hpp</code>) That is almost a tiny virtual memory system: page table, page faults and replacement, all done by the GPU itself.</p>
+
+<h2 id="sec-6">14.6 Hands-on: make the race show up every time</h2>
+<p>This chapter has no separate interactive lab; the two simulators are your workbench. In "Double buffering", play once each with 1, 2 and 3 buffers and note the total time. Then go back to 2 buffers, turn on "overwrite without waiting", and see which chunks are marked ✗. Next make the copy slower and the compute faster and try again: why did nothing go wrong "by luck" this time? Errors that are "sometimes right, sometimes wrong" are the hardest to track down.</p>
+<p>In "DMA and pinning", walk through once with pinning off and once with it on, and compare the page table with the frame numbers DMA holds at steps 4 and 5.</p>
+<p>Finally, a paper experiment: simulate double buffering with two arrays and write a test that deliberately lets the producer overwrite an array before the consumer has finished reading it; confirm the test fails. Then add the "used" signal and confirm it passes. Last, artificially delay the "done" event by a few steps and confirm the system waits instead of quietly reading half-new, half-old data.</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>Program addresses are virtual, and the operating system can move pages at any time. DMA only understands physical addresses, so memory it uses must be pinned. Strata pins its whole expert arena and maps it for the GPU.</li>
+<li>An asynchronous call "returning" does not mean "done". To use the result, wait for the completion event; to reuse a buffer, wait for the "used" event.</li>
+<li>Double buffering hides copying behind computing: total time ≈ first copy + (chunks − 1) × the slower part + last compute. Pinning has a cost, so leave headroom for the system.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "Once the async copy function returns, the data has arrived, and I can change the source buffer right away."</strong></p>
+<p>The function returning only says the work has been submitted; the copy may not even have started. If you overwrite the source buffer now, the GPU may receive a mix of old and new data; if you free it, the copy may well read memory someone else now owns. Whether you can reuse a buffer depends only on the completion signal. Adding "wait 0.1 seconds" in between is not a fix either: it still fails on a slower machine and wastes time on a faster one.</p></div>
+
+<details class="deep"><summary>Go deeper: the producer–consumer protocol, stream ordering boundaries and memory budgets</summary>
+<h3>A minimal producer–consumer protocol</h3>
+<p>The producer fills in the bytes first and then publishes "ready". The consumer reads after it sees "ready" and publishes "used" when it is done. Only when the producer sees "used" may it overwrite. The teaching state machine is: free → filling → ready → reading → free. You may not jump from "ready" straight back to "free", and you may not use a plain variable or <code>volatile</code> in place of the ordering guarantees that cross-device work needs. Which fences, events and stream semantics to use depends on the rules of the target platform. [R01]</p>
+<h3>Stream order holds only where it is guaranteed</h3>
+<p>Operations submitted in order on the same stream are naturally ordered. Between different streams, or between a host read and the default stream, you cannot just assume an order. The startup fill of the expert cache tripped right here: the data was copied on a non-blocking stream and the check read it on the legacy stream; the two had no ordering, so the check read slots that had not finished copying. <span class="ev ev-code">Code fact</span>[S05] The asynchronous commit of a verify window is the same: the caller can skip the wait only if later work is on the same stream and drafting does not read what the commit writes. As soon as another stream or the host needs to read the session state, it must wait first. <span class="ev ev-code">Code fact</span>[S08]</p>
+<h3>The same concurrency lesson, used twice</h3>
+<p>When helper copy threads take jobs, they use an atomic variable packed as "batch number | job count | index". A thread gets a job only if the batch matches, so a late thread cannot grab a job from the next batch. A source comment says this is the lesson from the CPU expert pool hang (issue #29). <span class="ev ev-code">Code fact</span>(<code>prefill.cpp</code>) Chapter 13 tells the whole story of that hang.</p>
+<h3>Do not count the memory budget twice</h3>
+<p>A sound memory budget separates several quantities: reserved (address space taken, not yet really allocated), committed (the system promises it can provide), resident (in physical memory right now), locked (may not be swapped out), and those that also have a copy on the GPU. These quantities can point at the same physical pages, so simply adding them up counts things twice. First work out whether they overlap, then do the totals. [R02] The host also runs service processes and needs file cache, page tables, input buffers and recoverable session state; you cannot give all physical memory to the experts.</p>
+<h3>Acceptance: make rare errors show up every time</h3>
+<p>Tests must not only walk the happy path. Build these cases on purpose: the consumer is slow to answer "used" — does the producer come around and overwrite? The completion event is artificially delayed — does the system wait, or read a half-finished result? Each round's data carries an increasing generation number, and the generation the consumer reads must match the one it expects. After a timeout, that buffer must not be reused. The SSD reader in Chapter 11 has built-in fault injection that "artificially delays every read", exactly for this kind of acceptance test.</p>
+</details>
