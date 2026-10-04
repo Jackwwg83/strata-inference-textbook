@@ -1,18 +1,282 @@
-<h2 id="sec-1">21.1 三种“多卡”要先说清楚</h2>
-<p>层切分把不同层放到不同设备；张量并行把同一层的矩阵计算拆到多个设备；请求并行让不同请求在不同副本上运行。三种方案的通信量、可共享状态和优化目标不同。只说“支持多 GPU”没有足够信息推导性能。</p>
-<p>固定源码的 <code>Verifier::set_stage</code> 与 <code>Prefill::set_stage</code> 明确暴露层范围和 stage 链。[S08][S12] 本章围绕这些已读接口展开，不把它们等同于通用张量并行引擎。</p>
-<h2 id="sec-2">21.2 单 token 的层链仍然串行</h2>
-<p>假设前半模型在 GPU A 需 4 ms，后半在 B 需 5 ms，中间传递需 1 ms。对同一个 token，必须先 A，再传递，再 B，约 10 ms；不是 max(4,5)=5 ms。层切分可能因为更多显存缓存而减少 CPU 工作，从而获得另一种收益，但不能把它解释为消除了层依赖。</p>
-<p>对于多个已知 prompt chunks，可在 A 处理 chunk c+1 时，让 B 处理 chunk c。<code>Prefill</code> 接口说明使用两个 pinned handoff 缓冲和 stage 线程形成这种流水。[S12]</p>
-<h2 id="sec-3">21.3 例题：流水有填充与排空</h2>
-<p>忽略通信，两个 stage 每块分别 4 和 5 ms，N 块总时间近似 <code>4+5+(N−1)×5 = 5N+4 ms</code>。N=1 是 9 ms，N=8 是 44 ms；串行逐块则 72 ms。块数有限时存在气泡，不会达到无限流水的理想吞吐。</p>
-<p>若每块通信都占用关键资源，应显式纳入 stage 或额外阶段，而不是自动忽略。PCIe P2P 能否直接使用、是否回退主机、设备拓扑和跨 NUMA 都需要验证。</p>
-<h2 id="sec-4">21.4 handoff 为什么不只是 n_embd？</h2>
-<p>验证器接口给出的 handoff 浮点数个数为 <code>hc*n_embd+n_embd+hc</code>，包含残差 R、尚待折入的写回向量和 inject。[S08] 代入 hc=4、n_embd=2560，共 12,804 个 float，约 <strong>51,216 字节 / token</strong>，这是该接口载荷，不含所有传输元数据。</p>
-<p>仅传一个 2560 维向量会遗漏模型状态。这个例子说明系统通信格式必须反映完整数学契约，不能根据“隐藏维度就是 2560”随意削减。</p>
-<h2 id="sec-5">21.5 每张卡只分配自己真正需要的状态</h2>
-<p><code>SessionState</code> 的 layer range carve 使 stage 仅分配对应层的状态，并维护全局到局部序号映射。[S13] 如果两张卡都为全部 48 层分配状态，容量收益会被浪费；如果减错 ordinal，又会读错另一层的状态。</p>
-<p>checkpoint 时各 stage 可能已处于不同 chunk 边界，因此不能等最后一张卡通知完成，再随意抓取前卡的“当前状态”。prefill 的 <code>on_stage_chunk</code> 正是为各 stage 在正确时刻捕获状态提供位置。[S12]</p>
-<h2 id="sec-6">21.6 实验与验收</h2>
-<p>把阶段时间画成甘特图，计算 1、2、8 个 chunk 的总时间，加入通信后重算。真实多 GPU 作业需先验证切分与不切分的数值 / 状态契约，再测容量和吞吐。</p>
-<p>测试还应覆盖某 stage 无 QSA 层、极短最后 chunk、取消、第二卡故障和 P2P 不可用。不能只在理想双卡拓扑上通过一次，就把所有桌面主板组合写成已支持。</p>
+<div class="hook"><span class="eyebrow">两张卡，为什么不是两倍</span>
+<p>Strata 的 README 里有一句：两三张显卡可以一起跑这个模型。<span class="ev ev-report">上游报告</span>[S01] 上游文档给了一组实测：RTX 5080 加 RTX 3090，读长提示词快了约两成；可生成回答的速度，和 5080 单独跑差不多。</p>
+<p>多插了一张 24 GB 的显卡，回答却没变快。钱花到哪去了？这一章讲清楚三件事：两张卡怎么分工，为什么一个 token 快不起来，以及两张卡之间到底要传多少东西。</p></div>
+<p class="tldr"><strong>一句话：</strong>Strata 把 48 层切成前后两段，每张卡管一段。一个 token 仍要先过前一张卡、再过后一张卡，所以单个 token 不会变快；真正的收益是两张卡能多缓存一倍的专家，以及读提示词时两张卡像流水线一样同时干活。</p>
+
+<h2 id="sec-1">21.1 两张卡能怎么分工</h2>
+<p>想象两个人一起搬家。可以一人搬卧室、一人搬客厅；可以两人合抬同一张大沙发；也可以各搬各的家。三种分法都叫“两个人一起干”，可要商量的次数完全不同。多块显卡也一样，常见的分法有三种，见图 21-1。</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="图 21-1：三种多卡分工。层切分每张卡管几层，张量并行把同一层拆开算，请求并行每张卡一整份模型">
+<text class="f-text" fill="#182f2b" x="69" y="18" font-size="13" font-weight="600" text-anchor="middle">层切分</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="35" font-size="11" text-anchor="middle">流水线并行</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">张量并行</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="35" font-size="11" text-anchor="middle">同一层拆开算</text>
+<text class="f-text" fill="#182f2b" x="331" y="18" font-size="13" font-weight="600" text-anchor="middle">请求并行</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="35" font-size="11" text-anchor="middle">数据并行</text>
+<rect class="f-accent" fill="#136d5a" x="14" y="50" width="110" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="69" y="66" font-size="11" text-anchor="middle">GPU A</text>
+<text class="f-on" fill="#ffffff" x="69" y="82" font-size="11" text-anchor="middle">第 0–18 层</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M69 90V104"/>
+<rect class="f-soft" fill="#e5f1df" x="14" y="106" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="69" y="122" font-size="11" text-anchor="middle">GPU B</text>
+<text class="f-text" fill="#182f2b" x="69" y="138" font-size="11" text-anchor="middle">第 19–47 层</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="50" width="110" height="96" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="66" font-size="11" text-anchor="middle">同一层的矩阵</text>
+<rect class="f-accent" fill="#136d5a" x="151" y="74" width="47" height="64" rx="4"/>
+<text class="f-on" fill="#ffffff" x="174.5" y="102" font-size="11" text-anchor="middle">A</text>
+<text class="f-on" fill="#ffffff" x="174.5" y="120" font-size="11" text-anchor="middle">算左半</text>
+<rect class="f-soft" fill="#e5f1df" x="202" y="74" width="47" height="64" rx="4"/>
+<text class="f-text" fill="#182f2b" x="225.5" y="102" font-size="11" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="225.5" y="120" font-size="11" text-anchor="middle">算右半</text>
+<rect class="f-accent" fill="#136d5a" x="276" y="50" width="110" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="331" y="66" font-size="11" text-anchor="middle">GPU A</text>
+<text class="f-on" fill="#ffffff" x="331" y="82" font-size="11" text-anchor="middle">完整模型 · 请求 1</text>
+<rect class="f-soft" fill="#e5f1df" x="276" y="106" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="331" y="122" font-size="11" text-anchor="middle">GPU B</text>
+<text class="f-text" fill="#182f2b" x="331" y="138" font-size="11" text-anchor="middle">完整模型 · 请求 2</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M134.5 8V208M265.5 8V208"/>
+<text class="f-text" fill="#182f2b" x="69" y="168" font-size="11" text-anchor="middle">跨卡：每窗口 1 次</text>
+<text class="f-text" fill="#182f2b" x="200" y="168" font-size="11" text-anchor="middle">跨卡：每层 2 次</text>
+<text class="f-text" fill="#182f2b" x="331" y="168" font-size="11" text-anchor="middle">跨卡：几乎不需要</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="186" font-size="11" text-anchor="middle">省的是显存</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="186" font-size="11" text-anchor="middle">快互连才划算</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="186" font-size="11" text-anchor="middle">适合多人同时用</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="204" font-size="11" text-anchor="middle">Strata 用的就是它</text>
+</svg><figcaption>图 21-1　三种分法的区别在于“多久要商量一次”。层切分每个验证窗口只跨卡一次；张量并行每层都要同步；请求并行几乎不用沟通，但每张卡都得装下整个模型。</figcaption></figure>
+<p>Strata 用的是第一种：<dfn>层切分</dfn>，也就是把模型的层按顺序切成几段，每张卡负责连续的一段。上游文档写得很直白：这是流水线（按层）并行，不是张量并行；一个 token 每个验证窗口从一张卡跨到下一张卡一次，而不是每层跨两次。<span class="ev ev-report">上游报告</span></p>
+<p>在代码里，这件事落在一个叫 <code>set_stage</code> 的函数上。每个<dfn>阶段</dfn>（stage，一张卡上的那一段层）只跑 <code>[layer_begin, layer_end)</code> 这些层：不从第 0 层开始的阶段，从上一段手里接过数据；不到最后一层就结束的阶段，把数据交出去，而且不带输出头。<span class="ev ev-code">代码事实</span>[S08]</p>
+<aside class="primer" id="c21-parallelism">
+<h3>流水线并行与张量并行</h3>
+<p>一个大模型放不进一张卡，有两种最基本的切法。横着切，按层分段，叫<dfn>流水线并行</dfn>：像工厂流水线，第一道工序做完传给第二道。竖着切，把同一层的大矩阵拆成几块，叫<dfn>张量并行</dfn>：像两个人合抬一张沙发，每一步都得喊“一二三”对齐。</p>
+<p>两种切法的代价落在不同地方。流水线只在段与段的交界处传一次数据，可一份数据必须走完上一段才能进下一段，单份数据的等待时间省不掉。张量并行让同一层真的由两张卡同时算，但每层算完都要把两半结果合起来。经典的 Megatron-LM 做法里，Transformer 的每一层前向计算要做两次这种合并。48 层就是 96 次。</p>
+<p>还有第三种，<dfn>数据并行</dfn>（这里叫请求并行）：每张卡放一整份模型，各自处理不同的请求。它几乎不用跨卡沟通，前提是一张卡装得下整个模型。</p>
+<p>Strata 面对的是“一张卡装不下”的问题，而家用电脑的显卡之间通常只有 PCIe 相连，没有专门的高速线。所以它选了沟通最少的层切分。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/流水线_(计算机)" target="_blank" rel="noopener noreferrer">维基百科：流水线 (计算机)</a> · <a href="https://zh.wikipedia.org/zh-cn/并行计算" target="_blank" rel="noopener noreferrer">维基百科：并行计算</a> · <a href="https://pytorch.org/docs/stable/distributed.pipelining.html" target="_blank" rel="noopener noreferrer">PyTorch 文档：Pipeline Parallelism</a> · <a href="https://huggingface.co/docs/transformers/perf_train_gpu_many" target="_blank" rel="noopener noreferrer">Hugging Face：多 GPU 并行方式对比</a> · <a href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener noreferrer">Megatron-LM 论文</a></p>
+</aside>
+
+<h2 id="sec-2">21.2 一个 token 还是得一层层排队</h2>
+<p>生成回答时，每个 token 都要从第 0 层走到第 47 层。第 19 层要用第 18 层的结果，第 18 层要用第 17 层的结果。这条依赖链拆不开。所以前一张卡算前半段时，后一张卡只能等；后一张卡算后半段时，前一张卡也闲着。见图 21-2。</p>
+<figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="图 21-2：生成一个 token 时，GPU A 算完前半段层，交接给 GPU B 算后半段，两张卡轮流干活、轮流空等">
+<text class="f-muted" fill="#5c6d66" x="8" y="18" font-size="11">生成一个 token 的时间线（示意，横向是时间）</text>
+<text class="f-text" fill="#182f2b" x="8" y="56" font-size="12">GPU A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="40" width="330" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="40" width="130" height="24"/>
+<text class="f-on" fill="#ffffff" x="125" y="56" font-size="11" text-anchor="middle">第 0–18 层</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="56" font-size="11" text-anchor="middle">空等</text>
+<text class="f-text" fill="#182f2b" x="8" y="100" font-size="12">GPU B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="84" width="330" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="214" y="84" width="176" height="24"/>
+<text class="f-on" fill="#ffffff" x="302" y="100" font-size="11" text-anchor="middle">第 19–47 层 + 输出头</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="100" font-size="11" text-anchor="middle">空等</text>
+<rect class="f-warn" fill="#9e5d24" x="190" y="68" width="24" height="12"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M190 64L202 68M214 80L214 84"/>
+<text class="f-text" fill="#182f2b" x="60" y="130" font-size="11">交接：每个 token 51,216 字节，经内存中转</text>
+<text class="f-text" fill="#182f2b" x="8" y="156" font-size="12" font-weight="600">同一个 token：先过 A，再过 B，没法同时</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="178" font-size="11">层号取自上游日志里 K = 19 的拆分；时间长短是示意</text>
+</svg><figcaption>图 21-2　生成回答时，一个 token 必须先走完前一张卡上的层，才能进入后一张卡。两张卡轮流干活，也轮流空等，所以单个 token 的时间不会减半。</figcaption></figure>
+<p>上游文档的实测印证了这一点：RTX 5080 加 RTX 3090，生成速度和 5080 单卡基本持平，写代码时略快。<span class="ev ev-report">上游报告</span>（Coder 模型，32K 上下文，CPU 为 Ryzen 9 9950X3D；单卡写故事每秒 83–87 个 token，双卡最佳拆分每秒 84 个；写代码分别是 88–105 和 110。文档未注明引擎版本，结果目录日期为 2026-09-29。）</p>
+<p>那第二张卡图什么？图的是<strong>容量</strong>。第 10 章讲过，没放进显存的专家要交给 CPU 在内存里算，CPU 算得慢。层切分以后，每张卡只为自己负责的层缓存专家，两张卡合起来能缓存的专家大约是一张卡的两倍。上游文档说，对 Coder 模型，16 GB 加 24 GB 两张卡几乎能放下全部专家，“速度就是从这里来的”：生成时几乎用不着 CPU。<span class="ev ev-report">上游报告</span> 图 21-3 是每张卡上放了什么。</p>
+<figure class="fig"><svg viewBox="0 0 400 272" role="img" aria-label="图 21-3：层切分后每张卡各放一份稠密权重、自己的会话状态、提示词缓冲和自己那几层的专家缓存；最后一张卡另放输出头和草稿层；内存里的专家只存一份">
+<text class="f-text" fill="#182f2b" x="102" y="22" font-size="13" font-weight="600" text-anchor="middle">GPU A（主卡）</text>
+<text class="f-text" fill="#182f2b" x="297" y="22" font-size="13" font-weight="600" text-anchor="middle">GPU B（最后一张）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="30" width="185" height="156" rx="8"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="30" width="185" height="156" rx="8"/>
+<rect class="f-soft" fill="#e5f1df" x="20" y="40" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="56" font-size="11" text-anchor="middle">稠密权重副本 约 3.4 GB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="68" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="84" font-size="11" text-anchor="middle">自己的会话状态（含 KV）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="96" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="112" font-size="11" text-anchor="middle">提示词缓冲 约 1.5 GB</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="124" width="165" height="52" rx="4"/>
+<text class="f-on" fill="#ffffff" x="102.5" y="146" font-size="11" text-anchor="middle">第 0–18 层的专家缓存</text>
+<text class="f-on" fill="#ffffff" x="102.5" y="164" font-size="11" text-anchor="middle">剩下的显存都给它</text>
+<rect class="f-soft" fill="#e5f1df" x="215" y="40" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="56" font-size="11" text-anchor="middle">稠密权重副本 约 3.4 GB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="68" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="84" font-size="11" text-anchor="middle">自己的会话状态（含 KV）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="96" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="112" font-size="11" text-anchor="middle">提示词缓冲 约 1.5 GB</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="215" y="124" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="140" font-size="11" text-anchor="middle">输出头 + 草稿层 约 0.8 GB</text>
+<rect class="f-accent" fill="#136d5a" x="215" y="152" width="165" height="24" rx="4"/>
+<text class="f-on" fill="#ffffff" x="297.5" y="168" font-size="11" text-anchor="middle">第 19–47 层的专家缓存</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M102 186V206M297 186V206"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="206" width="380" height="40" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="231" font-size="12" text-anchor="middle">内存：全部专家只存一份，两张卡共用；CPU 算没人缓存的专家</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="264" font-size="11" text-anchor="middle">GB 数是上游文档给 Coder 模型的约数；提示词缓冲按默认 2048 块计</text>
+</svg><figcaption>图 21-3　稠密权重每张卡各放一份，专家缓存却只放自己那几层的。层切分换来的，主要是“能缓存的专家多了一倍”。</figcaption></figure>
+<p>注意代价：稠密权重每张卡都要放一份副本，每张卡还要有自己的会话状态和提示词缓冲。所以上游不建议把显存小于 8 GB 的卡拉进来一起用。<span class="ev ev-report">上游报告</span></p>
+
+<h2 id="sec-3">21.3 读提示词时，流水线才转起来</h2>
+<p>读提示词的情况不一样。一段长提示词在读之前就全部已知，Strata 会把它切成很多<dfn>块</dfn>（chunk），一块一块读。第 16 章讲过分块。这时两张卡就能错开：后一张卡读第 c 块的时候，前一张卡已经在读第 c+1 块。prefill 接口的注释写的正是这个：不到最后一层的阶段把数据拷进<strong>两个</strong>锁页的内存缓冲区，在另一个线程上启动下一阶段，“这样下一阶段读第 c 块时，本阶段读第 c+1 块”。<span class="ev ev-code">代码事实</span>[S12]</p>
+<p>洗衣服是个好比方。洗衣机洗一桶要 4 分钟，烘干机烘一桶要 5 分钟。只有一桶衣服，怎么也得 9 分钟。有 8 桶衣服，第一桶进烘干机时，第二桶就能进洗衣机。烘干机成了节拍：每 5 分钟出一桶。总时间是开头的 4 分钟，加上 8 次烘干的 40 分钟，共 44 分钟。全部串着做要 8 × 9 = 72 分钟。</p>
+<p>开头那段“烘干机在等第一桶”的时间，和结尾“洗衣机已经没衣服可洗”的时间，叫<dfn>气泡</dfn>：流水线上有工位在空等。下面的模拟器把两张卡画成时间线，你可以改每段的时间、块数和搬运时间，看气泡在哪：</p>
+<div class="viz" data-viz="layer-pipeline"><figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="图 21-4：两张卡的流水线时间线。a 为 4 毫秒、b 为 5 毫秒、4 块共 24 毫秒，开头和结尾各有一段空等">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="11">读 4 块提示词：A 每块 4 ms，B 每块 5 ms，不计搬运</text>
+<text class="f-text" fill="#182f2b" x="8" y="55" font-size="12">GPU A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="36" width="324" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="114" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="181.5" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="249" y="37" width="52.5" height="26"/>
+<text class="f-on" fill="#ffffff" x="86" y="55" font-size="12" text-anchor="middle">1</text>
+<text class="f-on" fill="#ffffff" x="140" y="55" font-size="12" text-anchor="middle">2</text>
+<text class="f-on" fill="#ffffff" x="207.5" y="55" font-size="12" text-anchor="middle">3</text>
+<text class="f-on" fill="#ffffff" x="275" y="55" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="343" y="55" font-size="11" text-anchor="middle">空等</text>
+<text class="f-text" fill="#182f2b" x="8" y="103" font-size="12">GPU B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="84" width="324" height="28"/>
+<text class="f-muted" fill="#5c6d66" x="87" y="103" font-size="11" text-anchor="middle">空等</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="114" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="181.5" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="249" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="316.5" y="85" width="66" height="26"/>
+<text class="f-text" fill="#182f2b" x="147" y="103" font-size="12" text-anchor="middle">1</text>
+<text class="f-text" fill="#182f2b" x="214.5" y="103" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="282" y="103" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="349.5" y="103" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="60" y="130" font-size="11" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="114" y="130" font-size="11" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="181.5" y="130" font-size="11" text-anchor="middle">9</text>
+<text class="f-muted" fill="#5c6d66" x="249" y="130" font-size="11" text-anchor="middle">14</text>
+<text class="f-muted" fill="#5c6d66" x="316.5" y="130" font-size="11" text-anchor="middle">19</text>
+<text class="f-muted" fill="#5c6d66" x="384" y="130" font-size="11" text-anchor="end">24 ms</text>
+<text class="f-text" fill="#182f2b" x="60" y="152" font-size="11">填充：B 等 A 交出第 1 块</text>
+<text class="f-text" fill="#182f2b" x="384" y="152" font-size="11" text-anchor="end">排空：A 已读完，B 收尾</text>
+<text class="f-text" fill="#182f2b" x="10" y="178" font-size="12">4 块共 24 ms = 5 × 4 + 4；一张卡串行要 4 × 9 = 36 ms</text>
+</svg><figcaption>图 21-4　慢的那张卡定节拍：每 5 毫秒出一块。总时间 = a + b + (N − 1) × max(a, b)。块越多，开头和结尾的气泡占比越小。</figcaption></figure></div>
+<p>把模拟器的结论和上游实测对一下：同样是 5080 加 3090，读 16K 提示词从单卡的每秒 1,726–2,017 个 token 提到 2,039 个，28K 从 1,970 提到 2,357 个。文档的解释是“每张卡读自己那几层，同时另一张卡读下一块”，提速约 18%–20%。<span class="ev ev-report">上游报告</span>（条件同上一节。）</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这和《计算机组成原理》里的指令流水线是一回事。5 级流水线不会让单条指令变快，只会让每个周期都有指令完成；吞吐量由最慢的一级决定，开头的填充和遇到依赖时的停顿就是气泡。层切分的“级”是一段层，“指令”是一块提示词。</p>
+
+<h2 id="sec-4">21.4 交接的包裹有多大，路有多宽</h2>
+<p>两张卡交接时，到底要传什么？直觉上，一个 token 在层与层之间流动的是一个 2560 维的向量，也就是 2560 个数。Strata 的交接却更大。<code>verify.hpp</code> 规定，交接缓冲区里每个 token 要放三样东西：残差 R（hc × n_embd 个数）、上一层还没写回的一份向量（n_embd 个数）、以及 hc 个注入系数。<span class="ev ev-code">代码事实</span>[S08] 代入模型几何 hc = 4、n_embd = 2560 [S04]：</p>
+<div class="equation">4 × 2560 + 2560 + 4 = 12,804 个 float ＝ 51,216 字节 / token</div>
+<p>为什么不只传 2560 个数？因为这个模型的残差本身就是 4 份 2560 维的向量，而且最后一层有一笔写回被推迟到下一层开头才做。下一阶段要“像没拆开时一样”接着算，就必须拿到这些全部。代码注释说，这样拆分是<strong>逐位一致</strong>的（bit-exact）：拆不拆开，算出的数一模一样。<span class="ev ev-code">代码事实</span>[S08]</p>
+<p>读提示词时交接的是残差那部分：每个 token 4 × 2560 个 float，40,960 字节。一块默认 2048 个 token，就是 2048 × 40,960 = 83,886,080 字节，约 84 MB。<span class="ev ev-code">代码事实</span>（<code>src/prefill/prefill.cpp</code>）<span class="ev ev-est">教学推演</span> 生成回答时，文档说每个验证窗口交接一次，“几百 KB，经锁页内存中转”。<span class="ev ev-report">上游报告</span> 按 51,216 字节一个 token，5 个 token 的窗口约 256 KB，对得上。</p>
+<p>包裹大小知道了，还要看路有多宽。下面的专栏讲两张卡之间的路。</p>
+<aside class="primer" id="c21-interconnect">
+<h3>互连带宽：PCIe 与 NVLink</h3>
+<p>显卡插在主板的 <dfn>PCIe</dfn> 插槽上。PCIe 是一条串行总线，由若干条<dfn>通道</dfn>（lane）并排组成，就像几车道的公路：“×16”是 16 条车道，“×4”是 4 条。每一代 PCIe 把单条车道的速度翻一倍。</p>
+<p>按每个方向的理论峰值算：PCIe 3.0 ×16 约 15.8 GB/s，PCIe 4.0 ×16 约 31.5 GB/s，PCIe 5.0 ×16 约 63 GB/s。插在 ×4 插槽上，就只剩四分之一。</p>
+<p><dfn>NVLink</dfn> 是英伟达在显卡之间拉的专用高速线。数据中心的 H100 有 18 条 NVLink 4.0 链路，双向合计 900 GB/s，每个方向约 450 GB/s，是 PCIe 4.0 ×16 的十几倍。家用的双卡组合通常没有它，只能走 PCIe。图 21-5 把这些路放在一起比。</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="图 21-5：常见互连每个方向的理论带宽。PCIe 4.0 ×4 约 7.9，PCIe 3.0 ×16 约 15.8，PCIe 4.0 ×16 约 31.5，PCIe 5.0 ×16 约 63，NVLink 4.0 约 450 GB/s">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="11">每个方向的理论峰值，GB/s（条长按比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="46" font-size="12">PCIe 4.0 ×4</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="34" width="3.9" height="16"/>
+<text class="f-text" fill="#182f2b" x="130" y="47" font-size="12">7.9</text>
+<text class="f-text" fill="#182f2b" x="10" y="76" font-size="12">PCIe 3.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="64" width="7.7" height="16"/>
+<text class="f-text" fill="#182f2b" x="134" y="77" font-size="12">15.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="12">PCIe 4.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="94" width="15.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="142" y="107" font-size="12">31.5</text>
+<text class="f-text" fill="#182f2b" x="10" y="136" font-size="12">PCIe 5.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="124" width="30.8" height="16"/>
+<text class="f-text" fill="#182f2b" x="157" y="137" font-size="12">63</text>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="12">NVLink 4.0</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="154" width="220" height="16"/>
+<text class="f-text" fill="#182f2b" x="346" y="167" font-size="12">450</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="198" font-size="11">NVLink 4.0：H100 的 18 条链路合计；家用双卡一般只走 PCIe</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="11">PCIe 每升一代翻一倍；×16 表示 16 条通道并排</text>
+</svg><figcaption>图 21-5　家用主板上的路窄得多。张量并行每层都要同步，离开 NVLink 这类高速线就很吃亏；层切分只在段与段之间交接一次，PCIe 就够用。</figcaption></figure>
+<p>带宽之外还有<dfn>延迟</dfn>：哪怕只传一个字节，也要付一笔固定的启动和同步开销。传一次大包裹，延迟只付一次；传 96 次小包裹，延迟就付 96 次。第 5 章细讲带宽与延迟，第 1 章的<a href="#chapter/01/c01-memory-hierarchy">「存储层次结构」</a>专栏有各层带宽的对比。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/PCI_Express" target="_blank" rel="noopener noreferrer">维基百科：PCI Express</a> · <a href="https://zh.wikipedia.org/zh-cn/NVLink" target="_blank" rel="noopener noreferrer">维基百科：NVLink</a> · <a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/overview.html" target="_blank" rel="noopener noreferrer">NVIDIA NCCL 文档：多卡通信概览</a></p>
+</aside>
+<p>把包裹和路放在一起算。下面的计算器比较两种分工在不同连线上的通信代价。张量并行那一行是假想的对照，Strata 并不这么做：</p>
+<div class="viz" data-viz="link-budget"><figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="图 21-6：在 PCIe 4.0 ×16 上，层切分每个窗口交接约 36 微秒，假想的张量并行约 1116 微秒；提示词一块的交接约 5.3 毫秒">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="11">PCIe 4.0 ×16，每次跨卡固定延迟 10 µs，窗口 5 个 token</text>
+<text class="f-text" fill="#182f2b" x="10" y="50" font-size="12">层切分</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="38" width="7.5" height="16"/>
+<text class="f-text" fill="#182f2b" x="134" y="51" font-size="12">约 36 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="70" font-size="11">2 次 × (10 µs + 256 KB ÷ 31.5 GB/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="100" font-size="12">张量并行（假想）</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="88" width="230" height="16"/>
+<text class="f-on" fill="#ffffff" x="344" y="101" font-size="12" text-anchor="end">约 1116 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="120" font-size="11">96 次 × (10 µs + 51 KB ÷ 31.5 GB/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="150" font-size="12">提示词一块（2048 个 token）的交接：约 5.3 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="170" font-size="11">读这一块本身约 1 秒（按上游约 2,000 token/s 估算）</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="11">延迟是教学假设；张量并行是对照，不是 Strata 的做法</text>
+</svg><figcaption>图 21-6　层切分的通信代价小到可以忽略；张量并行的代价主要来自同步次数，每次的固定延迟被乘了 96 遍。</figcaption></figure></div>
+<p>算式都在图上。<span class="ev ev-est">教学推演</span> 结论有两条。第一，生成回答时，层切分每个窗口的交接只要几十微秒；按上游实测每秒约 84 个 token 算，一个 token 约 12 毫秒，交接不到它的 1%。第二，读提示词时一块 84 MB 的交接，在 PCIe 4.0 ×16 上来回约 5.3 毫秒，而读这一块本身要将近 1 秒。这就是上游文档敢说“不需要 NVLink，也不需要显卡之间直接互访，插在 ×4 甚至 ×1 插槽上也能用”的底气。<span class="ev ev-report">上游报告</span></p>
+
+<h2 id="sec-5">21.5 每张卡只管自己那几层</h2>
+<p>切好层之后，每张卡还得有自己的“记忆”：每一层的 KV 缓存或递归状态。早期的做法是每个阶段都为全部 48 层开辟状态，可它只跑其中一段。<code>session.hpp</code> 的注释把这叫“整模型大小缓冲区的老毛病”。现在每个会话只拥有 <code>[layer_lo, layer_hi)</code> 这几层的状态。<span class="ev ev-code">代码事实</span>[S13]</p>
+<p>这里有个容易出错的细节。代码里的层仍按<strong>全局</strong>序号编号，数组却只装本段的几行。所以取第 g 个 GDN 层的状态时，要先减去本段第一个 GDN 层的序号 <code>gdn_ord0</code>。减错了，读到的就是另一层的状态，而且不会报错。如果某一段一个 QSA 层都没有，代码仍会为它开辟一份“主”QSA 状态，因为旋转位置编码表等全模型共用的东西要从那里读。<span class="ev ev-code">代码事实</span>[S13]</p>
+<p>切在哪一层，也有讲究。计算一段层要占多少字节的函数 <code>session_bytes</code> 是纯算术，可以在分配任何内存之前，就给一个候选的切法“报价”。<span class="ev ev-code">代码事实</span>[S13] 上游文档说，默认的自动模式会把两三张卡的所有切法都试一遍，选能让各卡缓存装下最多“热门专家”的那种。启动日志会打印选择，例如“K = 19，缓存能装下 12,288 个画像条目中的 11,767 个”。<span class="ev ev-report">上游报告</span></p>
+<p>最后是存档。第 20 章讲会话快照。读提示词时，前一张卡往往比后一张卡领先一块甚至更多。如果在某个时刻把两张卡的状态直接拼起来，拼出的是“前半段读到第 3 块、后半段读到第 2 块”的怪物，见图 21-7。</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="图 21-7：读提示词时 GPU A 领先 GPU B 一块。直接拼两张卡的当前状态会得到不一致的存档；正确做法是每张卡读完同一块时各存一份">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="11">某一时刻两张卡的进度</text>
+<text class="f-text" fill="#182f2b" x="8" y="48" font-size="12">GPU A</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="30" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="140" y="30" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="216" y="30" width="70" height="26" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="292" y="30" width="70" height="26" rx="3"/>
+<text class="f-on" fill="#ffffff" x="99" y="48" font-size="11" text-anchor="middle">第 1 块</text>
+<text class="f-on" fill="#ffffff" x="175" y="48" font-size="11" text-anchor="middle">第 2 块</text>
+<text class="f-on" fill="#ffffff" x="251" y="48" font-size="11" text-anchor="middle">第 3 块</text>
+<text class="f-text" fill="#182f2b" x="327" y="48" font-size="11" text-anchor="middle">第 4 块</text>
+<text class="f-text" fill="#182f2b" x="8" y="92" font-size="12">GPU B</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="74" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="140" y="74" width="70" height="26" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="216" y="74" width="70" height="26" rx="3"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="292" y="74" width="70" height="26" rx="3"/>
+<text class="f-on" fill="#ffffff" x="99" y="92" font-size="11" text-anchor="middle">第 1 块</text>
+<text class="f-on" fill="#ffffff" x="175" y="92" font-size="11" text-anchor="middle">第 2 块</text>
+<text class="f-text" fill="#182f2b" x="251" y="92" font-size="11" text-anchor="middle">第 3 块</text>
+<text class="f-muted" fill="#5c6d66" x="327" y="92" font-size="11" text-anchor="middle">第 4 块</text>
+<text class="f-warn" fill="#9e5d24" x="8" y="128" font-size="12">错误：此刻直接拼，A 在第 3 块末，B 在第 2 块末</text>
+<text class="f-text" fill="#182f2b" x="8" y="152" font-size="12">正确：每张卡读完同一块时，各存自己那一份</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="172" font-size="11">Strata 用 on_stage_chunk 回调在这个时刻取状态</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="192" font-size="11">高亮 = 已读完；浅底 = 正在读；空框 = 还没轮到</text>
+</svg><figcaption>图 21-7　两张卡的进度不同步。存档必须对齐到同一块的末尾，各卡在自己读完那一块时各存一份，不能在某个时刻把两边的“当前状态”拼起来。</figcaption></figure>
+<p>Strata 的做法是给每个阶段一个回调 <code>on_stage_chunk</code>：每张卡读完一块、自己的状态正好停在这块末尾时，调用它。注释写明，前面的阶段在最后阶段报告时“已经领先一块或更多”，所以提示词中途的存档要在这里取各阶段的那一份。<span class="ev ev-code">代码事实</span>[S12]</p>
+
+<h2 id="sec-6">21.6 动手：找气泡，也想想该不该加卡</h2>
+<p>本章没有单独的实验页，两个交互图就是实验台。建议这样玩：</p>
+<ol>
+<li>在「双卡流水线」里固定 a = 4、b = 5，把块数从 1 拉到 8，记下每次的总时间，验证 5N + 4。再把搬运时间调到 1 ms，按“只算一个 token”，看双卡为什么反而比单卡慢。</li>
+<li>把 a、b 拉得很不平衡（比如 2 和 8），看快的那张卡空等多久。这就是上游建议“把最快的卡放第一位，让自动拆分按缓存能力分层”的原因。<span class="ev ev-report">上游报告</span></li>
+<li>在「交接一次要多久」里换几种连线、改延迟，看张量并行和层切分的差距主要来自字节，还是来自次数。</li>
+</ol>
+<p>上游文档还给了几条实用经验，可以拿模拟器的结论去理解。<span class="ev ev-report">上游报告</span></p>
+<ul>
+<li><strong>别拉一张慢很多的卡凑数。</strong>在 5080 加 3090 上再加一张 RTX 2080 Ti，生成速度反而降到每秒 68（故事）和 90（代码）个 token。每多一张卡，每个窗口就多一轮交接和等待。</li>
+<li><strong>一张卡放得下，就别拆。</strong>0.1.31 版加了一个可选开关：第一张卡能装下全部画像专家和上下文时，干脆只用它。在 R9700 32 GB 加 RX 9070 XT 上跑 Coder 模型，打开后 4K 提示词从每秒 1,244 提到 1,776 个 token，生成从约 51 提到约 60；16K 提示词则慢了约 5%。</li>
+<li><strong>老卡不支持。</strong>每张卡都要求计算能力 7.5 以上（RTX 20 系列及更新）。</li>
+</ul>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>多卡有三种分法：层切分（流水线并行）、张量并行、请求并行。Strata 用层切分，因为它跨卡沟通最少，家用 PCIe 就够。</li>
+<li>一个 token 的层必须一层接一层算，层切分不会让它变快。双卡带来的是能多缓存一倍的专家，以及读提示词时两张卡错开干活：总时间 = a + b + (N − 1) × max(a, b)。</li>
+<li>交接的是完整的数学状态：生成时每个 token 51,216 字节，读提示词时每块约 84 MB。字节不多，次数很少，所以通信代价很小；存档要对齐到每张卡读完同一块的时刻。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“插两张显卡，生成速度就翻倍。”</strong></p>
+<p>同一个 token 的层有先后依赖，两张卡只能轮流算。上游实测里，5080 加 3090 的生成速度和 5080 单卡基本持平；再加一张 2080 Ti 反而更慢。双卡能提速，靠的是多出来的显存让 CPU 少算专家，以及读长提示词时的流水线，不是“两份算力叠加”。<span class="ev ev-report">上游报告</span></p></div>
+
+<details class="deep"><summary>深入一层：交接契约、双缓冲协议与怎样评估双卡收益</summary>
+<h3>交接为什么必须是 12,804 个数</h3>
+<p><code>Verifier::set_stage</code> 的注释写明：交接里每个 token 有残差 R（hc × n_embd）、最后一层尚未写回的向量 bo（n_embd）和 inject（hc）；下一阶段在读第一层时把这笔写回“折进去”，和不拆分的窗口做法完全一样，所以拆分是逐位一致的。两个指针都必须是设备可见的内存（映射的锁页内存；两个阶段在两张卡上时还要是 portable 的）。<span class="ev ev-code">代码事实</span>[S08] 交接浮点数的个数由 <code>handoff_floats</code> 给出，公式就是 <code>hc*n_embd + n_embd + hc</code>。[S08]</p>
+<p>只传 2560 维的“隐藏状态”会丢掉其余三份残差和那笔推迟的写回。结果不会崩溃，只会悄悄算错。教训是：跨设备的通信格式必须反映完整的数学契约，不能凭“隐藏维度是 2560”随手删减。上游还提供了一个检查用的模式：<code>--layer-split K --split-device 0</code> 让两个阶段跑在同一张卡上，专门用来验证交接逐位一致，它不是提速模式。<span class="ev ev-report">上游报告</span></p>
+<h3>双缓冲的交接协议</h3>
+<p><code>prefill.cpp</code> 里，前一阶段在初始化时用 <code>cudaHostAlloc(..., cudaHostAllocPortable)</code> 分配两块锁页内存，每块能放一整块提示词的残差行（chunk × D × 4 字节，D = 4 × 2560）。<span class="ev ev-code">代码事实</span> 每读完一块，它依次做四件事：</p>
+<ol>
+<li>把残差行从显存拷进当前这块交接缓冲区，并等拷贝完成；</li>
+<li>调用 <code>on_stage_chunk</code>，此时本阶段的状态正好停在这块末尾；</li>
+<li>等下一阶段把上一块读完（这样它不会再读即将被覆盖的那块缓冲区）；</li>
+<li>在另一个线程上启动下一阶段读这一块，然后换到另一块缓冲区，继续读下一块。</li>
+</ol>
+<p>设前一阶段每块耗时 a′（含拷出），后一阶段每块耗时 b′（含拷入）。第 3 步意味着：前一阶段开始读第 c+1 块的时刻，等于后一阶段开始读第 c 块的时刻。由此可以推出：后一阶段相邻两块的开始时间相差 max(a′, b′)，第一块在 a′ 时开始，最后一块在开始后 b′ 结束，所以总时间 = a′ + b′ + (N − 1) × max(a′, b′)。a′ = 4、b′ = 5、N = 8 时是 44 ms，逐块串行是 72 ms。<span class="ev ev-est">教学推演</span> 本章模拟器用的就是这个模型，并在 <code>tests/viz-21.test.cjs</code> 里逐块检查了依赖和缓冲区规则。</p>
+<p>如果每块的搬运也占用关键资源，它就该算进 a′ 或 b′，不能当它不存在。PCIe 能否让两张卡直接互访、是否要绕道内存、主板拓扑和跨 NUMA 节点，都会改变这个数。Strata 选了最保守的路：全部经内存中转，不依赖显卡互访。</p>
+<h3>全局序号与“没有 QSA 层的一段”</h3>
+<p>会话状态的注释说明：<code>qsa_states</code> 和 <code>gdn_state</code> 保持全局序号，数组只是行数变少，所以每层的使用者要减去 <code>gdn_ord0</code>；原来写成 <code>qsa_states[0]</code> 的全模型级用法（共享的 RoPE 表、prefill 暂存身份、MTP 借用的 rope）改为读 <code>qsa_states[primary]</code>；一段里没有 QSA 层时仍开辟一份主状态。默认的全范围开辟和旧的整模型开辟逐字节相同。<span class="ev ev-code">代码事实</span>[S13] 测试要专门覆盖“某段没有 QSA 层”“切点落在第 1 层附近”这类边界。</p>
+<h3>存档必须属于同一个边界</h3>
+<p><code>on_stage_chunk</code> 的契约是：每个阶段读完一块、自己的流已同步、状态停在这块末尾时调用；最后阶段在 <code>on_chunk</code> 之前调用；它运行在该阶段自己的线程上，当前设备也是该阶段的卡。<span class="ev ev-code">代码事实</span>[S12] 上游文档补充：会话存档会保存并恢复每张卡的状态，提示词中途的存档由每张卡在读完那一块时各存自己的部分。<span class="ev ev-report">上游报告</span> 反过来说，等最后一张卡报告完成后再去抓前一张卡的“当前状态”，得到的是更靠后的某一块，存档就不一致了。</p>
+<h3>怎样判断双卡快在哪</h3>
+<p>“双卡比单卡快”不能直接说明“流水线效率很高”。多出来的显存会提高专家命中率、减少 CPU 计算，这可能才是主要收益。要分开测：各卡的专家命中率、CPU 池的工作量、交接耗时、每个阶段的耗时。上游的自动拆分本身也说明了重点：它挑的是“缓存装下最多热门专家”的切法，平分时让最满的那张卡留出最多空间。<span class="ev ev-report">上游报告</span></p>
+<h3>还没覆盖或有条件的情况</h3>
+<ul>
+<li>Windows 和 WSL2 的 WDDM 驱动下，只把 8 GiB 的专家区域锁页，其余经锁页暂存环流式传输；Linux 驱动没有这个上限。<span class="ev ev-report">上游报告</span></li>
+<li>每张卡都要放一份稠密权重和自己的提示词缓冲（默认 2048 块时每张约 1.5 GB），所以小于 8 GB 的卡不建议一起用；不支持英伟达和 AMD 显卡混用。<span class="ev ev-report">上游报告</span></li>
+<li>Strata 还有另一种双卡模式 <code>--peer-device</code>：第二张卡只当专家缓存，激活值和结果经 NVLink 或其他显卡互访通道往返；它和 <code>--layer-split</code> 互斥，两者只能选一个。<span class="ev ev-report">上游报告</span></li>
+<li>验收不能只在理想的双卡拓扑上跑通一次。还要测取消请求、极短的最后一块、第二张卡出错、显卡互访不可用，再把结果与单卡逐字节比较。</li>
+</ul>
+</details>
