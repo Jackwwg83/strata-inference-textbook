@@ -1,0 +1,279 @@
+<div class="hook"><span class="eyebrow">Let's start with a puzzle</span>
+<p>The first line of Strata's README says: run a 125-billion-parameter AI model on your own gaming PC. For the graphics card, it asks for at least 12 GB of VRAM. <span class="ev ev-report">Upstream report</span>[S01]</p>
+<p>Do the common-sense math: 125 billion parameters, even at just 1 byte each, come to 125 GB. How can a 12 GB graphics card hold that? This book answers questions like this one: how does an AI model actually run inside your computer? Along the way, we will tie together the basics of computer organization, operating systems, algorithms and networking.</p></div>
+<p class="tldr"><strong>In one line:</strong> a chat AI generates only one token at a time. Generating that one token puts the GPU, RAM, CPU and SSD to work. Strata's trick is to arrange these four so that each one is just enough.</p>
+
+<h2 id="sec-1">1.1 What happens after you press Enter</h2>
+<p>You type a sentence into the chat box and press Enter. A few seconds later the answer appears, word by word. In between, your words go through six transformations, shown in Figure 1-1.</p>
+<div class="viz" data-viz="token-journey"><figure class="fig"><svg viewBox="0 0 400 486" role="img" aria-label="Figure 1-1: six transformations take a sentence from input to output; steps 4 to 6 repeat once for every generated token">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="30" font-size="14" font-weight="600" text-anchor="middle">① Your message</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="48" font-size="12" text-anchor="middle">"Please explain what MoE is"</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="80" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="102" font-size="14" font-weight="600" text-anchor="middle">② Chat template</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="120" font-size="12" text-anchor="middle">Adds role tags, system prompt, tools</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="152" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="174" font-size="14" font-weight="600" text-anchor="middle">③ Tokenizer</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="192" font-size="12" text-anchor="middle">Text → a list of token IDs (integers)</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="224" width="300" height="50" rx="10"/>
+<text class="f-on" fill="#ffffff" x="190" y="246" font-size="14" font-weight="600" text-anchor="middle">④ Inference engine: layer by layer</text>
+<text class="f-on" fill="#ffffff" x="190" y="264" font-size="12" text-anchor="middle">48 layers → next-token probabilities</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="296" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="318" font-size="14" font-weight="600" text-anchor="middle">⑤ Sampling</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="336" font-size="12" text-anchor="middle">Picks one token by probability</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="368" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="390" font-size="14" font-weight="600" text-anchor="middle">⑥ Detokenize and stream</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="408" font-size="12" text-anchor="middle">ID → text, pushed to your screen</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M190 58V78M190 130V150M190 202V222M190 274V294M190 346V366"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M340 393H372V249H346"/>
+<path class="f-muted" fill="#5c6d66" d="M346 249l8-5v10z"/>
+<text class="f-muted" fill="#5c6d66" x="190" y="446" font-size="12" text-anchor="middle">Dashed line: answer not done? Append the new</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="464" font-size="12" text-anchor="middle">token, go back to step ④. One round, one token.</text>
+</svg><figcaption>Figure 1-1　Six transformations of one sentence. Steps ④–⑥ repeat once for every token generated.</figcaption></figure></div>
+<p>The figure has a few new words. Here they are in plain language.</p>
+<p>A <dfn>token</dfn> is the smallest unit a model reads and writes. It may be one Chinese character, one word, half an English word or one punctuation mark. The model does not read letters directly; it only knows token IDs. The <dfn>tokenizer</dfn> is the program that cuts text into tokens and turns them into IDs, as Figure 1-2 shows.</p>
+<figure class="fig"><svg viewBox="0 0 400 210" role="img" aria-label="Figure 1-2: the tokenizer cuts a sentence into tokens and turns them into integer IDs; the model sees only the IDs">
+<text class="f-muted" fill="#5c6d66" x="200" y="20" font-size="12" text-anchor="middle">Text: Engines turn text into numbers</text>
+<rect class="f-soft" fill="#e5f1df" x="32" y="34" width="44" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="54" y="56" font-size="14" text-anchor="middle">Eng</text>
+<rect class="f-soft" fill="#e5f1df" x="82" y="34" width="48" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="106" y="56" font-size="14" text-anchor="middle">ines</text>
+<rect class="f-soft" fill="#e5f1df" x="136" y="34" width="48" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="160" y="56" font-size="14" text-anchor="middle">turn</text>
+<rect class="f-soft" fill="#e5f1df" x="190" y="34" width="48" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="214" y="56" font-size="14" text-anchor="middle">text</text>
+<rect class="f-soft" fill="#e5f1df" x="244" y="34" width="48" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="268" y="56" font-size="14" text-anchor="middle">into</text>
+<rect class="f-soft" fill="#e5f1df" x="298" y="34" width="70" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="333" y="56" font-size="14" text-anchor="middle">numbers</text>
+<text class="f-muted" fill="#5c6d66" x="54" y="88" font-size="12" text-anchor="middle">18723</text><text class="f-muted" fill="#5c6d66" x="106" y="88" font-size="12" text-anchor="middle">40121</text><text class="f-muted" fill="#5c6d66" x="160" y="88" font-size="12" text-anchor="middle">1204</text><text class="f-muted" fill="#5c6d66" x="214" y="88" font-size="12" text-anchor="middle">29871</text><text class="f-muted" fill="#5c6d66" x="268" y="88" font-size="12" text-anchor="middle">31650</text><text class="f-muted" fill="#5c6d66" x="333" y="88" font-size="12" text-anchor="middle">26425</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 100V118"/>
+<path class="f-muted" fill="#5c6d66" d="M200 124l-5-8h10z"/>
+<rect class="f-accent" fill="#136d5a" x="30" y="130" width="340" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="149" font-size="12" text-anchor="middle">All the model ever sees:</text>
+<text class="f-on" fill="#ffffff" x="200" y="168" font-size="12" text-anchor="middle">[18723, 40121, 1204, 29871, 31650, 26425]</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="200" font-size="12" text-anchor="middle">Sketch: real splits and IDs depend on the tokenizer</text>
+</svg><figcaption>Figure 1-2　Tokenizing: text is first cut into tokens, then each token is looked up and turned into an ID. From start to finish, the model deals only with these integers.</figcaption></figure>
+<p><dfn>Sampling</dfn> is step ⑤. The model does not "say" the next word directly. Instead it gives a probability for every candidate token, and sampling picks one according to those probabilities. Chapter 2 covers it in detail.</p>
+<p>Look at the dashed line in Figure 1-1. The model generates only one token per round: to write a 300-token answer, steps ④ to ⑥ repeat 300 times. That is why "generation speed" is usually measured in tokens per second, written token/s.</p>
+<p class="bridge"><strong>If you studied CS:</strong> the whole generation process is one loop: <code>while not done: probs = model(tokens); t = sample(probs); tokens.append(t)</code>. Each round's input includes the previous round's output. A model that "feeds on its own output" like this is called an <dfn>autoregressive</dfn> model.</p>
+
+<h2 id="sec-2">1.2 Why the first word is always a bit slow</h2>
+<p>You may have noticed: after you send a question, you wait a moment before the first word appears; after that, the words come quickly. The reason is that an answer has two phases, shown in Figure 1-3.</p>
+<div class="viz" data-viz="first-token-wait"><figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="Figure 1-3: the timeline of one answer. First the whole question is read in one go, then the answer is written one token per round">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">Timeline of one answer (sketch, not to scale)</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="32" width="150" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="85" y="52" font-size="13" font-weight="600" text-anchor="middle">Prefill</text>
+<text class="f-on" fill="#ffffff" x="85" y="70" font-size="12" text-anchor="middle">whole prompt at once</text>
+<rect class="f-soft" fill="#e5f1df" x="168" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="186" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="204" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="222" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="240" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="258" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="276" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="294" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="312" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="330" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="348" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="366" y="32" width="14" height="48" rx="3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 88V94H160V88M168 88V94H380V88"/>
+<text class="f-muted" fill="#5c6d66" x="85" y="110" font-size="12" text-anchor="middle">Time to first token</text>
+<text class="f-muted" fill="#5c6d66" x="274" y="110" font-size="12" text-anchor="middle">Decode: one token per round</text>
+<text class="f-text" fill="#182f2b" x="10" y="142" font-size="12">Upstream (RTX 5070 12 GB, Q2_0, 4K prompt):</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">· Prefill: about 1,299 tokens per second</text>
+<text class="f-text" fill="#182f2b" x="10" y="184" font-size="12">· Decode: about 93 tokens per second</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">Prefill is 10×+ faster: tokens go together (Ch. 16)</text>
+</svg><figcaption>Figure 1-3　Read the prompt first, then write the answer. Prefill computes the whole prompt together, so it handles far more tokens per second; decode can only go one token after another.</figcaption></figure></div>
+<p>The first phase is called <dfn>prefill</dfn> ("reading the prompt"): the model reads your whole question in one go. Every token in the question is already known, so they can all be computed together. The second phase is called <dfn>decode</dfn> ("writing the answer"): each new token depends on the one before it, so they can only come one at a time.</p>
+<p>Strata's upstream measurements show that on the same machine, prefill handles about 1,299 tokens per second and decode about 93. <span class="ev ev-report">Upstream report</span>[S03] So the longer the question, the longer you wait for the first word. The README also warns that the first message of a conversation must be read in full, at roughly 1 minute per 30,000 tokens; later follow-ups read only the new part and start answering within seconds. [S01]</p>
+
+<h2 id="sec-3">1.3 Model, engine, app: three roles people often mix up</h2>
+<p>Think of a restaurant, as in Figure 1-4. Strata's own docs use a kitchen analogy too. [S02]</p>
+<figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="Figure 1-4: the three roles of app, inference engine and model match a restaurant's front desk, kitchen and recipe">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="110" height="70" rx="10"/>
+<text class="f-text" fill="#182f2b" x="65" y="40" font-size="15" font-weight="600" text-anchor="middle">App</text>
+<text class="f-muted" fill="#5c6d66" x="65" y="62" font-size="12" text-anchor="middle">Front desk</text>
+<text class="f-text" fill="#182f2b" x="132" y="30" font-size="12">Greets you, passes on your order</text>
+<text class="f-muted" fill="#5c6d66" x="132" y="50" font-size="12">Template, tokenize, parse output</text>
+<text class="f-muted" fill="#5c6d66" x="132" y="70" font-size="12">Strata: the Python server in serve/</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M65 80V108"/>
+<text class="f-muted" fill="#5c6d66" x="74" y="99" font-size="12">token IDs</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="110" width="110" height="70" rx="10"/>
+<text class="f-on" fill="#ffffff" x="65" y="140" font-size="15" font-weight="600" text-anchor="middle">Engine</text>
+<text class="f-on" fill="#ffffff" x="65" y="162" font-size="12" text-anchor="middle">Kitchen, chefs</text>
+<text class="f-text" fill="#182f2b" x="132" y="130" font-size="12">Does the math on your hardware</text>
+<text class="f-muted" fill="#5c6d66" x="132" y="150" font-size="12">Juggles VRAM, RAM, CPU and GPU</text>
+<text class="f-muted" fill="#5c6d66" x="132" y="170" font-size="12">Strata itself: C++ / CUDA / HIP</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M65 180V208"/>
+<text class="f-muted" fill="#5c6d66" x="74" y="199" font-size="12">reads parameters</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="210" width="110" height="70" rx="10"/>
+<text class="f-text" fill="#182f2b" x="65" y="240" font-size="15" font-weight="600" text-anchor="middle">Model</text>
+<text class="f-muted" fill="#5c6d66" x="65" y="262" font-size="12" text-anchor="middle">Recipe</text>
+<text class="f-text" fill="#182f2b" x="132" y="230" font-size="12">Trained parameters + fixed rules</text>
+<text class="f-muted" fill="#5c6d66" x="132" y="250" font-size="12">About 125 billion parameters</text>
+<text class="f-muted" fill="#5c6d66" x="132" y="270" font-size="12">Qwen3.8-Flash-Next</text>
+</svg><figcaption>Figure 1-4　Each of the three roles owns one stretch. The app hands the engine a list of token IDs, and the engine computes by the model's recipe.</figcaption></figure>
+<ul>
+<li><strong>The model is the recipe.</strong> It is a huge pile of trained numbers (called "parameters" or "weights"), plus a fixed set of computation rules. Qwen3.8-Flash-Next is a model.</li>
+<li><strong>The inference engine is the kitchen and the chefs.</strong> It does the computation on your hardware, following the recipe. Strata is an inference engine; so are llama.cpp and vLLM.</li>
+<li><strong>The app is the front desk.</strong> It greets you, tidies up your words and hands them to the kitchen, then brings the finished dish back to you. Strata's built-in web chat page, and the coding tools that connect through its API, all live in this layer. [S01]</li>
+</ul>
+<p>Keep these three layers apart, and you will not look in the wrong place when something breaks. However fast the engine is, it cannot make the model smarter: same recipe, different kitchen, and the dish should taste the same. In the other direction, if answer quality drops, the cause may be the recipe (a different model, or one compressed too hard), the kitchen (an engine bug that computes something wrong), or the front desk (a template or protocol that passes your words on incorrectly).</p>
+
+<h2 id="sec-4">1.4 Three layers of "storage" in one computer</h2>
+<p>How fast a kitchen works depends a lot on where things are kept. A computer is the same. Three layers of storage matter for inference, shown in Figure 1-5.</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="Figure 1-5: the three storage layers of VRAM, RAM and SSD, faster and smaller toward the top, and what Strata keeps in each">
+<rect class="f-accent" fill="#136d5a" x="70" y="10" width="260" height="92" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="34" font-size="14" font-weight="600" text-anchor="middle">GPU memory (VRAM) 12–24 GB</text>
+<text class="f-on" fill="#ffffff" x="200" y="54" font-size="12" text-anchor="middle">Counter: within arm's reach</text>
+<text class="f-on" fill="#ffffff" x="200" y="74" font-size="12" text-anchor="middle">Parts every token needs, plus</text>
+<text class="f-on" fill="#ffffff" x="200" y="91" font-size="12" text-anchor="middle">thousands of hot experts + history</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="118" width="320" height="92" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="142" font-size="14" font-weight="600" text-anchor="middle">RAM 32–64 GB</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="162" font-size="12" text-anchor="middle">Pantry: a few steps away</text>
+<text class="f-text" fill="#182f2b" x="200" y="182" font-size="12" text-anchor="middle">All 24,576 experts</text>
+<text class="f-text" fill="#182f2b" x="200" y="199" font-size="12" text-anchor="middle">The CPU computes experts not on the GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="226" width="380" height="80" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="250" font-size="14" font-weight="600" text-anchor="middle">Solid-state drive (SSD)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="270" font-size="12" text-anchor="middle">Basement storeroom: biggest and slowest</text>
+<text class="f-text" fill="#182f2b" x="200" y="290" font-size="12" text-anchor="middle">A 28.8 GB lookup table; each token reads a few rows</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="334" font-size="12" text-anchor="middle">Higher up: faster, smaller, pricier</text>
+</svg><figcaption>Figure 1-5　How Strata uses the three storage layers. The capacities are the README's hardware requirements; the division of work comes from the upstream docs. [S01][S02]</figcaption></figure>
+<p>The graphics card (GPU) computes fastest, but its VRAM is the smallest: common gaming cards have only 12–24 GB. RAM is much bigger, but it sits far from the GPU, and data must travel over a bus called PCIe to get there. The SSD is the biggest and also the slowest.</p>
+<p>Strata divides the work like this <span class="ev ev-report">Upstream report</span>[S02]:</p>
+<ol>
+<li>The parts every token needs, plus the few thousand most often used "experts", go in VRAM.</li>
+<li>All the experts go in RAM. The ones not on the GPU are computed by the CPU right there in RAM, working at the same time as the GPU.</li>
+<li>The SSD holds a 28.8 GB lookup table, and each token reads only a few of its rows.</li>
+</ol>
+<p>Chapter 10 is all about what an "expert" is. For now you only need to know that experts are the key to running a big model on a small graphics card.</p>
+<aside class="primer" id="c01-memory-hierarchy">
+<h3>The memory hierarchy</h3>
+<p>A computer's storage devices always trade off among "fast", "big" and "cheap": the faster ones are smaller and pricier, and the bigger ones are slower. So a computer stacks them into a pyramid: the most used data goes on the fastest level, less used data goes lower, and data moves up when it is needed. This is the <dfn>memory hierarchy</dfn>.</p>
+<p>Two measures describe "fast". <dfn>Bandwidth</dfn> is how many bytes per second you can move, like how thick a water pipe is. <dfn>Latency</dfn> is how long you wait from sending a request to getting the first byte, like the time water takes to flow from the tap into the glass. An inference engine reads a huge number of parameters for every token, so it cares most about bandwidth. Figure 1-6 shows the theoretical bandwidth of each level on the upstream test machine.</p>
+<figure class="fig"><svg viewBox="0 0 400 234" role="img" aria-label="Figure 1-6: theoretical bandwidth of each storage level on the upstream test machine: VRAM about 672 GB/s, RAM about 83 GB/s, PCIe 5.0 about 63 GB/s, SSD about 7 GB/s">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">Theoretical peak bandwidth in GB/s (bars to scale)</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">VRAM</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="36" width="250" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="348" y="49" font-size="12">672</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">RAM</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="72" width="31" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="129" y="85" font-size="12">83 (dual-channel DDR5-5200)</text>
+<text class="f-text" fill="#182f2b" x="10" y="120" font-size="12">PCIe bus</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="108" width="23" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="121" y="121" font-size="12">about 63 (PCIe 5.0 x16, one way)</text>
+<text class="f-text" fill="#182f2b" x="10" y="156" font-size="12">SSD</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="144" width="3" height="16" rx="1"/>
+<text class="f-text" fill="#182f2b" x="101" y="157" font-size="12">about 7 (typical NVMe sequential read)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="190" font-size="12">VRAM: RTX 5070 spec. RAM: upstream test machine.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="207" font-size="12">Measured numbers are usually lower.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="224" font-size="12">Reading from VRAM is about 100× faster than from SSD.</text>
+</svg><figcaption>Figure 1-6　In one computer, the bandwidths of the storage levels can differ by a factor of a hundred. Keeping often-used data on the fast level is where every cache design begins.</figcaption></figure>
+<p>All of Strata's design can be seen as placing data on this pyramid: hot experts in VRAM, all experts in RAM, the big lookup table on the SSD. Later chapters come back to this picture again and again.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Locality_of_reference" target="_blank" rel="noopener noreferrer">Wikipedia: Locality of reference</a> · <a href="https://en.wikipedia.org/wiki/Memory_hierarchy" target="_blank" rel="noopener noreferrer">Wikipedia: Memory hierarchy</a> · <a href="https://csapp.cs.cmu.edu/" target="_blank" rel="noopener noreferrer">Computer Systems: A Programmer's Perspective (CS:APP), Chapter 6</a></p>
+</aside>
+<p class="bridge"><strong>If you studied CS:</strong> this is the memory hierarchy from computer organization, with one extra level: VRAM. To the CPU, VRAM is memory on another device. The CPU cannot read and write it directly the way it uses its own RAM; data has to be moved over PCIe (Chapter 14 covers DMA).</p>
+
+<h2 id="sec-5">1.5 Doing the math: 24,576 and 480</h2>
+<p>The README says this model is made of 24,576 "experts", and each word it writes needs only 10 of them. [S01] That sentence is simplified to make it easy to read. Let's check it against the source code.</p>
+<p>The source code defines the model as 48 layers with 512 experts per layer <span class="ev ev-code">Code fact</span>[S04]; every token picks 10 experts in <strong>each layer</strong> <span class="ev ev-code">Code fact</span>[S13]. Figure 1-7 draws this structure.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figure 1-7: 48 layers with 512 experts each; 10 are picked in each layer, so one token makes 480 expert picks in total">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">Rows = layers of 512 experts; highlighted = 10 picked</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="43" font-size="12">Layer 1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="34" width="320" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="96.4" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="110.4" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="130.0" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="172.1" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="217.4" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="288.3" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="304.2" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="320.7" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="343.3" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="356.6" y="34" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="61" font-size="12">Layer 2</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="52" width="320" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="126.3" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="167.8" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="186.8" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="201.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="215.0" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="271.8" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="290.7" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="304.2" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="313.9" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="325.5" y="52" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="79" font-size="12">Layer 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="70" width="320" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="82.3" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="94.0" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="132.4" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="142.2" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="154.5" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="220.4" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="260.2" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="316.4" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="345.7" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="356.6" y="70" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="115" font-size="12">Layer 46</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="106" width="320" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="74.4" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="97.0" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="127.5" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="154.5" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="183.7" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="200.2" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="209.4" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="222.2" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="263.2" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="330.4" y="106" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="133" font-size="12">Layer 47</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="124" width="320" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="101.2" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="115.3" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="155.0" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="188.0" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="213.1" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="224.7" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="264.4" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="275.4" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="299.8" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="383.6" y="124" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="151" font-size="12">Layer 48</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="142" width="320" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="86.0" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="101.2" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="163.0" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="183.2" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="232.6" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="249.1" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="271.8" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="299.2" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="330.4" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="346.9" y="142" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="225" y="97" font-size="13" text-anchor="middle">⋮ (42 more layers in between)</text>
+<text class="f-text" fill="#182f2b" x="200" y="180" font-size="13" font-weight="600" text-anchor="middle">48 layers × 10 per layer = 480 picks</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="202" font-size="12" text-anchor="middle">48 layers × 512 per layer = 24,576 experts (total)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="224" font-size="12" text-anchor="middle">"Only 10 experts per word" means per layer</text>
+</svg><figcaption>Figure 1-7　A token passes through 48 layers and picks 10 new experts in every one, so it makes 480 picks in total, not 10.</figcaption></figure>
+<ul>
+<li>48 × 512 = <strong>24,576</strong>: this is the total number of experts.</li>
+<li>One token passes through 48 layers and picks 10 in each, for 48 × 10 = <strong>480</strong> expert picks in total.</li>
+</ul>
+<p>"10" is per layer, not for the whole model. If you read it as "the whole model uses only 10 experts", your estimates of compute and data movement will be 48 times too small. This is a habit the book keeps stressing: <strong>a number must carry its unit and its scope</strong>.</p>
+
+<h2 id="sec-6">1.6 How to read this book: every number has a source</h2>
+<p>Every conclusion in this book is marked with the kind of evidence behind it:</p>
+<ul>
+<li><span class="ev ev-code">Code fact</span>Read directly from the source code at a fixed version. For example, "48 layers".</li>
+<li><span class="ev ev-report">Upstream report</span>An explanation or a measurement from Strata's author in the docs; this book has not measured it again. For example, "94 tokens per second on an RTX 5070". [S01]</li>
+<li><span class="ev ev-est">Teaching estimate</span>A result this book works out with a simplified model, to help you build intuition; not a measurement. All the interactive experiments in your browser belong here.</li>
+<li>Basic principles: general rules of math or computing that do not depend on Strata. These get no tag.</li>
+</ul>
+<p>Why be so fussy? Because numbers in the AI world are very easy to carry to the wrong place. A speed from someone else's graphics card, the VRAM use of one particular setup, a simplified claim in a marketing picture: once cut off from their conditions, they can mislead. Learning to ask "under what conditions was this number measured?" is worth more than memorizing any single number.</p>
+<p>The source code reading in this book is pinned to one commit from 2026-10-03; its hash is in the page footer. Strata is still changing fast, so the numbers in newer versions may already differ.</p>
+<p><strong>Hands-on:</strong> open this chapter's interactive lab, "The journey of one token". It breaks the path of Figure 1-1 into stages you can inspect one by one, so you can see the input and output of every step. Try to think of a "what goes wrong if…" example for one of the arrows: say, the template changed, or the tokenizer does not match the model. All the numbers in the lab are teaching estimates, not measurements on your computer.</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>The model is the recipe, the inference engine is the kitchen, the app is the front desk. Each one owns its own stretch.</li>
+<li>Prefill first, then decode: prefill computes the whole question together, decode can only produce one token per round.</li>
+<li>For every number, ask: is it a code fact, an upstream report or an estimate? What are its unit and scope?</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "You need as much VRAM as the model file is big."</strong></p>
+<p>Not necessarily. The file size only tells you how many bytes the weights take on disk. At run time, some weights can stay in RAM, computed by the CPU or sent to the GPU on demand; VRAM also has to hold the chat history and temporary data. Strata downloads a model of about 70 GB, yet runs on a 12 GB graphics card. [S01]</p></div>
+
+<details class="deep"><summary>Go deeper: for readers who want to read the source</summary>
+<h3>The real boundary between the server layer and the engine</h3>
+<p>In Strata's server code, what the app layer hands to the engine is not an HTTP request, and not raw JSON either, but a list of token IDs. The interface is <code>Engine.generate(ids, max_new, sampling, cancel)</code>, and it returns an iterator that yields token IDs one by one. <span class="ev ev-code">Code fact</span>[S15] Template rendering, tokenizing and protocol parsing all happen outside this boundary. So when you debug, the first step is to decide which side of the boundary the error is on.</p>
+<p>The same file also says that the server handles only one sequence at a time, and requests queue first come, first served (FIFO). [S15] "Supports an OpenAI-compatible API" does not mean "supports many users at once"; Chapter 25 discusses what it takes to extend it to many users.</p>
+<h3>Different kinds of "cache" are not the same thing</h3>
+<p>The CPU's hardware cache keeps recently accessed memory lines. Strata's expert cache puts some of the weights in VRAM. The KV cache keeps intermediate results of the chat history. The session cache keeps whole sequence states that can be restored. The lookup table's row cache keeps table rows read from the SSD. What they cache, how long it lives and when it becomes invalid are all completely different. "Add a cache" means something only once you say <strong>what is cached, how you confirm it is still the same object, and when it becomes invalid</strong>.</p>
+<h3>A comment is not a fact</h3>
+<p>Source comments can be stuck at an old stage of development. For example, the top of <code>expert_source.hpp</code> says "Phase 2 has no cache (hit rate h = 0)" and explains that Phase 3 will replace this object with a VRAM cache. [S06] Yet the current engine does have an expert cache. [S02][S05] When you meet a contradiction like this, do not decide based on one comment; trace the current call chain, the default configuration and the tests. The source tour in this book reviews the listed windows of key files; it is <strong>not a line-by-line audit of the whole repository</strong>.</p>
+<h3>Class activity: draw responsibility boundaries for one token</h3>
+<p>Draw five boxes on paper: server layer, sequence state, weight storage, compute kernels, hardware. For each box, write one input, one output and one condition that must always hold, for example "a sequence state belongs only to its own conversation". Then place three failures in the boxes where they could come from: "the answer is right but slow", "the answer changes randomly every time", "the second half of the text is garbled". The goal is not to guess right at once, but to learn to design experiments that tell these hypotheses apart.</p>
+</details>

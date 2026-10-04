@@ -1,0 +1,245 @@
+<div class="hook"><span class="eyebrow">You may have noticed</span>
+<p>Ask a chat AI the same question twice, and you often get two different answers. But it is a computer: how can the same input give different outputs?</p>
+<p>The answer hides in step ⑤ of Chapter 1's six steps. The model never "says" the next word directly. It only produces a probability table, and then, like rolling dice, picks one entry from it. This chapter explains, step by step, where that table comes from, how the dice are rolled, and what filtering happens before the roll.</p></div>
+<p class="tldr"><strong>In one line:</strong> at each step the model answers just one multiple-choice question: given the text so far, it scores every token in the vocabulary; softmax turns the scores into probabilities, and a random number picks one token by probability. Temperature, top-k and top-p all change this probability table before the pick.</p>
+
+<h2 id="sec-1">2.1 The model reads numbers, not letters</h2>
+<p>As Chapter 1 said, the <dfn>tokenizer</dfn> cuts text into tokens and turns them into integer IDs. Strata's tokenizer has 248,320 tokens, and its method is called <dfn>byte-level BPE</dfn>: first split the text into its smallest units, bytes, then keep merging pieces that often sit next to each other in the training text into a single token. Common words end up as one token; rare characters are split into several pieces. <span class="ev ev-code">Code fact</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/tools/strata_tokenizer.py#L3-L14" target="_blank" rel="noopener noreferrer">strata_tokenizer.py</a></p>
+<p>Because the lowest level is bytes, any text can be represented, and "unknown character" never happens. The tokenizer's notes also name the check it cares about most: encode a piece of text and decode it again, and you must get back the original, byte for byte. Emoji, multi-byte Chinese characters and runs of spaces are all covered by this check.</p>
+<p>So a token is not the same as a word. Strata's README says "a token is about ¾ of an English word". [S01] That is a rule of thumb for English; Chinese, code and tables all have different ratios. The only reliable way to count the tokens in a piece of text is to actually run this tokenizer on it.</p>
+<p>One more thing is easy to miss: the sentence you type is not all the model reads. The <dfn>chat template</dfn> in step ② adds role tags, a system prompt and tool descriptions around it, as Figure 2-1 shows.</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figure 2-1: your message is first wrapped in the chat template, then turned into IDs by the tokenizer; the engine receives only these IDs">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="320" height="44" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="27" font-size="13" font-weight="600" text-anchor="middle">① Your message</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="44" font-size="12" text-anchor="middle">"Hello"</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 52V70"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="72" width="320" height="64" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="92" font-size="13" font-weight="600" text-anchor="middle">② Wrap in the chat template</text>
+<text class="f-text" fill="#182f2b" x="200" y="111" font-size="12" text-anchor="middle">⟨user⟩Hello⟨end⟩⟨assistant⟩</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="128" font-size="12" text-anchor="middle">Thinking level and tools are written in too</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 136V154"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="156" width="320" height="48" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="176" font-size="13" font-weight="600" text-anchor="middle">③ Tokenizer</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="195" font-size="12" text-anchor="middle">Text → [3, 1023, 4, 5] (IDs are made up)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 204V222"/>
+<rect class="f-accent" fill="#136d5a" x="40" y="224" width="320" height="44" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="251" font-size="13" font-weight="600" text-anchor="middle">④ The engine receives only these IDs</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="12" text-anchor="middle">New template, new IDs: a different question</text>
+</svg><figcaption>Figure 2-1　Your words are wrapped in a template and cut into IDs before the model ever sees them. The template is part of the input, just like the words you typed.</figcaption></figure>
+<p>Strata's server layer renders the model's own Jinja template, and it requires the result to match what Hugging Face produces exactly; this is checked against 10 standard examples, including thinking mode and tool calls. <span class="ev ev-code">Code fact</span>[S16] The "thinking level" you choose in the interface is also passed to the template as a parameter: when you choose high, the value actually passed is xhigh; when you choose none, it passes "thinking off". [S16] All of these change the final list of IDs.</p>
+<p>The interface between the server layer and the engine is <code>Engine.generate(prompt_ids, max_new, sampling, cancel)</code>: a list of IDs goes in, and token IDs come back one by one. [S15] Text exists only outside this boundary.</p>
+
+<h2 id="sec-2">2.2 Guess only the next one: the chain rule</h2>
+<p>Your phone keyboard guesses the next word as you type. A large model does the same thing, just far more accurately. At each step it answers only one question: <strong>given all the tokens so far, what comes next?</strong> The answer is not one word but a probability table: every token in the vocabulary gets a probability, and they add up to 1.</p>
+<p>The probability of a whole sentence is the product of the probabilities from each step of guessing, as Figure 2-2 shows. This rule is called the <dfn>chain rule</dfn>.</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="Figure 2-2: the probability of a sentence is the product of the conditional probabilities at each step; the probability of I love you is 0.20 times 0.10 times 0.60, which is 0.012">
+<text class="f-text" fill="#182f2b" x="75" y="18" font-size="13" font-weight="600" text-anchor="middle">Step 1</text>
+<text class="f-muted" fill="#5c6d66" x="75" y="36" font-size="12" text-anchor="middle">Given: (start)</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">Step 2</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="36" font-size="12" text-anchor="middle">Given: I</text>
+<text class="f-text" fill="#182f2b" x="325" y="18" font-size="13" font-weight="600" text-anchor="middle">Step 3</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="36" font-size="12" text-anchor="middle">Given: I love</text>
+<rect class="f-accent" fill="#136d5a" x="23" y="48" width="104" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="35" y="66" font-size="13">I</text><text class="f-on" fill="#ffffff" x="117" y="66" font-size="12" text-anchor="end">0.20</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="23" y="80" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="35" y="98" font-size="13">You</text><text class="f-muted" fill="#5c6d66" x="117" y="98" font-size="12" text-anchor="end">0.15</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="23" y="112" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="35" y="130" font-size="13">Today</text><text class="f-muted" fill="#5c6d66" x="117" y="130" font-size="12" text-anchor="end">0.10</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="148" y="48" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="160" y="66" font-size="13">am</text><text class="f-muted" fill="#5c6d66" x="242" y="66" font-size="12" text-anchor="end">0.30</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="148" y="80" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="160" y="98" font-size="13">want</text><text class="f-muted" fill="#5c6d66" x="242" y="98" font-size="12" text-anchor="end">0.20</text>
+<rect class="f-accent" fill="#136d5a" x="148" y="112" width="104" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="160" y="130" font-size="13">love</text><text class="f-on" fill="#ffffff" x="242" y="130" font-size="12" text-anchor="end">0.10</text>
+<rect class="f-accent" fill="#136d5a" x="273" y="48" width="104" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="285" y="66" font-size="13">you</text><text class="f-on" fill="#ffffff" x="367" y="66" font-size="12" text-anchor="end">0.60</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="273" y="80" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="285" y="98" font-size="13">it</text><text class="f-muted" fill="#5c6d66" x="367" y="98" font-size="12" text-anchor="end">0.10</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="273" y="112" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="285" y="130" font-size="13">cats</text><text class="f-muted" fill="#5c6d66" x="367" y="130" font-size="12" text-anchor="end">0.05</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M127 61H137V125H146M252 125H262V61H271"/>
+<text class="f-text" fill="#182f2b" x="200" y="170" font-size="13" font-weight="600" text-anchor="middle">P(I love you) = 0.20 × 0.10 × 0.60 = 0.012</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="196" font-size="12" text-anchor="middle">Each step: given what came before, guess the next</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="216" font-size="12" text-anchor="middle">Highlighted = the path taken; numbers are made up</text>
+</svg><figcaption>Figure 2-2　The chain rule: the probability of a whole sentence is the product of the conditional probabilities at each step. "love" in step 2 is not the top choice; a sentence does not have to take first place at every step.</figcaption></figure>
+<aside class="primer" id="c02-chain-rule">
+<h3>Conditional probability and the chain rule</h3>
+<p>Start with an intuition: the chance that a random person on the street carries an umbrella is not high; but if you know "it is raining outside", that chance is much higher. "The probability of A, given that B happened" is called a <dfn>conditional probability</dfn>, written P(A | B), and defined as P(A | B) = P(A and B) ÷ P(B).</p>
+<p>Rearrange the definition and you get the multiplication rule: P(A and B) = P(B) × P(A | B). Apply it again and again, and the joint probability of a long run of events breaks into a product of conditional probabilities: P(x₁, x₂, x₃) = P(x₁) × P(x₂ | x₁) × P(x₃ | x₁, x₂). This is the <dfn>chain rule</dfn>. It needs no assumptions; it holds for every probability distribution.</p>
+<p>Language models are built on exactly this formula: at each step the model learns only one thing, P(next token | all previous tokens). In Figure 2-2, the probability 0.012 of "I love you" is three conditional probabilities multiplied together. Note that the condition is <strong>all previous</strong> tokens, so changing one word in the prefix can change the probability table at every later step.</p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Conditional_probability" target="_blank" rel="noopener noreferrer">Wikipedia: Conditional probability</a> · <a href="https://en.wikipedia.org/wiki/Independence_%28probability_theory%29" target="_blank" rel="noopener noreferrer">Wikipedia: Independence (probability theory)</a> · <a href="https://en.wikipedia.org/wiki/Chain_rule_(probability)" target="_blank" rel="noopener noreferrer">Wikipedia: Chain rule (probability)</a></p>
+</aside>
+<p class="bridge"><strong>If you studied CS:</strong> this is the multiplication rule from probability theory. Unlike a Markov chain, the condition here is the <strong>whole</strong> history, not just the previous state. Because the condition includes the whole history, the engine must store that history and reuse it again and again (the KV cache in Chapter 17).</p>
+<p>While we are here, let's clear up a common mix-up: during generation, not a single model parameter changes; only the history of "tokens so far" changes. Parameters change only during training. The expert cache in Chapter 10 does adjust as the conversation goes on, but it adjusts <strong>where</strong> the parameters are kept, not <strong>what</strong> they are, so that is not "the model learning" either.</p>
+
+<h2 id="sec-3">2.3 From scores to probabilities: softmax and temperature</h2>
+<p>The model's last layer does not output probabilities. It outputs a list of <dfn>scores</dfn>, called <dfn>logits</dfn> in the jargon: one number per token in the vocabulary, positive or negative, and they do not add up to 1. To turn them into probabilities, they go through a function called <dfn>softmax</dfn>: first take the exponential e<sup>z</sup> of every score, which makes it positive; then divide by the sum of all the exponentials, so they add up to 1.</p>
+<p>Before taking the exponential, you can also divide every score by a number T, called the <dfn>temperature</dfn>. With T below 1, the gaps between scores grow: high scores get relatively higher, the distribution gets "sharper", and the answers get more conservative. With T above 1, the gaps shrink: the distribution gets "flatter", unpopular words get more of a chance, and the answers wander more. Figure 2-3 shows the same scores at three temperatures.</p>
+<div class="viz" data-viz="softmax-temperature"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figure 2-3: the probabilities of the same scores at temperatures 0.5, 1 and 2. The lower the temperature, the more the top-scoring cat dominates: 86%, 62% and 42%">
+<text class="f-text" fill="#182f2b" x="72" y="18" font-size="12" font-weight="600" text-anchor="middle">T = 0.5 (sharper)</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="12" font-weight="600" text-anchor="middle">T = 1</text>
+<text class="f-text" fill="#182f2b" x="328" y="18" font-size="12" font-weight="600" text-anchor="middle">T = 2 (flatter)</text>
+<rect class="f-accent" fill="#136d5a" x="17" y="68" width="16" height="112"/>
+<rect class="f-muted" fill="#5c6d66" x="40" y="164.8" width="16" height="15.2"/>
+<rect class="f-muted" fill="#5c6d66" x="63" y="177.9" width="16" height="2.1"/>
+<rect class="f-muted" fill="#5c6d66" x="86" y="179" width="16" height="1"/>
+<rect class="f-muted" fill="#5c6d66" x="109" y="179" width="16" height="1"/>
+<text class="f-text" fill="#182f2b" x="25" y="62" font-size="12" text-anchor="middle">86%</text>
+<rect class="f-accent" fill="#136d5a" x="145" y="98.9" width="16" height="81.1"/>
+<rect class="f-muted" fill="#5c6d66" x="168" y="150.2" width="16" height="29.8"/>
+<rect class="f-muted" fill="#5c6d66" x="191" y="169" width="16" height="11"/>
+<rect class="f-muted" fill="#5c6d66" x="214" y="173.3" width="16" height="6.7"/>
+<rect class="f-muted" fill="#5c6d66" x="237" y="178.5" width="16" height="1.5"/>
+<text class="f-text" fill="#182f2b" x="153" y="92" font-size="12" text-anchor="middle">62%</text>
+<rect class="f-accent" fill="#136d5a" x="273" y="125.7" width="16" height="54.3"/>
+<rect class="f-muted" fill="#5c6d66" x="296" y="147.1" width="16" height="32.9"/>
+<rect class="f-muted" fill="#5c6d66" x="319" y="160" width="16" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="342" y="164.5" width="16" height="15.5"/>
+<rect class="f-muted" fill="#5c6d66" x="365" y="172.7" width="16" height="7.3"/>
+<text class="f-text" fill="#182f2b" x="281" y="119" font-size="12" text-anchor="middle">42%</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M12 180.5H130M140 180.5H258M268 180.5H386"/>
+<text class="f-muted" fill="#5c6d66" x="25" y="196" font-size="12" text-anchor="middle">cat</text><text class="f-muted" fill="#5c6d66" x="48" y="196" font-size="12" text-anchor="middle">dog</text><text class="f-muted" fill="#5c6d66" x="71" y="196" font-size="12" text-anchor="middle">hen</text><text class="f-muted" fill="#5c6d66" x="94" y="196" font-size="12" text-anchor="middle">koi</text><text class="f-muted" fill="#5c6d66" x="117" y="196" font-size="12" text-anchor="middle">car</text>
+<text class="f-muted" fill="#5c6d66" x="153" y="196" font-size="12" text-anchor="middle">cat</text><text class="f-muted" fill="#5c6d66" x="176" y="196" font-size="12" text-anchor="middle">dog</text><text class="f-muted" fill="#5c6d66" x="199" y="196" font-size="12" text-anchor="middle">hen</text><text class="f-muted" fill="#5c6d66" x="222" y="196" font-size="12" text-anchor="middle">koi</text><text class="f-muted" fill="#5c6d66" x="245" y="196" font-size="12" text-anchor="middle">car</text>
+<text class="f-muted" fill="#5c6d66" x="281" y="196" font-size="12" text-anchor="middle">cat</text><text class="f-muted" fill="#5c6d66" x="304" y="196" font-size="12" text-anchor="middle">dog</text><text class="f-muted" fill="#5c6d66" x="327" y="196" font-size="12" text-anchor="middle">hen</text><text class="f-muted" fill="#5c6d66" x="350" y="196" font-size="12" text-anchor="middle">koi</text><text class="f-muted" fill="#5c6d66" x="373" y="196" font-size="12" text-anchor="middle">car</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="224" font-size="12" text-anchor="middle">Assumed scores: cat 3, dog 2, hen 1, koi 0.5, car −1</text>
+</svg><figcaption>Figure 2-3　Same scores, different temperatures, different shapes of the probability table. Temperature changes only "sharp or flat"; it never changes who is in first place.</figcaption></figure></div>
+<p>The softmax formula contains an exponential, and exponentials grow extremely fast. Inside a computer that causes trouble. The primer below explains why, and the one trick that fixes it.</p>
+<aside class="primer" id="c02-softmax-overflow">
+<h3>Softmax and floating-point overflow</h3>
+<p>Computers store fractional numbers as <dfn>floating-point numbers</dfn>. They have a limited number of bits, so the largest value they can represent is limited too. The most common 32-bit float (FP32) tops out at about 3.4 × 10³⁸. That sounds huge, but e<sup>89</sup> already exceeds it. A result above the limit becomes "infinity" (∞); this is called <dfn>overflow</dfn>. Once both the numerator and the denominator are ∞, ∞ ÷ ∞ in floating point is <dfn>NaN</dfn> (Not a Number), and the whole probability table is ruined.</p>
+<p>The fix takes one line: before taking the exponentials, subtract the largest score m from every score. Since e<sup>z−m</sup> = e<sup>z</sup> ÷ e<sup>m</sup>, the numerator and the denominator are both divided by the same e<sup>m</sup>, and the ratio does not change at all. But after the subtraction the largest number becomes 0, e<sup>0</sup> = 1, and all the others are below 1, so nothing can overflow any more. Mathematically identical, numerically safe: this is called a <dfn>numerically stable</dfn> way to write it.</p>
+<p>An example: take the exponentials of the scores [1000, 999] directly, and both come out as ∞. Subtract 1000 first to get [0, −1]; the exponentials are [1, 0.3679] and the probabilities are [0.7311, 0.2689]. Strata's sampling kernel does exactly this: it subtracts the maximum from every entry, then computes the exponentials and cumulative probabilities in double precision. <span class="ev ev-code">Code fact</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L366-L408" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/LogSumExp" target="_blank" rel="noopener noreferrer">Wikipedia: LogSumExp (the same max-subtraction trick)</a> · <a href="https://docs.python.org/3/tutorial/floatingpoint.html" target="_blank" rel="noopener noreferrer">Python docs: Floating-point arithmetic: issues and limitations</a> · <a href="https://en.wikipedia.org/wiki/Softmax_function" target="_blank" rel="noopener noreferrer">Wikipedia: Softmax function</a></p>
+</aside>
+<p>Why floating-point numbers have a limit, and how FP32 differs from FP16, is covered in Chapter 4.</p>
+
+<h2 id="sec-4">2.4 Rolling the dice: picking one by probability</h2>
+<p>With the probability table in hand, how do you "pick by probability"? Picture a ruler of length 1. Lay each candidate's probability along it in turn: cat takes the first 0.62, dog the next 0.23, and so on, until the ruler is exactly covered. Then drop a needle at random; whichever segment it lands in, that word is picked, as Figure 2-4 shows. A high-probability segment is long, so it has a bigger chance of being hit.</p>
+<div class="viz" data-viz="sampling-dice"><figure class="fig"><svg viewBox="0 0 400 186" role="img" aria-label="Figure 2-4: the probabilities of five candidates are laid along the segment from 0 to 1; the random number u = 0.8 lands in the dog segment, so dog is picked">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="12">Probabilities along [0, 1), to scale</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="44" width="224.5" height="34"/>
+<rect class="f-accent" fill="#136d5a" x="244.5" y="44" width="82.6" height="34"/>
+<rect class="f-soft" fill="#e5f1df" x="327.1" y="44" width="30.4" height="34"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="357.5" y="44" width="18.4" height="34"/>
+<rect class="f-muted" fill="#5c6d66" x="375.9" y="44" width="4.1" height="34"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 44V78M244.5 44V78M327.1 44V78M357.5 44V78M375.9 44V78M380 44V78"/>
+<text class="f-text" fill="#182f2b" x="132" y="66" font-size="13" text-anchor="middle">cat 0.62</text>
+<text class="f-on" fill="#ffffff" x="286" y="66" font-size="13" text-anchor="middle">dog 0.23</text>
+<text class="f-text" fill="#182f2b" x="342" y="66" font-size="12" text-anchor="middle">hen</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M366.7 80V100M378 80V108H372"/>
+<text class="f-muted" fill="#5c6d66" x="368" y="112" font-size="12" text-anchor="end">koi (about 5%), car (about 1%)</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="96" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="244.5" y="96" font-size="12" text-anchor="middle">0.62</text>
+<text class="f-muted" fill="#5c6d66" x="318" y="96" font-size="12" text-anchor="middle">0.85</text>
+<path class="f-warn" fill="#9e5d24" d="M308 40l-5-10h10z"/>
+<text class="f-warn" fill="#9e5d24" x="308" y="24" font-size="12" text-anchor="middle">u = 0.8</text>
+<text class="f-text" fill="#182f2b" x="200" y="132" font-size="13" font-weight="600" text-anchor="middle">0.62 ≤ 0.8 &lt; 0.85, so "dog" is picked</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="156" font-size="12" text-anchor="middle">u is uniform in [0, 1); greedy always takes segment 1</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="176" font-size="12" text-anchor="middle">Temperature T = 1; scores as in Figure 2-3</text>
+</svg><figcaption>Figure 2-4　Picking a token by probability: the probabilities decide how long each segment is, and the random number u decides where the needle lands. The distribution and the draw are two separate things.</figcaption></figure></div>
+<p>This method is called <dfn>inverse transform sampling</dfn>: first compute the cumulative probabilities (0.62, 0.85, 0.94, …), then find the first position greater than u. Strata's sampling kernel picks exactly this way: it adds up the cumulative probability entry by entry, and the first entry that goes past u is the result. <span class="ev ev-code">Code fact</span>[S07]</p>
+<p>The other approach is <dfn>greedy</dfn> decoding: roll no dice, always pick the most probable token. Greedy output is fully deterministic, which suits cases that need a stable answer, such as solving exercises or testing. Strata's sampling parameters say that a temperature of 0 or below means greedy, and the server layer notes that when a request gives no temperature, the engine also defaults to greedy. <span class="ev ev-code">Code fact</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/sampler.hpp#L15-L28" target="_blank" rel="noopener noreferrer">sampler.hpp</a> · <a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/serve/server.py#L297-L302" target="_blank" rel="noopener noreferrer">server.py</a></p>
+<p>One question remains: how does a computer drop the needle "at random"? It actually <strong>computes</strong> a number that only looks random.</p>
+<aside class="primer" id="c02-prng">
+<h3>Pseudorandom numbers and seeds</h3>
+<p>A computer is a deterministic machine: the same input always gives the same output. The "random numbers" it produces are really a sequence computed by a formula that just looks patternless; these are called <dfn>pseudorandom numbers</dfn>. The formula's starting point is called the <dfn>seed</dfn>: same seed, same whole sequence. That is a good thing: when something goes wrong, you can replay the exact scene with the same seed.</p>
+<p>Common generators are <strong>sequential</strong>: each number is computed from the previous one, so to get the 1000th you must first compute the 999 before it. There is also a <strong>counter-based</strong> kind: the n-th number is computed directly from (seed, n), no matter how many came before, as Figure 2-5 shows.</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="Figure 2-5: a sequential generator must compute numbers one after another, while a counter-based generator computes any random number directly from the seed and its position">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">Sequential: one after another</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="41" y="52" font-size="12" text-anchor="middle">seed</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="102" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="133" y="52" font-size="12" text-anchor="middle">r₁</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="194" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="225" y="52" font-size="12" text-anchor="middle">r₂</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="286" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="317" y="52" font-size="12" text-anchor="middle">r₃</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M72 47H100M164 47H192M256 47H284"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="82" font-size="12">To get r₃, you must first compute r₁ and r₂</text>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="13" font-weight="600">Counter-based: straight from the position</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="130" width="100" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="60" y="150" font-size="12" text-anchor="middle">(seed, 0)</text>
+<rect class="f-soft" fill="#e5f1df" x="145" y="130" width="100" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="195" y="150" font-size="12" text-anchor="middle">(seed, 1)</text>
+<rect class="f-soft" fill="#e5f1df" x="280" y="130" width="100" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="330" y="150" font-size="12" text-anchor="middle">(seed, 2)</text>
+<text class="f-text" fill="#182f2b" x="60" y="182" font-size="12" text-anchor="middle">↓ u₀</text>
+<text class="f-text" fill="#182f2b" x="195" y="182" font-size="12" text-anchor="middle">↓ u₁</text>
+<text class="f-text" fill="#182f2b" x="330" y="182" font-size="12" text-anchor="middle">↓ u₂</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="204" font-size="12">No position depends on another: compute them in</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="222" font-size="12">any order, or all at once. Strata uses this kind.</text>
+</svg><figcaption>Figure 2-5　Two kinds of pseudorandom generator. A counter-based result depends only on (seed, position), so computing in parallel or skipping ahead still reproduces it.</figcaption></figure>
+<p>Strata's sampling uses a counter-based generator called Philox: the random number for the t-th token is determined only by (seed, position t). A source comment states the reason for this choice: a batch of tokens can be sampled in any order, and the results can still be reproduced. The generated u takes 24 bits, so it falls strictly inside [0, 1) and is never rounded up to 1. <span class="ev ev-code">Code fact</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L38-L63" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p class="further">Further reading: <a href="https://en.wikipedia.org/wiki/Random_number_generation" target="_blank" rel="noopener noreferrer">Wikipedia: Random number generation</a> · <a href="https://docs.python.org/3/library/random.html" target="_blank" rel="noopener noreferrer">Python docs: the random module</a> · <a href="https://en.wikipedia.org/wiki/Pseudorandom_number_generator" target="_blank" rel="noopener noreferrer">Wikipedia: Pseudorandom number generator</a> · <a href="https://en.wikipedia.org/wiki/Counter-based_random_number_generator" target="_blank" rel="noopener noreferrer">Wikipedia: Counter-based RNG</a></p>
+</aside>
+<p class="bridge"><strong>If you studied CS:</strong> inverse transform sampling is a lookup on the cumulative distribution function (CDF): it maps the uniform distribution on [0, 1) to any discrete distribution. With many candidates, the cumulative array is sorted, so binary search brings one draw down to O(log n).</p>
+
+<h2 id="sec-5">2.5 The sampling chain: order matters too</h2>
+<p>Before rolling the dice, a real engine first "trims" the probability table several times. Strata's sampling chain has six steps in a fixed order, shown in Figure 2-6. <span class="ev ev-code">Code fact</span>[S07]</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="Figure 2-6: Strata's sampling chain, in order: repetition penalty, top-k, top-p, min-p, temperature, and a pick with a random number">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Right: candidates left after this step</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="316" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="45" font-size="13" font-weight="600">① Repetition penalty</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="62" font-size="12">Recently seen tokens score a bit lower</text>
+<text class="f-text" fill="#182f2b" x="390" y="52" font-size="12" text-anchor="end">248,320</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="80" width="316" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="99" font-size="13" font-weight="600">② top-k</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="116" font-size="12">Keep only the k highest (default 20)</text>
+<text class="f-text" fill="#182f2b" x="390" y="106" font-size="12" text-anchor="end">20</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="134" width="316" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="153" font-size="13" font-weight="600">③ top-p</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="170" font-size="12">Sum from the top, stop at p (default 0.95)</text>
+<text class="f-text" fill="#182f2b" x="390" y="160" font-size="12" text-anchor="end">≤ 20</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="188" width="316" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="207" font-size="13" font-weight="600">④ min-p</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="224" font-size="12">Drop below min_p × top prob (default off)</text>
+<text class="f-text" fill="#182f2b" x="390" y="214" font-size="12" text-anchor="end">fewer</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="242" width="316" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="261" font-size="13" font-weight="600">⑤ Temperature</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="278" font-size="12">Reshapes only the remaining candidates</text>
+<text class="f-text" fill="#182f2b" x="390" y="268" font-size="12" text-anchor="end">same</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="296" width="316" height="44" rx="8"/>
+<text class="f-on" fill="#ffffff" x="22" y="315" font-size="13" font-weight="600">⑥ Pick</text>
+<text class="f-on" fill="#ffffff" x="22" y="332" font-size="12">One random u picks by cumulative prob.</text>
+<text class="f-text" fill="#182f2b" x="390" y="322" font-size="12" text-anchor="end">1</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M155 70V80M155 124V134M155 178V188M155 232V242M155 286V296"/>
+</svg><figcaption>Figure 2-6　Strata's sampling chain. Temperature comes after the cuts: top-k and top-p first remove candidates based on the original distribution, and temperature can only reshape what is left. Defaults come from the definition of the sampling parameters.</figcaption></figure>
+<ul>
+<li><strong>Repetition penalty</strong>: tokens that appeared recently get lower scores, so the model does not keep repeating itself in circles.</li>
+<li><strong>top-k</strong>: keep only the k highest-scoring tokens. Strata's default sampling parameter is 20; the server layer limits top-k to 1–64, because the engine's sampling path keeps at most 64 candidates. <span class="ev ev-code">Code fact</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/serve/server.py#L456-L459" target="_blank" rel="noopener noreferrer">server.py</a></li>
+<li><strong>top-p</strong>: add up probabilities from highest to lowest, stop once the sum reaches p, and cut everything after. The default is p = 0.95.</li>
+<li><strong>min-p</strong>: drop candidates whose probability is below min_p times the top one's. The default is 0, which means off.</li>
+<li><strong>Temperature</strong> and the <strong>pick</strong>: covered above.</li>
+</ul>
+<p>Why does the order matter? Look at where temperature sits: after the cuts. So the top-p cut is made using the probabilities at temperature 1. However high you set the temperature, it cannot bring back a candidate that was already cut. The other way around, if you moved temperature to the front, the same parameters would cut a different set of candidates.</p>
+<p>Strata itself fell into this trap. A source comment records a fix: an earlier version applied the repetition penalty twice (once more after temperature) and also put min-p in front of top-p. The comment puts it bluntly: <strong>every one of these orders produces a "valid" token</strong>, so you cannot spot the problem by looking at the output; you have to compare, entry by entry, at the level of the probability distribution, against an independently computed result. <span class="ev ev-code">Code fact</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L1-L11" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p>This gives us an important habit: <strong>to judge whether two sampling implementations agree, compare the probability tables, not just the final text.</strong> The text can be identical while the distributions differ; and distributions that differ only slightly can make the text fork at some step.</p>
+
+<h2 id="sec-6">2.6 Hands-on: look at the "distribution" and the "draw" separately</h2>
+<p>Open this chapter's interactive lab, "From logits to probabilities". It uses only three scores and turns temperature and the random number u into two independent knobs.</p>
+<ol>
+<li><strong>Fix u, change only the temperature.</strong> You will see the probability bars change length, and the picked token may change with them. Temperature changes the <strong>distribution</strong>.</li>
+<li><strong>Fix the temperature, change only u.</strong> The probability bars do not move at all; only where the needle lands changes. u changes <strong>which sample is drawn from the distribution</strong>.</li>
+<li>Add up the three probabilities. The numbers on screen are rounded, so they may add up to 0.999 or 1.001. That is not a bug: checking "adds up to 1" must allow a tiny floating-point error.</li>
+</ol>
+<p>The lab and the two interactive figures on this page are all teaching estimates: the scores are assumed, and the random numbers come from a simple hash function, not Strata's Philox.</p>
+
+<div class="recap"><h3>Remember these three</h3><ol>
+<li>At each step the model outputs only one probability table for the "next token"; the probability of a whole sentence is the product of the conditional probabilities at each step (the chain rule).</li>
+<li>Softmax turns scores into probabilities. Subtracting the maximum first leaves the result unchanged and prevents floating-point overflow. Temperature only changes how sharp or flat the distribution is.</li>
+<li>Sampling = using one pseudorandom number to pick by cumulative probability. The order of the sampling chain is part of its meaning: a different order gives a different probability table.</li>
+</ol></div>
+<div class="myth"><p><strong>Common misconception: "Set the temperature to 0, and the answer to the same question will always be word-for-word identical."</strong></p>
+<p>Temperature 0 only guarantees "pick the highest score at every step". But the highest score itself comes out of floating-point arithmetic: change the order of a sum, and the last few decimal places may differ. When two candidates' scores are extremely close, that tiny difference can swap a token, and everything after it forks. Strata's docs record exactly this: with the IQ-series models, the CPU uses different kernels for one token at a time and for several tokens at once, the rounding differs slightly, and the same prompt at temperature 0 may get another (equally reasonable) answer. To get byte-identical output you also have to turn off several settings, including the prompt cache, expert swapping and PCIe offloading. Upstream measurement (IQ3_XXS, a prompt of about 3,600 tokens, repeated 4 times): with all those switches set, the 4 runs gave only 1 distinct answer; with the default settings they gave 2. <span class="ev ev-report">Upstream report</span>[S03]</p></div>
+
+<details class="deep"><summary>Go deeper: work it by hand, then read the server layer's contract</summary>
+<h3>The chain rule written out in full</h3>
+<p>For a sequence x₁…xₙ, the chain rule gives:</p>
+<div class="equation">P(x₁…xₙ) = ∏ₜ P(xₜ | x₁…xₜ₋₁)</div>
+<p>Each round of the inference loop computes one conditional distribution. The "history" is not optional background; it is an input of the function. Change one earlier token, and every later conditional distribution may change. This also explains why cached results for earlier text (the session cache in Chapter 20) can be reused only when the prefix is exactly the same.</p>
+<h3>Softmax and one draw, by hand</h3>
+<p>Take z = [2, 1, 0] and T = 1. Subtract the maximum 2 to get [0, −1, −2]; the exponentials are about [1, 0.3679, 0.1353], the sum is 1.5032, and normalizing gives <strong>[0.6652, 0.2447, 0.0900]</strong>. The cumulative probabilities are about [0.6652, 0.9100, 1]. If u = 0.8, the first cumulative value above it is 0.9100, so the second entry is picked; u = 0.5 picks the first entry; u = 0.95 picks the third. Greedy always picks the first.</p>
+<h3>Temperature approaching 0 is not the same as greedy</h3>
+<p>Mathematically, as T approaches 0, softmax approaches "the top-scoring entry has probability 1". But a program cannot actually compute z ÷ 0, so real implementations write greedy as a separate branch. Another detail is <strong>ties</strong>: when two scores are exactly equal, there must be a fixed rule for who wins. Strata's greedy kernel says the smaller ID wins, the parallel version keeps the same rule, and the comment calls it "the core of the whole correctness argument". <span class="ev ev-code">Code fact</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L98-L99" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<h3>The sign trap in the repetition penalty</h3>
+<p>The repetition penalty "lowers the score", which sounds like dividing by a number greater than 1. But a score can be negative, and a negative number divided by 1.1 actually gets bigger. Strata copies llama.cpp's rule: divide by the penalty when the score is positive, multiply by it when the score is 0 or below. The comment warns that dividing unconditionally is the most natural thing to write after reading the paper, yet it turns the penalty into a reward on half the vocabulary. Another detail: the presence penalty only looks at whether a token appeared at all; it is a 0/1 switch and ignores how many times. <a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/cuda/sampler.cu#L65-L80" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<h3>Same seed does not mean same output</h3>
+<p>Suppose candidate A had the top score, but it was repeated many times in the history. Doing top-k first and then the penalty, or the penalty first and then top-k, can give completely different candidate sets. So "same seed" is far from enough to prove "same output". You must also fix the history, the sampling parameters, the processing order, and the numerical path that computed the logits. Strata's coupled-draft interface writes all this into the contract: row t of the verification window draws with Philox(seed, pos₀ + t), and a draft is accepted only if it <strong>equals</strong> that row's draw. So the output is a function of the seed alone, and the drafts decide only how many tokens one round produces. This mode is off by default. <span class="ev ev-code">Code fact</span>[S07]</p>
+<h3>The server layer's contract: reject, never silently truncate</h3>
+<p>When you read <code>serve/frontend.py</code>, first see how <code>ChatTemplate.render</code> passes in messages, tools and the generation prompt, then see how <code>effort_kwargs</code> normalizes the many ways of writing a "thinking level" into the four levels the template knows. [S16] Then read the header of <code>serve/server.py</code>: when the prompt plus the maximum output length exceeds the context, the request is rejected with a 400, <strong>never truncated</strong>; leaving the maximum output empty, or setting it to 0 or −1, all mean "write as much as the remaining context allows". [S15] The accounting also keeps a margin of <code>CTX_SLACK = 8</code> positions, matching the check on the engine side. [S15] Those 8 positions are not a mathematical constant of the model; they are an agreement between the front end and the back end.</p>
+<h3>How to accept a sampling implementation</h3>
+<p>In the lab, drag the temperature and watch the probabilities, not just the token that gets picked. For acceptance, compare distributions: given the same logits and the same parameters, the two implementations' probability tables must agree within a floating-point tolerance. Do not require the rounded numbers on screen to add up to exactly 1.</p>
+</details>
