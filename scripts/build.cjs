@@ -9,7 +9,7 @@ const json = n => JSON.parse(read(`content/${n}.json`));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
 const plain = s => s.replace(/<[^>]*>/g, ' ').replace(/&(?:lt|gt|amp|quot|#39);/g, ' ').replace(/\s+/g, ' ').trim();
 const Book = {};
-for (const n of ['chapters','sources','tracks','weeks','glossary','walkthroughs','labs','provenance']) Book[n] = json(n);
+for (const n of ['chapters','sources','tracks','weeks','glossary','walkthroughs','labs','provenance','courses']) Book[n] = json(n);
 for (const c of Book.chapters) {
   c.html = read(`content/chapters/${c.id}.html`);
   c.plain = plain(c.html);
@@ -22,7 +22,7 @@ Book.assets['labs-README.md'] = read('labs/README.md');
 const payload = JSON.stringify(Book).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
 // Viz widgets: the framework first, then pure math modules, then widgets, all in name order.
 const vizFiles = fs.readdirSync(path.join(root,'src/viz')).filter(n=>n.endsWith('.js')&&n!=='core.js').sort((a,b)=>(a.endsWith('.math.js')?0:1)-(b.endsWith('.math.js')?0:1)||a.localeCompare(b)).map(n=>'viz/'+n);
-const scripts = ['lab-math.js', 'labs.js', 'viz/core.js', ...vizFiles, 'app.js'].map(n => `<script>\n${read('src/'+n).replace(/<\/script/gi, '<\\/script')}\n</script>`).join('\n');
+const scripts = ['lab-math.js', 'labs.js', 'i18n.js', 'viz/core.js', ...vizFiles, 'app.js'].map(n => `<script>\n${read('src/'+n).replace(/<\/script/gi, '<\\/script')}\n</script>`).join('\n');
 const icon = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><rect width="48" height="48" rx="12" fill="#136d5a"/><path d="M11 15h26M11 24h21M11 33h16" stroke="#e5f1df" stroke-width="5" stroke-linecap="round"/></svg>');
 const html = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

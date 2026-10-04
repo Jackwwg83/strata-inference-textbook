@@ -1,0 +1,159 @@
+/* Interface strings for the reading app. zh is the master copy; every other
+   language falls back to zh key by key. Values may be functions for strings
+   with variables. Chapter prose and other book content live in content/. */
+(function (root) {
+  'use strict';
+  const S = {
+    zh: {
+      // record import / validation
+      errSchema: '不是可识别的学习记录（schema 1）',
+      errArray: key => `${key} 应为数组`,
+      // theme
+      toDark: '切换深色主题', toLight: '切换浅色主题',
+      // footer, draft note, scope
+      footerBook: '从 Strata 学推理系统 · 独立 Web 教材',
+      footerReview: '未经正式同行外审',
+      footerAnchor: '源码锚点',
+      footerSources: '证据边界与来源',
+      footerNotes: '笔记仅存本机，可导出',
+      footerPrivacy: '匿名访问统计 · 隐私说明',
+      draftLabel: '初版',
+      draftText: ' · AI 辅助编写 · 未经同行审阅 · 发现错误请',
+      draftLink: '提交勘误 ↗',
+      scopeLabel: '阅读约定',
+      scopePre: ' · 基础原理、固定代码、上游报告和教学推演分别标注。',
+      scopePost: ' 浏览器实验不调用模型，数字不是硬件实测。',
+      // sidebar
+      pathEyebrow: 'LEARNING PATH / 学习路线',
+      pathSelect: '选择学习路线',
+      chaptersN: n => `${n} 章`,
+      sideMap: '课程关联图', sideGlossary: '术语表', sideToc: '章节目录',
+      doneMark: '已学',
+      doneCount: n => `${n} / 28 章已标记学完`,
+      doneProgress: '手动标记的学习进度',
+      shortTitle: t => t.split('：')[0],
+      // home architecture panel
+      archAria: 'GPU、RAM与SSD三层推理架构示意',
+      archGpuSub: '工作集与计算', archGpuTitle: 'QSA · GDN · 热专家', archGpuText: '状态、密集算子与显存缓存',
+      archDown: '↓ 激活 / 结果', archUp: '↑ 专家 / 历史页',
+      archRamSub: 'CPU 专家计算', archRamTitle: '专家全集，或 GPU 缓存的补集', archRamText: '锁页缓冲 · 主机历史状态',
+      archFetch: '↑ 按需读取与页面缓存',
+      archSsdSub: '按行查询', archSsdTitle: 'PLE / n-gram 模型表', archSsdText: '大容量不等于每步完整读取',
+      archCaption: '真正的问题不是“全部塞进显存”，而是哪些数据、在什么时刻、应出现在什么位置。示意非比例图。',
+      // home
+      homePill: '独立开源项目教材 · EDITION 1.0',
+      homeTitle: '从一个 token，<br><em>读懂计算机。</em>',
+      homeTitlePlain: '从一个 token，读懂计算机',
+      homeIntro: '以 Strata 为线索，将线性代数、存储层级、并发与网络协议连成一门可实验的推理系统课程。先弄懂原理，再阅读代码，最后用证据说话。',
+      homeStart: '开始第一章', homeContinue: id => '继续第 ' + id + ' 章', homeLabs: '进入交互实验室',
+      homeMicro: '无需显卡即可学习与实验 · 无账户 · 仅匿名访问统计',
+      homeDate: '研究日期 2026.10.04 · 上游锚点 ',
+      statChapters: '完整章节', statLabs: '交互实验', statQuiz: '解析自测', statHours: '教学学时',
+      homePathTitle: '找到适合你的入口', homePathSub: '同一本教材，三种深度；切换路线只改变目录，不删除内容。',
+      homeTeacher: '教师手册 ↗',
+      homeCoursesTitle: '把熟悉的大学课程接起来', homeCoursesSub: '每一章都回答：这段实现，来自哪一种基本原理？', homeMapLink: '查看关联图 ↗',
+      homeTocTitle: name => `${name} · 章节目录`, homeTocSub: '理解 → 推导 → 源码 → 反例 → 实验 → 自测',
+      exportBook: '导出全文 HTML ↓',
+      // chapter page
+      checkAnswer: '核对答案', right: '✓ 回答正确。', wrong: '↻ 再检查一下。',
+      crumbHome: '课程', crumbChapter: id => `第 ${id} 章`,
+      levelExtended: '扩展', notAudited: ' / 非上游已审计实现',
+      doneUndo: '✓ 已学完 · 撤销', markDone: '标记为已学完', bookmarked: '★ 已收藏', bookmark: '☆ 加入书签',
+      fontSmaller: '缩小正文字号', fontLarger: '增大正文字号', printChapter: '打印本章',
+      goalsEyebrow: '学习后，你应能做到', prereq: '先修建议：',
+      labEyebrow: '把公式变成一次实验', openLab: '打开实验 →',
+      sourcesTitle: '本章源码与原理索引', sourcesHint: '链接固定到本版 SHA 的相关阅读窗口；接口事实不等于全路径运行验证。',
+      quizTitle: '不靠猜，解释你选的答案', quizHint: '3 道自测公开附解析，适合学习反馈，不作为保密考试。',
+      openTitle: '开放题 · 把条件说完整', openShow: '展开参考论证与评分要点',
+      noteTitle: '把自己的理解留下来', noteAria: id => `第 ${id} 章个人笔记`,
+      notePlaceholder: '写下一个你原来理解错的地方，或者一个仍需验证的假设……',
+      noteLocal: '笔记仅保存在此浏览器，可在“学习笔记”导出。', noteNoStorage: '本地存储不可用；记录仅保留在本次页面，请及时导出。',
+      noteSaved: '已保存到本机。建议定期导出备份。', noteSaveFailed: '本地存储不可用；请在离开页面前导出。',
+      pageNav: '前后章节', prev: id => `← 上一章 ${id}`, next: id => `下一章 ${id} →`, backHome: '← 回到课程首页', toTeacher: '教师手册 →',
+      tocAria: '本章目录', tocTitle: '本章导航', tocLab: '↗ 本章实验', tocSources: '↗ 源码地图', tocNotes: '↗ 学习笔记',
+      progressUpdated: '学习进度已更新', pickFirst: '先选择一个答案，再核对解析。',
+      // labs
+      all: '全部',
+      labsTitle: '把推理系统，<em>拆成能动手的实验。</em>',
+      labsIntro: '调一个变量，先预测，再观察，再解释。所有数字来自明确的教学模型；不会偷偷调用远程模型，也不会把模拟包装成显卡跑分。',
+      labChapters: ids => `关联章节 ${ids}`, labStart: '开始实验 ↗',
+      labsCodeTitle: '继续走向真实代码',
+      labsCodeHint: 'Python 标准库微型推理链：随机固定权重，完整走通输入、状态、MoE 与输出。不是 Strata 兼容实现，也不代表语言质量。',
+      dlEngine: '下载微型引擎 ↓', dlTests: '下载配套测试 ↓', dlReadme: '实验说明 ↓',
+      labCrumb: '交互实验室', labEyebrowNote: ' · 教学推演，非硬件实测', labChip: (id, title) => `第 ${id} 章 · ${title}`,
+      labBoundary: '模型边界：', labSave: '保存本次实验记录', labExport: '导出参数与结果 JSON ↓', labNotes: '查看实验笔记',
+      labTask: '本次实验任务', labTaskHint: '保存时记录参数、结果、时间和“教学推演”标识。你的判断和反例可写入对应章节的笔记。',
+      labInvalidSave: '参数无效，不能保存', labSaved: '已保存到学习笔记', labInvalidExport: '参数无效，不能导出',
+      // map
+      mapTitle: '不是另学一套黑话，<br><em>而是把基础知识接起来。</em>',
+      mapIntro: '同一段系统代码，往往同时涉及数学、状态与硬件。点击一门课，查看对应章节与可操作的问题。',
+      mapCount: n => `${n} 个章节交叉关联 →`, mapAll: '全部课程', mapAllHead: '全部基础课程',
+      mapHead: (name, n) => `${name} · ${n} 个章节`, mapDefault: '先修建议在每章开头；通识路线先用手算和浏览器模型建立直觉。',
+      // sources
+      srcEyebrow: 'SOURCE ATLAS / 固定版本，不漂移', srcTitle: '每一个结论，<em>都能找到来处。</em>',
+      srcIntro: '19 个项目阅读入口，6 项基础原理 / 平台资料，8 份重点逻辑导读。代码窗口、接口契约、历史注释与真实运行是不同证据层次。',
+      srcAnchor: '源码锚点：', srcDates: (commit, research) => `提交时间 ${commit}；研究日期 ${research}。未编译运行上游 GPU 引擎，未审阅用户多并发 fork。`,
+      srcMythsTitle: '四个值得在课堂主动纠正的误读',
+      srcMyths: [
+        ['S04', '48 层，不是 48 个 GDN 层', '当前几何为 36 GDN + 12 QSA；旧注释不应覆盖可执行定义。'],
+        ['S18', '805,306,368 B = 768 MiB', '单位逐项验算，不把十进制 MB 与二进制 MiB 混用。'],
+        ['S11', '八路轮换，不是 LRU', '判断替换算法要看实际状态更新，不凭缓存名称猜测。'],
+        ['S07', '精确匹配，不照搬 p/q 公式', '经典投机采样和当前接口分开讲，状态与随机历史也需一致。'],
+      ],
+      srcProject: '项目代码与文档', srcProjectHint: '只对所列阅读范围负责', srcRefs: '大学基础与原始资料',
+      srcScope: '文件窗口的行号用于定位阅读范围，长文件没有全部审阅。代码导读中的节选会省略空白与无关上下文，完整实现请查看不可变链接。项目注释可能保留旧阶段叙述，不能只凭一句注释判断当前所有路径。',
+      srcCrumb: '源码与原理地图', srcWindow: (s, e) => `阅读窗口 L${s}–L${e}`,
+      srcOpenCode: '打开固定版本源码窗口 ↗', srcOpenRef: '打开原始资料 ↗', srcLicense: '查看随教材附带的上游 MIT 许可',
+      srcNetHint: '外部原始资料需要网络；课程内容与交互计算本身可以离线使用。', srcCodeKind: '代码', srcCodeHint: '接口注释与字段不等于所有分派路径都已执行验证。',
+      srcWalkHint: '核心逻辑摘编：省略无关上下文，部分片段为头文件数学说明；不是可单独编译的完整实现。',
+      srcHowTo: '<strong>建议的阅读方法：</strong>先看输入、输出、所有者与有效期；再区分当前可执行字段、接口承诺与历史说明；最后找能推翻错误解释的最小测试。不要把一个文件窗口推断为整个工程的覆盖率。',
+      srcUsedIn: '在这些章节中使用', srcUnused: '用于教材的发布、来源或许可说明。',
+      // teacher
+      weekHead: ['周', '章节 / 主题', '实验', '本周交付'],
+      teacherTitle: '一门可以进入课堂的<em>系统课程。</em>',
+      teacherIntro: '16 周、64 学时（每学时 45 分钟）、分层路线、形成性测验与课程项目。考核的是解释与证据，不是学生拥有什么显卡。',
+      exportTeacher: '导出授课手册 HTML ↓', exportAll: '导出全文与答案 HTML ↓', dlCsv: '实测记录 CSV 模板 ↓', dlProtocol: '实测协议 ↓',
+      teacherWeeks: '16 周教学安排', teacherWeeksHint: '每周 2 理论 + 2 实验学时',
+      // glossary
+      glossTitle: '术语不是门槛，<em>是索引。</em>', glossIntro: '先读一句能理解的解释，再回到出现这个概念的章节。',
+      glossSearch: '搜索术语或解释', glossPlaceholder: '搜索 KV、操作系统、量化、state……', glossRead: id => `阅读第 ${id} 章 →`, glossNone: '没有匹配术语，试试全文搜索。',
+      // notes
+      notesTitle: '让理解，<em>留下可追踪的记录。</em>',
+      notesIntro: '本机保存的章节笔记、书签与实验参数。没有账户，不跨设备同步；导出 JSON 后可在另一浏览器导入。',
+      notesStatDone: '已学章节 / 28', notesStatQuiz: n => `答对 / 已核对 ${n}`, notesStatNotes: '章节笔记', notesStatLabs: '实验快照',
+      notesExport: '导出学习记录 JSON ↓', notesImport: '导入并替换本机记录 ↑', notesClear: '清空本机学习记录',
+      notesHint: '记录可由自己编辑，不作为考试成绩证明。导入将替换本机记录；请先备份。单次导入最大 2 MB，实验最多保留 40 份。',
+      notesBookmarks: '我的书签', notesNoBookmarks: '在任意章节点击“加入书签”，就会出现在这里。',
+      notesChapterNotes: '章节笔记', notesLocalChip: '仅本机', notesNoNotes: '每章末尾都可以记录一个新理解、一个反例或一个待验证问题。',
+      notesLabs: '实验快照', notesLabTag: ' · 教学推演，非硬件实测', notesDelete: '删除', notesShow: '查看保存的参数与完整结果',
+      notesNoLabs: '在交互实验末尾点击“保存本次实验记录”，保留参数与结果。',
+      // export documents
+      docMeta: commit => `独立教学初版 1.0 · 2026-10-04 · 固定 SHA ${commit}<br>未编译运行上游 GPU 引擎；模拟值不是真实跑分；源码阅读范围见索引。`,
+      docAuthor: (a, l, i) => `作者：${a} · 许可：${l} · 勘误：${i}`,
+      fullTitle: '从 Strata 学推理系统 · 全文与练习解析',
+      fullIntro: '28 章 · 84 道选择题及解析 · 28 道开放题 · 16 周授课方案。浏览器交互实验请使用主站 / 单文件交互版。',
+      fullPrereq: '先修：', fullGoals: '学习目标：', goalSep: '；', fullQuiz: '自测与参考答案', fullAnswer: k => `答案 ${k}。`,
+      fullOpen: '开放题', fullArgument: '参考论证：', fullTeacher: '教师手册', fullSources: '源码与原理索引', fullLicense: '上游源码许可',
+      teacherDocTitle: '从 Strata 学推理系统 · 教师手册',
+      fileBook: 'Strata-推理系统-全文与解析.html', fileTeacher: 'Strata-教师手册.html', fileRecord: 'Strata-学习记录.json',
+      exported: name => '已导出 ' + name, assetMissing: '该素材在完整源码包中。',
+      // import / clear
+      errTooBig: '文件超过 2 MB', confirmImport: '导入将替换此浏览器的学习记录。确认已备份后继续？', imported: '学习记录已导入', importFailed: msg => '导入失败：' + msg,
+      confirmClear: '确定清空本机的进度、笔记、书签与实验记录？此操作不能撤销，建议先导出。', cleared: '本机学习记录已清空',
+      // page titles and fallbacks
+      titleLabs: '交互实验室', titleMap: '基础课程关联图', titleSources: '源码地图', titleTeacher: '教师手册', titleGlossary: '术语表', titleNotes: '学习笔记',
+      notFound: '未找到页面', notFoundBody: '<h1>这个学习入口不存在。</h1><p>章节和实验都可以从目录找到；未知地址不会触发任何远程请求。</p>', backHomeBtn: '回到课程首页',
+      storageAlert: '本地存储当前不可用，或旧记录无法解析；本次学习记录暂存于页面内存。请在关闭前导出 JSON，勿把它当作已持久保存。',
+      siteTitle: '从 Strata 学推理系统',
+      // search
+      searchEmpty: '试试“128”“残差”“只回退”“SSE”或某门基础课。正文、标题和术语均可检索。',
+      searchCount: (h, t, s) => `${h} 个章节匹配 · ${t} 个术语 · ${s} 项来源（每类展示有上限）`,
+      searchTerm: '术语', searchSource: '来源',
+      searchNone: '没有找到匹配内容。可尝试较短关键词，如“状态”“量化”“页表”。',
+    },
+  };
+  const lang = (root.document && document.documentElement.lang || 'zh').slice(0, 2).toLowerCase();
+  const cur = S[lang] || {};
+  root.I18N = { lang, S, t: new Proxy({}, { get: (_, k) => (k in cur ? cur[k] : S.zh[k]) }) };
+  if (typeof module !== 'undefined' && module.exports) module.exports = root.I18N;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
