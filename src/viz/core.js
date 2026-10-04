@@ -67,6 +67,8 @@
       registry[name] = def;
     },
     has(name) { return name in registry; },
+    // Inner HTML of the first <figcaption> in an HTML string, or ''.
+    captionOf(html) { const m = /<figcaption>([\s\S]*?)<\/figcaption>/.exec(html || ''); return m ? m[1] : ''; },
     names() { return Object.keys(registry).sort(); },
     // Mounts every widget in container. Returns a function that disposes all of them.
     mountAll(container) {
@@ -75,16 +77,20 @@
         const def = registry[el.dataset.viz];
         if (!def) return;
         const ctx = context(el);
+        // The static fallback carries the numbered caption ("图 1-1 …") that the prose refers to.
+        const fallback = el.innerHTML, caption = Viz.captionOf(fallback);
         try {
           el.innerHTML = '';
           el.classList.add('viz-live');
           const cleanup = def.mount(el, ctx);
           if (typeof cleanup === 'function') ctx.cleanup = cleanup;
+          if (caption) el.insertAdjacentHTML('beforeend', '<p class="viz-caption">' + caption + '</p>');
           fitWide(el);
           ctxs.push(ctx);
         } catch (err) {
           ctx.dispose();
-          el.innerHTML = '<p class="hint">viz error: ' + esc(err.message) + '</p>';
+          el.classList.remove('viz-live');
+          el.innerHTML = fallback;
           if (root.console) console.error('viz ' + el.dataset.viz, err);
         }
       });
