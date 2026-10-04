@@ -1,0 +1,216 @@
+<div class="hook"><span class="eyebrow">먼저 비유 하나</span>
+<p>회의 내용을 기록하는 방법은 두 가지예요. 하나는 속기사예요. 말을 전부 적고, 공책은 점점 두꺼워지고, 뭔가 찾으려면 되짚어 넘겨 봐요. 다른 하나는 화이트보드예요. 크기가 정해진 판 하나뿐이라, 새 내용이 들어오면 옛 내용을 조금 지우고 고쳐 써요. 판은 언제나 같은 크기예요.</p>
+<p>8장의 어텐션은 속기사였어요. 이 장은 화이트보드 이야기예요. Strata 모델의 48개 층 중 36개 층은 <dfn>GDN</dfn>(Gated DeltaNet, 게이트 델타넷)을 써요. 층마다, 헤드마다 128 × 128짜리 "화이트보드"가 하나씩 있고, 대화가 아무리 길어져도 이 판은 커지지 않아요. 손으로 계산할 수 있는 작은 예 몇 개로, 이 판을 어떻게 지우고, 쓰고, 읽는지 살펴봐요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> GDN은 역사를 고정 크기 상태 행렬에 눌러 담아요. 토큰이 올 때마다 먼저 전체를 감쇠시키고, 현재 키로 옛 값을 읽고, "목표 값 − 옛 값"의 차이만 외적으로 되써요. 상태는 컨텍스트가 길어져도 커지지 않아요. 하지만 손실이 있고, 순서를 한 단계만 틀려도 결과가 슬며시 달라져요.</p>
+
+<h2 id="sec-1">9.1 두 가지 기억: 공책을 넘겨 보기, 화이트보드를 고쳐 쓰기</h2>
+<p>어텐션은 과거 위치마다 키와 값을 한 벌씩 남겨 두고, 필요할 때 되짚어 찾아요. 장점은 아무것도 잃지 않는다는 것이에요. 대가는 컨텍스트가 길수록 더 많이 저장하고 더 느리게 찾는다는 것이에요(8장). GDN은 다른 길을 가요. 항목별 기록을 남기지 않고, 고정 크기의 <strong>상태</strong>(state)를 유지해요. 토큰이 올 때마다 한 번씩 갱신해요. 그림 9-1을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 254" role="img" aria-label="그림 9-1: 어텐션의 KV 캐시는 컨텍스트에 비례해 늘어 262K에서 약 6 GiB가 돼요. GDN 상태는 늘 약 112 MiB예요">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">기억이 차지하는 바이트(컨텍스트 길이별)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M50 190H380M50 190V36"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M50 190L380 40"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" stroke-dasharray="7 4" d="M50 187.3H380"/>
+<text class="f-text" fill="#182f2b" x="96" y="80" font-size="12">어텐션의 KV 캐시:</text>
+<text class="f-text" fill="#182f2b" x="96" y="98" font-size="12">토큰마다 24 KiB씩 늘어요</text>
+<text class="f-text" fill="#182f2b" x="200" y="176" font-size="12">GDN 상태: 늘 약 112 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="46" y="44" font-size="12" text-anchor="end">6 GiB</text>
+<text class="f-muted" fill="#5c6d66" x="46" y="194" font-size="12" text-anchor="end">0</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="208" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="208" font-size="12" text-anchor="middle">128K</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="208" font-size="12" text-anchor="end">262K</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="230" font-size="12">KV: FP16, QSA 12개 층 기준으로 추정</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="248" font-size="12">GDN: 36개 층의 컨볼루션 이력 포함</text>
+</svg><figcaption>그림 9-1　KV 캐시는 컨텍스트와 함께 계속 늘어요. GDN의 상태는 첫 토큰부터 같은 크기예요. 대가는 고정 크기의 화이트보드에 끝없는 세부 사항을 담을 수 없다는 것이에요.</figcaption></figure>
+<aside class="primer" id="c09-rnn-state">
+<h3>순환 신경망과 "상태"</h3>
+<p>직관: 양을 셀 때 머릿속에는 숫자 하나만 있어요. "지금 몇 마리째인가". 양이 한 마리 보일 때마다 이 숫자에 1을 더해요. 양이 각각 어떻게 생겼는지 기억하지 않아도 언제든 총수를 말할 수 있어요. 이 "머릿속에 담아 둔 것"이 <dfn>상태</dfn>(state)예요.</p>
+<p>정의: 시스템이 매 단계 "옛 상태 + 새 입력 → 새 상태"로 갱신하는 것을 hₜ = f(hₜ₋₁, xₜ)로 써요. 디지털 회로의 카운터, 컴파일러 이론의 <dfn>유한 상태 기계</dfn>(finite-state machine)가 모두 이 모양이에요. f를 학습할 수 있는 신경망으로 바꾸면 <dfn>순환 신경망</dfn>(RNN)이 돼요.</p>
+<p>핵심 성질이 두 가지 있어요. 첫째, 상태 크기가 고정이라 단계마다 작업량은 지금까지 몇 단계를 왔는지와 상관없이 O(1)이에요. 단어 n개짜리 글을 읽는 데는 O(n)이 들고, 어텐션의 O(n²)보다 싸요. 둘째, 크기가 고정이라는 것은 <strong>손실이 있다</strong>는 뜻이에요. "양을 세던 사람"은 총수는 말해 주지만 17번째 양이 무슨 색이었는지는 말하지 못해요. 옛 RNN의 난제가 바로 "오래된 일을 기억하지 못한다"였어요. GDN 같은 새 모델은 더 큰 행렬 상태와 더 영리한 쓰기 규칙으로 이것을 완화해요. 하지만 손실이 있다는 점은 바뀌지 않아요.</p>
+<p>공학적인 결과가 하나 더 있어요. 상태는 앞으로만 가요. t번째 단계의 상태를 받았다고 해서 t − 2번째 단계를 일반적으로 <strong>거꾸로 구할 수는 없어요</strong>. 쓸 때 옛 정보 일부를 이미 지워 버렸기 때문이에요. 되돌리려면 미리 스냅샷을 저장해 두거나, 처음부터 다시 실행해야 해요.</p>
+<p>이 장과의 관계: Strata의 GDN 층 36개는 층마다 자기 상태를 하나씩 갖고, 토큰을 하나씩 따라 앞으로 나아가요.</p>
+<p class="further">더 읽기: <a href="https://ko.wikipedia.org/wiki/%EC%88%9C%ED%99%98_%EC%8B%A0%EA%B2%BD%EB%A7%9D" target="_blank" rel="noopener noreferrer">위키백과: 순환 신경망</a> · <a href="https://ko.wikipedia.org/wiki/%EC%9C%A0%ED%95%9C_%EC%83%81%ED%83%9C_%EA%B8%B0%EA%B3%84" target="_blank" rel="noopener noreferrer">위키백과: 유한 상태 기계</a> · <a href="https://en.wikipedia.org/wiki/Recurrent_neural_network" target="_blank" rel="noopener noreferrer">Wikipedia: Recurrent neural network</a></p>
+</aside>
+<p>Strata에서는 48개 층 중 36개가 GDN이에요.<span class="ev ev-code">코드 사실</span>[S04] 세션 상태는 GDN 층마다 재귀 상태와 컨볼루션 이력(convolution history)을 따로 저장해요. 중간 계산용 임시 버퍼는 36개 층이 한 벌을 함께 쓰지만, 상태는 층마다 한 벌씩이어야 해요. "재귀"가 곧 핵심이기 때문이에요.[S13](<code>session.cpp</code> 38–44번째 줄) 새 대화가 시작되면 모든 상태를 0으로 지워요.[S13] GDN 층에는 "위치"라는 인자가 아예 없어요. 토큰마다 입력은 그 수열뿐이고, 토큰 사이에서 앞으로 전해지는 것은 이 상태예요(<code>layer.hpp</code> 513–515번째 줄).</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> GDN 층 하나를 상태 기계로 보세요. 상태는 128 × 128 부동소수점 행렬 48개이고, 입력은 현재 토큰의 벡터이고, 전이 함수는 이 장의 점화식이에요. 《디지털 논리》의 순차 회로와 같은 추상화예요. 조합 논리가 다음 상태를 계산하고, 레지스터가 현재 상태를 저장해요.</p>
+
+<h2 id="sec-2">9.2 외적: 표 전체를 한 번에 고쳐 쓰기</h2>
+<p>화이트보드는 행렬이에요. "키 k → 값 v"라는 관계를 여기에 어떻게 쓸까요? 답은 외적이에요.</p>
+<aside class="primer" id="c09-outer-product">
+<h3>외적과 랭크 1 업데이트</h3>
+<p>3장의 내적은 두 벡터를 <strong>수 하나</strong>로 바꿔요. q · k = Σ qᵢkᵢ. <dfn>외적</dfn>(outer product)은 반대로 두 벡터를 <strong>표 하나</strong>로 바꿔요. k vᵀ의 i행 j열은 kᵢ × vⱼ예요. k가 수 3개, v가 수 2개이면 외적은 3 × 2 표예요. 칼럼 뒤의 그림 9-2를 보세요.</p>
+<p>이 표에는 특징이 있어요. 모든 행이 v의 배수예요(i번째 행 = kᵢ × v). 모든 행이 "같은 방향을 가리켜서", 선형대수에서는 이 표의 <dfn>랭크</dfn>(rank, 계수)가 1이라고 해요. 그래서 외적 하나를 행렬에 더하는 것을 <dfn>랭크 1 업데이트</dfn>라고 불러요. S ← S + k vᵀ.</p>
+<p>랭크 1 업데이트는 왜 기억에 알맞을까요? 같은 k로 "읽으면" v가 그대로 돌아오기 때문이에요. 읽는 방법은 Sᵀk예요. 각 열을 k와 내적해요. S = k vᵀ이고 k의 길이가 1이면 Sᵀk = v × (k · k) = v예요. 키들이 서로 수직이면(내적이 0) 각자 써 넣은 내용이 서로 방해하지 않아요. 겹치는 부분이 있으면 서로 섞여요.</p>
+<p>대가도 직관적이에요. 랭크 1 업데이트 한 번은 표의 모든 칸을 건드려요. S × S번의 곱셈-덧셈이에요. 하지만 현재의 k, v 한 쌍에만 의존하고, 과거를 되짚어 볼 필요가 없어요.</p>
+<p>이 장과의 관계: GDN은 토큰마다 값 헤드마다 랭크 1 업데이트를 한 번씩 해요. 화이트보드 하나는 128 × 128이에요.</p>
+<p class="further">더 읽기: <a href="https://ko.wikipedia.org/wiki/%EC%99%B8%EC%A0%81" target="_blank" rel="noopener noreferrer">위키백과: 외적</a> · <a href="https://ko.wikipedia.org/wiki/%EA%B3%84%EC%88%98_%28%EC%84%A0%ED%98%95%EB%8C%80%EC%88%98%ED%95%99%29" target="_blank" rel="noopener noreferrer">위키백과: 계수(선형대수학)</a> · <a href="https://ko.wikipedia.org/wiki/%ED%96%89%EB%A0%AC" target="_blank" rel="noopener noreferrer">위키백과: 행렬</a> · <a href="https://en.wikipedia.org/wiki/Outer_product" target="_blank" rel="noopener noreferrer">Wikipedia: Outer product</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 242" role="img" aria-label="그림 9-2: k = [1, 0, 2], v = [2, 3]의 외적은 3행 2열 표이고, 모든 행이 v의 배수예요">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">v = [2, 3]</text>
+<rect class="f-soft" fill="#e5f1df" x="170" y="24" width="56" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="198" y="44" font-size="13" text-anchor="middle">2</text>
+<rect class="f-soft" fill="#e5f1df" x="230" y="24" width="56" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="258" y="44" font-size="13" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="120" y="44" font-size="12" text-anchor="middle">k</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="62" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="84" font-size="13" text-anchor="middle">1</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="100" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="138" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="160" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="170" y="62" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="198" y="84" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="62" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="258" y="84" font-size="13" text-anchor="middle">3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="100" width="56" height="34" rx="3"/><text class="f-muted" fill="#5c6d66" x="198" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="100" width="56" height="34" rx="3"/><text class="f-muted" fill="#5c6d66" x="258" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-accent" fill="#136d5a" x="170" y="138" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="198" y="160" font-size="13" text-anchor="middle">4</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="138" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="258" y="160" font-size="13" text-anchor="middle">6</text>
+<text class="f-text" fill="#182f2b" x="296" y="84" font-size="12">= 1 × v</text>
+<text class="f-text" fill="#182f2b" x="296" y="122" font-size="12">= 0 × v</text>
+<text class="f-text" fill="#182f2b" x="296" y="160" font-size="12">= 2 × v</text>
+<text class="f-text" fill="#182f2b" x="20" y="196" font-size="12">i행 j열 = kᵢ × vⱼ</text>
+<text class="f-text" fill="#182f2b" x="20" y="216" font-size="12">모든 행이 v의 배수라서 랭크는 1이에요</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="236" font-size="12">상태에 더하면 S ← S + k vᵀ, 랭크 1 업데이트예요</text>
+</svg><figcaption>그림 9-2　외적은 두 벡터를 "엮어서" 표 하나로 만들어요. 표 속의 정보는 사실 k와 v 두 줄의 수뿐이라서 랭크 1이라고 해요.</figcaption></figure>
+
+<h2 id="sec-3">9.3 델타 규칙: 먼저 옛 값을 읽고, 차이만 쓰기</h2>
+<p>가장 소박한 쓰기 방법은 매번 k vᵀ를 더하는 것이에요. 문제는 같은 키를 두 번 쓰면 두 값이 <strong>겹쳐 쌓인다</strong>는 것이에요. 2 × 2 화이트보드에서 해 봐요. 먼저 "사과"(키 [1, 0])를 [2, 3]으로 쓰고, 그다음 사과를 [5, 1]로 고쳐요. 단순 덧셈이면 화이트보드 첫 행은 [2, 3] + [5, 1] = [7, 4]가 되고, 읽어 보면 [7, 4]예요. 어느 쪽도 아니에요.</p>
+<p><dfn>델타 규칙</dfn>(delta rule)은 이렇게 해요. 쓰기 전에 이 키로 먼저 읽어서 화이트보드에 이미 무엇이 있는지 확인해요(v̂라고 써요). 그런 다음 "목표 − 옛 값"의 차이 δ = v − v̂만 써요. 사과를 두 번째로 쓸 때 v̂ = [2, 3]이고 δ = [5, 1] − [2, 3] = [3, −2]예요. 더하면 첫 행이 [5, 1]이 되고, 읽으면 새 값이 그대로 나와요. 그림 9-3을 보세요.</p>
+<div class="viz" data-viz="delta-memory"><figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="그림 9-3: 사과를 2, 3으로 쓴 뒤 5, 1로 고쳐요. 단순 덧셈은 7, 4를 읽고, 델타 규칙은 5, 1을 읽어요">
+<text class="f-text" fill="#182f2b" x="200" y="16" font-size="12" text-anchor="middle">사과 → [2, 3] 쓰기, 그다음 사과 → [5, 1]로 수정</text>
+<text class="f-text" fill="#182f2b" x="100" y="42" font-size="13" font-weight="600" text-anchor="middle">단순 덧셈</text>
+<rect class="f-warn" fill="#9e5d24" x="30" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="77" font-size="14" text-anchor="middle">7</text>
+<rect class="f-warn" fill="#9e5d24" x="104" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="137" y="77" font-size="14" text-anchor="middle">4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="30" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="63" y="121" font-size="14" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="104" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="137" y="121" font-size="14" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="100" y="160" font-size="12" text-anchor="middle">사과 읽기 = [7, 4]</text>
+<text class="f-warn" fill="#9e5d24" x="100" y="176" font-size="12" text-anchor="middle">새것과 옛것이 겹쳐요</text>
+<text class="f-text" fill="#182f2b" x="300" y="42" font-size="13" font-weight="600" text-anchor="middle">델타 규칙</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="77" font-size="14" text-anchor="middle">5</text>
+<rect class="f-accent" fill="#136d5a" x="304" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="337" y="77" font-size="14" text-anchor="middle">1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="263" y="121" font-size="14" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="304" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="337" y="121" font-size="14" text-anchor="middle">0</text>
+<text class="f-text" fill="#182f2b" x="300" y="160" font-size="12" text-anchor="middle">사과 읽기 = [5, 1]</text>
+<text class="f-text" fill="#182f2b" x="300" y="176" font-size="12" text-anchor="middle">정확해요</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="198" font-size="12">델타의 두 번째 쓰기: 옛 값 v̂ = [2, 3]</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="218" font-size="12">차이 δ = [5, 1] − [2, 3] = [3, −2] → 첫 행 [5, 1]</text>
+</svg><figcaption>그림 9-3　같은 키를 두 번 쓰기. 단순 덧셈은 새 값과 옛 값을 겹쳐 쌓아요. 델타 규칙은 옛 값을 먼저 빼고 쓰므로, 읽으면 최신 값이 나와요.</figcaption></figure></div>
+<p>실제 GDN에는 손잡이가 하나 더 있어요. 쓰기 강도 β예요. 차이에 β를 곱한 다음 써요. δ = β(v − v̂). β = 1은 "새 값으로 완전히 바꾸기"이고, β = 0.25는 "새 값 쪽으로 4분의 1만 옮기기"예요. β는 0과 1 사이여야 해서 층이 먼저 시그모이드(sigmoid)를 거치게 하고, 커널은 이 단계를 맡지 않아요(7장에서 이 계약을 다뤘어요).[S17]</p>
+<p>2 × 2 화이트보드에는 수가 4개뿐이에요. 쓰는 키가 많을수록, 키끼리 겹칠수록 서로 방해가 심해져요. 위의 시뮬레이터에서 사과, 바나나, 오렌지를 차례로 쓰면 오렌지는 정확하게 읽히지만 사과와 바나나는 변해요. 실제 화이트보드는 128 × 128이라 간섭이 훨씬 작아요. 하지만 "고정 크기 = 손실"이라는 이치는 같아요.</p>
+
+<h2 id="sec-4">9.4 게이트 감쇠: 순서를 한 단계만 틀려도 결과가 달라져요</h2>
+<p>화이트보드에는 "잊기"도 필요해요. 토큰이 올 때마다 GDN은 먼저 화이트보드 전체에 감쇠 계수(decay factor) α를 곱하고, 그다음 델타 쓰기를 해요. α가 1에 가까우면 옛 기억은 거의 바래지 않아요. α가 0에 가까우면 거의 빈 판에서 시작해요. 값 헤드마다 자기 α가 있고, 현재 토큰으로 그때그때 계산해요. α = e<sup>gate</sup>.[S17]</p>
+<p>gate는 softplus(…) × ssm_a로 계산해요(<code>layer.hpp</code> 14번째 줄). softplus의 출력은 0 이상이고, ssm_a는 모델 안의 값 헤드별 계수예요. ssm_a가 음수이기만 하면 gate는 0 이하이고 α는 0과 1 사이에 놓여요. "단계마다 옛 기억을 할인한다"는 뜻이에요.</p>
+<p>값 헤드 하나의 한 단계를 모두 쓰면 이래요. 상태 S는 "키 차원 × 값 차원" 행렬이에요 <span class="ev ev-code">코드 사실</span>[S17]:</p>
+<ol>
+<li>감쇠: S̄ = α S</li>
+<li>옛 값 읽기: v̂ = S̄ᵀ k</li>
+<li>차이 계산: δ = β (v − v̂)</li>
+<li>쓰기: S′ = S̄ + k δᵀ</li>
+<li>출력: o = S′ᵀ q</li>
+</ol>
+<p>GDN의 헤더 파일은 감쇠가 랭크 1 업데이트<strong>보다 먼저</strong>여야 한다고 특별히 강조하고, 이것을 못 박는 테스트도 있어요.[S17] 순서가 왜 이렇게 중요할까요? 행렬을 수 하나로 줄여서 손으로 계산해 봐요. 옛 상태 S = 2, α = 0.5, k = 1, v = 3, β = 0.25, q = 1이에요.</p>
+<ul>
+<li><strong>먼저 감쇠, 그다음 쓰기</strong>(계약): S̄ = 1, v̂ = 1, δ = 0.25 × (3 − 1) = 0.5, S′ = 1.5, 출력 1.5.</li>
+<li><strong>먼저 쓰기, 그다음 감쇠</strong>(오류): v̂ = 2, δ = 0.25 × (3 − 2) = 0.25, 쓰고 나면 2.25, 다시 0.5를 곱하면 1.125.</li>
+</ul>
+<p>두 결과 모두 그럴듯하고, 유한하고, 범위를 벗어나지 않아요. 하지만 모델에 맞는 것은 하나뿐이에요. 잘못된 순서는 <strong>방금 써 넣은 새 정보</strong>까지 할인해요. "적자마자 일부를 잊는" 셈이에요. 아래 도구로 값을 바꿔 보세요. 양쪽을 동시에 계산해 줘요.</p>
+<div class="viz" data-viz="gdn-order"><figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="그림 9-4: 같은 값으로 먼저 감쇠하고 쓰면 1.5, 먼저 쓰고 감쇠하면 1.125가 나와요">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">S = 2, α = 0.5, k = 1, v = 3, β = 0.25, q = 1</text>
+<rect class="f-soft" fill="#e5f1df" x="8" y="26" width="188" height="170" rx="8"/>
+<text class="f-text" fill="#182f2b" x="102" y="48" font-size="13" font-weight="600" text-anchor="middle">감쇠 → 쓰기(계약)</text>
+<text class="f-text" fill="#182f2b" x="18" y="76" font-size="12">S̄ = 0.5 × 2 = 1</text>
+<text class="f-text" fill="#182f2b" x="18" y="100" font-size="12">v̂ = 1 × 1 = 1</text>
+<text class="f-text" fill="#182f2b" x="18" y="124" font-size="12">δ = 0.25 × (3 − 1) = 0.5</text>
+<text class="f-text" fill="#182f2b" x="18" y="148" font-size="12">S′ = 1 + 1 × 0.5 = 1.5</text>
+<text class="f-text" fill="#182f2b" x="18" y="178" font-size="13" font-weight="600">출력 o = 1.5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="204" y="26" width="188" height="170" rx="8"/>
+<text class="f-warn" fill="#9e5d24" x="298" y="48" font-size="13" font-weight="600" text-anchor="middle">쓰기 → 감쇠(오류)</text>
+<text class="f-text" fill="#182f2b" x="210" y="76" font-size="12">v̂ = 2 × 1 = 2</text>
+<text class="f-text" fill="#182f2b" x="210" y="100" font-size="12">δ = 0.25 × (3 − 2) = 0.25</text>
+<text class="f-text" fill="#182f2b" x="210" y="124" font-size="12">쓰고 나면 = 2 + 0.25 = 2.25</text>
+<text class="f-text" fill="#182f2b" x="210" y="148" font-size="12">S′ = 0.5 × 2.25 = 1.125</text>
+<text class="f-warn" fill="#9e5d24" x="210" y="178" font-size="13" font-weight="600">출력 o = 1.125</text>
+</svg><figcaption>그림 9-4　순서가 다르면 결과가 달라요. 잘못된 순서는 방금 써 넣은 0.25까지 절반으로 깎아요.</figcaption></figure></div>
+<p>이 1차원 예는 테스트를 짜기에도 좋은 재료예요. 세 가지 경계 조건이 각각 한 가지를 검증해요. α = 0이면 옛 기억이 모두 지워져요. β = 0이면 아무것도 쓰지 않아요. k = 0이면 어떤 키도 고쳐 쓰이지 않아요. 이 세 경우에 두 순서가 같을 때도 있고 다를 때도 있어요. 구현이 몰래 순서를 바꿨는지 검사하기에 딱 좋아요.</p>
+
+<h2 id="sec-5">9.5 왜 병렬이 되고, 왜 안 되는가</h2>
+<p>다섯 단계 공식을 돌아보면 눈에 잘 띄지 않는 사실이 하나 있어요. 고정된 값 헤드 h와 값 차원 j에 대해, 각 단계는 화이트보드의 j번째 열의 수만 건드려요. 옛 값 읽기는 키 차원 i를 따라 합하고, 쓰기도 j번째 열만 고쳐요. 서로 다른 열 사이에는 주고받는 것이 전혀 없어요.<span class="ev ev-code">코드 사실</span>[S17] 그래서 스레드 하나가 열 하나를 독점해서 처음부터 끝까지 계산할 수 있고, 점화식 전체에서 동기화 장벽이 하나도 필요하지 않아요. 그림 9-5를 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="그림 9-5: 같은 토큰 안에서는 화이트보드의 열마다 다른 스레드가 병렬로 계산해요. 이웃한 토큰 사이는 반드시 순서대로 진행해요">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">토큰 하나 안에서: 열마다 스레드 하나</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="94" y="26" width="30" height="120"/><rect class="f-accent" fill="#136d5a" x="128" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="162" y="26" width="30" height="120"/><rect class="f-accent" fill="#136d5a" x="196" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="230" y="26" width="30" height="120"/>
+<text class="f-muted" fill="#5c6d66" x="75" y="164" font-size="12" text-anchor="middle">j=0</text>
+<text class="f-muted" fill="#5c6d66" x="143" y="164" font-size="12" text-anchor="middle">j=2</text>
+<text class="f-muted" fill="#5c6d66" x="211" y="164" font-size="12" text-anchor="middle">j=4</text>
+<text class="f-muted" fill="#5c6d66" x="54" y="40" font-size="12" text-anchor="end">i=0</text>
+<text class="f-muted" fill="#5c6d66" x="54" y="140" font-size="12" text-anchor="end">i=S−1</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M276 30V142M270 134L276 144L282 134"/>
+<text class="f-text" fill="#182f2b" x="288" y="80" font-size="12">키 차원 i를 따라</text>
+<text class="f-text" fill="#182f2b" x="288" y="98" font-size="12">합산과 쓰기</text>
+<text class="f-text" fill="#182f2b" x="20" y="192" font-size="12" font-weight="600">토큰 사이: 반드시 하나씩 차례로</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="65" y="224" font-size="12" text-anchor="middle">상태 Sₜ</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="195" y="224" font-size="12" text-anchor="middle">상태 Sₜ₊₁</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="325" y="224" font-size="12" text-anchor="middle">상태 Sₜ₊₂</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M110 219H148M140 213L148 219L140 225M240 219H278M270 213L278 219L270 225"/>
+</svg><figcaption>그림 9-5　병렬은 "열"에서, 직렬은 "시간"에서 일어나요. 한 단계 안에서는 128 × 48개 열을 동시에 계산할 수 있어요. 하지만 t + 1번째 단계는 t번째 단계의 상태를 기다려야 해요.</figcaption></figure>
+<p>병렬 스레드가 메모리를 읽을 때 보조를 맞추도록, Strata는 상태의 저장 순서를 참조 구현의 (키 차원, 값 차원, 헤드)에서 (키 차원, 헤드, 값 차원)으로 바꿨어요. 이웃한 스레드가 이웃한 주소를 읽게 하려는 것이에요. 상태는 런타임 버퍼이지 가중치가 아니라서 배치를 자유롭게 고를 수 있어요. 다만 헤더 파일은 두 배치가 같은 수 세 개를 색인하기 때문에 섞어 써도 오류가 나지 않는다고 특별히 경고해요.[S17]</p>
+<p>하지만 "열이 병렬"이라고 해서 "토큰이 병렬"인 것은 아니에요. t + 1번째 단계의 상태는 t번째 단계에 의존하니, 시간 방향으로는 여전히 사슬 하나예요. 병렬인 것은 한 단계 안의 일이지, 단계와 단계 사이가 아니에요.</p>
+<p>헤드 짝짓기에도 사연이 있어요. GDN에는 키/쿼리 헤드가 16개, 값 헤드가 48개 있고, 값 헤드 h는 h % 16번째 키 헤드와 짝이 돼요(나머지 연산).[S17] 8장의 GQA는 정수 나눗셈을 썼어요. 두 모듈의 약속이 정반대예요. "범용 멀티 헤드 매핑 함수"를 하나 만들어 여기저기 재사용하면 오히려 틀려요.</p>
+<p>마지막으로 계산을 해 봐요. GDN 층 하나의 주 상태는 128 × 128 × 48개의 FP32 수예요. 3,145,728바이트이고, 딱 3 MiB예요. 36개 층이면 108 MiB예요. 여기에 컨볼루션 이력(층마다 채널 10,240개 × 3열 × 4바이트 = 120 KiB)을 더하면 합계 약 112.2 MiB예요.<span class="ev ev-est">교육용 추정</span>(크기는 [S04]에서 나왔고, 층마다의 부동소수점 수는 <code>session.cpp</code> 41–44번째 줄을 보세요.) 이 수는 첫 토큰에서 262,144번째 토큰까지 변하지 않아요. 하지만 모델 전체의 상태는 아니에요. QSA 층의 KV 캐시는 여전히 컨텍스트와 함께 늘어나요.</p>
+<p>덧붙이면, GDN 헤더 파일 첫머리의 설명은 "48개 층이 GDN이고 12개 층이 QSA"라고 적었어요. 합치면 60개 층이라서 실제 36 + 12 = 48과 맞지 않아요.[S17] 이 책은 실행 가능한 구조 정의와 세션의 상태 할당을 기준으로 삼고, 낡은 주석을 모델의 사실로 취급하지 않아요.[S04][S13]</p>
+
+<h2 id="sec-6">9.6 직접 해 보기: 1차원 GDN, 그리고 "롤백"이 얼마나 어려운가</h2>
+<p>이 장의 인터랙티브 실험 「재귀 업데이트 한 번」을 열어 보세요. GDN을 스칼라 상태 하나로 줄여서, 올바른 업데이트 순서와 잘못된 순서를 나란히 보여 줘요. 세 가지를 해 보세요.</p>
+<ol>
+<li>α = 0, β = 0, k = 0으로 놓고, 9.4절의 세 경계 성질을 하나씩 확인하세요.</li>
+<li>두 순서의 결과가 같아지는 값을 찾아 보세요. 그다음 일반적으로는 왜 다른지 설명해 보세요.</li>
+<li>이 장의 「순서가 정말 중요해요」로 돌아가서 α를 1로 끌어 보세요. 두 순서가 여전히 다를까요? 공식으로 이유를 설명해 보세요.</li>
+</ol>
+<p>상태가 앞으로만 간다는 사실은 추측 디코딩(18, 19장)에서 실제 문제가 돼요. 엔진은 먼저 싼 방법으로 몇 단어를 추측하고(Strata는 모델에 딸린 MTP 층을 써요), 그다음 48개 층 전체로 한꺼번에 검증해서, 틀린 것은 되돌려요.[S02] KV 캐시는 쉬워요. 틀린 위치의 키-값이 그대로 남아 있어도 괜찮고, 다음에 이 위치를 처리할 때 덮어쓰면 돼요. 하지만 GDN의 상태는 이미 틀린 단어로 고쳐 써졌으니 단순히 "카운터만 되돌릴" 수 없어요. Strata의 방법은 이래요. 검증 윈도는 GDN 상태를 <strong>건드리지 않아요</strong>. 앞의 n개 단어를 수락하기로 확정한 뒤에, 윈도에 저장해 둔 입력으로 이 n개 단어를 다시 실행해서 컨볼루션 이력과 재귀 상태를 앞으로 진행시켜요.<span class="ev ev-code">코드 사실</span>[S08] 그림 9-6을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 238" role="img" aria-label="그림 9-6: 드래프트를 거부할 때 KV 캐시는 나중에 잘못된 위치를 덮어쓰면 돼요. GDN 상태는 그대로 두고, 저장해 둔 입력으로 수락된 단어를 다시 실행해요">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">드래프트 토큰 3개를 검증하고 앞 2개를 수락해요</text>
+<text class="f-text" fill="#182f2b" x="20" y="42" font-size="12">KV 캐시(위치별 저장)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="50" width="86" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="63" y="70" font-size="12" text-anchor="middle">커밋됨</text>
+<rect class="f-accent" fill="#136d5a" x="112" y="50" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="155" y="70" font-size="12" text-anchor="middle">드래프트 1 ✓</text>
+<rect class="f-accent" fill="#136d5a" x="204" y="50" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="247" y="70" font-size="12" text-anchor="middle">드래프트 2 ✓</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="296" y="50" width="86" height="30" rx="4"/><text class="f-warn" fill="#9e5d24" x="339" y="70" font-size="12" text-anchor="middle">드래프트 3 ✗</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="100" font-size="12">✗ 위치는 그대로 두어요.</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="116" font-size="12">다음에 이 위치를 처리할 때 덮어써요</text>
+<text class="f-text" fill="#182f2b" x="20" y="134" font-size="12">GDN 상태(한 벌뿐)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="142" width="104" height="34" rx="4"/><text class="f-text" fill="#182f2b" x="72" y="164" font-size="12" text-anchor="middle">검증 땐 그대로</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M124 159H142M134 153L142 159L134 165"/>
+<rect class="f-soft" fill="#e5f1df" x="144" y="142" width="146" height="34" rx="4"/><text class="f-text" fill="#182f2b" x="217" y="164" font-size="12" text-anchor="middle">드래프트 1, 2 재실행</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M290 159H308M300 153L308 159L300 165"/>
+<rect class="f-accent" fill="#136d5a" x="310" y="142" width="76" height="34" rx="4"/><text class="f-on" fill="#ffffff" x="348" y="164" font-size="12" text-anchor="middle">새 상태</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="202" font-size="12">재실행에는 검증 윈도에 저장해 둔 입력을 써요</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="224" font-size="12">위치 카운터만 되돌리면 상태에 드래프트 3의 흔적이 남아요</text>
+</svg><figcaption>그림 9-6　KV 캐시는 위치별로 저장하니 틀리면 덮어쓸 수 있어요. GDN 상태는 하나뿐이라, 틀리면 지워서 되돌릴 수 없어요. 그래서 Strata는 먼저 건드리지 않고, 확정한 뒤에 수락된 단어만 다시 실행해요.</figcaption></figure>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>GDN은 고정 크기의 상태 행렬로 역사를 기억해요. 층마다 값 헤드마다 128 × 128이고, 36개 층을 합치면 약 112 MiB예요. 컨텍스트가 길어져도 커지지 않아요. 대가는 손실이 있고 앞으로만 간다는 것이에요.</li>
+<li>토큰 하나의 한 단계: 먼저 감쇠 S̄ = αS, 옛 값 읽기 v̂ = S̄ᵀk, 차이 계산 δ = β(v − v̂), 외적으로 쓰기 S′ = S̄ + kδᵀ. 먼저 감쇠하고 나중에 쓰는 것이 계약이에요. 거꾸로 하면 새 정보까지 할인돼요.</li>
+<li>한 단계 안에서 화이트보드의 열들은 서로 무관해서, 열마다 스레드 하나로 병렬 계산할 수 있어요. 토큰과 토큰 사이는 여전히 직렬 사슬이에요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: "GDN 상태 크기가 고정이니까 모델 전체의 메모리도 컨텍스트와 함께 늘지 않고, 마음대로 롤백할 수도 있다."</strong></p>
+<p>고정인 것은 GDN 층 36개의 상태뿐이에요. QSA 층 12개의 KV 캐시는 그대로 컨텍스트와 함께 늘어나요. 크기가 고정이라고 해서 "거꾸로 구할 수 있다"는 뜻도 아니에요. 쓸 때 옛 정보가 일부 지워졌으므로, 더 이른 상태로 돌아가려면 미리 스냅샷을 저장해 두거나 이미 아는 상태에서 다시 실행해야 해요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 텐서 모양 전체, 읽기 쉽게 틀리는 계약들, 점화식을 테스트하는 방법</summary>
+<h3>GDN 점화식 한 번의 전체 표기</h3>
+<p><code>gdn.hpp</code>는 한 단계를 이런 줄들로 설명해요(상태는 참조 구현의 인덱스에 따라 st[i, j, h]로 써요).[S17]</p>
+<ul>
+<li>dec = exp(gate), 값 헤드마다 수 하나. st = state × dec</li>
+<li>sk[h, j] = Σᵢ st[i, j, h] × k[idx[h]][i] (옛 값 읽기)</li>
+<li>d[h, j] = (v[h, j] − sk[h, j]) × beta[h] (차이)</li>
+<li>st[i, j, h] += k[idx[h]][i] × d[h, j] (랭크 1 쓰기)</li>
+<li>o[h, j] = Σᵢ st[i, j, h] × q[idx[h]][i] (읽어 내기)</li>
+</ul>
+<p>여기서 idx[h] = h % h_k, h_k = 16, h_v = 48, S = 128이에요. 모든 줄이 (j, h) 열 하나만 건드려요. 이것이 "열마다 스레드 하나, 장벽 불필요"의 근거예요.[S17]</p>
+<h3>읽기 쉽게 틀리는 입력 계약 네 가지</h3>
+<ul>
+<li><strong>q와 k는 이미 L2 정규화를 거쳤고, q에는 이미 1/√S가 곱해져 있어요.</strong> llama.cpp의 두 경로가 이 계수를 서로 다른 곳에서 곱하므로, 호출하는 쪽이 책임져요.[S17] L2 정규화의 ε은 제곱합에 더해야 하고, 너비로 나누면 안 돼요. 안 그러면 √128 ≈ 11.3배 어긋나요(7장).[S17]</li>
+<li><strong>gate는 지수를 취하기 전의 값이에요.</strong> dec = exp(gate)는 커널 안에서 계산해요.[S17]</li>
+<li><strong>beta는 층이 먼저 시그모이드를 거쳐요.</strong> 커널의 계약은 d = (v − sk) × beta이고, 받는 값은 이미 분수여야 해요. 투영의 원시 값을 그대로 넘기면 쓰기 강도가 한계 없이 커지고 양수도 음수도 될 수 있어요.[S17]</li>
+<li><strong>v는 정규화하지 않아요.</strong> q와 k만 해요(<code>layer.hpp</code> 23번째 줄).</li>
+</ul>
+<p>층의 마지막 단계는 y = rms_norm(o) × ssm_norm × sigmoid(z)예요. 헤드마다 따로 RMS 정규화를 하고, 여기에 쓰는 것은 sigmoid예요. qwen3.5가 쓴 SiLU가 아니에요.[S17]</p>
+<h3>컨볼루션 이력: 작은 상태가 하나 더 있어요</h3>
+<p>점화식 전에 10,240개 채널이 길이 4의 짧은 컨볼루션을 먼저 지나요. 이 컨볼루션은 앞의 3열 입력을 기억해야 하고, "가장 오래된 것이 앞"인 순서로 배열해요. 컨볼루션 커널의 0번째 계수는 가장 오래된 열에 곱하고, 새 입력은 마지막 열에 놓여요. 가중치는 GGML의 고유 배치로 저장하고, tap이 가장 빠르게 변하는 차원이에요. 참조 구현의 행 우선 순서와 달라요.[S17] 이 3열 이력도 재귀 상태와 같아요. 층마다 한 벌씩이고 토큰을 따라 앞으로 가는 상태라서, 롤백할 때 똑같이 처리해야 해요.[S08]</p>
+<h3>점화식을 테스트하는 방법</h3>
+<p>첫째는 경계 테스트예요. α = 0으로 망각을 검사하고, β = 0으로 쓰지 않음을 검사하고, k = 0으로 키 없는 업데이트를 검사하고, "먼저 감쇠, 나중에 쓰기"의 순서 테스트도 해요(GDN의 참조 구현에는 이것을 못 박는 성질이 따로 있어요).[S17]</p>
+<p>둘째는 스냅샷과 재실행 테스트예요. 고정된 수열 하나를 처리하고, t번째 단계의 상태를 저장하고, 두 단계를 더 간 다음, 스냅샷을 복원해서 그 두 단계를 다시 실행해요. 중단 없이 쭉 계산한 결과와 비트 단위로 같아야 해요. 추측 디코딩의 커밋 로직이 기대는 것이 바로 이 성질이에요.[S08]</p>
+<p>셋째는 헤드 매핑 테스트예요. 나머지 연산과 정수 나눗셈, 두 짝짓기 모두 모양이 맞는 출력을 낼 수 있어요. 테스트는 둘을 구별할 수 있는 데이터를 써야 해요. 안 그러면 잘못 쓴 것을 영영 찾지 못해요.[S17]</p>
+<p>최종 상태에서 더 이른 상태를 "거꾸로 구하려" 하지 마세요. 감쇠가 어떤 방향을 0에 가깝게 곱해 버렸을 수 있고, 델타 쓰기가 옛 값을 덮어썼어요. 필요한 정보를 저장해 두지 않았다면 이 역연산은 일반적으로 존재하지 않아요.</p>
+</details>
