@@ -1,0 +1,240 @@
+<div class="hook"><span class="eyebrow">같은 컴퓨터, 두 가지 속도</span>
+<p>Strata 업스트림의 속도 측정표에는 숫자 열이 두 개 있어요. RTX 5070이 달린 같은 컴퓨터가 32K 토큰짜리 질문을 읽을 때는 초당 2,171개를 읽는데, 답을 쓸 때는 초당 81.8개밖에 쓰지 못해요.<span class="ev ev-report">업스트림 보고</span>[S03]</p>
+<p>같은 모델, 같은 48개 층, 같은 그래픽 카드인데 왜 "읽기"가 "쓰기"보다 20배 넘게 빠를까요? 비밀은 한 단어, 바로 배치(batch)예요. 이 장에서는 여러 개를 한꺼번에 계산하면 하나씩 계산하는 것보다 왜 빠른지, 청크는 얼마나 크게 자르는 게 좋은지, 그리고 데이터 이동과 계산을 어떻게 동시에 진행하는지를 살펴봐요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 답을 쓸 때는 한 번에 토큰을 하나만 계산할 수 있어서, 가중치를 한 번 읽으면 한 번만 써요. 문제를 읽을 때는 프롬프트가 전부 이미 정해져 있어서 토큰 수천 개를 청크 하나로 묶어 계산할 수 있고, 가중치를 한 번 읽으면 청크 전체가 함께 써요. Strata는 한 청크에 토큰을 최대 8,192개까지 읽고, 현재 층이 계산하는 동안 다음 층의 전문가를 미리 옮기기 시작해요.</p>
+
+<h2 id="sec-1">16.1 문제 읽기가 답 쓰기보다 20배 넘게 빠른 이유</h2>
+<p>먼저 숫자부터 볼게요. 그림 16-1은 업스트림이 같은 컴퓨터에서 잰 두 가지 속도예요.</p>
+<figure class="fig"><svg viewBox="0 0 400 264" role="img" aria-label="그림 16-1: 업스트림 실측 프리필과 디코드의 속도. 프리필은 초당 토큰 536개에서 2171개, 디코드는 초당 74개에서 93개">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">업스트림 실측: 같은 컴퓨터의 읽기·쓰기 속도(token/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">1K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="36" width="69.1" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="135" y="46" font-size="12">536</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="52" width="11.3" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="77" y="62" font-size="12">87.3</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12">4K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="86" width="167.5" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="233" y="96" font-size="12">1,299</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="102" width="12" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="78" y="112" font-size="12">93.0</text>
+<text class="f-text" fill="#182f2b" x="10" y="148" font-size="12">32K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="136" width="280" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="346" y="146" font-size="12">2,171</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="152" width="10.6" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="77" y="162" font-size="12">81.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="198" font-size="12">128K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="186" width="271.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="338" y="196" font-size="12">2,107</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="202" width="9.5" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="76" y="212" font-size="12">73.7</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="226" width="10" height="10"/><text class="f-muted" fill="#5c6d66" x="24" y="235" font-size="12">프리필(읽기)</text>
+<rect class="f-warn" fill="#9e5d24" x="130" y="226" width="10" height="10"/><text class="f-muted" fill="#5c6d66" x="144" y="235" font-size="12">디코드(쓰기)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="256" font-size="12">RTX 5070 12 GB, Q2_0, 엔진 0.1.26</text>
+</svg><figcaption>그림 16-1　같은 컴퓨터에서 프리필(문제 읽기)이 디코드(답 쓰기)보다 약 6배에서 30배 가까이 빨라요. 막대 길이는 비율대로 그렸어요. 디코드 막대는 거의 보이지 않을 만큼 짧아요. 데이터는 업스트림 문서에서 가져왔어요. [S03]</figcaption></figure>
+<p>측정 조건은 업스트림 문서에 적혀 있어요. 그래픽 카드는 RTX 5070 12 GB, 프로세서는 Ryzen 5 7600, 메모리는 64 GB DDR5-5200, 운영체제는 Windows, 엔진은 0.1.26, 모델은 Q2_0이고, 답을 쓸 때는 추측 디코딩(speculative decoding)을 켰어요.<span class="ev ev-report">업스트림 보고</span>[S03]</p>
+<p>두 단계는 본질이 달라요. <dfn>디코드(decode)</dfn>(답 쓰기)에서는 다음 토큰이 무엇인지 이전 토큰이 정해져야 알 수 있어서 하나씩 차례로 가야 해요. <dfn>프리필(prefill)</dfn>(문제 읽기)에서는 프롬프트 속 토큰이 이미 전부 놓여 있어서 큰 덩어리째 모델에 넣을 수 있어요. 한 가지 주의할 점이 있어요. "함께 계산한다"는 "서로 몰래 본다"는 뜻이 아니에요. 5번째 토큰은 여전히 앞의 4개만 볼 수 있어요. 모델의 인과 규칙은 하나도 바뀌지 않고, 계산을 짜는 방식만 달라질 뿐이에요.</p>
+
+<h2 id="sec-2">16.2 함께 계산하면 왜 빠를까: 행렬-벡터 곱과 행렬 곱</h2>
+<p>선생님이 객관식 시험지를 채점한다고 생각해 보세요. 한 장씩 채점할 때마다 서랍에서 정답지를 꺼내 맞춰 보고 다시 넣어야 해요. 한 번에 한 장씩 오면 시간 대부분을 정답지를 꺼내고 넣는 데 써요. 한 번에 50장이 오면 정답지를 한 번 꺼내 50장을 채점하고 다시 넣으니, 장당 드는 시간이 거의 없어요.</p>
+<p>모델의 "정답지"가 바로 가중치예요. 층 하나를 계산할 때마다 그 층의 가중치를 VRAM에서 계산 유닛으로 읽어 와야 해요. 그림 16-2는 두 경우를 나란히 그린 거예요.</p>
+<figure class="fig"><svg viewBox="0 0 400 244" role="img" aria-label="그림 16-2: 행렬-벡터 곱에서는 가중치를 한 번 읽어 토큰 하나에만 쓰고, 행렬 곱에서는 가중치를 한 번 읽어 토큰 한 청크가 함께 써요">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="12" font-weight="600" text-anchor="middle">행렬-벡터 곱: 토큰 1개</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="34" width="100" height="100" rx="4"/>
+<text class="f-text" fill="#182f2b" x="70" y="89" font-size="13" text-anchor="middle">가중치 W</text>
+<text class="f-text" fill="#182f2b" x="137" y="89" font-size="14" text-anchor="middle">×</text>
+<rect class="f-accent" fill="#136d5a" x="152" y="34" width="12" height="100" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="158" y="152" font-size="12" text-anchor="middle">1열</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="176" font-size="12" text-anchor="middle">가중치를 한 번 읽어서</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="192" font-size="12" text-anchor="middle">토큰 1개에만 써요</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="12" font-weight="600" text-anchor="middle">행렬 곱: 토큰 C개</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="34" width="100" height="100" rx="4"/>
+<text class="f-text" fill="#182f2b" x="270" y="89" font-size="13" text-anchor="middle">가중치 W</text>
+<text class="f-text" fill="#182f2b" x="335" y="89" font-size="14" text-anchor="middle">×</text>
+<rect class="f-accent" fill="#136d5a" x="346" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="358" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="370" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="382" y="34" width="9" height="100" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="368" y="152" font-size="12" text-anchor="middle">C열</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="176" font-size="12" text-anchor="middle">가중치를 한 번 읽어서</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="192" font-size="12" text-anchor="middle">토큰 C개가 함께 써요</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 30V198"/>
+<text class="f-text" fill="#182f2b" x="200" y="220" font-size="12" text-anchor="middle">계산량은 토큰 수만큼 늘지만,</text>
+<text class="f-text" fill="#182f2b" x="200" y="236" font-size="12" text-anchor="middle">가중치를 옮기는 비용은 한 번만 내요</text>
+</svg><figcaption>그림 16-2　답을 쓸 때는 "행렬-벡터 곱"이라서 가중치를 한 번 읽어도 토큰 하나만 도와줘요. 문제를 읽을 때는 "행렬 곱"이라서 같은 가중치가 토큰 한 청크를 도와줘요.</figcaption></figure>
+<aside class="primer" id="c16-batching">
+<h3>배치 처리: 행렬-벡터 곱과 행렬 곱</h3>
+<p>직관: 데이터 이동과 계산은 따로 치르는 비용이에요. 토큰을 하나씩 계산하면 매번 가중치 전체를 옮겨야 해서 이동 비용이 대부분을 차지해요. 토큰 여러 개를 함께 계산하면 이동 비용은 한 번만 내고 계산은 하나도 줄지 않아요. 그러면 "바이트 하나를 옮길 때마다 하는 계산"이 늘어나요. 5장에서 이 비율을 산술 강도(arithmetic intensity)라고 불렀어요. 이 값이 프로그램이 대역폭에 막히는지, 연산 능력에 막히는지를 정해요.</p>
+<p>정의: 층 하나의 가중치는 m × n 행렬 W예요. 토큰 하나의 입력은 길이 n인 벡터 x이고, W·x를 계산하는 걸 <dfn>행렬-벡터 곱(GEMV)</dfn>이라고 해요. 가중치 m × n개를 읽고, 곱하고 더하는 연산을 약 2mn번 해요. 토큰 C개의 벡터를 n × C 행렬 X로 세워 놓고 W·X를 계산하는 걸 <dfn>행렬 곱(GEMM)</dfn>이라고 해요. 가중치는 여전히 m × n개만 읽는데, 계산은 약 2mnC번이 돼요. 산술 강도가 약 C배로 올라가요.</p>
+<p>구체적인 숫자 하나: Strata의 추측 디코딩 컨트롤러에는 기본 표가 있어요. "토큰 n개의 밀집(dense) 부분을 동시에 계산하면 토큰 하나일 때의 몇 배 시간이 드는가"를 적어 둔 표예요. 토큰 2개는 1.05배, 4개는 1.45배, 8개는 3.0배예요.<span class="ev ev-code">코드 사실</span> 즉 토큰 8개를 함께 계산하면 하나당 평균 3.0 ÷ 8 ≈ 38%만 들어요.<span class="ev ev-est">교육용 추정</span></p>
+<p>이 장과의 관계: 문제를 읽을 때는 C가 수천이 될 수 있어서 읽기가 훨씬 빨라요. 배치 처리에도 대가가 있어요. 청크 전체의 중간 결과를 담을 임시 저장 공간이 더 필요하고, 청크 하나가 끝나는 시간도 길어져요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%ED%96%89%EB%A0%AC" target="_blank" rel="noopener noreferrer">위키백과: 행렬</a> · <a href="https://ko.wikipedia.org/wiki/%ED%96%89%EB%A0%AC_%EA%B3%B1%EC%85%88" target="_blank" rel="noopener noreferrer">위키백과: 행렬 곱셈</a> · <a href="https://ko.wikipedia.org/wiki/BLAS" target="_blank" rel="noopener noreferrer">위키백과: BLAS(GEMV와 GEMM의 유래)</a></p>
+</aside>
+<div class="viz" data-viz="batch-reuse"><figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="그림 16-3: 토큰 n개를 밀집 계산 한 번에 넣으면 2개는 5%만 더 들고, 4개는 1.45배, 8개는 3배가 들어요. 하나씩 계산하는 n배보다 훨씬 적어요">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">토큰 n개를 함께 계산할 때, 토큰 1개 대비 걸리는 시간</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">n = 1</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="34" width="35" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="101" y="44" font-size="12">1.0배</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="49" width="35" height="12" rx="2"/>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">n = 2</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="78" width="36.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="103" y="88" font-size="12">1.05배</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="93" width="70" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="136" y="103" font-size="12">2배</text>
+<text class="f-text" fill="#182f2b" x="10" y="132" font-size="12">n = 4</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="122" width="50.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="117" y="132" font-size="12">1.45배</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="137" width="140" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="206" y="147" font-size="12">4배</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">n = 8</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="166" width="105" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="171" y="176" font-size="12">3.0배</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="181" width="280" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="346" y="191" font-size="12">8배</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="212" font-size="12">진한 막대: 업스트림 기본 실측 비율</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">연한 막대: 하나씩 계산할 때(n배)</text>
+</svg><figcaption>그림 16-3　함께 계산하는 밀집 부분은 하나씩 계산하는 것보다 훨씬 싸요. 토큰 8개를 계산하는 데 3배 시간만 들어요. 숫자는 spec/controller.hpp의 기본값이고, 주석에 따르면 업스트림의 행렬-벡터 곱 측정에서 나왔어요. 인터랙티브 버전에서는 n을 끌어서 하나씩 볼 수 있어요.</figcaption></figure></div>
+<p>Strata는 다른 곳에서도 같은 방법을 써요. 추측 디코딩의 검증 윈도우는 토큰 몇 개를 한꺼번에 넣어요. 소스 코드는 이 윈도우의 비용을 "밀집 가중치는 한 번만 읽고 T개 토큰이 함께 쓴다"고 설명해요.[S08] 혼합 잔차의 융합 읽기에도 다중 토큰 버전이 있어요. 토큰 최대 8개가 가중치를 공유하고, "가중치는 이들 전체를 위해 한 번만 읽어요".<span class="ev ev-code">코드 사실</span></p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 《컴퓨터 구조》의 "메모리 접근 지역성"과 《수치 선형대수》의 BLAS 단계(level)가 바로 이 이야기예요. BLAS-2(행렬-벡터 곱)는 대역폭에 막히고, BLAS-3(행렬 곱)이어야 연산 능력을 꽉 채워 쓸 수 있어요. 프리필은 BLAS-2 여러 번을 BLAS-3 한 번으로 묶어 줘요.</p>
+
+<h2 id="sec-3">16.3 전문가는 어떻게 묶을까: 전문가별 그룹화</h2>
+<p>밀집 부분은 쉬워요. 모든 토큰이 같은 가중치를 쓰니까요. 전문가 부분은 조금 까다로워요. 토큰마다 층마다 전문가를 10개씩 고르는데, 토큰마다 고르는 전문가가 달라요. Strata는 먼저 <strong>전문가별로 그룹을 만들어요</strong>. 같은 전문가를 고른 토큰끼리 모으면, 그 전문가의 가중치를 한 번만 읽고 한 그룹을 한꺼번에 계산해요.[S12] 그림 16-4는 축소한 예시예요.</p>
+<figure class="fig"><svg viewBox="0 0 400 256" role="img" aria-label="그림 16-4: 토큰 6개가 각각 전문가 2개를 고르고, 전문가별로 다시 묶으면 전문가마다 가중치를 한 번만 읽어 그 전문가를 고른 모든 토큰을 함께 계산해요">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12" font-weight="600">토큰 기준(예시: 토큰마다 전문가 2개 선택)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="39" y="42" font-size="12" text-anchor="middle">t1</text><text class="f-muted" fill="#5c6d66" x="39" y="58" font-size="12" text-anchor="middle">E3 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="74" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="103" y="42" font-size="12" text-anchor="middle">t2</text><text class="f-muted" fill="#5c6d66" x="103" y="58" font-size="12" text-anchor="middle">E3 E5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="138" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="167" y="42" font-size="12" text-anchor="middle">t3</text><text class="f-muted" fill="#5c6d66" x="167" y="58" font-size="12" text-anchor="middle">E1 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="231" y="42" font-size="12" text-anchor="middle">t4</text><text class="f-muted" fill="#5c6d66" x="231" y="58" font-size="12" text-anchor="middle">E1 E3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="266" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="295" y="42" font-size="12" text-anchor="middle">t5</text><text class="f-muted" fill="#5c6d66" x="295" y="58" font-size="12" text-anchor="middle">E5 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="330" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="359" y="42" font-size="12" text-anchor="middle">t6</text><text class="f-muted" fill="#5c6d66" x="359" y="58" font-size="12" text-anchor="middle">E3 E7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 70V88"/>
+<text class="f-muted" fill="#5c6d66" x="210" y="84" font-size="12">전문가별로 다시 묶기</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="96" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="113" font-size="12" text-anchor="middle">E1</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="96" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="113" font-size="12" text-anchor="middle">t3</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="96" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="113" font-size="12" text-anchor="middle">t4</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="113" font-size="12" text-anchor="end">1번 읽고 2개 계산</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="126" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="143" font-size="12" text-anchor="middle">E3</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="143" font-size="12" text-anchor="middle">t1</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="143" font-size="12" text-anchor="middle">t2</text>
+<rect class="f-soft" fill="#e5f1df" x="164" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="186" y="143" font-size="12" text-anchor="middle">t4</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="236" y="143" font-size="12" text-anchor="middle">t6</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="143" font-size="12" text-anchor="end">1번 읽고 4개 계산</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="156" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="173" font-size="12" text-anchor="middle">E5</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="156" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="173" font-size="12" text-anchor="middle">t2</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="156" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="173" font-size="12" text-anchor="middle">t5</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="173" font-size="12" text-anchor="end">1번 읽고 2개 계산</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="186" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="203" font-size="12" text-anchor="middle">E7</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="203" font-size="12" text-anchor="middle">t1</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="203" font-size="12" text-anchor="middle">t3</text>
+<rect class="f-soft" fill="#e5f1df" x="164" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="186" y="203" font-size="12" text-anchor="middle">t5</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="236" y="203" font-size="12" text-anchor="middle">t6</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="203" font-size="12" text-anchor="end">1번 읽고 4개 계산</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">계산이 끝나면 결과를 각 토큰 자리에 돌려놓고,</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="244" font-size="12">라우팅 가중치대로 더해요</text>
+</svg><figcaption>그림 16-4　전문가별 그룹화: "전문가 호출" 12번에 전문가 가중치는 4번만 읽었어요. 실제 규모는 훨씬 커서 재사용도 훨씬 많아요.</figcaption></figure>
+<p>실제 규모로 키워 볼게요. 청크 하나가 토큰 8,192개이고 토큰마다 층마다 전문가를 10개 고르면, 층 하나에 전문가 호출이 81,920번이에요. 그런데 층마다 전문가는 512개뿐이에요. 평균적으로 전문가 하나를 81,920 ÷ 512 = 160개 토큰이 함께 써요.<span class="ev ev-est">교육용 추정</span> 소스 코드 주석에도 청크가 토큰 1,024개 이상이면 층마다 전문가 512개가 "거의 전부 선택된다"고 적혀 있어요.<span class="ev ev-code">코드 사실</span></p>
+<p>그룹을 만든 뒤에 전문가는 어디서 올까요? VRAM에 캐시로 들어 있는 인기 전문가는 바로 읽어요. VRAM에 없는 전문가는 RAM(메인 메모리)의 전문가 영역에서 고정(pinned) 메모리 환형 큐(ring buffer)를 거쳐, 전용 복사 스트림으로 GPU에 올려요.[S12] 계산이 끝나면 결과를 원래 토큰 순서대로 돌려놓고, 각자의 라우팅 가중치대로 더해요. 순서를 하나라도 잘못 놓으면 결과가 다른 토큰에 더해져요.</p>
+<p>답을 쓸 때와는 역할 분담이 다르다는 점에 주의하세요. 답을 쓸 때는 히트하지 못한 전문가를 주로 CPU가 RAM에서 그 자리에서 계산해요(10장). 문제를 읽을 때는 전문가 하나를 수백, 수천 개 토큰이 함께 쓰니까 GPU로 옮겨서 한꺼번에 계산하는 쪽이 이득이에요.</p>
+
+<h2 id="sec-4">16.4 청크를 얼마나 크게 자를까: 클수록 좋을까</h2>
+<p>프롬프트는 <dfn>청크(chunk)</dfn> 단위로 잘려서 한 청크씩 읽혀요. 청크마다 48개 층을 모두 지나고 나서 다음 청크가 이어져요.[S12] 청크가 클수록 가중치와 전문가를 더 많은 토큰이 함께 쓰지만, 청크가 크다고 무조건 좋지는 않아요. 아래 교육용 모델이 이 트레이드오프를 그려 줘요.</p>
+<div class="viz" data-viz="prefill-chunk"><figure class="fig"><svg viewBox="0 0 400 238" role="img" aria-label="그림 16-5: 교육용 모델에서 청크를 토큰 1개에서 2048개로 키우면 프리필 속도가 빠르게 오르고, 그 뒤에는 상한인 초당 토큰 2500개에 가까워져요">
+<text class="f-muted" fill="#5c6d66" x="10" y="14" font-size="12">교육용 모델: 32K 프롬프트, 청크 크기 C별 프리필 속도(token/s)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="14" y="179" width="36" height="1"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="62" y="178.5" width="36" height="1.5"/>
+<rect class="f-accent" fill="#136d5a" x="110" y="174" width="36" height="6"/>
+<rect class="f-accent" fill="#136d5a" x="158" y="156.2" width="36" height="23.8"/>
+<rect class="f-accent" fill="#136d5a" x="206" y="85.8" width="36" height="94.2"/>
+<rect class="f-accent" fill="#136d5a" x="254" y="42.1" width="36" height="137.9"/>
+<rect class="f-accent" fill="#136d5a" x="302" y="41.1" width="36" height="138.9"/>
+<rect class="f-accent" fill="#136d5a" x="350" y="40.6" width="36" height="139.4"/>
+<text class="f-text" fill="#182f2b" x="32" y="172" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="80" y="172" font-size="12" text-anchor="middle">27</text>
+<text class="f-text" fill="#182f2b" x="128" y="168" font-size="12" text-anchor="middle">107</text>
+<text class="f-text" fill="#182f2b" x="176" y="150" font-size="12" text-anchor="middle">425</text>
+<text class="f-text" fill="#182f2b" x="224" y="80" font-size="12" text-anchor="middle">1,683</text>
+<text class="f-text" fill="#182f2b" x="272" y="37" font-size="12" text-anchor="middle">2,462</text>
+<text class="f-text" fill="#182f2b" x="320" y="36" font-size="12" text-anchor="middle">2,481</text>
+<text class="f-text" fill="#182f2b" x="368" y="36" font-size="12" text-anchor="middle">2,490</text>
+<text class="f-muted" fill="#5c6d66" x="32" y="196" font-size="12" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="196" font-size="12" text-anchor="middle">16</text>
+<text class="f-muted" fill="#5c6d66" x="128" y="196" font-size="12" text-anchor="middle">64</text>
+<text class="f-muted" fill="#5c6d66" x="176" y="196" font-size="12" text-anchor="middle">256</text>
+<text class="f-muted" fill="#5c6d66" x="224" y="196" font-size="12" text-anchor="middle">1024</text>
+<text class="f-muted" fill="#5c6d66" x="272" y="196" font-size="12" text-anchor="middle">2048</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="196" font-size="12" text-anchor="middle">4096</text>
+<text class="f-muted" fill="#5c6d66" x="368" y="196" font-size="12" text-anchor="middle">8192</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="214" font-size="12">가정: W = 600 ms, u = 0.4 ms, 파이프라인 켬</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="230" font-size="12">(막대 위 숫자는 token/s)</text>
+</svg><figcaption>그림 16-5　청크가 작으면 청크마다 계산량이 가중치 이동 비용을 못 감당해서, 속도가 청크 크기에 거의 비례해요. 청크가 균형점을 넘으면 속도가 연산 능력의 상한에 붙어요. 숫자는 교육용 모델에서 나왔고 Strata의 실측이 아니에요.</figcaption></figure></div>
+<p>실제 Strata는 청크를 어떻게 고를까요? 업스트림 설명은 이래요. 긴 텍스트는 큰 청크로 읽고, 청크 하나에 토큰을 최대 8,192개까지 담아요. 그래서 긴 문서를 초당 1,000개 넘는 토큰 속도로 읽을 수 있어요.[S02] <code>--prefill auto</code>로 설정하면 엔진이 후보 표에서 골라요. 빌려 쓸 수 있는 상한을 넘지 않는 범위에서 버퍼가 가장 큰 단계를 선택해요. 기본 최댓값은 8,192이고, 사용자가 직접 16,384나 32,768까지 풀 수 있어요.<span class="ev ev-code">코드 사실</span> 서버도 "문제를 읽는 데 얼마나 기다려야 하는가"를 추정할 때 청크당 최대 32,768 토큰으로 계산해요.[S15]</p>
+<p>청크가 커지면 임시 VRAM이 필요해요. 토큰 8,192개짜리 청크의 중간 결과는 꽤 많은 자리를 차지해요. Strata는 전문가 캐시에서 "빌려" 와요. 문제를 읽는 동안 캐시 끝쪽 슬롯 일부를 청크 버퍼에 빌려주고, 다 읽으면 원래 전문가를 다시 채워 넣어요. 요청마다 자기 프롬프트에 필요한 크기만큼만 빌려요.[S12] 그림 16-6은 소스 코드 주석에 적힌 실측 한 세트예요.</p>
+<figure class="fig"><svg viewBox="0 0 400 198" role="img" aria-label="그림 16-6: 12 GB 그래픽 카드로 32K 프롬프트를 읽을 때 청크 크기 4096, 6144, 8192에서 각각 초당 토큰 791개, 878개, 973개를 읽었어요">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">업스트림 소스 주석: 12 GB 그래픽 카드, Q2_0, 32K 프롬프트</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">청크 4096</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="35" width="162.6" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="258" y="48" font-size="12">791 token/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">청크 6144</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="75" width="180.4" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="276" y="88" font-size="12">878 token/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="128" font-size="12">청크 8192</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="115" width="200" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="296" y="128" font-size="12">973 token/s</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="164" font-size="12">청크 8192에서는 전문가 캐시 슬롯의 69%를 읽기 버퍼에 빌려줬어요</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="186" font-size="12">청크가 클수록 빠르고, 빌려 가는 VRAM도 늘어요</text>
+</svg><figcaption>그림 16-6　실제 엔진에서 청크를 4,096에서 8,192로 키우면 프리필이 약 23% 빨라져요. 대가로 읽는 동안 전문가 캐시 대부분을 빌려 가요. 주석에는 엔진 버전이 적혀 있지 않아요.</figcaption></figure>
+<p>속도는 973 ÷ 791 ≈ 1.23배 올랐어요.<span class="ev ev-est">교육용 추정</span> 청크를 더 키우면 조금 더 빨라져요. 주석에는 RTX 5090으로 32K 프롬프트를 읽은 예가 있어요. 8,192짜리 청크로는 초당 5,624 토큰, 한 청크(32,768)로 통째로 읽으면 초당 6,465 토큰이에요. 하지만 VRAM이 충분히 커야 해서 기본값으로는 켜지 않아요.<span class="ev ev-code">코드 사실</span></p>
+<p>청크가 너무 작아도 안 돼요. 소스 주석에 따르면 청크가 약 1,000 토큰보다 작으면 엔진이 다른 커널 세트로 바꿔서 Q2_0의 출력이 달라져요. 그래서 "전문가를 모두 옮기는" 모드의 하한은 1,024예요.<span class="ev ev-code">코드 사실</span> 또 엔진은 청크가 시작되기 전에 "멈출까?"를 한 번 확인해요. 그래서 청크가 클수록 요청을 취소한 뒤 기다려야 하는 시간도 길어져요.[S12]</p>
+
+<h2 id="sec-5">16.5 파이프라인: 이 층이 계산하는 동안 다음 층은 이미 오는 중</h2>
+<p>청크를 잘랐어도 청크마다 48개 층을 지나가야 해요. 층마다 일이 두 가지예요. 이 층에서 쓸 전문가를 GPU로 옮기고, 그다음 계산해요. 두 일을 번갈아 하면 GPU가 계산할 때 복사 통로는 놀고, 옮길 때는 GPU가 놀아요. Strata는 둘을 겹쳐요. 현재 층이 어텐션을 계산하는 동안 다음 층의 전문가는 PCIe로 이미 옮겨 오는 중이에요.[S02]</p>
+<aside class="primer" id="c16-pipeline">
+<h3>파이프라인: 여러 공정을 동시에 돌리기</h3>
+<p>직관: 빨래는 "세탁"과 "건조" 두 단계예요. 세탁기와 건조기가 한 대씩 있으면, 첫 번째 바구니가 건조기에 들어갈 때 두 번째 바구니를 세탁기에 넣는 게 영리한 방법이에요. 바구니마다 걸리는 시간은 그대로인데, 빨래 더미 전체가 끝나는 시간은 크게 줄어요.</p>
+<p>정의: 일 하나를 앞뒤로 이어진 공정 몇 개로 나누고, 공정마다 다른 부품이 맡아요. i번째 일이 2번 공정을 하는 동안 i+1번째 일은 이미 1번 공정을 시작해요. 이게 <dfn>파이프라인(pipeline)</dfn>이에요. 안정되고 나면 전체 시간은 각 공정의 합이 아니라 가장 느린 공정이 정해요. 그림 16-7은 공정 2개, 층 4개짜리 예예요.</p>
+<p>파이프라인의 전제는 두 가지예요. 두 공정이 서로 다른 부품을 써야 해요(여기서는 복사 엔진과 계산 유닛). 그리고 중간에 "옮겨 왔지만 아직 계산 안 한" 것을 담아 둘 버퍼가 있어야 해요. 버퍼가 너무 작으면 옮기는 쪽이 멈춰서 기다려요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%ED%8C%8C%EC%9D%B4%ED%94%84%EB%9D%BC%EC%9D%B8_%28%EC%BB%B4%ED%93%A8%ED%8C%85%29" target="_blank" rel="noopener noreferrer">위키백과: 파이프라인(컴퓨팅)</a> · <a href="https://ko.wikipedia.org/wiki/%EB%AA%85%EB%A0%B9%EC%96%B4_%ED%8C%8C%EC%9D%B4%ED%94%84%EB%9D%BC%EC%9D%B8" target="_blank" rel="noopener noreferrer">위키백과: 명령어 파이프라인</a> · <a href="https://en.wikipedia.org/wiki/Pipeline_(computing)" target="_blank" rel="noopener noreferrer">Wikipedia: Pipeline (computing)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="그림 16-7: 이동과 계산을 번갈아 하면 8칸의 시간이 걸리고, 겹치면 5칸의 시간이면 돼요">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12" font-weight="600">겹치지 않음: 옮기고 나서 계산, 번갈아</text>
+<text class="f-text" fill="#182f2b" x="390" y="16" font-size="12" text-anchor="end">8칸</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="38" font-size="12">이동</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="58" font-size="12">계산</text>
+<rect class="f-soft" fill="#e5f1df" x="60" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="79.5" y="38" font-size="12" text-anchor="middle">1층</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="119.5" y="58" font-size="12" text-anchor="middle">1층</text>
+<rect class="f-soft" fill="#e5f1df" x="140" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="159.5" y="38" font-size="12" text-anchor="middle">2층</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="199.5" y="58" font-size="12" text-anchor="middle">2층</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="239.5" y="38" font-size="12" text-anchor="middle">3층</text>
+<rect class="f-accent" fill="#136d5a" x="260" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="279.5" y="58" font-size="12" text-anchor="middle">3층</text>
+<rect class="f-soft" fill="#e5f1df" x="300" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="319.5" y="38" font-size="12" text-anchor="middle">4층</text>
+<rect class="f-accent" fill="#136d5a" x="340" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="359.5" y="58" font-size="12" text-anchor="middle">4층</text>
+<text class="f-text" fill="#182f2b" x="10" y="96" font-size="12" font-weight="600">겹침: l층을 계산하는 동안 l+1층을 이동</text>
+<text class="f-text" fill="#182f2b" x="390" y="96" font-size="12" text-anchor="end">5칸</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="118" font-size="12">이동</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="138" font-size="12">계산</text>
+<rect class="f-soft" fill="#e5f1df" x="60" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="79.5" y="118" font-size="12" text-anchor="middle">1층</text>
+<rect class="f-soft" fill="#e5f1df" x="100" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="119.5" y="118" font-size="12" text-anchor="middle">2층</text>
+<rect class="f-soft" fill="#e5f1df" x="140" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="159.5" y="118" font-size="12" text-anchor="middle">3층</text>
+<rect class="f-soft" fill="#e5f1df" x="180" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="199.5" y="118" font-size="12" text-anchor="middle">4층</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="119.5" y="138" font-size="12" text-anchor="middle">1층</text>
+<rect class="f-accent" fill="#136d5a" x="140" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="159.5" y="138" font-size="12" text-anchor="middle">2층</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="199.5" y="138" font-size="12" text-anchor="middle">3층</text>
+<rect class="f-accent" fill="#136d5a" x="220" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="239.5" y="138" font-size="12" text-anchor="middle">4층</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="164" font-size="12">Strata: 현재 층이 어텐션을 계산하는 동안</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="182" font-size="12">다음 층의 전문가가 PCIe로 이미 오는 중</text>
+</svg><figcaption>그림 16-7　두 공정의 길이가 같을 때 겹치면 8칸의 시간을 5칸으로 줄일 수 있어요. 층이 많을수록 "공정 하나 값만 낸다"에 가까워져요.</figcaption></figure>
+<p>Strata의 버퍼가 바로 그 고정 메모리 환형 큐예요. 소스 주석에는 이 큐의 크기가 얼마나 중요한지 적혀 있어요. 8,192 청크로 Q2_0을 읽을 때 환형 큐 슬롯이 96개면 초당 1,153 토큰, 384개로 늘리면 초당 1,294 토큰이에요. "다음 층의 전문가가 이번 층의 어텐션 단계에서 이미 도착해 있을 수 있기" 때문이에요.<span class="ev ev-code">코드 사실</span></p>
+<p>GPU가 여러 장이면 파이프라인에 한 겹이 더 생겨요. 카드마다 층 구간 하나를 맡고, 앞 구간이 청크 하나의 중간 결과를 뒤 구간에 넘기면 곧바로 다음 청크를 읽기 시작해요. 인터페이스 주석의 표현으로는, 뒤 구간이 c번째 청크를 읽을 때 앞 구간은 이미 c+1번째 청크를 읽고 있어요.[S12]</p>
+<p>마지막으로 인수인계를 잊으면 안 돼요. 청크를 다 읽으면 엔진은 세션 상태를 "토큰을 하나씩 읽어 여기까지 왔다면 있어야 할 모습"으로 남겨야 해요. GDN의 재귀 상태와 합성곱 이력, QSA의 KV 캐시와 indexer, PLE의 이력 중 어느 하나도 빠지면 안 돼요. 그래야 답 쓰기가 다음 토큰에서 끊김 없이 이어져요.[S12]</p>
+
+<h2 id="sec-6">16.6 직접 해 보기: 빠르면서 메모리에 들어가는 청크 찾기</h2>
+<ol>
+<li>먼저 위의 인터랙티브 그림(그림 16-5)을 가지고 놀아 보세요. C를 1에서 8192까지 끌면서 막대가 어디서 "상승"에서 "평탄"으로 바뀌는지 보세요. 그다음 파이프라인을 끄고, C = 1024에서 각각 한 번씩 재생해서 두 번의 "청크당 시간"을 비교해 보세요.</li>
+<li>이 책의 인터랙티브 실험 「청크 분할과 공간 트레이드오프」를 열어 보세요. 명시적으로 주어진 재사용 곡선 아래에서 청크마다의 속도와 필요한 공간을 함께 계산해 줘요. 먼저 절대적으로 가장 빠른 청크를 찾고, VRAM 예산을 넘는 것을 빼고 나서 "가능한 최적"과 "절대 최적"이 얼마나 다른지 비교해 보세요. 실험의 재사용 곡선과 토큰당 공간은 사람이 정한 파라미터이고, Strata의 할당기가 아니에요.</li>
+<li>생각해 보세요. 같은 프롬프트를 C = 1과 C = 8192로 읽으면 마지막 상태가 같아야 할까요? "한 걸음 더"를 읽고 나서 답해 보세요.</li>
+</ol>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>답 쓰기는 행렬-벡터 곱이라서 가중치를 한 번 읽어도 토큰 하나만 돕고, 문제 읽기는 행렬 곱이라서 한 번 읽은 가중치가 청크 전체를 도와요. 같은 컴퓨터에서 읽기가 쓰기보다 20배 넘게 빠를 수 있어요.</li>
+<li>전문가 부분은 전문가별 그룹화로 배치를 만들어요. 같은 전문가를 고른 토큰끼리 모으면 가중치를 한 번만 읽어요. 청크가 클수록 재사용이 늘지만, VRAM을 더 빌려야 하고 취소도 느려져요. Strata는 기본적으로 청크당 토큰 최대 8,192개예요.</li>
+<li>파이프라인은 이동과 계산을 겹쳐요. 현재 층이 계산하는 동안 다음 층의 전문가는 이미 오는 중이에요. 전체 시간은 가장 느린 공정이 정해요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: "문제를 읽을 때는 토큰이 다 정해져 있으니 서로 볼 수 있어서 인과 규칙은 신경 쓰지 않아도 돼요."</strong></p>
+<p>아니에요. 배치는 계산을 짜는 방식만 바꿀 뿐, 모델의 규칙은 바꾸지 않아요. i번째 토큰은 여전히 앞의 토큰만 볼 수 있어요. 프리필 단계에서도 인과 마스크를 그대로 쓰고, 재귀 층도 청크 전체를 순서대로 끝까지 지나가요. 입력이 "이미 정해져 있다"는 것과 의미상 "미래를 봐도 된다"는 것은 전혀 다른 이야기예요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 상태 인계, 반올림 차이, VRAM을 빌려 써도 안전한 조건</summary>
+<h3>상태 인계는 마지막 벡터 하나만 남기는 게 아니에요</h3>
+<p>청크 하나를 다 읽으면 넘겨야 하는 상태에는 GDN의 재귀 상태와 합성곱 상태, QSA의 KV와 indexer, PLE의 이력, 그리고 드래프트 층과 관련된 상태가 있어요.[S12][S13] 마지막 줄의 logits만 남기고 이 상태들을 버리면, 다음 답 쓰기는 더 이상 같은 이력 위에서 이어지지 않아요.</p>
+<p>강력한 테스트가 하나 있어요. 같은 토큰열을 C = 1, C = 7, C = 32처럼 서로 다른 방식으로 잘라 읽고, 청크 경계에서의 상태와 그 뒤에 고정된 이력 아래에서의 출력을 비교해요. 가장 잘 틀리는 샘플은 이런 거예요. 길이가 청크 경계를 정확히 넘는 경우, 마지막 청크가 꽉 차지 않은 경우, 프롬프트가 아주 짧은 경우, 읽는 도중에 취소된 경우, 다 읽자마자 바로 답을 쓰는 경우예요.</p>
+<h3>배치는 반올림을 바꾸지만, "부동소수점"을 만능 핑계로 쓰면 안 돼요</h3>
+<p>배치 계산과 하나씩 계산은 서로 다른 반올림 경로를 탈 수 있어요. 업스트림 문서에 예가 있어요. IQ 계열 모델에서 CPU가 토큰 하나의 전문가를 계산할 때는 ggml의 내적을 쓰고, 토큰 여러 개를 계산할 때는 Strata가 만든 다중 토큰 커널을 써요. 두 방식은 반올림이 약간 달라서, 온도가 0이어도 같은 프롬프트가 드래프트에 따라 똑같이 그럴듯한 다른 답을 낼 수 있어요. 그래서 업스트림은 모든 그룹이 다중 토큰 커널을 쓰게 하는 스위치를 제공해요.[S03]</p>
+<p>그러니 C = 1과 큰 C의 출력이 글자 단위로 똑같지 않아도, 곧바로 어느 한쪽에 버그가 있다고 단정할 수 없고, "그냥 부동소수점이야" 한마디로 넘어가서도 안 돼요. 같은 고정 이력에서 중간 텐서, 선택된 전문가와 인덱스 번호, 오차가 몇 번째 층부터 커지는지를 비교하고, 미리 정한 허용 오차와 품질 기준으로 판단해야 해요. 상태 위치, 인과 마스크, 인덱스 번호처럼 "수치가 아닌 계약"은 따로 정확하게 확인해야 해요.</p>
+<h3>VRAM을 빌려 쓸 때의 안전 조건</h3>
+<p>청크 버퍼가 전문가 캐시에서 슬롯을 빌리면 문제가 두 가지 생겨요. 첫째, 빌리는 동안 빌려 간 슬롯에 있던 전문가는 이미 거기 없으니, 라우팅 테이블이 그 전문가를 "히트"로 다루면 안 돼요. 소스 코드에서는 이 전문가들이 문제를 읽는 동안 RAM에서 옮겨 오는 방식으로 바뀌고, 다 읽으면 다시 채워 넣어요.[S12] 둘째, 채워 넣기가 끝난 다음에야 이 슬롯에 어떤 전문가가 들어 있다고 다시 선언할 수 있어요. "예산을 합쳐도 VRAM을 넘지 않는다"는 계산만으로는 빌려 쓰기가 안전하다는 걸 증명하지 못해요. 증명해야 하는 건 "어느 순간에도 라벨과 슬롯 안의 바이트가 일치한다"예요.</p>
+<h3>문서에 나오는 여러 가지 청크 크기</h3>
+<p>업스트림의 여러 곳에 서로 다른 청크 크기가 나와요. 설명 문서는 "최대 8,192 토큰"이라고 써요.[S02] 상세 문서의 오래된 단락에는 2,048이 아직 적혀 있어요. 서버는 대기 시간을 추정할 때 상한을 32,768로 써요.[S15] 엔진의 자동 단계는 기본 최대가 8,192이고, 직접 32,768까지 풀 수 있어요.<span class="ev ev-code">코드 사실</span> 이 숫자들은 서로 모순되지 않아요. 서로 다른 질문(기본값, 과거 값, 상한)에 답하고 있어요. 이 책은 공식을 쓸 때 청크 크기를 항상 변수 C로 적어요.</p>
+<h3>교육용 비용식의 한계</h3>
+<p>이 장의 인터랙티브 그림과 「청크 분할과 공간 트레이드오프」 실험은 단순화한 비용식을 써요. 형태는 T ≈ N ÷ r(C) ＋ ⌈N ÷ C⌉ × 청크당 고정 비용이고, r(C)는 명시적으로 정한 재사용 곡선이에요. 이 식은 "고정 비용이 분산된다"와 "공간 제약"이라는 두 가지를 설명할 수 있지만, Strata의 실제 처리량을 예측할 수는 없어요. 실제 속도는 전문가 히트율, PCIe 대역폭, CPU 복사 스레드, 컨텍스트가 길어지면서 늘어나는 어텐션 계산량 같은 것에도 달려 있어요.</p>
+<p>GPU 심화 실험을 할 때는 매번 C만 바꾸고 나머지 설정(양자화, KV 형식, 드래프트, 입력, 캐시 상태)은 그대로 둔 채 속도와 품질의 변화를 설명해 보세요.</p>
+</details>

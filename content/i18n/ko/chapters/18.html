@@ -1,0 +1,167 @@
+<div class="hook"><span class="eyebrow">"반칙" 같은 속도 향상</span>
+<p>Strata 설명 문서는 속도를 높이는 방법 하나를 이렇게 소개해요. 작고 빠른 도우미가 다음 단어 몇 개를 먼저 추측하면, 큰 모델이 그 추측을 한 번에 모두 검사해서 동의하는 것만 남기고 그다음 단어는 자기가 써요. "도우미는 추측만 하고 모든 단어는 큰 모델이 결정하기 때문에, 답변 품질은 그대로이고 속도만 1.6–1.8배 빨라져요."<span class="ev ev-report">업스트림 보고</span>[S02]</p>
+<p>추측이 어떻게 계산을 빠르게 하면서 답은 바꾸지 않을 수 있을까요? 추측이 틀리면 어떻게 될까요? 틀린 추측을 따라 이미 계산해 버린 것은 어떻게 "되돌릴" 수 있을까요? 이 장에서는 Strata의 검증 윈도우로 이 세 가지 질문에 답해요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 드래프트 층이 토큰을 최대 3개 먼저 추측하면, 목표 모델은 그것들을 윈도우 하나에 넣어 한 번에 계산하고, 왼쪽부터 비교해서 처음으로 다른 곳까지만 수락하고 나머지는 모두 폐기해요. 목표 모델이 다른 곳에서 자기 선택을 내놓기 때문에, 라운드마다 최소 1개는 나아가요. 이건 CPU의 추측 실행, 그리고 데이터베이스의 "먼저 임시로 쓰고, 나중에 커밋하고, 틀리면 롤백한다"와 같은 생각이에요.</p>
+
+<h2 id="sec-1">18.1 먼저 추측하고 나중에 검증: 틀려도 손해 없어요</h2>
+<p>16장에서 배웠어요. 토큰 여러 개를 한 번에 계산하면 가중치를 한 번만 읽으니까 하나씩 계산하는 것보다 훨씬 싸요. 그런데 답을 쓸 때는 다음 토큰이 무엇인지 이전 토큰이 정해져야 알 수 있어서 배치로 묶을 수 없어요. <dfn>추측 디코딩(speculative decoding)</dfn>은 이렇게 풀어요. 값싼 방법으로 다음 토큰 몇 개를 먼저 <strong>추측</strong>하고, "지난 결과 ＋ 이 추측들"을 한 배치로 묶어 큰 모델에 한 번에 계산시켜요. 큰 모델은 모든 위치에서 "나라면 여기에 이걸 쓰겠다"를 말해 주니까, 그걸 추측과 비교하면 어느 것이 맞았는지 알 수 있어요.</p>
+<p>추측을 맡은 쪽을 <dfn>드래프트(draft)</dfn>, 최종 결정을 맡은 큰 모델을 <dfn>목표 모델(target)</dfn>이라고 해요. Strata의 드래프트는 모델에 들어 있는 MTP(다중 토큰 예측) 층 하나에서 나오고, 최대 3개를 추측해요. 답이 앞 문맥을 되풀이하는 경우(코드를 고치거나 원문을 인용할 때)에는 앞 문맥에서 최대 5개를 "베껴" 올 수도 있는데, 이걸 prompt lookup이라고 해요. 검증 한 번에 48개 층을 모두 지나고, 라운드마다 평균 토큰 2.4–3.2개씩 나아가요.[S02] 그림 18-1에서 비교해 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="그림 18-1: 일반 생성은 라운드마다 토큰 1개만 나와요. 추측 후 검증은 한 라운드에 4행을 검증하고, 이번에는 드래프트 2개를 수락하고 목표 자신의 1개를 더해 모두 3개 나아가요">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">일반 생성: 라운드마다 토큰 1개</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="28" width="88" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="54" y="44" font-size="12" text-anchor="middle">1라운드</text><text class="f-muted" fill="#5c6d66" x="54" y="61" font-size="12" text-anchor="middle">→ 1개</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="106" y="28" width="88" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="150" y="44" font-size="12" text-anchor="middle">2라운드</text><text class="f-muted" fill="#5c6d66" x="150" y="61" font-size="12" text-anchor="middle">→ 1개</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="28" width="88" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="246" y="44" font-size="12" text-anchor="middle">3라운드</text><text class="f-muted" fill="#5c6d66" x="246" y="61" font-size="12" text-anchor="middle">→ 1개</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="298" y="28" width="88" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="342" y="44" font-size="12" text-anchor="middle">4라운드</text><text class="f-muted" fill="#5c6d66" x="342" y="61" font-size="12" text-anchor="middle">→ 1개</text>
+<text class="f-text" fill="#182f2b" x="10" y="100" font-size="13" font-weight="600">추측 후 검증: 4행 검증, 이번엔 3개 전진</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="110" width="380" height="44" rx="8"/>
+<rect class="f-accent" fill="#136d5a" x="18" y="117" width="86" height="30" rx="5"/><text class="f-on" fill="#ffffff" x="61" y="137" font-size="12" text-anchor="middle">지난 결과</text>
+<rect class="f-accent" fill="#136d5a" x="111" y="117" width="86" height="30" rx="5"/><text class="f-on" fill="#ffffff" x="154" y="137" font-size="12" text-anchor="middle">드래프트 1 ✓</text>
+<rect class="f-accent" fill="#136d5a" x="204" y="117" width="86" height="30" rx="5"/><text class="f-on" fill="#ffffff" x="247" y="137" font-size="12" text-anchor="middle">드래프트 2 ✓</text>
+<rect class="f-warn" fill="#9e5d24" x="297" y="117" width="86" height="30" rx="5"/><text class="f-on" fill="#ffffff" x="340" y="137" font-size="12" text-anchor="middle">드래프트 3 ✗</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="178" font-size="12">드래프트 2개를 수락하고, 3번째 칸은 목표가 직접 골라요.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="196" font-size="12">그래서 이번 라운드는 3개 전진해요</text>
+</svg><figcaption>그림 18-1　같은 48개 층을 한 번 지나도 일반 생성은 토큰 1개만 나오고, 추측 후 검증은 1개에서 k＋1개까지 나올 수 있어요. 틀린 추측은 계산만 헛수고가 될 뿐, 답에는 들어가지 않아요.</figcaption></figure>
+<p>라운드 하나에 토큰을 몇 개 더 검증하는 게 왜 별로 부담이 안 될까요? 소스 코드에 계산이 있어요. 윈도우 하나의 비용은 "밀집 가중치는 한 번만 읽고 T개 토큰이 함께 쓰는 것"에, T개 토큰이 각자 히트하지 못한 전문가의 합집합을 CPU에서 계산하는 비용을 더한 거예요. 실제 디코딩 기록으로 보면, CPU에서 계산할 미스 전문가는 T ＝ 2일 때 토큰 1개의 1.75배, T ＝ 3일 때 2.4배, T ＝ 4일 때 3.05배예요.[S08] 토큰 하나를 더 검증하는 한계 비용은 한 라운드를 더 도는 것보다 훨씬 작아요.</p>
+<p>추측이 얼마나 정확한지가 얼마나 버는지를 곧바로 정해요. 소스 코드 주석에 따르면 MTP 층이 1, 2, 3번째 단계에서 그리디 결과를 맞히는 비율은 각각 0.89, 0.86, 0.85예요.<span class="ev ev-code">코드 사실</span> 업스트림 문서도 출력 속도가 텍스트에 따라 달라진다고 알려 줘요. 드래프트가 많이 수락될수록 빨라지고, 같은 프롬프트에서 답이 달라지면 속도가 몇 퍼센트포인트씩 차이 나요.[S03] 매번 몇 개를 추측할지, 추측할 가치가 있는지는 19장의 주제예요.</p>
+
+<h2 id="sec-2">18.2 이어진 접두부만 수락해요</h2>
+<p>비교 규칙은 딱 하나예요. <strong>왼쪽부터 보면서 처음으로 다른 곳까지만 수락해요</strong>. 윈도우의 0번째 행은 지난 라운드에서 확정한 토큰 x이고, 그 뒤가 드래프트 d₁, d₂, d₃라고 해 봐요. 목표 모델은 "x 다음에는 a를 쓰겠다", "x, d₁ 다음에는 b를 쓰겠다"…를 계산해 내고, 차례로 비교해요.</p>
+<ul>
+<li>목표가 x 다음에 a를 골랐고 드래프트 d₁ ＝ a이면 수락해요.</li>
+<li>목표가 x, a 다음에 b를 골랐고 드래프트 d₂ ＝ b이면 수락해요.</li>
+<li>목표가 x, a, b 다음에 e를 골랐는데 드래프트 d₃ ≠ e이면 멈춰요. d₃는 폐기하고 목표 자신의 e로 바꿔요.</li>
+</ul>
+<p>Strata의 생성 루프에서 이 규칙은 코드 한 줄이에요. <code>while (a &lt; T - 1 &amp;&amp; window[a + 1] == outv[a]) ++a;</code>, 바로 뒤에 <code>ver.commit(a + 1)</code>이 와요.<span class="ev ev-code">코드 사실</span> 여기서 <code>outv[t]</code>는 윈도우의 t번째 행 다음에 목표가 고른 토큰이고, a는 수락한 드래프트 수예요. 다른 곳에서 목표가 자기 토큰을 하나 출력하기 때문에, 라운드마다 a ＋ 1개가 나아가고 최소 1개예요. 추측 컨트롤러의 주석도 "이 검증은 언제나 토큰 하나를 커밋한다"고 적고 있어요.[S09]</p>
+<p>처음으로 다른 곳 뒤의 드래프트는 왜 "맞아 보여도" 무조건 폐기할까요? 틀린 토큰 뒤에 이어서 추측한 것이라 그 전제가 이미 무너졌기 때문이에요. 아래 시뮬레이터는 바로 이 경우를 일부러 만들어 뒀어요. <strong>한 단계</strong>씩 눌러 2라운드를 따라가 보세요.</p>
+<div class="viz" data-viz="spec-verify"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="그림 18-2: 윈도우에서 첫 번째 드래프트 “우리”는 수락돼요. 두 번째 드래프트 “바다에”는 목표의 “공원에”와 달라요. 세 번째 드래프트 “가서”는 원문과 같지만 그래도 폐기돼요">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="13">지금까지: 오늘 하늘이 아주 맑아요,</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="42" font-size="12">윈도우: 0행은 지난 결과, 뒤는 드래프트</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="50" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="53" y="70" font-size="13" text-anchor="middle">,</text>
+<rect class="f-accent" fill="#136d5a" x="102" y="50" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="145" y="70" font-size="13" text-anchor="middle">우리</text>
+<rect class="f-warn" fill="#9e5d24" x="194" y="50" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="237" y="70" font-size="13" text-anchor="middle">바다에</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="50" width="86" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="329" y="70" font-size="13" text-anchor="middle">가서</text>
+<text class="f-muted" fill="#5c6d66" x="145" y="96" font-size="12" text-anchor="middle">수락</text><text class="f-muted" fill="#5c6d66" x="237" y="96" font-size="12" text-anchor="middle">불일치</text><text class="f-muted" fill="#5c6d66" x="329" y="96" font-size="12" text-anchor="middle">폐기</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="118" font-size="12">각 행 다음에 목표 모델이 고른 토큰</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="126" width="86" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="53" y="146" font-size="13" text-anchor="middle">우리</text>
+<rect class="f-warn" fill="#9e5d24" x="102" y="126" width="86" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="145" y="146" font-size="13" text-anchor="middle">공원에</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="194" y="126" width="86" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="237" y="146" font-size="13" text-anchor="middle">…</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="126" width="86" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="329" y="146" font-size="13" text-anchor="middle">…</text>
+<text class="f-text" fill="#182f2b" x="10" y="182" font-size="12">“가서”는 원문과 같지만, 틀린 “바다에” 뒤에</text>
+<text class="f-text" fill="#182f2b" x="10" y="198" font-size="12">이어졌으니 그대로 폐기해요</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="224" font-size="12">commit(2): 윈도우 앞 2행 유지, 이번 출력은 “우리 공원에”</text>
+</svg><figcaption>그림 18-2　처음으로 다른 곳까지만 비교해요. 두 번째 드래프트 “바다에”가 틀렸고, 목표는 거기에 “공원에”를 써요. 세 번째 드래프트는 우연히 원문과 같더라도 틀린 단어 뒤에 이어서 추측한 것이라 무조건 폐기돼요.</figcaption></figure></div>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 이 규칙이 옳다는 건 수학적 귀납법으로 증명할 수 있어요. 이미 커밋한 히스토리 H가 그리디 생성 결과와 같다고 해 봐요. d₁이 H 다음의 목표 선택과 같으면 H＋d₁도 그리디 결과와 같아요. 이렇게 처음으로 다른 곳까지 이어 가요. 다른 곳 뒤의 드래프트는 틀린 히스토리 위에 있어서 귀납의 고리가 끊겼으니, 받아들일 이유가 없어요. 정확성은 접두부를 따라 <strong>사슬처럼</strong> 성립하는 거지, 윈도우의 각 위치가 따로따로 체크 표시를 받는 게 아니에요.</p>
+<p>그리디일 때(매 단계 확률이 가장 높은 토큰을 고를 때), Strata의 검증 윈도우는 더 강한 보장도 해요. 윈도우의 t번째 행 결과가 일반적인 하나씩 생성에서 그 위치의 결과와 <strong>비트 단위로 같아요</strong>. 윈도우 안의 모든 커널이 토큰 하나짜리 커널이거나, 토큰마다의 산술이 토큰 하나짜리 버전과 완전히 같기 때문이에요. 그래서 "드래프트가 수락됐다"는 정확히 "일반 생성도 그것을 썼을 것이다"와 같은 뜻이에요.[S08]</p>
+
+<h2 id="sec-3">18.3 추측 실행: CPU는 진작부터 이렇게 해 왔어요</h2>
+<p>"일단 추측하고 계속 가다가, 틀리면 되돌린다"는 언어 모델이 만든 발명이 아니에요. 요즘 CPU는 이걸 1초에 수십억 번 해요.</p>
+<aside class="primer" id="c18-speculation">
+<h3>추측 실행과 분기 예측</h3>
+<p>직관: 구내식당에서 줄을 서 있는데, 앞사람이 면을 먹을지 밥을 먹을지 아직 정하지 않았어요. 그런데 조리사는 그 사람의 평소 습관을 보고 벌써 면을 삶기 시작했어요. 맞으면 기다리는 시간이 줄고, 틀리면 면은 한쪽에 치우고 다시 만들어요. 헛수고는 해도 엉뚱한 음식을 내놓지는 않아요.</p>
+<p>정의: CPU는 파이프라인으로 명령어를 실행해요(16장에서 파이프라인을 배웠어요). <code>if</code> 같은 분기를 만나면 조건이 아직 계산되지 않아서 다음에 어느 명령어를 가져올지 정해지지 않아요. <dfn>분기 예측기(branch predictor)</dfn>가 과거 기록을 보고 방향 하나를 추측하면, CPU는 추측한 방향으로 계속 실행해요. 이게 <dfn>추측 실행(speculative execution)</dfn>이에요. 핵심은 이거예요. 추측 실행의 결과는 임시 장소에 먼저 두고 <strong>정식 상태에는 쓰지 않아요</strong>. 조건이 계산되고 나서 추측이 맞으면 결과를 "퇴역(retire)"시켜(커밋해) 반영해요. 틀리면 파이프라인에 있던 그 명령어들을 비우고 올바른 방향에서 다시 시작해요.</p>
+<p>구체적인 숫자 하나: 요즘 프로세서의 분기 예측 정확도는 보통 90%를 넘어요. 그래서 "가끔 조금 헛수고하는 것"이 "매번 멈춰서 기다리는 것"보다 훨씬 이득이에요. 틀렸을 때 치르는 대가는 파이프라인이 길수록, 헛수고한 양이 많을수록 커져요.</p>
+<p>이 장과의 관계: 드래프트는 분기 예측이고, 검증 윈도우는 추측 실행이고, <code>commit(a + 1)</code>은 퇴역이에요. 양쪽이 같은 규율을 지켜요. 추측한 결과는 대조하기 전에는 효력이 생기면 안 된다는 규율이에요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%ED%88%AC%EA%B8%B0%EC%A0%81_%EC%8B%A4%ED%96%89" target="_blank" rel="noopener noreferrer">위키백과: 투기적 실행</a> · <a href="https://ko.wikipedia.org/wiki/%EB%B6%84%EA%B8%B0_%EC%98%88%EC%B8%A1" target="_blank" rel="noopener noreferrer">위키백과: 분기 예측</a> · <a href="https://ko.wikipedia.org/wiki/%EB%AA%85%EB%A0%B9%EC%96%B4_%ED%8C%8C%EC%9D%B4%ED%94%84%EB%9D%BC%EC%9D%B8" target="_blank" rel="noopener noreferrer">위키백과: 명령어 파이프라인</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="그림 18-3: CPU 분기 예측과 추측 디코딩의 다섯 단계가 하나씩 대응해요. 먼저 추측하기, 추측대로 실행하기, 대조하기, 맞으면 커밋하기, 틀리면 되돌리기">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">단계</text>
+<text class="f-text" fill="#182f2b" x="120" y="18" font-size="13" font-weight="600" text-anchor="middle">CPU 분기 예측</text>
+<text class="f-text" fill="#182f2b" x="295" y="18" font-size="13" font-weight="600" text-anchor="middle">추측 디코딩</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="28" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="48" font-size="12">추측</text><text class="f-text" fill="#182f2b" x="120" y="48" font-size="12" text-anchor="middle">분기 방향 예측</text><text class="f-text" fill="#182f2b" x="295" y="48" font-size="12" text-anchor="middle">드래프트가 토큰 k개 추측</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="62" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="82" font-size="12">실행</text><text class="f-text" fill="#182f2b" x="120" y="82" font-size="12" text-anchor="middle">예측 방향으로 실행</text><text class="f-text" fill="#182f2b" x="295" y="82" font-size="12" text-anchor="middle">윈도우째 48개 층 통과</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="96" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="116" font-size="12">대조</text><text class="f-text" fill="#182f2b" x="120" y="116" font-size="12" text-anchor="middle">조건 계산 후 비교</text><text class="f-text" fill="#182f2b" x="295" y="116" font-size="12" text-anchor="middle">목표의 선택과 비교</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="130" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="150" font-size="12">적중</text><text class="f-text" fill="#182f2b" x="120" y="150" font-size="12" text-anchor="middle">결과 퇴역, 반영</text><text class="f-text" fill="#182f2b" x="295" y="150" font-size="12" text-anchor="middle">commit(a+1)로 접두부 유지</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="164" width="380" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="184" font-size="12">실패</text><text class="f-text" fill="#182f2b" x="120" y="184" font-size="12" text-anchor="middle">파이프라인 비우기</text><text class="f-text" fill="#182f2b" x="295" y="184" font-size="12" text-anchor="middle">나머지 폐기, 덮어쓸 자리</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">공통 규율: 추측한 결과는 대조 전에는 효력이 없어요</text>
+</svg><figcaption>그림 18-3　CPU의 추측 실행과 추측 디코딩은 하나씩 대응해요. 둘 다 "추측"과 "반영"을 분리해요. 추측은 대담하게 해도 되고, 반영은 대조가 끝나야 해요.</figcaption></figure>
+
+<h2 id="sec-4">18.4 먼저 임시로 쓰고, 나중에 커밋해요: 트랜잭션처럼 상태 관리하기</h2>
+<p>어려운 부분은 "되돌리기"예요. 검증 윈도우가 T개 행을 계산할 때 모델의 여러 상태가 바뀔 수 있어요. KV 캐시가 T칸 늘고, GDN의 재귀 상태가 앞으로 나아가고, indexer(어텐션 인덱서)에는 키가 몇 개 더 생겨요. 앞의 2개 행만 수락했다면, 뒤쪽의 변경은 아무 일도 없었던 것처럼 되돌려야 해요. 이게 바로 데이터베이스의 "트랜잭션"이 풀려는 문제예요.</p>
+<aside class="primer" id="c18-transaction">
+<h3>트랜잭션의 커밋과 롤백</h3>
+<p>직관: 은행 송금은 두 단계예요. A 계좌에서 100을 빼고, B 계좌에 100을 더해요. 첫 단계를 마쳤는데 정전이 되면 어떻게 될까요? 은행은 두 단계를 하나의 <dfn>트랜잭션(transaction)</dfn>으로 묶어요. 전부 반영되거나, 아무 일도 없었던 것처럼 되거나 둘 중 하나예요.</p>
+<p>정의: 트랜잭션이 실행되는 동안의 수정은 임시 장소(로그나 복사본)에 먼저 기록되고, 바깥에서는 보이지 않아요. 전부 검사를 통과하면 <dfn>커밋(commit)</dfn>해서 수정이 한꺼번에 반영돼요. 중간에 오류가 나면 <dfn>롤백(rollback)</dfn>해서 임시 수정을 버리고 트랜잭션이 시작되기 전 상태로 돌아가요. 롤백을 구현하는 흔한 방법은 두 가지예요. 하나는 미리 <strong>스냅샷</strong>을 저장해 두었다가 오류가 나면 복원하는 거예요. 다른 하나는 <strong>입력</strong>을 기록해 두었다가, 확정된 뒤에 입력대로 다시 한 번 실행하는 거예요. 파일 시스템의 "저널링(journaling)"도 같은 생각을 써요.</p>
+<p>구체적인 예: Strata의 <code>commit(n)</code>은 "윈도우 전체를 커밋하거나 전부 롤백한다"가 아니라 "앞의 n개 행만 커밋한다"예요. 교과서의 트랜잭션보다 더 세밀해요. 한 윈도우 안에서 앞부분은 반영하고 뒷부분은 롤백해요.</p>
+<p>이 장과의 관계: 상태마다 되돌리는 방법이 달라요. 아래에서 하나씩 볼게요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EB%8D%B0%EC%9D%B4%ED%84%B0%EB%B2%A0%EC%9D%B4%EC%8A%A4_%ED%8A%B8%EB%9E%9C%EC%9E%AD%EC%85%98" target="_blank" rel="noopener noreferrer">위키백과: 데이터베이스 트랜잭션</a> · <a href="https://ko.wikipedia.org/wiki/%EB%A1%A4%EB%B0%B1" target="_blank" rel="noopener noreferrer">위키백과: 롤백</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/file-journaling.pdf" target="_blank" rel="noopener noreferrer">OSTEP: Crash Consistency: FSCK and Journaling (PDF)</a></p>
+</aside>
+<p>Strata의 검증 윈도우는 이 일을 아주 분명하게 써 놨어요. 윈도우가 실행되는 동안 T개 위치 모두에 K/V와 indexer 키를 추가하지만, GDN 상태는 <strong>건드리지 않아요</strong>. 그다음 <code>commit(n)</code>이 앞의 n개 토큰을 반영하는데, 상태마다 자기 방법이 있어요.[S08]</p>
+<figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="그림 18-4: 검증 윈도우 안에서와 커밋할 때 네 가지 상태의 처리 방식. GDN은 저장한 입력으로 재생하고, indexer는 스냅샷을 복원한 뒤 추가하고, PLE는 해당 스냅샷으로 복원하고, KV는 더 쓴 칸을 나중에 덮어써요">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">상태</text>
+<text class="f-muted" fill="#5c6d66" x="96" y="18" font-size="12">윈도우 안에서</text>
+<text class="f-muted" fill="#5c6d66" x="196" y="18" font-size="12">앞 n행 커밋 시 (n = a + 1)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="28" width="380" height="32" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="49" font-size="12" font-weight="600">GDN 재귀</text><text class="f-text" fill="#182f2b" x="96" y="49" font-size="12">건드리지 않음</text><text class="f-text" fill="#182f2b" x="196" y="49" font-size="12">저장한 입력으로 앞 n개 재생</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="64" width="380" height="32" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="85" font-size="12" font-weight="600">indexer 끝</text><text class="f-text" fill="#182f2b" x="96" y="85" font-size="12">키 T개 추가</text><text class="f-text" fill="#182f2b" x="196" y="85" font-size="12">스냅샷 복원, 수락한 키 추가</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="100" width="380" height="32" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="121" font-size="12" font-weight="600">PLE 이력</text><text class="f-text" fill="#182f2b" x="96" y="121" font-size="12">행마다 스냅샷</text><text class="f-text" fill="#182f2b" x="196" y="121" font-size="12">n−1행 뒤 스냅샷으로 설정</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="136" width="380" height="32" rx="4"/>
+<text class="f-text" fill="#182f2b" x="16" y="157" font-size="12" font-weight="600">KV 캐시</text><text class="f-text" fill="#182f2b" x="96" y="157" font-size="12">T칸 모두 기록</text><text class="f-text" fill="#182f2b" x="196" y="157" font-size="12">더 쓴 칸은 다음에 덮어쓰기</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="194" font-size="12">되돌리는 세 가지 방법: 입력 재생, 스냅샷 복원, 덮어쓰기를 기다리기</text>
+</svg><figcaption>그림 18-4　같은 "앞 n행 커밋"인데 네 가지 상태가 세 가지 방법을 써요. "카운터를 하나 줄인다"로 요약되는 방법은 하나도 없어요.</figcaption></figure>
+<ul>
+<li><strong>GDN 재귀 상태</strong>: 윈도우 안에서는 아예 바꾸지 않고, 행마다 입력만 저장해 둬요. 커밋할 때 저장한 입력으로 앞 n개 토큰을 다시 재생하면 상태가 올바른 위치까지 나아가요. "입력을 기록해 두었다가, 확정되면 다시 실행"하는 방식이에요.</li>
+<li><strong>indexer의 키</strong>: 윈도우 전에 저장한 스냅샷을 먼저 복원하고, 수락한 키를 다시 추가해요. 주석이 이유를 따로 설명해요. 거부된 키가 현재 블록이 아직 쓸 슬롯에 놓여 있을 수 있기 때문이에요. "스냅샷 ＋ 다시 하기"예요.</li>
+<li><strong>PLE 이력</strong>: n−1번째 토큰 뒤의 스냅샷으로 곧바로 설정해요.</li>
+<li><strong>KV 캐시</strong>: 더 써 둔 칸은 아무것도 안 해도 돼요. 다음 라운드에 그 위치를 다시 처리하고, 새 값이 어떤 쿼리가 읽기 전에 덮어써요.[S08] 17장에서 배운 KV 스트리밍도 같은 규칙을 지켜요. 새 토큰은 늘 RAM에 있는 원본에 쓰기 때문에 드래프트를 거부하고 나서 VRAM 슬롯을 무효로 만들 필요가 없어요.<span class="ev ev-code">코드 사실</span></li>
+</ul>
+<p>윈도우의 "행 수"와 "수락한 드래프트 수"가 1 차이 난다는 점에 주의하세요. 윈도우 0번째 행은 지난 라운드에서 확정한 토큰이고, 이것도 이번 라운드에서 상태에 써야 해요. 그래서 드래프트 a개를 수락하면 커밋하는 건 a ＋ 1개 행이에요. 생성 루프의 주석은 이렇게 말해요. "윈도우의 앞 a ＋ 1개 토큰은 이제 세션에 들어갔다. 마지막 출력은 아직 아니다. 그건 다음 라운드의 0번째 행이다."<span class="ev ev-code">코드 사실</span> 드래프트 층의 위치 카운트도 이 오프셋대로 계산해요. 위치 p의 윈도우에서 드래프트 a개를 수락하면 다음 윈도우는 p ＋ a ＋ 1에서 시작해요.[S07]</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 새로운 시퀀스 상태를 추가할 때마다 네 가지 질문에 답해야 해요. 윈도우가 실행되는 동안 이 상태에 쓰는가? <code>commit(n)</code>은 어떻게 접두부만 남기는가? 거부된 부분은 어떻게 무효로 만드는가? 비동기 읽기와 쓰기가 끝났음은 누가 확인하는가? 데이터베이스에 새 테이블을 추가할 때 그 테이블의 로그와 복구를 따져 보는 것과 똑같은 일이에요.</p>
+
+<h2 id="sec-5">18.5 샘플링할 때는 어떻게 검증할까: 목표의 샘플 결과와 정확히 같아야 해요</h2>
+<p>그리디일 때는 비교가 쉬워요. 이 행에서 확률이 가장 높은 토큰이 드래프트와 같은지만 보면 돼요. 그런데 채팅에서는 온도 샘플링을 켜 두는 경우가 많고, 매 단계가 "확률대로 하나 뽑기"예요. 샘플 결과 자체가 무작위인데 어떻게 비교할까요?</p>
+<p>Strata는 목표 모델의 샘플링을 <strong>재현할 수 있게</strong> 만들어요. 윈도우의 t번째 행의 난수는 "시드"와 이 행의 절대 위치로 정해지고, 그다음 샘플링 체인 전체(반복 페널티, top-k, top-p, min-p, 온도, 마지막으로 누적 분포에 따라 하나 뽑기)를 거쳐요. 드래프트는 이 행의 샘플 결과와 <strong>완전히 같을</strong> 때만 수락돼요. 그러면 출력은 시드에만 달려 있고 드래프트가 무엇인지와는 상관이 없어요. 드래프트는 한 라운드에 몇 걸음 나아갈지만 정해요.[S07] 행마다 반복 페널티도 "이 행 이전에 있어야 할 히스토리"를 따로 준비해서, 일반 하나씩 생성에서 센 것과 같게 세요.[S08]</p>
+<p>드래프트는 어떻게 추측해야 목표의 샘플에 더 쉽게 "맞아떨어질"까요? Strata에는 기본으로 꺼져 있는 "결합 드래프트(coupled draft)" 모드가 있어요. 드래프트 층이 가장 자신 있는 토큰을 커밋하는 대신, 목표와 같은 샘플링 체인에 목표가 <strong>쓰려는 바로 그 난수</strong>를 넣어서 뽑아요. 두 분포가 가까우면 같은 난수로 누적 분포를 따라 뽑을 때 결과가 같을 확률이 "최댓값을 들고 무작위 샘플에 부딪히는 것"보다 훨씬 커요. 목표의 샘플링은 그대로이니 출력 글자도 그대로예요.[S07] 그림 18-5는 이 아이디어를 보여 줘요.</p>
+<figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="그림 18-5: 목표 분포와 드래프트 분포를 누적 막대 두 줄로 그렸어요. 같은 난수 u = 0.42가 두 막대 모두에서 토큰 A에 떨어져요">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">확률을 한 줄로 놓고, 난수 u가 떨어진 구간을 뽑아요</text>
+<text class="f-text" fill="#182f2b" x="10" y="54" font-size="12">목표 p</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="38" width="160" height="24"/><text class="f-on" fill="#ffffff" x="144" y="55" font-size="12" text-anchor="middle">A 0.50</text>
+<rect class="f-soft" fill="#e5f1df" x="224" y="38" width="96" height="24"/><text class="f-text" fill="#182f2b" x="272" y="55" font-size="12" text-anchor="middle">B 0.30</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="38" width="48" height="24"/><text class="f-text" fill="#182f2b" x="344" y="55" font-size="12" text-anchor="middle">C</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="368" y="38" width="16" height="24"/>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="12">드래프트</text><text class="f-text" fill="#182f2b" x="10" y="121" font-size="12">q</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="94" width="144" height="24"/><text class="f-on" fill="#ffffff" x="136" y="111" font-size="12" text-anchor="middle">A 0.45</text>
+<rect class="f-soft" fill="#e5f1df" x="208" y="94" width="112" height="24"/><text class="f-text" fill="#182f2b" x="264" y="111" font-size="12" text-anchor="middle">B 0.35</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="94" width="48" height="24"/><text class="f-text" fill="#182f2b" x="344" y="111" font-size="12" text-anchor="middle">C</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="368" y="94" width="16" height="24"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" stroke-dasharray="4 3" d="M198 30V126"/>
+<text class="f-text" fill="#182f2b" x="198" y="144" font-size="12" text-anchor="middle">같은 u = 0.42: 두 막대 모두 A에 떨어져요</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="172" font-size="12">두 분포가 비슷하면 같은 u는 대체로 같은 토큰에 떨어져요</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="194" font-size="12">수락 여부는 목표의 샘플 결과로만 정해요: 다르면 폐기</text>
+</svg><figcaption>그림 18-5　결합 드래프트: 드래프트와 목표가 같은 난수로 누적 분포에서 뽑아요. 분포가 가까울수록 같은 토큰에 맞아떨어지기 쉬워요. 심판은 언제나 목표의 샘플 결과예요. 숫자는 예시예요.</figcaption></figure>
+<p>이건 추측 디코딩의 고전 논문과는 다르다는 점에 주의하세요. 고전적인 방법은 min(1, p ÷ q)의 확률로 드래프트를 수락하고, 거부되면 보정된 분포에서 하나를 다시 뽑아서 출력 분포가 목표와 완전히 같도록 보장해요.[R04] 이 책에서 읽은 Strata 코드는 이 공식이 아니라 "목표의 샘플 결과와 정확히 같다"를 써요. 두 방법은 분포 논증, 난수를 짜는 방식, 구현 조건이 모두 달라서 섞어 쓰면 안 돼요.</p>
+<p>드래프트가 무엇을 추측할 수 있는지는 현실적인 제약도 있어요. MTP 드래프트 층은 어휘의 일부분 집합에서만 토큰을 제안할 수 있어요. 엔진 0.1.27부터는 이 집합에 중국어, 일본어, 한국어 토큰이 전부 들어갔고, 업스트림 실측으로 이 언어들의 답변이 15–38% 빨라졌어요(Q2_0, RTX 5070).[S03] 한국어 사용자가 얻는 속도 향상의 일부가 여기서 나와요.</p>
+
+<h2 id="sec-6">18.6 직접 해 보기: 접두부를 직접 커밋해 보기</h2>
+<ol>
+<li>이 장의 시뮬레이터(그림 18-2)로 5라운드를 이어서 돌리고, 라운드당 평균 토큰이 몇 개 나오는지 적어 두세요. 그다음 k를 1과 5로 바꿔 각각 돌려서 세 번의 평균을 비교하세요. 생각해 보세요. k가 클수록 전부 맞았을 때 더 벌지만 검증도 더 비싸요. 그럼 최적의 k는 무엇이 정할까요? (답은 19장에 있어요.)</li>
+<li>이 책의 인터랙티브 실험 「수락된 접두부만 커밋하기」를 열어 보세요. 실제 상태 대신 장난감 재귀 s ← 0.5s ＋ t를 써요. 두 번째 드래프트를 거부당하게 만든 다음 답해 보세요. 위치 카운터만 되돌리고 재귀 상태는 복원하지 않으면 어떤 오류가 남을까요? 이 실험은 윈도우 0번째 행의 오프셋은 흉내 내지 않아요.</li>
+<li>그림 18-4를 보면서 "시퀀스 안 통계 버퍼 추가"를 위한 체크리스트를 써 보고, 이 장 연습 문제의 모범 답안과 비교해 보세요.</li>
+</ol>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>드래프트는 추측하고 목표가 결정해요. 왼쪽부터 비교해서 처음으로 다른 곳까지만 수락해요. 다른 곳 뒤의 드래프트는 우연히 맞더라도 폐기해요. 라운드마다 토큰 a ＋ 1개가 나아가고, 최소 1개예요.</li>
+<li>CPU의 추측 실행과 같은 규율이에요. 추측한 결과는 대조하기 전에는 효력이 없어요. Strata는 <code>commit(a + 1)</code>로 윈도우의 접두부만 반영해요.</li>
+<li>되돌리기는 상태마다 따로 설계해야 해요. GDN은 저장한 입력을 재생하고, indexer는 스냅샷을 복원한 뒤 추가하고, PLE는 해당 스냅샷으로 복원하고, KV는 더 쓴 칸이 덮어써지기를 기다려요. 위치만 하나 줄이는 걸로는 부족해요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: "드래프트 층은 작고 부정확하니까, 쓰면 답변 품질이 나빠져요."</strong></p>
+<p>그렇지 않아요. 드래프트는 제안만 해요. 모든 토큰은 목표 모델 자신의 선택(또는 재현 가능한 샘플 결과)과 완전히 같아야 남을 수 있어요. 추측이 부정확하면 라운드마다 나아가는 양이 줄어 속도가 느려질 뿐, 쓰인 글자는 바뀌지 않아요.[S02][S07] 업스트림이 기록한 알아 둘 예외가 하나 있어요. IQ 계열 모델을 쓰면 CPU가 토큰 하나를 계산할 때와 여러 개를 계산할 때 전문가에 서로 다른 커널 두 세트를 써서 반올림이 조금 달라요. 그래서 온도가 0이어도 같은 프롬프트가 드래프트에 따라 똑같이 그럴듯한 다른 답을 낼 수 있어요. 스위치를 켜서 모든 그룹이 다중 토큰 커널을 쓰게 하면 답이 더는 드래프트에 달려 있지 않아요.[S03]</p></div>
+
+<details class="deep"><summary>한 걸음 더: 오프셋, 비동기 커밋, 검수 체크리스트</summary>
+<h3>윈도우 안의 여러 카운트를 하나로 뭉뚱그리지 마세요</h3>
+<p>이미 커밋한 길이가 100이라고 해 봐요. 윈도우의 0번째 행은 100번째 위치의 토큰 x이고, 드래프트 d₁, d₂, d₃가 위치 101–103을 차지해요. d₁만 수락됐다면(a ＝ 1) 2개 행(위치 100과 101)을 커밋하고, 위치 101 다음에 목표가 고른 것이 다음 윈도우의 0번째 행이 돼요. 다음 윈도우는 위치 102에서 시작해요.[S07] 수학적으로는 "이번 라운드는 목표가 최소 한 걸음 나아가고, 거기에 수락한 드래프트 수를 더한다"고 말할 수 있어요. 엔지니어링에서는 윈도우 시작점, 행 번호, 다음 위치, <code>commit(n_keep)</code>의 뜻을 하나하나 확인해야 하고, "수락한 드래프트 수"와 "커밋한 행 수"를 같은 변수로 취급하면 안 돼요. 결합 드래프트의 난수 카운트도 같은 오프셋을 따라요. MTP의 c번째 칸에서 만든 드래프트는 카운터 c ＋ 1번째 행이 검증해요.[S07]</p>
+<h3>행마다의 페널티 히스토리</h3>
+<p>반복 페널티는 "이 행 이전에 어떤 토큰이 나왔는지"를 세요. 윈도우 t번째 행 이전의 히스토리는 이미 커밋한 내용에 드래프트 1부터 t까지를 더한 거예요. Strata는 윈도우의 행마다 히스토리를 따로 준비해요. 0.1.19 이전에는 0번째 행만 준비해서 드래프트 행이 쓰인 적 없는 슬롯을 읽었어요.[S08] 이런 오류는 프로그램을 멈추게 하지 않고, 페널티를 켠 상태에서 결과가 일반 생성과 슬그머니 달라지게만 만들어요.</p>
+<h3>비동기 커밋</h3>
+<p>GPU가 하나일 때 <code>commit()</code>은 기본적으로 그래프가 끝나기를 기다리지 않고 돌아와요. 다음 윈도우는 같은 스트림에서 그 뒤에 줄을 서고, 드래프트 층은 커밋이 쓴 것을 읽지 않으니까, 커밋과 다음 라운드의 드래프트가 겹쳐 실행될 수 있어요. 다른 스트림이나 호스트에서 세션을 읽고 쓰는 쪽(새 요청, 체크포인트, 스냅샷, 문제 읽기 경로, 실행 종료)은 모두 먼저 <code>wait_commit()</code>을 호출해야 해요.[S08] 14장의 "동기와 비동기"의 또 다른 예예요. 빠른 경로는 기다림을 없앴지만, 대가로 곁에서 읽는 쪽이 모두 스스로 기다리는 걸 기억해야 해요.</p>
+<h3>드래프트 층의 "꾀"가 출력에 영향을 주지 않는 이유</h3>
+<p>MTP 드래프트 층은 구현에서 여러 가지를 단순화했어요. 큰 프로젝션은 Q8_0 양자화를 쓰고, 어텐션은 본 적 있는 모든 칸에 대해 밀집 계산을 하고, 전문가 512개 전부가 VRAM에 상주해요(708 MB). 소스 코드가 분명히 말해요. 이런 선택은 드래프트의 품질에만 영향을 주고 출력에는 영향을 주지 않아요. 출력되는 토큰은 모두 검증 윈도우가 결정하기 때문이에요. 추측으로 쓴 칸도 indexer 상태에는 손대지 않고, 그 위치가 다시 처리될 때 그냥 덮어써요.<span class="ev ev-code">코드 사실</span></p>
+<h3>검수 체크리스트</h3>
+<p>추측 디코딩을 테스트할 때는 평균 수락률만 봐서는 안 돼요. 적어도 이런 경우를 덮어야 해요. 전부 거부, 전부 수락, 중간에 거부, 컨텍스트 상한 근처, 종료 토큰을 만난 경우, 중간 취소, 반복 페널티를 켠 경우, 요청 사이에서 샘플링 파라미터를 바꾼 경우예요. 비교 대상은 "같은 고정 히스토리에서 추측을 쓰지 않은 참조 결과"예요. logits, 커밋 후 상태, 최종 토큰이 모두 일치해야 해요. 시퀀스 상태를 새로 추가할 때는 18.4절의 네 가지 질문에 하나씩 답하고, 대응하는 테스트를 더하세요.</p>
+</details>
