@@ -1,18 +1,265 @@
-<h2 id="sec-1">24.1 一个请求有多个状态</h2>
-<p>教学状态机可写为 <code>QUEUED → PREFILL → DECODING → COMPLETED</code>，旁路为 CANCELLING、CANCELLED、FAILED。状态机是我们对设计的抽象，不是声称上游恰好采用这些枚举。</p>
-<p>用户断开连接后，网络层停止写回，不代表 GPU 已停止运行；进程退出，不代表所有临时文件已安全清理；返回一个错误 JSON，也不代表模型状态已可供下一请求复用。每个完成状态必须有可检查的不变量。</p>
-<h2 id="sec-2">24.2 取消的线性化点在哪里？</h2>
-<p>可将取消定义为“从某个已确认边界起，不再提交新的用户可见 token，资源最终停止使用”。如果只是设一个 flag，还未被 prefill chunk 或 decode loop 观察到，取消尚未完成。</p>
-<p><code>Prefill</code> 有逐 chunk 的 should_stop；验证器暴露 wait_commit 和 GPU 等待释放接口。[S12][S08] 后者说明故障时强制释放等待会让 verifier 拒绝之后的窗口，不能把这种不可信 drain 当成普通成功后继续服务。</p>
-<h2 id="sec-3">24.3 watchdog 要理解工作阶段</h2>
-<p>固定服务文件设置静默监控，同时对 prefill 采用与 chunk 大小和速度相关的额外等待逻辑。[S15] 原因是长 prompt 可能一段时间没有普通 token 输出。把“暂时没有文本”一律当死锁，会误杀健康请求。</p>
-<p>另一方面，永久等待会堵住 FIFO。合理诊断需要区分排队、合法长计算、I/O 慢、子进程失联与协议失步，报告状态和最后进度，而不是只有一个模糊的 timeout。</p>
-<h2 id="sec-4">24.4 例题：超时后的旧回包</h2>
-<p>请求 A 超时，服务开始请求 B。若 A 的延迟结果仍写入共享输出队列，B 可能收到 A 的 token。解决方向是请求 ID / generation 与输出归属校验；旧执行未确认结束前，不应无条件复用同一可变状态。</p>
-<p>这是扩展设计评审原则。我们没有审计上游所有输出归属路径，因此不宣称它存在这个 bug；课堂通过故意延迟的 mock 来构造风险并验证修复。</p>
-<h2 id="sec-5">24.5 工具、图像 URL 和本地文件都是信任边界</h2>
-<p>模型输出是不可信输入。工具参数应经过 schema 和权限检查；远程 URL 获取涉及出网与资源限制；本地路径读取涉及文件权限与路径范围。是否具备 SSRF、路径穿越等防护要逐入口审计，不能仅根据使用了一个安全库就断言整体安全。</p>
-<p><code>frontend.py</code> 使用 sandboxed Jinja 环境，这是模板层的具体选择，不自动证明工具执行、URL 获取与文件访问都安全。[S16] 课堂应为每一种资源建立单独威胁模型。</p>
-<h2 id="sec-6">24.6 实验与验收</h2>
-<p>在 toy 引擎中注入：prefill 中取消、输出中断、重复取消、worker 无响应、旧结果迟到、恢复后再次请求。要求没有跨请求 token、没有释放后使用、没有把失败报告为完成。</p>
-<p>本教材静态站不包含真实 inference API key，也不从浏览器直接访问你办公室的模型服务器。未来接入真实实验平台时，应另设认证、配额、作业隔离和服务端代理，不能把密钥嵌进课程页面。</p>
+<div class="hook"><span class="eyebrow">你可能注意到过</span>
+<p>聊天网页上有个“停止”按钮。你一点，字立刻不动了。可是，显卡真的停了吗？</p>
+<p>Strata 的源码里有一段很坦白的注释（问题编号 #430、#431）：以前，客户端挂断以后，那个请求还会让引擎一直忙下去，直到答案写完，或者整段提问读完。屏幕上早就停了，显卡还在为一个已经离开的人干活。这一章讲三件事：一个请求怎样出生、怎样结束；“停”字怎样一层层传到显卡；以及谁有资格让你的显卡干活。</p></div>
+<p class="tldr"><strong>一句话：</strong>一个请求要穿过浏览器、HTTP 连接、服务进程、引擎进程四层。“停止”是一个要层层传递、层层确认的信号；“认证”决定谁能把请求送进来。</p>
+
+<h2 id="sec-1">24.1 点了“停止”，到底停了什么</h2>
+<p>从你点下按钮，到显卡不再为这个请求计算，中间隔着好几层。每一层“停了”的意思都不一样，见图 24-1。</p>
+<figure class="fig"><svg viewBox="0 0 400 320" role="img" aria-label="图 24-1：一个请求穿过五层，每一层“停了”的含义都不同。上面一层停了，不代表下面一层也停了">
+<text class="f-muted" fill="#5c6d66" x="75" y="18" font-size="12" text-anchor="middle">层</text>
+<text class="f-muted" fill="#5c6d66" x="152" y="18" font-size="12">怎样才算这一层“停了”</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="28" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="55" font-size="13" font-weight="600" text-anchor="middle">浏览器</text>
+<text class="f-text" fill="#182f2b" x="152" y="55" font-size="12">不再显示新字</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="84" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="111" font-size="13" font-weight="600" text-anchor="middle">HTTP 连接</text>
+<text class="f-text" fill="#182f2b" x="152" y="111" font-size="12">连接关闭，服务器不再往里写</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="140" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="167" font-size="13" font-weight="600" text-anchor="middle">服务进程</text>
+<text class="f-text" fill="#182f2b" x="152" y="167" font-size="12">这个请求被标记为“已取消”</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="196" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="223" font-size="13" font-weight="600" text-anchor="middle">引擎进程</text>
+<text class="f-text" fill="#182f2b" x="152" y="223" font-size="12">收到 STOP，写出这个请求的 DONE</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="252" width="130" height="44" rx="8"/>
+<text class="f-on" fill="#ffffff" x="75" y="279" font-size="13" font-weight="600" text-anchor="middle">显卡</text>
+<text class="f-text" fill="#182f2b" x="152" y="279" font-size="12">手上的计算做完，不再开始新的</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="314" font-size="12" text-anchor="middle">停止信号从上往下传；上面一层停了，不代表下面一层也停了</text>
+</svg><figcaption>图 24-1　“停止”在每一层的含义不同。浏览器那一层最先停，显卡那一层最后停，中间每一层都要有人把信号往下传。</figcaption></figure>
+<p>为了把这件事讲清楚，先给请求画一张<dfn>状态机</dfn>：请求在任何时刻都处于某一个状态，只有特定的事件能让它换到另一个状态。下面是本书的教学版本：</p>
+<ul>
+<li><strong>排队</strong>：请求到了，但引擎正在服务别人。Strata 一次只服务一个序列，后来的都在 FIFO（先进先出）队列里等。[S15]</li>
+<li><strong>读题</strong>：引擎一块一块地读你的提问（第 1 章讲过的 prefill）。</li>
+<li><strong>生成</strong>：一个 token 一个 token 地写答案。</li>
+<li><strong>完成 / 已取消 / 失败</strong>：三个终点。每个请求最后都必须落到其中一个，不能悬着。</li>
+<li><strong>取消中</strong>：已经喊了“停”，但引擎还没确认停下。这个中间状态最容易被忽略。</li>
+</ul>
+<p>这些状态名是本书的抽象，不是上游代码里的枚举。Strata 实际记录的是一个请求是“排队中”还是“生成中”，再加一句阶段说明，比如“正在读提问”“正在回答”。<span class="ev ev-code">代码事实</span> 下面的模拟器把整个过程放慢了：</p>
+<div class="viz" data-viz="request-lifecycle"><figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="图 24-2：请求的教学状态机。排队、读题、生成、完成是正常路径；取消中是读题和生成被取消后的中间状态，确认后才进入已取消；引擎失联则进入失败">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="16" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="64" y="39" font-size="14" text-anchor="middle">排队</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="152" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="200" y="39" font-size="14" text-anchor="middle">读题</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="288" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="39" font-size="14" text-anchor="middle">生成</text>
+<rect class="f-accent" fill="#136d5a" x="152" y="104" width="96" height="36" rx="8"/><text class="f-on" fill="#ffffff" x="200" y="127" font-size="14" font-weight="600" text-anchor="middle">取消中</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="288" y="104" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="127" font-size="14" text-anchor="middle">完成</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="152" y="192" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="200" y="215" font-size="14" text-anchor="middle">已取消</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="288" y="192" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="215" font-size="14" text-anchor="middle">失败</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M112 34H150M248 34H286M336 52V102M200 52V102M296 52L240 104M200 140V190M64 52V210H150"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M248 130L300 192"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="248" font-size="12" text-anchor="middle">虚线：引擎失联，看门狗介入。交互版可以在任何状态按“取消”</text>
+</svg><figcaption>图 24-2　请求的教学状态机。读题和生成被取消后，先进入“取消中”，等引擎确认停下才算“已取消”。终点只有三个：完成、已取消、失败。</figcaption></figure></div>
+<p class="bridge"><strong>学过计算机的同学：</strong>《操作系统》课里的进程状态图（就绪、运行、阻塞、终止）也是这样画的。画状态机的好处是能逐条检查：每个状态遇到每个事件该去哪里？有没有哪个状态永远走不到终点？</p>
+
+<h2 id="sec-2">24.2 进程与线程：到底是谁在干活</h2>
+<p>要知道“停”字该传给谁，得先知道活是谁在干。</p>
+<aside class="primer" id="c24-process-thread">
+<h3>进程与线程的生命周期</h3>
+<p><dfn>进程</dfn>是一个正在运行的程序，操作系统给它分配一块独立的内存，还有打开的文件、网络连接等资源。两个进程默认看不到对方的内存，只能通过<dfn>管道</dfn>、网络等渠道互相传消息。进程结束时，操作系统把它占的内存、显存一并收回。</p>
+<p><dfn>线程</dfn>是进程里的一条执行路线。一个进程可以有好几个线程，它们共享同一块内存，所以交换数据很方便，但也容易互相踩脚。</p>
+<p>两者都有生命周期：创建、运行、等待（比如等网络数据）、结束。结束的方式分两种：<strong>自己走完</strong>，或者<strong>被别人结束</strong>。在类 Unix 系统里，一个进程可以给另一个进程发信号：SIGTERM 是“请你退出”，对方有机会先收拾一下；SIGKILL 是“立即结束”，对方没有任何机会清理。</p>
+<p>和 Strata 的关系：服务器和引擎是<strong>两个进程</strong>，靠管道一行一行地传文本；服务器内部又有好几个线程分工，见图 24-3。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/行程" target="_blank" rel="noopener noreferrer">维基百科：进程</a> · <a href="https://zh.wikipedia.org/zh-cn/线程" target="_blank" rel="noopener noreferrer">维基百科：线程</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-intro.pdf" target="_blank" rel="noopener noreferrer">OSTEP：进程（英文）</a> · <a href="https://docs.python.org/zh-cn/3/library/subprocess.html" target="_blank" rel="noopener noreferrer">Python 文档：subprocess</a> · <a href="https://man7.org/linux/man-pages/man7/signal.7.html" target="_blank" rel="noopener noreferrer">man 7 signal</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="图 24-3：Strata 的服务进程里有请求线程、监视线程和读取线程，靠 FIFO 锁轮流使用引擎；引擎是另一个进程，双方通过标准输入输出传文本行">
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="10" width="380" height="170" rx="10"/>
+<text class="f-text" fill="#182f2b" x="20" y="31" font-size="13" font-weight="600">Python 服务进程：serve/server.py</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="76" y="67" font-size="13" font-weight="600" text-anchor="middle">请求线程</text>
+<text class="f-muted" fill="#5c6d66" x="76" y="88" font-size="12" text-anchor="middle">每个连接一个</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="144" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="67" font-size="13" font-weight="600" text-anchor="middle">监视线程</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="88" font-size="12" text-anchor="middle">每 0.5 秒查连接</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="268" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="324" y="67" font-size="13" font-weight="600" text-anchor="middle">读取线程</text>
+<text class="f-muted" fill="#5c6d66" x="324" y="88" font-size="12" text-anchor="middle">把引擎输出排队</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="116" width="360" height="48" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="145" font-size="13" text-anchor="middle">FIFO 锁：同一时刻只有一个请求使用引擎</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 180V228M250 228V180"/>
+<path class="f-muted" fill="#5c6d66" d="M100 232l-5-8h10z"/>
+<path class="f-muted" fill="#5c6d66" d="M250 176l-5 8h10z"/>
+<text class="f-muted" fill="#5c6d66" x="108" y="200" font-size="12">stdin：GEN、STOP、QUIT</text>
+<text class="f-muted" fill="#5c6d66" x="258" y="222" font-size="12">stdout：T、PP、DONE</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="234" width="380" height="56" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="257" font-size="13" font-weight="600" text-anchor="middle">引擎进程：strata --serve</text>
+<text class="f-on" fill="#ffffff" x="200" y="278" font-size="12" text-anchor="middle">权重、专家缓存、显存都归它管</text>
+</svg><figcaption>图 24-3　服务器和引擎是两个进程，靠管道一行一行地传文本。服务器里的线程各管一摊，FIFO 锁保证同一时刻只有一个请求在用引擎。</figcaption></figure>
+<p>服务器用 Python 的 <code>subprocess.Popen</code> 启动 <code>strata --serve</code>，把它的标准输入和标准输出都接成管道。<span class="ev ev-code">代码事实</span> 引擎加载好权重后，会先写几行 <code>INFO</code>，再写一行 <code>READY</code> 加上下文长度；如果这一行还带着 <code>stop</code>，说明这个引擎版本支持中途停止。服务器读到 <code>READY</code>，才把引擎当作“活着”。之后，服务器写一行 <code>GEN</code> 命令提交一个请求，引擎回 <code>T</code>（一个 token）、<code>PP</code>（读题进度）、<code>DONE</code>（结束）或 <code>ERR</code>（出错）。</p>
+<p>还有一个专门的读取线程，把引擎的每一行输出放进队列。这样，处理请求的线程就能“带超时地”等待下一行：等不到，可以先发个心跳、检查一下取消标志，而不是一直傻等。<span class="ev ev-code">代码事实</span></p>
+<p>引擎进程也会意外结束。代码里专门有一个 <code>EngineDied</code> 异常，注释写着最常见的原因：在 Linux 上，被内存不足时的 OOM killer 结束了。[S15] 这时当前请求以错误收尾，下一个请求到来时，服务器用同样的命令重新启动引擎。</p>
+<p>正常关闭引擎也有讲究。服务器分三步走，每一步最多等 20 秒，见图 24-4。</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 24-4：关闭引擎进程分三步：先写 QUIT 让它自己退出，不行再 terminate，再不行就 kill；三步之后仍未退出就报告错误">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">关闭引擎进程：先礼后兵</text>
+<rect class="f-soft" fill="#e5f1df" x="8" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="51" y="54" font-size="13" font-weight="600" text-anchor="middle">QUIT</text>
+<text class="f-text" fill="#182f2b" x="51" y="76" font-size="12" text-anchor="middle">让引擎自己</text>
+<text class="f-text" fill="#182f2b" x="51" y="94" font-size="12" text-anchor="middle">释放内存</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="106" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="149" y="54" font-size="13" font-weight="600" text-anchor="middle">terminate</text>
+<text class="f-text" fill="#182f2b" x="149" y="76" font-size="12" text-anchor="middle">发终止信号</text>
+<text class="f-text" fill="#182f2b" x="149" y="94" font-size="12" text-anchor="middle">（SIGTERM）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="204" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="247" y="54" font-size="13" font-weight="600" text-anchor="middle">kill</text>
+<text class="f-text" fill="#182f2b" x="247" y="76" font-size="12" text-anchor="middle">强制结束</text>
+<text class="f-text" fill="#182f2b" x="247" y="94" font-size="12" text-anchor="middle">不给清理机会</text>
+<rect class="f-warn" fill="#9e5d24" x="302" y="32" width="90" height="76" rx="8"/>
+<text class="f-on" fill="#ffffff" x="347" y="54" font-size="13" font-weight="600" text-anchor="middle">仍未退出</text>
+<text class="f-on" fill="#ffffff" x="347" y="76" font-size="12" text-anchor="middle">报告错误，</text>
+<text class="f-on" fill="#ffffff" x="347" y="94" font-size="12" text-anchor="middle">不假装已释放</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M94 70H104M192 70H202M290 70H300"/>
+<text class="f-muted" fill="#5c6d66" x="51" y="128" font-size="12" text-anchor="middle">等 20 秒</text>
+<text class="f-muted" fill="#5c6d66" x="149" y="128" font-size="12" text-anchor="middle">等 20 秒</text>
+<text class="f-muted" fill="#5c6d66" x="247" y="128" font-size="12" text-anchor="middle">等 20 秒</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">为什么先礼后兵：引擎锁住了几十 GB 内存，</text>
+<text class="f-text" fill="#182f2b" x="10" y="184" font-size="12">让它自己有序释放，比被操作系统强行收回更稳妥。</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">Windows 上，引擎被放进一个“作业对象”：服务器无论</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">怎样退出，操作系统都会连带结束引擎。</text>
+</svg><figcaption>图 24-4　关闭引擎的三级台阶。每一级给 20 秒，三级都失败时如实报告“引擎还没退出”，而不是假装显存和内存已经还回来了。</figcaption></figure>
+<p>注释解释了为什么第一步是 <code>QUIT</code>：引擎会自己释放内存，而解除几十 GB 锁页内存的锁定需要一些时间。<span class="ev ev-code">代码事实</span> 如果三步都失败，服务器抛出 <code>EngineStuck</code>，并且<strong>继续保留</strong>这个进程的记录，不会宣称它的显存和内存已经还回来了。另外，在 Windows 上，服务器把引擎放进一个设置了“关闭即结束”的作业对象。这样，即使你直接关掉控制台窗口，引擎也会随之结束，不会变成没人管的孤儿进程。<span class="ev ev-code">代码事实</span></p>
+
+<h2 id="sec-3">24.3 取消：把“停”一层层传下去</h2>
+<aside class="primer" id="c24-cancel">
+<h3>取消：为什么只能“请你停下”</h3>
+<p>最直接的取消方式，是从外面把正在干活的线程掐断。可这很危险：它可能正拿着一把锁、正写到一半的数据结构、正借着一块显存。被掐断后，锁没人释放，数据半新半旧，后面的人全都会出错。</p>
+<p>所以实际系统大多用<dfn>协作式取消</dfn>：外面只负责设一个<dfn>取消标志</dfn>，干活的一方在约好的<dfn>检查点</dfn>上看一眼标志，看到了就自己收拾干净再退出。Python 的 <code>threading.Event</code>、Go 的 <code>context</code>、C# 的 <code>CancellationToken</code> 都是这个思路。</p>
+<p>由此得出两条规律：第一，取消不是瞬间完成的，最坏要等到下一个检查点；第二，检查点隔得越远，取消越慢。所以“喊了停”和“真的停了”是两回事，中间那段就是图 24-2 里的“取消中”。</p>
+<p class="further">延伸阅读：<a href="https://docs.python.org/zh-cn/3/library/threading.html" target="_blank" rel="noopener noreferrer">Python 文档：threading（Event 对象）</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/threads-intro.pdf" target="_blank" rel="noopener noreferrer">OSTEP：并发与线程（英文）</a> · <a href="https://zh.wikipedia.org/zh-cn/多线程" target="_blank" rel="noopener noreferrer">维基百科：多线程</a></p>
+</aside>
+<p>Strata 的取消就是协作式的。每个请求开始时，服务器创建一个 <code>threading.Event</code> 作为取消标志。有两条路能把它设上：</p>
+<ul>
+<li><strong>写不出去</strong>：服务器往连接里写 SSE 事件时出了错，说明客户端走了，立刻设标志。注释写着：“客户端走了：停掉引擎。”<span class="ev ev-code">代码事实</span></li>
+<li><strong>监视线程</strong>：光靠写出错还不够。读一段长提问时，服务器很久才写一次保活注释，而且挂断后的第一次写入通常还会“成功”。所以每个请求另起一个监视线程，每 0.5 秒检查一次连接：如果连接显示“可读”，却读不到任何数据，就说明对方关闭了，设标志。<span class="ev ev-code">代码事实</span> 这正是开头提到的 #430、#431 的修复。</li>
+</ul>
+<p>标志设上以后，要靠检查点生效，见图 24-5。</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="图 24-5：从客户端挂断到释放 FIFO 的六步：发现断开、设取消标志、生成循环写 STOP、引擎在检查点停下、读到这个请求的 DONE、释放 FIFO">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="8" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">① 客户端挂断（你点了“停止”）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="56" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="79" font-size="13" text-anchor="middle">② 监视线程发现连接断了（最多 0.5 秒）</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="104" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="127" font-size="13" text-anchor="middle">③ 设下取消标志 cancel</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="152" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="175" font-size="13" text-anchor="middle">④ 等待引擎输出的循环看到标志，写一行 STOP</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="200" width="320" height="36" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="223" font-size="13" text-anchor="middle">⑤ 引擎在下一个检查点停下</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="248" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="271" font-size="13" text-anchor="middle">⑥ 读到这个请求的 DONE，释放 FIFO</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V54M200 92V102M200 140V150M200 188V198M200 236V246"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="310" font-size="12" text-anchor="middle">生成时：下一个 token 就是检查点，很快</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="330" font-size="12" text-anchor="middle">读题时：要读完手上这一块，可能要十几秒</text>
+</svg><figcaption>图 24-5　取消的六步。前三步只花不到一秒；第 ⑤ 步要等引擎走到检查点，在哪个阶段取消，决定了要等多久。</figcaption></figure>
+<p>第 ⑤ 步的检查点在哪里？生成时，每产出一个 token，循环就看一眼标志。读题时，引擎是一块一块读的：<code>prefill.hpp</code> 里的 <code>should_stop</code> 在<strong>每一块开始之前</strong>检查一次，返回真就提前结束，错误信息是 “cancelled”。<span class="ev ev-code">代码事实</span>[S12] 服务器的注释也写明：读题过程中发出的 STOP，要等当前这一块读完才会被看到。一块最多可以有 32768 个 token。[S15] 交互图里的“最坏要等多久”就是按这个算的。</p>
+<p>第 ⑥ 步同样重要。STOP 发出后，服务器要继续读引擎的输出，一直读到<strong>这个请求自己的</strong> <code>DONE</code>，而且全程拿着 FIFO 锁。注释解释了原因：如果提前放手，引擎队列里还残留着上一个请求的 <code>DONE</code>，下一个请求就会把它当成自己的结束信号。<span class="ev ev-code">代码事实</span> 这一步也有时限：等 STOP 的回音时绝不无限期地等，因为等待期间 FIFO 一直被占着，后面所有人都在排队。</p>
+<p>测试时用的 <code>MockEngine</code> 也遵守这个约定：每吐一个 token 前，先看一眼取消标志。[S15] 所以取消逻辑可以在没有显卡的机器上测。</p>
+
+<h2 id="sec-4">24.4 卡住了怎么办：看门狗</h2>
+<p>取消依赖引擎“配合”。如果引擎卡死了，一句话都不说呢？服务器需要一只<dfn>看门狗</dfn>：一段时间没有动静，就判定出了问题。</p>
+<p>难点在于“多久算太久”。引擎生成时，每个 token 都会写一行，很热闹；读一段很长的提问时，却可能好几分钟一声不吭。看门狗如果一刀切，要么误杀正在认真读题的引擎，要么对真正卡死的引擎等上半天。Strata 的做法是按阶段给不同的时限 [S15]：</p>
+<ul>
+<li>基础时限 300 秒：请求进行中，引擎超过这么久没有任何输出，就判定失联。配置里可以改，设成 0 表示永远等。</li>
+<li>读题的第一块：在 300 秒之上，再按“最慢的电脑每秒只读 50 个 token”加上这一块的时间。</li>
+<li>读完一块以后：下一块最多可以用上一块实际耗时的 3 倍，但不少于 300 秒。</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="图 24-6：看门狗的时限。生成中 300 秒；读题第一块约 955 秒；快的电脑读完一块后仍是 300 秒；慢的电脑约 983 秒">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">引擎可以沉默多久（秒，条长按比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">生成中：每个 token 都会重新计时</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="50" width="90" height="14"/>
+<text class="f-text" fill="#182f2b" x="106" y="62" font-size="12">300</text>
+<text class="f-text" fill="#182f2b" x="10" y="92" font-size="12">读题第一块：300 + 32768 ÷ 50</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="98" width="286.6" height="14"/>
+<text class="f-text" fill="#182f2b" x="302" y="110" font-size="12">≈ 955</text>
+<text class="f-text" fill="#182f2b" x="10" y="140" font-size="12">之后的块，快的电脑：max(300, 3 × 15.1)</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="146" width="90" height="14"/>
+<text class="f-text" fill="#182f2b" x="106" y="158" font-size="12">300</text>
+<text class="f-text" fill="#182f2b" x="10" y="188" font-size="12">之后的块，慢的电脑：max(300, 3 × 327.7)</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="194" width="294.9" height="14"/>
+<text class="f-text" fill="#182f2b" x="310" y="206" font-size="12">≈ 983</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">一块按 32768 个 token 算；快的每秒读 2171 个，慢的 100 个</text>
+</svg><figcaption>图 24-6　看门狗的时限跟着工作阶段变。慢电脑读一大块提问时，时限会自动放宽到十几分钟，免得误杀正在干活的引擎。<span class="ev ev-est">教学推演</span></figcaption></figure>
+<p>图里的数字是代入代码常量算出来的。<span class="ev ev-est">教学推演</span> 第一块：300 + 32768 ÷ 50 ≈ 955 秒。快的电脑按上游实测的每秒 2171 个 token 读一块 32768 个 token，约 15.1 秒，3 倍是 45.3 秒，不到 300 秒，所以时限仍是 300 秒；慢的电脑每秒 100 个，一块要 327.7 秒，3 倍约 983 秒。</p>
+<p>超时以后怎么办？注释里管这叫“两边失步”：引擎的主线程在等下一条命令，服务器却在等这个请求的结束。服务器结束引擎进程，这个请求以错误收尾，下一个请求到来时重新启动引擎。[S15] 结束进程虽然粗暴，好处是显存和内存一定会随进程一起还回来。</p>
+<p>更底层也有同样的思路。负责验证草稿 token 的 <code>Verifier</code> 有一个 <code>release_gpu_waits</code>：显卡上的一批计算卡住、无法正常结束时，它把显卡上所有等待的标志强行放行，让这批计算排空。但从此以后，这个 Verifier <strong>拒绝</strong>再执行任何新的计算窗口，因为那批计算是在不可信的条件下跑完的。<span class="ev ev-code">代码事实</span>[S08] 强行排空不等于正常完成，不能装作什么都没发生，继续服务下一个请求。</p>
+
+<h2 id="sec-5">24.5 谁能用你的显卡：认证与 API Key</h2>
+<p>前面讲的是“怎样停”。这一节讲“谁能开始”。如果别人能随便往你的 Strata 发请求，你的显卡就成了公共资源。</p>
+<aside class="primer" id="c24-auth">
+<h3>认证与 API Key</h3>
+<p><dfn>认证</dfn>回答“你是谁”，<dfn>授权</dfn>回答“你能做什么”。最简单的认证方式是 <dfn>API Key</dfn>：服务器和客户端事先共享一串很长的随机字符，客户端每次请求都在 HTTP 头部带上它，常见写法是 <code>Authorization: Bearer 密钥</code>。服务器比对一致就放行，不一致就回 401。</p>
+<p>API Key 就像一把共用的钥匙：谁拿到谁就能开门，所以它必须保密，不能写进网页源码、不能提交到公开仓库。网络传输最好走 HTTPS，否则路上的人能看到它。</p>
+<p>比对本身也有讲究。普通的字符串比较一旦遇到不同的字符就立刻返回，猜对的前缀越长，比较花的时间就越久。攻击者测量时间，就能一位一位地猜出密钥。这类利用耗时、功耗等“副产品”泄露信息的攻击叫<dfn>旁路攻击</dfn>，这一种叫<dfn>计时攻击</dfn>。防法是用<dfn>恒定时间比较</dfn>：不管从哪一位开始不同，都把整串比完再返回。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/API密鑰" target="_blank" rel="noopener noreferrer">维基百科：API 密钥</a> · <a href="https://zh.wikipedia.org/zh-cn/旁路攻击" target="_blank" rel="noopener noreferrer">维基百科：旁路攻击</a> · <a href="https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Reference/Headers/Authorization" target="_blank" rel="noopener noreferrer">MDN：Authorization 头</a> · <a href="https://docs.python.org/zh-cn/3/library/hmac.html" target="_blank" rel="noopener noreferrer">Python 文档：hmac.compare_digest</a> · <a href="https://www.rfc-editor.org/rfc/rfc6750" target="_blank" rel="noopener noreferrer">RFC 6750：Bearer 令牌</a></p>
+</aside>
+<p>Strata 的第一道防线是<strong>默认只听本机</strong>：服务器默认监听 <code>127.0.0.1</code>，别的设备根本连不上。<span class="ev ev-code">代码事实</span> 这时 README 告诉你，应用里随便填一个 API Key 都行。[S01] 想从手机或另一台电脑访问，就要改成监听 <code>0.0.0.0</code>，README 的原话是“一定要带上密钥”。[S01] 如果你改了监听地址却没设密钥，服务器启动时会打出一行警告：没有 API Key，网络里的任何人都能用这个模型。<span class="ev ev-code">代码事实</span></p>
+<p>设了密钥以后，访问 <code>/v1/*</code> 的请求必须带上它：写成 <code>Authorization: Bearer …</code>，或者写在 <code>x-api-key</code> 头里（Anthropic 风格的客户端用这个）。比对用的是 <code>hmac.compare_digest</code>，代码注释写着“恒定时间”；比对失败回 401，类型是 <code>authentication_error</code>。<span class="ev ev-code">代码事实</span> 整个判断过程见图 24-7。</p>
+<figure class="fig"><svg viewBox="0 0 400 310" role="img" aria-label="图 24-7：Strata 检查 API Key 的流程：没设密钥直接放行；设了密钥就取出客户端带的密钥，用恒定时间比较，一致才处理，不一致回 401">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="8" width="200" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">请求到达 /v1/…</text>
+<rect class="f-soft" fill="#e5f1df" x="100" y="62" width="200" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="84" font-size="13" text-anchor="middle">配置里设了 API Key 吗？</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="316" y="62" width="76" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="354" y="84" font-size="13" text-anchor="middle">放行</text>
+<text class="f-muted" fill="#5c6d66" x="308" y="56" font-size="12" text-anchor="middle">没设</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="122" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="144" font-size="13" text-anchor="middle">取 Bearer 头或 x-api-key 头</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="114" font-size="12">设了</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="176" width="240" height="34" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="198" font-size="13" text-anchor="middle">hmac.compare_digest 比较</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="236" width="160" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="258" font-size="13" text-anchor="middle">一致：处理请求</text>
+<rect class="f-warn" fill="#9e5d24" x="220" y="236" width="160" height="34" rx="8"/>
+<text class="f-on" fill="#ffffff" x="300" y="258" font-size="13" text-anchor="middle">不一致：回 401</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V60M300 79H314M200 96V120M200 156V174M160 210V222H100V234M240 210V222H300V234"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="300" font-size="12" text-anchor="middle">更前面还有一道：默认只听 127.0.0.1，别的设备连不上</text>
+</svg><figcaption>图 24-7　Strata 的 API Key 检查。默认只听本机，所以不设密钥也安全；一旦对外开放，密钥就是唯一的门锁，比对必须用恒定时间。</figcaption></figure>
+<p>为什么一定要恒定时间？下面的模拟器让你当一回攻击者：</p>
+<div class="viz" data-viz="key-compare-timing"><figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="图 24-8：猜密钥第一位时，逐字比较下猜对的候选多比较一个字符，柱子明显更高；恒定时间比较下 16 个候选耗时完全一样">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="13" font-weight="600" text-anchor="middle">逐字比较：遇错就停</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="13" font-weight="600" text-anchor="middle">恒定时间比较</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="12" text-anchor="middle">猜对的那个多比较 1 个字符</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="38" font-size="12" text-anchor="middle">猜什么都比完 4 个字符</text>
+<rect class="f-accent" fill="#136d5a" x="16" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="27" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="38" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="49" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="60" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="71" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="82" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="93" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="104" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="115" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="126" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="137" y="126" width="8" height="24"/><rect class="f-warn" fill="#9e5d24" x="148" y="102" width="8" height="48"/><rect class="f-accent" fill="#136d5a" x="159" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="170" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="181" y="126" width="8" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="216" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="227" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="238" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="249" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="260" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="271" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="282" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="293" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="304" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="315" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="326" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="337" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="348" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="359" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="370" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="381" y="54" width="8" height="96"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 150H194M210 150H394"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="12" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="152" y="168" font-size="12" text-anchor="middle">c</text>
+<text class="f-muted" fill="#5c6d66" x="185" y="168" font-size="12" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="168" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="385" y="168" font-size="12" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="194" font-size="12" text-anchor="middle">第 1 位的 16 个候选（真实密钥以 c 开头）</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="214" font-size="12" text-anchor="middle">交互版：一位一位地猜，看要试多少次</text>
+</svg><figcaption>图 24-8　逐字比较让“猜对了几位”写在了耗时里，攻击者每位只要试 16 次；恒定时间比较让所有候选看起来一模一样。<span class="ev ev-est">教学推演</span></figcaption></figure></div>
+<p>真实世界里，每次比较只差几纳秒，网络抖动却有几毫秒，所以真正的攻击要对同一个猜测重复测量成千上万次，再用统计方法把差别挖出来。这很难，但并非做不到。用 <code>hmac.compare_digest</code> 只是一行代码的事，没有理由冒这个险。</p>
+<p>Strata 还防了一种更隐蔽的攻击：<dfn>DNS 重新绑定</dfn>。你打开的某个恶意网页，可以把自己的域名临时指向 <code>127.0.0.1</code>，然后以“自己网站”的身份访问你本机的服务。所以在没设密钥时，服务器只回应 <code>Host</code> 头是它认识的名字的请求，比如 <code>localhost</code> 和 IP 地址；带着陌生网页来源的 <code>POST</code> 请求也会被拒绝。设了密钥以后，就由密钥说了算，因为别人的网页拿不到你的密钥。<span class="ev ev-report">上游报告</span></p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这一节对应《计算机网络》和《信息安全》的几个基本概念：认证与授权的区别、最小暴露面（默认只听回环地址）、旁路攻击。安全措施要一层层叠起来，每一层只防它该防的东西。</p>
+
+<h2 id="sec-6">24.6 动手：亲手取消一次</h2>
+<p>本章没有单独的实验页，两个交互图就是实验。按顺序做三件事：</p>
+<ol>
+<li>在生命周期模拟器里，分别在<strong>排队、读题、生成</strong>三个状态按“取消”，记下“最坏要等多久”。读题阶段要等约 15.6 秒，生成阶段只要约 0.51 秒。想一想：如果你来设计，怎样让读题阶段也能更快停下？代价是什么？</li>
+<li>按取消后，在“取消中”按“引擎失联”。看看服务器怎样收场，为什么等 STOP 的回音也必须限时。</li>
+<li>在计时攻击模拟器里，用两种比较方式各破解一次，数一数分别要试多少次。</li>
+</ol>
+<p>如果你会写 Python，可以用 Strata 自带的 <code>MockEngine</code>（<code>python -m serve.server --engine mock</code>）在没有显卡的机器上起一个服务，用 <code>curl</code> 发一个流式请求，中途按 Ctrl+C 断开，再看服务器窗口里这个请求的结局。[S15]</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>一个请求要穿过浏览器、HTTP 连接、服务进程、引擎进程和显卡。每层“停了”的含义不同，取消信号要一层层传下去，并且要确认。</li>
+<li>Strata 的取消是协作式的：监视线程每 0.5 秒查一次连接，设下取消标志；引擎在检查点停下，服务器读到这个请求自己的 DONE 才释放 FIFO。读题时检查点隔得远，取消就慢。</li>
+<li>Strata 默认只听本机。对外开放时必须设 API Key，比对用恒定时间的 <code>hmac.compare_digest</code>，防止计时攻击。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“关掉网页，显卡就停了。”</strong></p>
+<p>关掉网页只停了最上面一层。服务器要先发现连接断了，再通知引擎，引擎还要走到下一个检查点才会停。Strata 在修复 #430、#431 之前，就出现过客户端早已离开、引擎还在一直算的情况。“停了”要在每一层分别确认。</p></div>
+
+<details class="deep"><summary>深入一层：取消的线性化点、迟到的旧回包与信任边界</summary>
+<h3>取消从哪一刻起算“生效”</h3>
+<p>可以把取消定义为：从某个已经确认的边界开始，不再向用户提交新的 token，并且相关资源最终停止使用。这个边界就是取消的<dfn>线性化点</dfn>。只设了一个标志、还没被读题的分块循环或生成循环看到时，取消并没有完成。</p>
+<p>按本书对 <code>serve/server.py</code> 的阅读，一个还在排队的请求，要等拿到 FIFO 锁、把 <code>GEN</code> 命令发给引擎之后，才会在等待引擎输出的循环里检查取消标志：收到第一行 token 或读题进度时，或者等满 10 秒没有输出时。<span class="ev ev-code">代码事实</span> 这意味着一个早已挂断的排队请求，仍会让引擎开始读它的提问，之后才收到 STOP。一个值得做的扩展练习：拿到锁之后、发命令之前，先检查一次标志。</p>
+<h3>例题：超时后的旧回包</h3>
+<p>请求 A 超时，服务开始处理请求 B。如果 A 迟到的结果仍然写进共享的输出队列，B 就可能收到 A 的 token，或者把 A 的 <code>DONE</code> 当成自己的结束。解决方向是给输出加上归属校验，并且在旧执行确认结束之前，不复用同一份可变状态。</p>
+<p>Strata 的做法正是后者：发 STOP 之后，一直读到这个请求自己的 <code>DONE</code>，全程拿着 FIFO 锁；统计用量时，也只认这个请求期间到达的 <code>DONE</code>，否则一个出错或断开的请求，会把上一个请求的解码数字记成自己的。<span class="ev ev-code">代码事实</span> 本书没有审计上游所有的输出归属路径；课堂上可以用一个故意延迟的 mock 引擎构造这种风险，再验证修复。</p>
+<h3>看门狗要懂工作阶段</h3>
+<p>把“暂时没有文字输出”一律当成死锁，会误杀正在读长提问的健康请求；永远等待，又会堵死整个 FIFO。合理的诊断要能区分：排队、合法的长计算、慢速 I/O、子进程失联、协议失步，并且报告状态和最后的进度，而不是只给一个含糊的“超时”。Strata 按读题分块调整时限，并把失联原因写进错误信息，就是这个思路。[S15]</p>
+<p>同理，“显式的模型控制”（加载、卸载）不能打断正在运行或排队的请求：代码里为此专门定义了 <code>ModelBusy</code>。[S15] 上游文档说明，这时控制接口返回 409。<span class="ev ev-report">上游报告</span></p>
+<h3>工具、图片 URL 和本地文件都是信任边界</h3>
+<p>模型输出是不可信输入。工具参数要经过结构校验和权限检查；获取远程 URL 牵涉对外访问和资源限制；读取本地路径牵涉文件权限和路径范围。Strata 的图片输入支持 base64 数据、http(s) URL 和本地文件路径三种来源。[S15] 是否防住了 SSRF、路径穿越等问题，要逐个入口审计，不能因为某处用了一个安全的库，就断言整体安全。</p>
+<p><code>frontend.py</code> 用沙箱化的 Jinja 环境渲染模板。[S16] 这是模板层的具体选择，不能自动证明工具执行、URL 获取和文件访问都安全。每一种资源都需要单独的威胁模型。</p>
+<h3>“取消完成”的验收清单</h3>
+<p>在 mock 引擎里注入这些情况：读题时取消、输出中断、重复取消、引擎无响应、旧结果迟到、恢复后再次请求。验收条件：不再提交新的用户可见 token；所有读写相关缓冲的任务都已停止或完成；队列和状态不会被下一个请求误用；迟到的旧输出能被识别并丢弃；资源只释放一次；客户端得到明确的“已取消”或“失败”，而不是“成功”。</p>
+<p>最后一条提醒：本教材是静态网站，不包含任何真实的推理 API Key，也不会从浏览器直接访问你的模型服务器。将来接入真实实验平台时，应另设认证、配额、作业隔离和服务端代理，不能把密钥写进课程页面。</p>
+</details>
