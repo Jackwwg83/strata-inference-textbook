@@ -1,18 +1,276 @@
-<h2 id="sec-1">26.1 五层证据阶梯</h2>
-<p>第一层是纯函数：地址偏移、容量、top-k、期望长度。第二层是单算子：同输入比较输出与误差。第三层是组合层：归一化、门、专家加权和状态更新的顺序。第四层是固定历史的整模型分布。第五层是真实任务与长期会话行为。</p>
-<p>下层通过不会自动推出上层通过。仓库接口里的“专家不加路由权重”、GDN 的 β 和状态轴说明，都展示了组合错误可以藏在各自通过测试的模块之间。[S06][S17]</p>
-<h2 id="sec-2">26.2 teacher forcing 为什么更适合定位？</h2>
-<p>自由生成时第一个不同 token 会改变后面全部历史，之后的 logits 已不再可直接逐位置比较。teacher forcing 固定双方的输入历史，在相同位置比较条件分布，才容易定位最早出现差异的层或算子。</p>
-<p>可记录最大绝对误差、相对误差、均方误差、KL、argmax 是否变化、路由 ID 和 indexer ID 是否变化。指标各有含义；相对误差在参考值接近零时容易失真，KL 计算要明确概率的归一化与零值处理。</p>
-<h2 id="sec-3">26.3 例题：很小的误差，完全不同的 token</h2>
-<p>参考 logits 为 [1.00000,0.99999]，测试 logits 为 [0.99998,1.00001]，最大差只有 0.00002，但 argmax 从第一项换成第二项。反过来，如果参考为 [10,0]，较大的小幅误差可能完全不影响所选 token。</p>
-<p>因此只报告“所有 token 相同”可能掩盖连续分布误差；只报告“最大误差很小”也可能掩盖选择边界翻转。正确验收需要数值层与离散决策层同时观察。</p>
-<h2 id="sec-4">26.4 变形测试：不必每次都知道巨大答案</h2>
-<p>若页表和数据同时做一致置换，逻辑注意力结果应不变；若同一输入分成不同 chunk，状态交接应满足等价契约；若保存后恢复再继续，应与未离开的历史一致；若禁用草稿，应保持对应目标路径的语义。[S08][S18]</p>
-<p>这些性质能产生大量强测试。但要说明容差和数值路径：跨 GPU/CPU、不同 GEMM 或量化路径未必保证逐比特相同，不能把所有差异直接放行，也不能忽略已知舍入边界。</p>
-<h2 id="sec-5">26.5 负例证明测试真的看见错误</h2>
-<p>给测试故意注入：头映射从模运算改成整数除法；RMS 替代 L2；每层激活缓存仅按指针；路由权重重复应用；位置被冻结；恢复时漏掉 PLE。测试应稳定失败，并指出最早违反的契约。</p>
-<p>如果测试在这些错误下仍通过，它可能只检查了“进程没崩溃”。独立 oracle 的实现不应与被测代码共用同一个错误假设；<code>layer.cpp</code> 两个工具共享错误字段名的案例正适合课堂讨论。[S14]</p>
-<h2 id="sec-6">26.6 本交付的可运行练习</h2>
-<p>项目的 <code>labs/tiny_inference.py</code> 是不依赖 GPU 的教学微型模型，使用随机固定权重、简化递归 / 注意力 / MoE，不是 Strata 的权重兼容实现，也没有真实语言质量。它让学生看到 tokenizer → prefill → 状态 → decode 的完整可运行链。</p>
-<p>随附测试检查分段处理、保存恢复、参考重放与受控草稿接受。网页数学单元测试和浏览器交互测试另行记录。<strong>这些测试证明的是教材代码，不是上游 Strata 的 GPU 实现。</strong></p>
+<div class="hook"><span class="eyebrow">先从一条启动警告说起</span>
+<p>Strata 曾经在每次启动时打印一句警告，大意是：显卡上的专家计算路径“不正确”，它算出的任何输出都不可信。后来，issue #23 提出了一个很直接的问题：打开专家缓存，回答会不会变差？<span class="ev ev-report">上游报告</span></p>
+<p>作者做了一个实验：同一段文字，缓存开一次、关一次，逐个位置比较模型的预测。结果有点反直觉：在 2%–5% 的位置上，两边挑出的“最可能的下一个词”不一样；可整体上，谁也不比谁更准。不一样，却都对。这一章就从这里讲起：一个连“标准答案”都说不死的系统，该怎么测？</p></div>
+<p class="tldr"><strong>一句话：</strong>测推理引擎要分层：小函数对精确答案，单个算子对独立的参照实现，整个模型喂同一段文字逐位置比。浮点数的最后几位会随计算顺序变化，所以“相等”要先定义成带容差的比较；一个好测试还必须证明，故意放进去的 bug 它真的抓得到。</p>
+
+<h2 id="sec-1">26.1 为什么“看起来对”最危险</h2>
+<p>程序出错有两种样子。一种是崩溃：报错、退出、输出一串乱码。这种错误很好找，第一次运行就暴露了。另一种更麻烦：程序照常运行，输出一个正常的数，生成的句子也通顺，只是内容已经错了。图 26-1 把两种错误放在一起。</p>
+<figure class="fig"><svg viewBox="0 0 400 242" role="img" aria-label="图 26-1：会崩溃的错误一跑就暴露，看起来正常的错误能骗过随手检查">
+<text class="f-text" fill="#182f2b" x="102" y="20" font-size="15" font-weight="600" text-anchor="middle">会崩溃的错误</text>
+<text class="f-text" fill="#182f2b" x="298" y="20" font-size="15" font-weight="600" text-anchor="middle">看起来正常的错误</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="185" height="112" rx="10"/>
+<text class="f-text" fill="#182f2b" x="102" y="64" font-size="14" text-anchor="middle">程序报错、退出</text>
+<text class="f-text" fill="#182f2b" x="102" y="92" font-size="14" text-anchor="middle">输出 NaN 或乱码</text>
+<text class="f-text" fill="#182f2b" x="102" y="120" font-size="14" text-anchor="middle">第一次运行就暴露</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="32" width="185" height="112" rx="10"/>
+<text class="f-text" fill="#182f2b" x="298" y="64" font-size="14" text-anchor="middle">输出是一个有限的数</text>
+<text class="f-text" fill="#182f2b" x="298" y="92" font-size="14" text-anchor="middle">生成的句子很通顺</text>
+<text class="f-warn" fill="#9e5d24" x="298" y="120" font-size="14" font-weight="600" text-anchor="middle">可内容已经错了</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="170" font-size="14" text-anchor="middle">容易发现：测试一跑就红</text>
+<text class="f-muted" fill="#5c6d66" x="298" y="170" font-size="14" text-anchor="middle">难发现：需要独立的参照答案</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 188H390"/>
+<text class="f-text" fill="#182f2b" x="200" y="210" font-size="14" text-anchor="middle">Strata 源码注释点名的例子，都属于右边：</text>
+<text class="f-text" fill="#182f2b" x="200" y="232" font-size="14" text-anchor="middle">权重乘两次、按地址缓存、头的配对规则用错</text>
+</svg><figcaption>图 26-1　崩溃的错误一跑就暴露；看起来正常的错误能骗过随手检查。推理引擎最怕的是右边这种。</figcaption></figure>
+<p>推理引擎特别容易出右边那种错。原因很简单：模型输出的是一串概率，算错一点，挑出的词照样是个“像样的词”。Strata 的源码注释里，作者把这类陷阱一条条写了下来 <span class="ev ev-code">代码事实</span>：</p>
+<ul>
+<li><strong>按地址缓存。</strong>每一层送给专家的输入，用的是同一块内存，地址永远不变，内容每层不同。如果按地址缓存它，就会把第 0 层的数据重复用到后面 47 层，得到“一个有限的、看起来合理的、完全错误的 token”。[S06]</li>
+<li><strong>权重乘两次。</strong>专家池不负责乘路由权重，合并步骤才乘。如果两边都乘了，单看一层几乎发现不了，叠加 48 层后误差会不断放大。[S06]</li>
+<li><strong>头的配对规则。</strong>GDN 层里 48 个值头要和 16 个键头配对，正确规则是取模（<code>h % 16</code>）。注释特意写明：另一种“按块分组”的规则也能产生格式完好的输出。[S17]</li>
+<li><strong>选错激活格式。</strong>一个量化矩阵该配哪种激活格式，取决于它的数据类型，而不是它的名字。选错了，矩阵乘法的结果偏差 0.6%–1.4%，注释原话是“一个看似合理的向量，而不是一个坏掉的向量”。[S14]</li>
+</ul>
+<p>所以，测推理引擎需要一个东西：<dfn>参照答案</dfn>，也叫测试预言（test oracle），就是一个能告诉你“正确结果应该是什么”的独立来源。它可以是手算的数、另一个可信的实现，或者一条必须成立的规律。没有参照答案，测试只能检查“程序没崩”。</p>
+
+<h2 id="sec-2">26.2 测试分几层：从一行算式到整段会话</h2>
+<p>一次就测完整个推理引擎是不现实的。工程上的做法是分层：底层测试小而快，出错时能精确指出哪一行；上层测试慢，却最接近用户真正看到的东西。图 26-2 是按 Strata 整理的一架“测试阶梯”。</p>
+<figure class="fig"><svg viewBox="0 0 400 332" role="img" aria-label="图 26-2：推理引擎的五层测试阶梯，从纯函数到整段会话">
+<rect class="f-accent" fill="#136d5a" x="80" y="10" width="240" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="31" font-size="15" font-weight="600" text-anchor="middle">整段会话与真实任务</text>
+<text class="f-on" fill="#ffffff" x="200" y="49" font-size="14" text-anchor="middle">藏针测试、两轮对话复用、质量门</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="64" width="280" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="85" font-size="15" font-weight="600" text-anchor="middle">整个模型，固定历史逐位置比</text>
+<text class="f-on" fill="#ffffff" x="200" y="103" font-size="14" text-anchor="middle">同一段文字，比每个位置的预测</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="118" width="320" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="139" font-size="15" font-weight="600" text-anchor="middle">组合与契约</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="157" font-size="14" text-anchor="middle">加载模型时检查每个张量的形状</text>
+<rect class="f-soft" fill="#e5f1df" x="25" y="172" width="350" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="193" font-size="15" font-weight="600" text-anchor="middle">单个算子，对照参照实现</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="211" font-size="14" text-anchor="middle">src/kernels/ 下有 34 个对照测试</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="226" width="380" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="247" font-size="15" font-weight="600" text-anchor="middle">纯函数</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="265" font-size="14" text-anchor="middle">例：FP32 转 BF16，遍历全部 2³² 种输入</text>
+<text class="f-text" fill="#182f2b" x="200" y="298" font-size="14" text-anchor="middle">越往上：越接近用户看到的结果，也越慢、越难定位</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="320" font-size="14" text-anchor="middle">越往下：越快、越能指出是哪一行，覆盖面越窄</text>
+</svg><figcaption>图 26-2　测试阶梯。每一层抓不同的错误，谁也替代不了谁。下层全过，不等于上层一定过。</figcaption></figure>
+<p>挑几层看看 Strata 实际怎么做。</p>
+<p><strong>最底层是纯函数。</strong>把一个 32 位浮点数转成 16 位的 BF16 格式，输入只有 2³² 种，大约 43 亿种。Strata 的测试干脆全部试一遍：每一种输入都和 ggml（llama.cpp 背后的计算库）的转换规则比，几秒钟跑完。这个测试抓到过一个真 bug：旧的舍入写法遇到 NaN（“不是一个数”）时会进位，把 NaN 变成了 −0 或无穷大，上游传来的 NaN 就这样被悄悄掩盖了。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/kernels/bf16_bits_test.cpp#L1-L13" target="_blank" rel="noopener noreferrer">bf16_bits_test.cpp</a>）</p>
+<p><strong>第二层是单个算子。</strong>每个 GPU 内核都有一个对照测试，把它和一份可信的参照实现比。构建脚本里的注释说得很直白：参照实现本身先和 ggml 核对过；“拿一个内核去和它自己的另一份拷贝比，什么也证明不了”。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/CMakeLists.txt#L219-L221" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）</p>
+<p><strong>第三层是组合与契约。</strong><code>layout.hpp</code> 在加载模型时就检查每个张量的形状是否符合内核的假设，发现不符就报出张量名、实际形状和要求的形状。注释里的原话是：要在加载时报错，而不是在第 4000 个 token 时变成矩阵乘法里一个错误的数。[S04] 同一段注释还记了一个真实教训：有一轮开发把索引器的键缓存按“4 个头”算了大小，实际只有 1 个共享的头，大了 4 倍。这个错误在代码里活过了一轮，因为它让预算变得更保守，没人觉得哪里不对。[S04]</p>
+<p><strong>上面两层</strong>要跑整个模型。第 26.4 节专门讲。</p>
+<p>阶梯的每一层都不能省。Strata 有一个现成的反面例子：模型里有一个叫 PLE 的模块（第 11 章讲过的查表模块），它的每个零件都写好了，也都单独通过了对照测试，可是没有任何一处模型代码真正调用它。结果整模型的一道验收关（代号 C1）没有通过。<span class="ev ev-code">代码事实</span>[S13] 零件全绿，系统照样是错的。</p>
+<aside class="primer" id="c26-test-levels">
+<h3>软件测试的层次</h3>
+<p>一个大系统的测试，通常分成几层。<dfn>单元测试</dfn>只测一个函数或一个类，给定输入，检查输出，跑起来以毫秒计。<dfn>集成测试</dfn>把几个模块接在一起，检查它们之间的“接口约定”是否被双方遵守。<dfn>系统测试</dfn>（也叫端到端测试）从用户的入口进去，看最终结果。还有一种贯穿各层的<dfn>回归测试</dfn>：每修一个 bug，就留下一个能重现它的测试，防止它以后再回来。</p>
+<p>常见的经验是“测试金字塔”：底层的单元测试多而快，顶层的端到端测试少而慢。原因是成本：一个端到端测试失败了，你还得花时间去找是哪一层出了问题；一个单元测试失败，通常直接指向那几行代码。</p>
+<p>另一个常用工具是<dfn>测试替身</dfn>：用一个假的、行为可控的对象，代替真实但昂贵的部件。Strata 的服务层就带了一个 <code>MockEngine</code>，它按剧本吐出 token，让所有 API 路径都能在没有 GPU 的机器上测试。<span class="ev ev-code">代码事实</span>[S15] 它能证明“HTTP 协议这一层没写错”，但证明不了真实引擎算得对。每一层测试，都只对它覆盖的那一层负责。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/软件测试" target="_blank" rel="noopener noreferrer">维基百科：软件测试</a> · <a href="https://zh.wikipedia.org/zh-cn/单元测试" target="_blank" rel="noopener noreferrer">维基百科：单元测试</a> · <a href="https://zh.wikipedia.org/zh-cn/回归测试" target="_blank" rel="noopener noreferrer">维基百科：回归测试</a> · <a href="https://docs.python.org/zh-cn/3/library/unittest.html" target="_blank" rel="noopener noreferrer">Python 文档：unittest 单元测试框架</a></p>
+</aside>
+<p class="bridge"><strong>学过计算机的同学：</strong>这就是《软件工程》里的测试金字塔和 V 模型。推理引擎的特别之处在于中间多了一层“对照参照实现”：因为大部分算子的正确答案没法手算，只能找一个独立的、可信的实现来比。</p>
+
+<h2 id="sec-3">26.3 浮点数的“相等”，要先定义</h2>
+<p>回到开头那个实验。显卡和 CPU 算的是同一个量化专家，数据一字节不差，结果却在最后几位小数上不一样。作者的解释是：两边做浮点运算的顺序不同，两者都是对模型同样好的近似。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity 报告</a>）</p>
+<p>顺序为什么会影响结果？因为计算机里的浮点数位数有限，每做一次加法都要四舍五入一次。举个极端的例子：在 32 位浮点数（FP32）里，1 亿附近能表示的相邻两个数相差 8。所以 1 亿加 1，结果还是 1 亿，那个 1 被“吃掉”了。同样四个数，换个顺序加，答案就不同，见图 26-3。</p>
+<div class="viz" data-viz="tolerance-lab"><figure class="fig"><svg viewBox="0 0 400 282" role="img" aria-label="图 26-3：四个数一亿、一、负一亿、一，在 FP32 里按两种顺序相加，分别得到 1 和 0，正确答案是 2">
+<text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="14" text-anchor="middle">四个数 [1亿, 1, −1亿, 1]，用 FP32 相加</text>
+<text class="f-text" fill="#182f2b" x="102" y="44" font-size="15" font-weight="600" text-anchor="middle">路径 A：从左到右</text>
+<text class="f-text" fill="#182f2b" x="298" y="44" font-size="15" font-weight="600" text-anchor="middle">路径 B：两两分组</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="54" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="73" font-size="14" text-anchor="middle">从 1亿 开始</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="88" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="107" font-size="14" text-anchor="middle">1亿 + 1 = 1亿（1 丢了）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="122" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="141" font-size="14" text-anchor="middle">1亿 − 1亿 = 0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="156" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="175" font-size="14" text-anchor="middle">0 + 1 = 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="54" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="298" y="73" font-size="14" text-anchor="middle">1亿 + 1 = 1亿（1 丢了）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="88" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="298" y="107" font-size="14" text-anchor="middle">−1亿 + 1 = −1亿（丢了）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="122" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="298" y="141" font-size="14" text-anchor="middle">1亿 + (−1亿) = 0</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="206" font-size="14" text-anchor="middle">1 亿附近，FP32 能表示的相邻两个数相差 8，加 1 等于没加</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="218" width="185" height="30" rx="6"/>
+<text class="f-on" fill="#ffffff" x="102" y="238" font-size="15" font-weight="600" text-anchor="middle">A 的结果：1</text>
+<rect class="f-accent" fill="#136d5a" x="205" y="218" width="185" height="30" rx="6"/>
+<text class="f-on" fill="#ffffff" x="298" y="238" font-size="15" font-weight="600" text-anchor="middle">B 的结果：0</text>
+<text class="f-text" fill="#182f2b" x="200" y="272" font-size="14" text-anchor="middle">正确答案是 2：两条路径都丢了信息，丢法还不一样</text>
+</svg><figcaption>图 26-3　加法的顺序会改变浮点结果。数学上的加法满足结合律，计算机里的浮点加法不满足。下面的实验台里，你可以换场景、换精度、调容差，亲手试一试。</figcaption></figure></div>
+<p>这个例子是故意挑的极端情况。真实的推理里，差异通常只在最后一两位，叫作差了一两个 <dfn>ULP</dfn>（unit in the last place，最后一位上的一个单位）。可是这已经足以让 <code>a == b</code> 这样的测试失败。</p>
+<p>工程上的办法是改用带<dfn>容差</dfn>的比较：两个数差得足够小，就算相等。“足够小”有两种量法。<dfn>相对容差</dfn>按数的大小打折扣，比如允许差万分之一；<dfn>绝对容差</dfn>是一个固定的门槛，比如差 10⁻⁶ 以内都算相等。两者通常一起用。下面的专栏讲清楚为什么。</p>
+<aside class="primer" id="c26-float-tolerance">
+<h3>浮点比较的容差</h3>
+<p>先说直觉。比较 1 亿和 1 亿零 8，差 8 已经是 FP32 能分辨的最小差别，应该算相等；比较 0.000001 和 0.000009，差不到 0.00001，可一个是另一个的 9 倍，显然不该算相等。所以“差多少算相等”必须和数本身的大小挂钩，这就是相对容差。</p>
+<p>可相对容差在 0 附近会失灵。一个结果理论上是 0，算出来是 2×10⁻⁸，另一个算出来正好是 0。相对差是 100%，可它们在实际意义上没有区别。这时需要一个绝对容差兜底。Python 标准库的 <code>math.isclose</code> 把两者合在一起：</p>
+<p style="text-align:center"><code>|a − b| ≤ max(rtol × max(|a|, |b|), atol)</code></p>
+<p>它的默认值是 rtol = 10⁻⁹、atol = 0。文档专门提醒：和 0 比较时，默认设置永远判“不相等”，必须自己给一个正的 atol。另外，NaN 和任何数都不“接近”，包括它自己。专栏下方的图 26-4 画出了这条规则：横轴是数的大小，纵轴是允许的误差。</p>
+<p>容差设多大？没有通用答案。它取决于数据类型（FP32 大约有 7 位有效数字，FP16 只有 3 位多）、计算链有多长、以及下游对误差有多敏感。一个可靠的做法是：先测量两个<strong>都正确</strong>的实现之间的典型差异，再把容差定在它之上、明显错误的差异之下。</p>
+<p>还有一点常被忽略：容差只能放过“顺序不同”这类合法差异，救不了算法本身丢信息的问题。图 26-3 里两条路径都错了，把容差放宽到能让它们“相等”，测试就什么也不测了。</p>
+<p class="further">延伸阅读：<a href="https://docs.python.org/zh-cn/3/library/math.html#math.isclose" target="_blank" rel="noopener noreferrer">Python 文档：math.isclose</a> · <a href="https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/Number/EPSILON" target="_blank" rel="noopener noreferrer">MDN：Number.EPSILON（机器精度）</a> · <a href="https://zh.wikipedia.org/zh-cn/IEEE_754" target="_blank" rel="noopener noreferrer">维基百科：IEEE 754</a> · <a href="https://en.wikipedia.org/wiki/Unit_in_the_last_place" target="_blank" rel="noopener noreferrer">Wikipedia: Unit in the last place</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="图 26-4：允许误差随数值大小变化。小数值时由绝对容差决定，大数值时由相对容差决定">
+<text class="f-muted" fill="#5c6d66" x="44" y="14" font-size="14">允许的误差（对数刻度）</text>
+<path class="f-soft" fill="#e5f1df" d="M40 190V119.2H210L380 34.2V190Z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40 20V190H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M40 119.2H210L380 34.2"/>
+<text class="f-text" fill="#182f2b" x="48" y="100" font-size="14">atol = 10⁻⁸：靠它兜底</text>
+<text class="f-text" fill="#182f2b" x="300" y="40" font-size="14" text-anchor="end">相对容差：10⁻⁵ × |b|</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="164" font-size="14">阴影：|a − b| 落在这里就算相等</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="206" font-size="14">10⁻⁹</text>
+<text class="f-muted" fill="#5c6d66" x="125" y="206" font-size="14" text-anchor="middle">10⁻⁶</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="206" font-size="14" text-anchor="middle">10⁻³</text>
+<text class="f-muted" fill="#5c6d66" x="295" y="206" font-size="14" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="206" font-size="14" text-anchor="end">10³</text>
+<text class="f-text" fill="#182f2b" x="210" y="230" font-size="14" text-anchor="middle">被比较的数 |b| 有多大（对数刻度）</text>
+</svg><figcaption>图 26-4　允许误差 = max(rtol × |b|, atol)。数大时看相对容差，数接近 0 时看绝对容差。图中 rtol = 10⁻⁵、atol = 10⁻⁸，只是示意。</figcaption></figure>
+<p>那什么时候应该坚持逐位相同？答案是：两边做的是<strong>完全相同的运算、完全相同的顺序</strong>时。比如把量化数据从一种存储格式换成另一种，只是重新排列字节，解码出来的值就必须一位不差。Strata 的 <code>canonical_xcheck.py</code> 正是这样要求的。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/tools/canonical_xcheck.py#L1-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>）反过来，连编译器的优化都可能改变顺序。Strata 在 AMD 显卡上特意关掉了两个文件的“乘加合并”（FMA）：把乘法和加法合成一条指令只舍入一次，会改变“正好在中间”时的取舍结果。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/CMakeLists.txt#L313-L317" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>《数值分析》讲过：浮点加法满足交换律，但不满足结合律，(a + b) + c 和 a + (b + c) 可能不同。GPU 上成千上万个线程做归约，求和的分组方式由线程布局决定，所以“同一个公式”在 CPU 和 GPU 上本来就不该期望逐位相同。</p>
+
+<h2 id="sec-4">26.4 差一点点，就换了一个词</h2>
+<p>数值上差一点点，会不会造成看得见的后果？会，而且就在“挑词”这一步。模型最后给每个候选词一个分数，叫 logit，分数最高的词被选中。如果第一名和第二名的分数几乎一样，一点点数值误差就能让它们交换位置。</p>
+<p>看一个例子。参考引擎给两个候选词的分数是 [1.00000, 0.99999]，选第一个；测试引擎算出 [0.99998, 1.00001]，选第二个。两边的最大差只有 0.00002，选出的词却换了。反过来，如果分数是 [10, 0]，误差再大十倍也不会换词。所以“最大误差很小”和“选出的词相同”是两件事，要分开检查。</p>
+<p>要比较两个引擎，还有一个麻烦。让它们各自自由生成，只要有一个词不同，后面的“上文”就不同了，再往后的每一步都没法比。解决办法叫 <dfn>teacher forcing</dfn>（固定历史）：不让引擎自己续写，而是喂给两边同一份标准文本，在每个位置上比较它们对“下一个词”的预测。图 26-5 对比了两种做法。</p>
+<figure class="fig"><svg viewBox="0 0 400 258" role="img" aria-label="图 26-5：自由生成时第一处分歧会传染到后面所有位置；teacher forcing 给两边喂同一份文本，每个位置都能独立比较">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="15" font-weight="600">自由生成：各写各的</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="44" font-size="14">引擎 A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="98" y="46" font-size="14" text-anchor="middle">今天</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="124" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="146" y="46" font-size="14" text-anchor="middle">天气</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="172" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="194" y="46" font-size="14" text-anchor="middle">很</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="220" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="242" y="46" font-size="14" text-anchor="middle">好</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="268" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="290" y="46" font-size="14" text-anchor="middle">，</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="316" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="338" y="46" font-size="14" text-anchor="middle">我们</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="78" font-size="14">引擎 B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76" y="62" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="98" y="80" font-size="14" text-anchor="middle">今天</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="124" y="62" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="146" y="80" font-size="14" text-anchor="middle">天气</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="172" y="62" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="194" y="80" font-size="14" text-anchor="middle">很</text>
+<rect class="f-warn" fill="#9e5d24" x="220" y="62" width="44" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="242" y="80" font-size="14" text-anchor="middle">不错</text>
+<text class="f-muted" fill="#5c6d66" x="274" y="80" font-size="14">后面全不同</text>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="15" font-weight="600">Teacher forcing：喂同一份文本，逐位置比</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="148" font-size="14">标准文本</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="76" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="98" y="150" font-size="14" text-anchor="middle">今天</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="124" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="146" y="150" font-size="14" text-anchor="middle">天气</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="172" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="194" y="150" font-size="14" text-anchor="middle">很</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="220" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="242" y="150" font-size="14" text-anchor="middle">好</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="268" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="290" y="150" font-size="14" text-anchor="middle">，</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="316" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="338" y="150" font-size="14" text-anchor="middle">我们</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="182" font-size="14">A 预测</text>
+<rect class="f-soft" fill="#e5f1df" x="76" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="98" y="184" font-size="14" text-anchor="middle">天气</text>
+<rect class="f-soft" fill="#e5f1df" x="124" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="146" y="184" font-size="14" text-anchor="middle">很</text>
+<rect class="f-soft" fill="#e5f1df" x="172" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="194" y="184" font-size="14" text-anchor="middle">好</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="242" y="184" font-size="14" text-anchor="middle">，</text>
+<rect class="f-soft" fill="#e5f1df" x="268" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="290" y="184" font-size="14" text-anchor="middle">我们</text>
+<rect class="f-soft" fill="#e5f1df" x="316" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="338" y="184" font-size="14" text-anchor="middle">去</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="216" font-size="14">B 预测</text>
+<rect class="f-soft" fill="#e5f1df" x="76" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="98" y="218" font-size="14" text-anchor="middle">天气</text>
+<rect class="f-soft" fill="#e5f1df" x="124" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="146" y="218" font-size="14" text-anchor="middle">很</text>
+<rect class="f-warn" fill="#9e5d24" x="172" y="200" width="44" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="194" y="218" font-size="14" text-anchor="middle">不错</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="242" y="218" font-size="14" text-anchor="middle">，</text>
+<rect class="f-soft" fill="#e5f1df" x="268" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="290" y="218" font-size="14" text-anchor="middle">我们</text>
+<rect class="f-soft" fill="#e5f1df" x="316" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="338" y="218" font-size="14" text-anchor="middle">去</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="248" font-size="14">上文都一样，第 3 个位置的分歧不会传染给后面</text>
+</svg><figcaption>图 26-5　自由生成时，第一处分歧之后就没法逐位比了；teacher forcing 让每个位置都有相同的上文，分歧被锁定在它发生的位置。</figcaption></figure>
+<p>Strata 回答“缓存会不会让输出变差”时用的就是这个办法：引擎有一个开关，按标准文本逐个 token 运行，把每个位置的 logits 全部写出来。缓存关闭时，所有专家都由 CPU 计算；缓存打开时，5,130 个最常用的专家放在显卡上。测试条件是 Q2_0 量化、RTX 5070，三段固定文本的前 512 或 1,024 个 token。<span class="ev ev-report">上游报告</span></p>
+<div class="table-wrap"><table><thead><tr><th>文本</th><th>首选词相同的位置</th><th>困惑度：缓存关</th><th>困惑度：缓存开</th></tr></thead><tbody>
+<tr><td>代码助手（512 个 token）</td><td>97.7%</td><td>2.672</td><td>2.630</td></tr>
+<tr><td>长文档（1,024 个 token）</td><td>96.2%</td><td>29.844</td><td>29.843</td></tr>
+<tr><td>聊天（1,024 个 token）</td><td>95.0%</td><td>18.380</td><td>18.301</td></tr>
+</tbody></table></div>
+<p>表里的<dfn>困惑度</dfn>衡量模型对这段真实文字有多“意外”，越低说明预测得越准。报告的结论有三条：缓存会在 2%–5% 的位置上改变“两个几乎同分的候选谁赢”，大多数翻转发生在前两名分数差不到 0.5 的地方；两边的困惑度在 1 个标准误差之内相同，没有谁更准；显卡和 CPU 用不同的浮点顺序计算同一个专家，是同样好的近似。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity 报告</a>）</p>
+<p>这张表演示了一个好的比较该怎么做：既看离散的决策（首选词是否相同），也看连续的质量（困惑度），还要说明翻转发生在什么地方。只报告“96% 的词相同”，读者会以为 4% 的地方出了错；只报告“困惑度相同”，又可能掩盖一个只在少数位置出错的 bug。</p>
+
+<h2 id="sec-5">26.5 让测试先失败一次：参照答案与负例</h2>
+<p>测试通过了，能说明什么？如果这个测试面对一个真有 bug 的程序也会通过，那它的“通过”就没有任何意义。检验测试本身的办法很朴素：故意往代码里放一个 bug，看测试能不能抓住它。这叫<dfn>变异测试</dfn>，被改坏的版本叫“变异体”。</p>
+<p>下面的实验用一个 48 层的玩具模型演示这件事。它准备了 4 个版本的实现和 5 个测试。先猜一猜：“权重乘两次”这个 bug，哪几个测试抓得到？</p>
+<div class="viz" data-viz="test-mutants"><figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="图 26-6：四个实现版本乘五个测试的结果表。冒烟测试一个 bug 也没抓到，带容差的差分测试抓到全部三个且没有误报">
+<text class="f-muted" fill="#5c6d66" x="175" y="16" font-size="14" text-anchor="middle">冒烟</text><text class="f-muted" fill="#5c6d66" x="175" y="34" font-size="14" text-anchor="middle">测试</text>
+<text class="f-muted" fill="#5c6d66" x="225" y="16" font-size="14" text-anchor="middle">弱</text><text class="f-muted" fill="#5c6d66" x="225" y="34" font-size="14" text-anchor="middle">单元</text>
+<text class="f-muted" fill="#5c6d66" x="275" y="16" font-size="14" text-anchor="middle">强</text><text class="f-muted" fill="#5c6d66" x="275" y="34" font-size="14" text-anchor="middle">单元</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="16" font-size="14" text-anchor="middle">差分</text><text class="f-muted" fill="#5c6d66" x="325" y="34" font-size="14" text-anchor="middle">精确</text>
+<text class="f-muted" fill="#5c6d66" x="375" y="16" font-size="14" text-anchor="middle">差分</text><text class="f-muted" fill="#5c6d66" x="375" y="34" font-size="14" text-anchor="middle">容差</text>
+<text class="f-text" fill="#182f2b" x="10" y="62" font-size="14">正确实现（换顺序）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="152" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="175" y="62" font-size="14" text-anchor="middle">通过</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="225" y="62" font-size="14" text-anchor="middle">通过</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="252" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="275" y="62" font-size="14" text-anchor="middle">通过</text>
+<rect class="f-warn" fill="#9e5d24" x="302" y="42" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="62" font-size="14" text-anchor="middle">误报</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="352" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="375" y="62" font-size="14" text-anchor="middle">通过</text>
+<text class="f-text" fill="#182f2b" x="10" y="100" font-size="14">bug：权重乘两次</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="175" y="100" font-size="14" text-anchor="middle">漏掉</text>
+<rect class="f-warn" fill="#9e5d24" x="202" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="225" y="100" font-size="14" text-anchor="middle">漏掉</text>
+<rect class="f-accent" fill="#136d5a" x="252" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="275" y="100" font-size="14" text-anchor="middle">抓到</text>
+<rect class="f-accent" fill="#136d5a" x="302" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="100" font-size="14" text-anchor="middle">抓到</text>
+<rect class="f-accent" fill="#136d5a" x="352" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="375" y="100" font-size="14" text-anchor="middle">抓到</text>
+<text class="f-text" fill="#182f2b" x="10" y="138" font-size="14">bug：漏掉一个专家</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="175" y="138" font-size="14" text-anchor="middle">漏掉</text>
+<rect class="f-accent" fill="#136d5a" x="202" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="225" y="138" font-size="14" text-anchor="middle">抓到</text>
+<rect class="f-accent" fill="#136d5a" x="252" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="275" y="138" font-size="14" text-anchor="middle">抓到</text>
+<rect class="f-accent" fill="#136d5a" x="302" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="138" font-size="14" text-anchor="middle">抓到</text>
+<rect class="f-accent" fill="#136d5a" x="352" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="375" y="138" font-size="14" text-anchor="middle">抓到</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="14">bug：每层用旧输入</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="175" y="176" font-size="14" text-anchor="middle">漏掉</text>
+<rect class="f-warn" fill="#9e5d24" x="202" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="225" y="176" font-size="14" text-anchor="middle">漏掉</text>
+<rect class="f-warn" fill="#9e5d24" x="252" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="275" y="176" font-size="14" text-anchor="middle">漏掉</text>
+<rect class="f-accent" fill="#136d5a" x="302" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="176" font-size="14" text-anchor="middle">抓到</text>
+<rect class="f-accent" fill="#136d5a" x="352" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="375" y="176" font-size="14" text-anchor="middle">抓到</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="212" font-size="14" text-anchor="middle">主色：抓到 bug；警示色：漏掉 bug，或冤枉了正确实现</text>
+</svg><figcaption>图 26-6　变异测试的结果表。冒烟测试一个 bug 也没抓到；只有带容差的差分测试做到了“bug 全抓到，正确实现不误报”。</figcaption></figure></div>
+<p>表里最值得琢磨的是两格。一是“弱单元测试”漏掉了“权重乘两次”：它恰好用了权重 1.0，而 1.0 的平方还是 1.0。一个测试选的输入太“规整”，就会对某类 bug 天然失明。二是“每层用旧输入”骗过了两个单元测试：bug 不在被测的那个函数里，而在把函数串起来的循环里。这正是第 26.2 节说的“零件全绿，系统照样是错的”。</p>
+<p>表里抓 bug 最得力的是<dfn>差分测试</dfn>：拿同一批输入，分别喂给被测实现和一个独立的参照实现，比较输出。下面的专栏专门讲它。</p>
+<aside class="primer" id="c26-differential-testing">
+<h3>差分测试与变形测试</h3>
+<p>很多计算没有能手算的标准答案：一个 2560 维的矩阵乘法，谁也没法在纸上验算。<dfn>差分测试</dfn>的思路是：找一个独立实现的版本当参照，两边吃同样的输入，比较输出。参照可以慢、可以笨，只要可信就行。Strata 的对照测试就是这样：GPU 内核对一条已经验证过的标量参照路径，而这条参照路径本身先和 ggml 核对过。</p>
+<p>参照的关键是<strong>独立</strong>。Strata 的 <code>layer.cpp</code> 里记着一个教训：两个打包工具都按字段名 <code>mins</code> 去找某种量化数据的偏移量平面，可这个平面真正的名字是 <code>offsets</code>。两个工具“一致同意”，于是一起漏掉了 54 个张量的偏移量，共 136 MiB。注释的结论是：两个工具意见一致，只有在它们不共享那个错误假设时才算证据。<span class="ev ev-code">代码事实</span>[S14]</p>
+<p>当连参照都不好找时，还可以用<dfn>变形测试</dfn>：不知道正确答案是多少，但知道“输入这样变，输出应该怎样变”。比如 Strata 的 KV 缓存按页存放，测试用同一份数据，分别按每页 1、4、512 个格子存放，并把页表打乱，要求注意力的输出完全相同。[S18] 再比如投机解码的验证窗口，设计上要求每个位置选出的词和逐个 token 生成时逐位相同。[S08] 这些“应该不变”的规律，就是不需要标准答案的参照。</p>
+<p class="further">延伸阅读：<a href="https://en.wikipedia.org/wiki/Differential_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Differential testing</a> · <a href="https://en.wikipedia.org/wiki/Metamorphic_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Metamorphic testing</a> · <a href="https://en.wikipedia.org/wiki/Test_oracle" target="_blank" rel="noopener noreferrer">Wikipedia: Test oracle</a> · <a href="https://en.wikipedia.org/wiki/Mutation_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Mutation testing</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="图 26-7：差分测试的流程。同一批输入分别交给被测实现和独立参照，再按规则比较">
+<rect class="f-soft" fill="#e5f1df" x="130" y="8" width="140" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="15" font-weight="600" text-anchor="middle">同一批输入</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V54H100V68M200 54H300V68"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="70" width="180" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="100" y="91" font-size="15" font-weight="600" text-anchor="middle">被测实现</text>
+<text class="f-on" fill="#ffffff" x="100" y="109" font-size="14" text-anchor="middle">例：Strata 的 GPU 内核</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="70" width="180" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="300" y="91" font-size="15" font-weight="600" text-anchor="middle">独立的参照</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="109" font-size="14" text-anchor="middle">例：ggml 的计算规则</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 118V132H300V118M200 132V146"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="148" width="300" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="169" font-size="15" font-weight="600" text-anchor="middle">按规则比较</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="187" font-size="14" text-anchor="middle">重排字节：逐位相同；改了运算顺序：带容差</text>
+<text class="f-text" fill="#182f2b" x="200" y="222" font-size="14" text-anchor="middle">参照必须独立：共享同一个错误假设，比较就失去意义</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="242" font-size="14" text-anchor="middle">反例：两个工具都找 mins 字段，一起漏掉了同一批数据</text>
+</svg><figcaption>图 26-7　差分测试：两份独立的实现吃同样的输入，结果按事先定好的规则比较。规则可以是逐位相同，也可以是带容差。</figcaption></figure>
+<p>差分测试也抓到过 Strata 的真 bug。Q2_0 量化格式里，2 位编码 0–3 解码时要先减 1，可表示的值是 {−d, 0, d, 2d}，而不是 {0, d, 2d, 3d}。漏掉这个减 1，大多数值看起来都对，其实每个都偏了一格。所以转换工具逐字照抄 ggml 的解码表达式，再逐位对照。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/tools/canonical_xcheck.py#L7-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>）同一个文件还记录了 Q8_0 格式的一次真实失误：编码曾被当成有符号数存放，自己和自己的解码器完全一致；直到用真实模型打包，才发现那两个张量解码后整体偏了 128 个编码，而其他 12 种类型都正常。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>编译器课上有一种经典做法，叫“对拍”：同一份程序交给两个编译器，比较运行结果。ACM 竞赛里写暴力解法去对拍优化解法，也是同一个思路。</p>
+
+<h2 id="sec-6">26.6 动手：给微型引擎写测试</h2>
+<p>本书随附一个纯 Python 的微型推理引擎 <code>labs/tiny_inference.py</code>：4 层、8 维、每层 4 个专家挑 2 个，权重是固定的随机数，不需要显卡。它不是 Strata 的兼容实现，输出也没有语言意义，但整条“编码 → 逐层计算 → 选词 → 保存与恢复”的链路都是真的。配套的 10 个测试在本书的环境里全部通过。</p>
+<ol>
+<li><strong>先读测试。</strong>打开 <code>labs/test_tiny_inference.py</code>，找到“分段处理等于一次处理”的那一个。它用的是精确相等。想一想：为什么这里精确相等是对的？（提示：两条路径做的是完全相同顺序的运算。）</li>
+<li><strong>注入一个 bug。</strong>按 <code>labs/README.md</code> 的第 3 个任务，把递归层里“先衰减、再更新”的顺序对调。哪些测试会失败？如果一个都没失败，就补一个会失败的测试。</li>
+<li><strong>改写比较规则。</strong>假设你把逐个 token 的预填充换成整段一起算的矩阵乘法，运算顺序变了。把那个精确相等的测试改成带容差的比较，并说明容差是怎么定的。</li>
+</ol>
+<p>本章的两个交互实验都在浏览器里真算，数字属于教学推演。实验台里的容差公式和 Python 的 <code>math.isclose</code> 一致；变异测试用的是一个玩具模型，不是 Strata 的内核。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>推理引擎最危险的错误是“看起来正常”的错误。测试要有独立的参照答案，不能只检查程序没崩。</li>
+<li>浮点结果会随计算顺序变化。同样的运算、同样的顺序，才要求逐位相同；否则用相对加绝对的容差比较，再单独检查选出的词。</li>
+<li>测试本身也要被检验：故意注入 bug，看它会不会失败。参照实现必须独立，不能和被测代码共享同一个错误假设。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“CPU 和显卡算出来的数不一样，说明其中一个有 bug。”</strong></p>
+<p>不一定。两边的浮点运算顺序不同，最后几位本来就会不同，Strata 的实测也显示两者同样准确。可也不能反过来一律放行：那条“显卡路径不正确”的启动警告，最早源自一个真实的故障，当时的输出从第 0 个 token 就开始分叉。后来故障修好了，由专家对照测试覆盖，从 0.1.8 版起警告才换成一句准确的说明。<span class="ev ev-report">上游报告</span> 区分两者要看规律：合法差异只在接近平手的位置翻转，困惑度不变；真 bug 往往从一开始就分叉，或者让质量指标系统性变差。</p></div>
+
+<details class="deep"><summary>深入一层：五层证据、指标的陷阱与“逐位相同”的边界</summary>
+<h3>五层证据阶梯</h3>
+<p>第一层是纯函数：地址偏移、容量、top-k、期望长度。第二层是单个算子：同样的输入，比较输出和误差。第三层是组合：归一化、门控、专家加权和状态更新的先后顺序。第四层是固定历史下的整模型分布。第五层是真实任务和长会话行为。下层通过，推不出上层通过。“专家池不乘路由权重”、GDN 的 β 和状态轴的说明，都说明组合错误可以藏在各自通过测试的模块之间。[S06][S17]</p>
+<h3>teacher forcing 下记录哪些指标</h3>
+<p>可以记录最大绝对误差、相对误差、均方误差、KL 散度、首选词是否改变，以及路由选中的专家编号和索引器选中的位置是否改变。每个指标都有陷阱：相对误差在参考值接近 0 时会失真；KL 散度要说明概率怎样归一化、零概率怎样处理；首选词相同的比例要和“前两名分差”的分布一起看。Strata 的 QSA 索引器干脆规定选中的位置必须<strong>完全相同</strong>，不给容差，因为选中一个不同的格子，注意力的输入就变了。为此它把索引器的键存成 FP32 而不是 FP16：FP16 会让每个分数产生约 2⁻¹¹ 的相对扰动，恰好落在选择边界上。代价不大：32K 上下文时，这些 FP32 键一共约 50 MiB。[S18]</p>
+<h3>可以直接拿来用的变形关系</h3>
+<p>页表和数据一起做同样的置换，逻辑上的注意力结果应当不变；同一段输入切成不同的块，分块之间的状态交接应当等价；保存后恢复再继续，应当和从未离开一样；关掉草稿，应当和对应的目标路径语义一致。[S08][S18] 这些关系能生成大量强测试，但要写明容差和数值路径：跨 CPU / GPU、换矩阵乘法实现、换量化路径时，不保证逐位相同，既不能把所有差异直接放行，也不能无视已知的舍入边界。</p>
+<h3>“逐位相同”的承诺有边界</h3>
+<p>Strata 的验证窗口在头文件里承诺：每个位置的选词和逐个生成时逐位相同。[S08] 可上游文档同时记录：使用 IQ 系列量化时，CPU 计算一个 token 和计算多个 token 用的是两套舍入略有不同的内核，所以温度为 0 的同一个提示，可能因为草稿、缓存状态或会话恢复的不同，得出另一个同样好的答案（issue #152）。设置 <code>STRATA_IQ_MT_MIN=1</code> 后，所有情况都走多 token 内核，答案就不再依赖草稿。若要在服务里做到字节级可重复，还要加上 <code>--prompt-cache 0 --adapt-swaps 0 --pcie-frac 0</code>。作者实测（IQ3_XXS、3.6K token 的提示、重复 4 次）：三个开关都加，4 次只出现 1 种答案；不加 <code>--pcie-frac 0</code>，出现 2 种（第一次不同）；全用默认值，也是 2 种。<span class="ev ev-report">上游报告</span>[S03] 头文件写的是设计目标，文档写的是实测边界，两样都要读。</p>
+<h3>主动注入的负例清单</h3>
+<p>给测试故意注入这些错误：把头映射从取模改成整数除法；用 RMS 归一化代替 L2 归一化；每层的激活缓存只按指针判断；路由权重重复乘；位置计数被冻结；恢复会话时漏掉 PLE 的历史。测试应当稳定失败，并指出最早被违反的契约。如果注入后测试仍然通过，它多半只检查了“进程没崩溃”。参照实现不能和被测代码共享同一个错误假设，<code>layer.cpp</code> 里两个工具都找错字段名的案例适合在课堂上讨论。[S14]</p>
+<h3>公开仓库能跑哪些测试</h3>
+<p>Strata 的 <code>CMakeLists.txt</code> 注释写明：完整的测试套件和微基准放在 <code>tests/</code> 和 <code>bench/micro/</code>，公开源码没有包含它们，所以构建测试的开关默认是关的。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/CMakeLists.txt#L52-L57" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）同样，<code>gdn.hpp</code> 注释里提到的参照实现 <code>ref/gdn.py</code>，在公开仓库的 <code>ref/</code> 目录里也找不到，那里只有 <code>load.py</code>。本章引用的对照测试和实测，来自公开的源码注释、测试文件和报告；本书没有在 GPU 上重跑它们。</p>
+<h3>本书随附测试证明的是什么</h3>
+<p><code>labs/tiny_inference.py</code> 的测试检查分段处理、保存与恢复、参考重放和受控草稿接受。它们证明的是本书的教学代码，<strong>不是</strong>上游 Strata 的 GPU 实现。Strata 的分派、量化、异步执行和真实权重，需要在对应的环境里独立验证。</p>
+</details>
