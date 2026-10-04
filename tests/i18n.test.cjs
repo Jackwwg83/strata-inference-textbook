@@ -6,7 +6,7 @@ const path = require('node:path');
 const I18N = require('../src/i18n.js');
 
 // Japanese is written with kanji, so for ja only glyphs that exist in Simplified Chinese alone count as leftovers.
-const SIMPLIFIED_ONLY = /[这们说时过发个对现么无问还进动样实关应长开见边头间两东车经资没认该处准则网签据维计读写钟递传输钮页图标题码块缓选择设显错误]/;
+const SIMPLIFIED_ONLY = /[这们说时过发个对现么无问还进动样实关应长开见边头间两东车经资认该处则网签维计读钟递传输钮页图标题码块缓选择设显错误]/;
 const hanFor = lang => (lang === 'ja' ? SIMPLIFIED_ONLY : /[一-鿿]/);
 
 test('every UI language has exactly the Chinese keys with matching value types', () => {
