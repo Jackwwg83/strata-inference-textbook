@@ -1,0 +1,223 @@
+<div class="hook"><span class="eyebrow">La historia de las piezas en verde</span>
+<p>El modelo de Strata tiene un módulo de consulta de tablas llamado PLE (lo vimos en el capítulo 11). Los desarrolladores lo dividieron en varias piezas: calcular un hash, leer una fila de una tabla grande y hacer un pequeño cálculo. Cada pieza estaba escrita y cada una pasó su prueba de comparación. Coincidían con un script de referencia, con numpy y con ggml.</p>
+<p>Sin embargo, el modelo completo falló una puerta de aceptación. El motivo estaba en un comentario del código fuente: la ruta principal del modelo <strong>nunca había llamado a esas piezas</strong>. <span class="ev ev-code">Hecho de código</span>[S13] Cada pieza era correcta, pero a la máquina entera le faltaba un trozo. Este es el último capítulo del libro. Trata de cómo tu proyecto de curso puede evitar esa trampa.</p></div>
+<p class="tldr"><strong>En una línea:</strong> cuando construyas un sistema, abre primero un «corte vertical» muy fino. Haz que un token viaje de la entrada a la salida y deje evidencia que se pueda revisar. Después añade funciones capa por capa. Cada vez que decidas un compromiso, anota qué ganaste, qué pagaste y cómo lo verificas. Al entregar, marca en cada componente hasta dónde llega su evidencia.</p>
+
+<h2 id="sec-1">28.1 Todos los módulos en verde, y el sistema sigue mal</h2>
+<p>La figura 28-1 muestra la situación de PLE. Cada una de las tres piezas pasó su prueba de comparación. Pero la ruta principal del modelo, desde la capa 0 hasta la capa 47, no pasó por ellas ni una sola vez. Si miras solo el informe de pruebas de una pieza, no ves ningún problema.</p>
+<figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="Figura 28-1: las tres piezas de PLE pasan cada una su prueba de comparación, pero la ruta principal del modelo nunca las llama y la aceptación del modelo completo falla">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle">Las piezas pasan, pero nadie las llama</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="70" y="58" font-size="12" text-anchor="middle">Calcular el hash</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="80" font-size="12" text-anchor="middle">✓ prueba pasada</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="58" font-size="12" text-anchor="middle">Leer una fila</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="80" font-size="12" text-anchor="middle">✓ prueba pasada</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="270" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="58" font-size="12" text-anchor="middle">Bloque de cálculo</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="80" font-size="12" text-anchor="middle">✓ prueba pasada</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M70 94V128M200 94V128M330 94V128"/>
+<text class="f-warn" fill="#9e5d24" x="80" y="116" font-size="13">✗ sin conectar</text>
+<text class="f-warn" fill="#9e5d24" x="210" y="116" font-size="13">✗</text>
+<text class="f-warn" fill="#9e5d24" x="340" y="116" font-size="13">✗</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="132" width="380" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="157" font-size="12" text-anchor="middle">Ruta principal: capa 0 → capa 1 → … → capa 47</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 172V188"/>
+<rect class="f-warn" fill="#9e5d24" x="40" y="190" width="320" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="215" font-size="13" text-anchor="middle">Aceptación del modelo completo (C1): fallida</text>
+</svg><figcaption>Figura 28-1　Que pasen todas las pruebas por pieza no significa que el sistema esté conectado. Solo una prueba que recorra de verdad toda la ruta principal puede detectar un error como «nadie la llama». [S13]</figcaption></figure>
+<p>Este tipo de error tiene una raíz común. Se termina cada capa «en horizontal» y solo al final se conectan. Es como construir una carretera de la ciudad A a la ciudad B asfaltando cada kilómetro con su ancho final, y descubrir el último día que un tramo del medio nunca se conectó. Lo más seguro es abrir primero un camino estrecho que llegue de A hasta B. Cuando ya pasen coches, lo ensanchas poco a poco.</p>
+<p>En software, este «camino estrecho» se llama <dfn>corte vertical</dfn> (vertical slice). Una función recorre el sistema de la entrada a la salida. Cada capa hace solo la parte pequeña que necesita, pero toda la cadena es real, se ejecuta y produce resultados que puedes revisar. En un motor de inferencia, el primer corte vertical es este: entra una frase, pasa por la codificación, el cálculo capa por capa y la elección de palabra, sale un token, y se imprimen los datos intermedios clave para que una persona pueda comprobarlos.</p>
+<p>Un corte vertical no es código chapucero. Debe ser «fino», no «tosco». Cada paso de la cadena necesita pruebas, y las respuestas de referencia y los casos negativos del capítulo 26 siguen siendo imprescindibles. Lo que se ahorra es amplitud, no corrección.</p>
+
+<h2 id="sec-2">28.2 Diseñar un sistema es anotar tus compromisos</h2>
+<p>Cuando el corte vertical ya funciona, cada función nueva trae decisiones. Puedes gastar más VRAM para ganar velocidad, o ahorrar VRAM. Puedes buscar primero la velocidad, o primero la facilidad de depuración. Estas decisiones no tienen una respuesta estándar, pero sí tienen una forma estándar de anotarse.</p>
+<aside class="primer" id="c28-system-design">
+<h3>Diseño de sistemas y compromisos de ingeniería</h3>
+<p>El <dfn>diseño de sistemas</dfn> responde a esta pregunta: con unas restricciones dadas, ¿cómo organizas un montón de piezas para formar un todo que cumpla los requisitos? No es como escribir un algoritmo. Un problema de algoritmos suele tener una solución óptima. El diseño de sistemas casi siempre es un <dfn>compromiso</dfn> (trade-off) entre varios objetivos. La velocidad, la memoria, la corrección, la facilidad de depuración y el tiempo de desarrollo suelen tirar cada uno para su lado.</p>
+<p>Un compromiso bien hecho anota al menos cinco cosas:</p>
+<p>① <strong>Decisión</strong>: qué elegiste y qué no elegiste. ② <strong>Ganancia</strong>: qué beneficio obtuviste, mejor con números. ③ <strong>Costo</strong>: qué pagaste, también con números. ④ <strong>Verificación</strong>: cómo confirmas que el beneficio es real y que el costo no es mayor que el anotado. ⑤ <strong>Condiciones para revisarlo</strong>: qué tendría que pasar para que cambies esta decisión.</p>
+<p>El punto ⑤ es el que más se olvida. Sin él, una decisión que era razonable en su momento sigue viva cuando las condiciones cambian, y se convierte en una «herencia» que nadie se atreve a tocar. A este tipo de costo, que se acumula y tarde o temprano hay que pagar, los ingenieros lo llaman <dfn>deuda técnica</dfn>.</p>
+<p>Los compromisos tienen otra trampa común: optimizar solo lo que sabes medir. Si miras solo la velocidad media, puedes sacrificar la latencia de cola. Si miras solo las pruebas unitarias, puedes pasar por alto errores de composición. Por eso, al diseñar, decide qué métrica mide cada objetivo.</p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/Ingenier%C3%ADa_de_software" target="_blank" rel="noopener noreferrer">Wikipedia: Ingeniería de software</a> · <a href="https://es.wikipedia.org/wiki/Deuda_t%C3%A9cnica" target="_blank" rel="noopener noreferrer">Wikipedia: Deuda técnica</a> · <a href="https://es.wikipedia.org/wiki/Dise%C3%B1o_de_sistemas" target="_blank" rel="noopener noreferrer">Wikipedia: Diseño de sistemas</a> · <a href="https://es.wikipedia.org/wiki/Trade-off" target="_blank" rel="noopener noreferrer">Wikipedia: Trade-off</a></p>
+</aside>
+<p>Los comentarios del código fuente de Strata contienen muchos compromisos anotados con esta claridad. La figura 28-2 recoge uno: el indexer de la capa QSA elige qué posiciones del historial hay que leer, y guarda sus claves en FP32 en lugar del FP16, que ocupa menos. <span class="ev ev-code">Hecho de código</span>[S18]</p>
+<figure class="fig"><svg viewBox="0 0 400 400" role="img" aria-label="Figura 28-2: registro completo de un compromiso: las claves del indexer se guardan en FP32, lo que da selecciones iguales a la referencia, a cambio de unos 50 MiB con un contexto de 32K">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="14" font-weight="600" text-anchor="middle">Registro completo de un compromiso</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="380" height="334" rx="10"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="60" font-size="12">Decisión</text><text class="f-text" fill="#182f2b" x="116" y="60" font-size="12">Guardar las claves del indexer en FP32,</text>
+<text class="f-text" fill="#182f2b" x="116" y="80" font-size="12">no en FP16</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="110" font-size="12">Ganancia</text><text class="f-text" fill="#182f2b" x="116" y="110" font-size="12">Las posiciones elegidas coinciden con</text>
+<text class="f-text" fill="#182f2b" x="116" y="130" font-size="12">la referencia</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="160" font-size="12">Costo</text><text class="f-text" fill="#182f2b" x="116" y="160" font-size="12">Unos 50 MiB para estas claves con un</text>
+<text class="f-text" fill="#182f2b" x="116" y="180" font-size="12">contexto de 32K</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="210" font-size="12">Motivo</text><text class="f-text" fill="#182f2b" x="116" y="210" font-size="12">FP16 desvía cada puntuación en torno a</text>
+<text class="f-text" fill="#182f2b" x="116" y="230" font-size="12">2⁻¹¹ en valor relativo, justo en el</text>
+<text class="f-text" fill="#182f2b" x="116" y="250" font-size="12">borde de «quién gana»</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="280" font-size="12">Verificación</text><text class="f-text" fill="#182f2b" x="116" y="280" font-size="12">Posiciones idénticas una por una;</text>
+<text class="f-text" fill="#182f2b" x="116" y="300" font-size="12">no se admite tolerancia</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="330" font-size="12">Revisar si</text><text class="f-text" fill="#182f2b" x="116" y="330" font-size="12">Antes de pasar a INT8, medir cuántas</text>
+<text class="f-text" fill="#182f2b" x="116" y="350" font-size="12">selecciones cambian</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="388" font-size="12" text-anchor="middle">Fuente: notas de diseño al inicio de qsa.hpp</text>
+</svg><figcaption>Figura 28-2　Un compromiso anotado por completo: decisión, ganancia, costo, motivo, verificación y cuándo revisarlo; están los seis. En palabras del propio comentario, esta cantidad de VRAM es «barata al lado de un contrato de corrección». [S18]</figcaption></figure>
+<p>Veamos algunos ejemplos más. Vienen de <code>session.hpp</code> y todos anotan juntos «qué se gana» y «qué se paga» <span class="ev ev-code">Hecho de código</span>[S13]:</p>
+<ul>
+<li><strong>Un grafo de cómputo de GPU por capa.</strong> Se graban en un grafo las decenas de lanzamientos de kernel de una capa y luego se reproduce. En las mediciones, el mismo trabajo bajó de 2,393 milisegundos a 1,585 milisegundos, 1,51 veces más rápido. La razón es que el cuello de botella del motor es el costo de «lanzar kernels», no el ancho de banda. El costo asociado está anotado justo al lado. Para combinar los resultados de los expertos de cada capa con los pesos de esa misma capa, hace falta un grafo más por capa. Por eso la ventana en que la CPU puede trabajar a la vez que la GPU se reduce al tramo del experto compartido. El comentario lo dice sin rodeos: «una cadena residual estrictamente serial no puede ocultar el trabajo de CPU de cada capa». Esa parte solo se resuelve con la caché de expertos en VRAM.</li>
+<li><strong>El interruptor de depuración es un parámetro de ejecución.</strong> «Sincronizar después de cada capa» atrapa errores que no se ven de otro modo, pero hace todo más lento. Por eso es un parámetro de ejecución y no una opción de compilación: se activa cuando hace falta y se apaga el resto del tiempo.</li>
+<li><strong>Cero asignaciones de memoria al generar tokens.</strong> Todo el estado que necesita una sesión se asigna una sola vez, al principio. El comentario avisa de algo concreto: si la VRAM se pidiera justo en el primer token de una secuencia larga, todas las pruebas actuales pasarían, y solo se rompería esta restricción.</li>
+</ul>
+<p>La capa de servicio es igual. El servidor de Strata atiende una secuencia a la vez, por orden de llegada. Si el prompt más el tope de salida supera la longitud del contexto, rechaza la solicitud de inmediato con un 400 en lugar de truncarla en silencio. [S15] La primera decisión cambia simplicidad por un estado que nunca se mezcla. La segunda cambia un mensaje de error por que el usuario nunca reciba, sin saberlo, un resultado truncado.</p>
+<p class="bridge"><strong>Si estudiaste informática:</strong> en la industria existe una práctica llamada «registro de decisiones de arquitectura» (ADR). Cada decisión importante se anota en un documento corto de una página, con el contexto, la decisión y sus consecuencias. En tu informe del curso puedes escribir cada decisión de diseño como una tarjeta pequeña con el formato de la figura 28-2.</p>
+
+<h2 id="sec-3">28.3 Tres tipos de proyecto: elige uno</h2>
+<p>Los proyectos del curso son de tres tipos. Elige según lo que tengas a mano. Los tres se califican con el mismo criterio: la calidad de la evidencia y lo completo del análisis y de la ingeniería, no el precio de tu tarjeta gráfica.</p>
+<p><strong>Proyecto A: un motor diminuto que no necesita tarjeta gráfica.</strong> Parte de <code>labs/tiny_inference.py</code>, que viene con este libro. Usa pesos aleatorios fijos muy pequeños y un vocabulario de caracteres. Con ellos enlaza en una cadena completa la codificación, la normalización, las capas recurrentes y de atención, el enrutamiento de expertos, la salida y la elección voraz de palabras. Los pesos aleatorios no producen lenguaje con sentido. El objetivo de este proyecto es entender cómo funciona la maquinaria, no fingir que entrenaste un modelo de chat. La sección 28.5 da una ruta paso a paso.</p>
+<p><strong>Proyecto B: empieza con una optimización medible.</strong> Elige una dirección local: decodificar bloques cuantizados, recopilar con la tabla de páginas, la política de caché, el tamaño de chunk, el control de la ventana de borradores, o el análisis por fragmentos de la salida en streaming. Entrega la derivación, una línea base, el cambio, los casos negativos, los resultados y las limitaciones. Cambia un solo factor a la vez. No muevas cinco interruptores a la vez para luego mostrar un único tiempo total. Si no tienes tarjeta gráfica, haz una implementación de referencia en CPU y una simulación matemática. Si la tienes, puedes hacer una reproducción real sobre un commit fijo de Strata.</p>
+<p><strong>Proyecto C: una revisión de diseño multiusuario.</strong> Entrega un diseño para «ejecutar varias secuencias a la vez», en lugar de forzar un servicio de producción al final del trimestre. El primer paso del diseño es decidir de quién es cada dato. Mira la figura 28-3.</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="Figura 28-3: propiedad de los datos en un diseño multiusuario: los pesos se comparten en solo lectura, cada secuencia tiene su propio estado y el área temporal se comparte a lo largo del tiempo">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle">Multiusuario, paso 1: de quién es cada dato</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="34" width="360" height="62" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="58" font-size="13" font-weight="600" text-anchor="middle">Solo lectura, compartido por todas</text>
+<text class="f-text" fill="#182f2b" x="200" y="82" font-size="12" text-anchor="middle">Pesos del modelo, datos de expertos</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="108" width="360" height="62" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="132" font-size="13" font-weight="600" text-anchor="middle">Una copia por secuencia</text>
+<text class="f-on" fill="#ffffff" x="200" y="156" font-size="12" text-anchor="middle">Caché KV, estado de GDN, historial de PLE</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="182" width="360" height="62" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="206" font-size="13" font-weight="600" text-anchor="middle">Búfer scratch (área de trabajo temporal)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="230" font-size="12" text-anchor="middle">Solo una capa lo usa a la vez: se puede compartir</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="274" font-size="12" text-anchor="middle">SessionState de Strata: todo lo que no son pesos</text>
+</svg><figcaption>Figura 28-3　La propiedad de los datos, en tres partes. Strata mete en SessionState «todo lo que una secuencia necesita y no son pesos». El área de trabajo de las capas GDN la comparten las 36 capas, mientras que el estado es una copia por capa. [S13]</figcaption></figure>
+<p>El documento de diseño debe enumerar qué objetos se comparten en solo lectura, cuáles son estado de cada secuencia, de quién es el área temporal, cómo se reparten la planificación y el presupuesto de VRAM, y cómo funcionan la cancelación, la restauración, la observabilidad y la reversión. Después usa los escenarios de aceptación de concurrencia del capítulo 25 para intentar refutar tu propio diseño. Un prototipo pequeño que se ejecute, de planificador o de aislamiento de estado, da puntos extra. Toda capacidad que no hayas verificado debe escribirse como «no implementada»: que la interfaz muestre cinco usuarios no es lo mismo que tener cinco flujos de inferencia ejecutándose de verdad.</p>
+<p class="bridge"><strong>Si estudiaste informática:</strong> esto es exactamente el modelo de procesos de Sistemas Operativos. Varios procesos comparten un segmento de código de solo lectura, y cada uno tiene su propia pila y su propio heap. La caché KV es la «memoria privada» de cada secuencia. Compartirla sin protección equivale a que dos procesos se sobrescriban los datos.</p>
+
+<h2 id="sec-4">28.4 Qué entregar: marca la evidencia de cada componente</h2>
+<p>El problema más común en los informes de proyecto no es el código equivocado. Es llamar «hecho» a lo que solo está «escrito». Por eso, cada componente del informe debe indicar hasta dónde llega su evidencia:</p>
+<div class="table-wrap"><table><thead><tr><th>Estado</th><th>Significado</th><th>Evidencia que puedes mostrar</th></tr></thead><tbody>
+<tr><td>Código escrito</td><td>Escrito y probado, pero aún sin conectar a la ruta principal</td><td>La salida de las pruebas unitarias</td></tr>
+<tr><td>En la ruta principal</td><td>La ruta principal sí lo llama</td><td>El registro de una ejecución completa en el que se ve cómo lo llaman</td></tr>
+<tr><td>Datos reales</td><td>Una entrada real pasó por él y produjo un resultado completo</td><td>Un registro completo: entrada, valores intermedios y salida, con todos los campos llenos</td></tr>
+<tr><td>Simulado, vacío o estimado</td><td>Se ve en la interfaz, pero detrás hay datos falsos, campos vacíos o estimaciones</td><td>Hay que decirlo claramente y marcarlo como «Estimación didáctica»</td></tr>
+</tbody></table></div>
+<p>Un componente puede estar perfectamente «con el código escrito y en la ruta principal» sin haber producido todavía datos reales. Ese estado hay que anotarlo tal como es, sin taparlo con la palabra «hecho». El código fuente de Strata tiene un buen ejemplo. La CPU y la GPU deberían solapar su trabajo. Pero si, cuando la CPU recibe su tarea, la GPU ya terminó esa capa, toda la tubería ha degenerado en ejecución serial. Aun así, cada token se calcula bien y el tiempo por capa no muestra diferencia. Por eso el autor añadió un contador que cuenta en cuántas capas la CPU recibió su tarea mientras la GPU seguía ejecutando. Así se sabe si el mecanismo de solapamiento «trabaja de verdad» o «es solo decoración». <span class="ev ev-code">Hecho de código</span>[S13]</p>
+<p>El informe sigue este orden. Primero plantea una pregunta que un experimento pueda refutar, por ejemplo: «con la misma entrada y la misma puerta de calidad, ¿aumentar el presupuesto de expertos calientes en VRAM reduce el tiempo de cómputo de la CPU?». Después presenta, por turnos, la teoría, dónde está en el código fuente, el método, los datos, la interpretación y las limitaciones. Cada figura indica sus unidades, el número de muestras y las condiciones de medición. Los enlaces al código apuntan a un commit fijo, no a la rama main, que cambia. Se conservan todos los datos en bruto y los registros de los fallos. La calificación sigue esta tabla:</p>
+<div class="table-wrap"><table><thead><tr><th>Dimensión</th><th>Puntos</th><th>Evidencia verificable</th></tr></thead><tbody>
+<tr><td>Teoría y derivación</td><td>20</td><td>Fórmulas, unidades, dependencias y supuestos correctos</td></tr>
+<tr><td>Código fuente y contratos</td><td>20</td><td>Señala código real y distingue el código actual de los comentarios desfasados</td></tr>
+<tr><td>Código y pruebas</td><td>25</td><td>Se ejecuta; tiene una respuesta de referencia independiente, casos negativos y pruebas de casos límite</td></tr>
+<tr><td>Experimentos y calidad</td><td>20</td><td>Comparación en pares o alternada, datos en bruto, una puerta de calidad, y también cuentan los fallos</td></tr>
+<tr><td>Redacción y réplica</td><td>15</td><td>Indica el entorno, los pasos y las limitaciones para que otros puedan comprobarlo</td></tr>
+</tbody></table></div>
+<p>Hay dos líneas rojas. Si presentas una simulación didáctica como una medición de hardware, toda la dimensión «Experimentos y calidad» vale cero. Si hay una fuga de estado sin explicar, toda la dimensión «Código y pruebas» vale cero. Ningún rendimiento compensa un defecto de corrección. La autoevaluación de abajo te permite ponerte nota antes de entregar.</p>
+<div class="viz" data-viz="rubric-check"><figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="Figura 28-4: los cinco pesos de la rúbrica: teoría 20, código fuente 20, código y pruebas 25, experimentos 20, redacción 15, y las dos líneas rojas">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="14" font-weight="600" text-anchor="middle">Cómo se reparten los 100 puntos</text>
+<text class="f-text" fill="#182f2b" x="10" y="50" font-size="12">Teoría y derivación</text>
+<rect class="f-accent" fill="#136d5a" x="160" y="36" width="140" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="308" y="51" font-size="13">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">Fuente y contratos</text>
+<rect class="f-accent" fill="#136d5a" x="160" y="70" width="140" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="308" y="85" font-size="13">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="12">Código y pruebas</text>
+<rect class="f-accent" fill="#136d5a" x="160" y="104" width="175" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="343" y="119" font-size="13">25</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="12">Experimentos y calidad</text>
+<rect class="f-accent" fill="#136d5a" x="160" y="138" width="140" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="308" y="153" font-size="13">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="186" font-size="12">Redacción y réplica</text>
+<rect class="f-accent" fill="#136d5a" x="160" y="172" width="105" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="273" y="187" font-size="13">15</text>
+<text class="f-warn" fill="#9e5d24" x="10" y="222" font-size="12">Línea roja: simulación presentada como medición</text>
+<text class="f-warn" fill="#9e5d24" x="22" y="240" font-size="12">→ «Experimentos y calidad» = 0</text>
+<text class="f-warn" fill="#9e5d24" x="10" y="264" font-size="12">Línea roja: fuga de estado sin explicar</text>
+<text class="f-warn" fill="#9e5d24" x="22" y="282" font-size="12">→ «Código y pruebas» = 0</text>
+</svg><figcaption>Figura 28-4　Cómo se reparten los puntos de la rúbrica. «Código y pruebas» pesa más. Cada línea roja puede anular una dimensión entera. En la versión interactiva puedes marcar los puntos uno a uno y ponerte nota.</figcaption></figure></div>
+
+<h2 id="sec-5">28.5 Manos a la obra: abre el primer corte vertical</h2>
+<p>Tomemos el proyecto A como ejemplo. El primer paso no es escribir una función nueva. Es ejecutar una vez la cadena que ya existe y mirar con atención cada campo que produce. En el repositorio de este libro, ejecuta:</p>
+<p><code>python3 labs/tiny_inference.py --prompt "hello" --tokens 8</code></p>
+<p>La salida de una ejecución real hecha al escribir este libro contiene estas cosas. Está la geometría del modelo (4 capas, 8 dimensiones, 2 expertos elegidos de 4). Está una huella del modelo, <code>model_id</code>, calculada a partir de todos los pesos. Están los identificadores del prompt, <code>[8, 5, 12, 12, 15]</code>. Están los 8 identificadores generados y su texto, <code>"mzjsldhx"</code>. Y está <code>"draft_matches_greedy": true</code>, que indica que el resultado de la demostración con borrador coincide exactamente con generar de uno en uno. El texto no significa nada, porque los pesos son aleatorios. Pero todos los campos se calcularon de verdad. Esta es tu primera evidencia de «datos reales».</p>
+<p>Ahora ve añadiendo tramos, de uno en uno, con la idea del corte vertical. En cada tramo, escribe primero una prueba que falle y después la implementación:</p>
+<ol>
+<li><strong>Mira las formas y los dueños.</strong> Imprime la forma de cada tensor en cada capa y dibuja cuáles son pesos de solo lectura y cuáles son estado que cambia.</li>
+<li><strong>Guardar y restaurar, prefill por chunks.</strong> Guarda una sesión, restáurala y sigue generando. El resultado debe ser igual al de una ejecución sin interrupciones. Divide el prompt en varios chunks. El resultado debe ser igual al de procesarlo de una vez.</li>
+<li><strong>Borrador y verificación.</strong> Cambia los candidatos de la demostración con borrador. Cuando un token del borrador se rechace por primera vez, en cualquier posición, descarta el resto del borrador. La salida debe coincidir con la generación voraz.</li>
+<li><strong>Medir.</strong> Mide la velocidad solo al final y anótala como un registro con el método del capítulo 27. Ojo: los tiempos de este script no sirven como rendimiento de Strata.</li>
+</ol>
+<p>Las cinco tareas de <code>labs/README.md</code> siguen más o menos esta ruta. Antes de lanzarte, tantea el terreno con el planificador de abajo. Con el mismo número de semanas, ¿qué tienes el día de la entrega si construyes en horizontal y qué tienes si cortas en vertical?</p>
+<div class="viz" data-viz="slice-planner"><figure class="fig"><svg viewBox="0 0 400 330" role="img" aria-label="Figura 28-5: el avance en la semana 10. Construyendo en horizontal, ninguna función está lista para una demostración; con cortes verticales primero, dos funciones ya funcionan de punta a punta">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">Horizontal: en la semana 10</text>
+<text class="f-muted" fill="#5c6d66" x="93" y="46" font-size="12" text-anchor="middle">Código</text>
+<text class="f-muted" fill="#5c6d66" x="143" y="46" font-size="12" text-anchor="middle">Tests</text>
+<text class="f-muted" fill="#5c6d66" x="193" y="46" font-size="12" text-anchor="middle">Unión</text>
+<text class="f-muted" fill="#5c6d66" x="243" y="46" font-size="12" text-anchor="middle">Evidencia</text>
+<text class="f-text" fill="#182f2b" x="10" y="72" font-size="12">Núcleo</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12">Guardar</text>
+<text class="f-text" fill="#182f2b" x="10" y="124" font-size="12">Chunks</text>
+<text class="f-text" fill="#182f2b" x="10" y="150" font-size="12">Borrador</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="56" width="46" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="120" y="56" width="46" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="170" y="56" width="46" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="220" y="56" width="46" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="82" width="46" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="120" y="82" width="46" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="170" y="82" width="46" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="220" y="82" width="46" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="108" width="46" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="120" y="108" width="46" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="108" width="46" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="220" y="108" width="46" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="134" width="46" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="120" y="134" width="46" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="134" width="46" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="220" y="134" width="46" height="22" rx="3"/>
+<text class="f-warn" fill="#9e5d24" x="276" y="76" font-size="13" font-weight="600">Demo lista: 0</text>
+<text class="f-text" fill="#182f2b" x="276" y="102" font-size="12">Código de los 4</text>
+<text class="f-text" fill="#182f2b" x="276" y="128" font-size="12">Cero evidencia</text>
+<text class="f-text" fill="#182f2b" x="10" y="190" font-size="13" font-weight="600">Cortes verticales primero: semana 10</text>
+<text class="f-muted" fill="#5c6d66" x="93" y="216" font-size="12" text-anchor="middle">Código</text>
+<text class="f-muted" fill="#5c6d66" x="143" y="216" font-size="12" text-anchor="middle">Tests</text>
+<text class="f-muted" fill="#5c6d66" x="193" y="216" font-size="12" text-anchor="middle">Unión</text>
+<text class="f-muted" fill="#5c6d66" x="243" y="216" font-size="12" text-anchor="middle">Evidencia</text>
+<text class="f-text" fill="#182f2b" x="10" y="242" font-size="12">Núcleo</text>
+<text class="f-text" fill="#182f2b" x="10" y="268" font-size="12">Guardar</text>
+<text class="f-text" fill="#182f2b" x="10" y="294" font-size="12">Chunks</text>
+<text class="f-text" fill="#182f2b" x="10" y="320" font-size="12">Borrador</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="226" width="46" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="120" y="226" width="46" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="170" y="226" width="46" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="220" y="226" width="46" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="252" width="46" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="120" y="252" width="46" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="170" y="252" width="46" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="220" y="252" width="46" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="278" width="46" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="120" y="278" width="46" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="278" width="46" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="220" y="278" width="46" height="22" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="304" width="46" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="120" y="304" width="46" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="304" width="46" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="220" y="304" width="46" height="22" rx="3"/>
+<text class="f-text" fill="#182f2b" x="276" y="246" font-size="13" font-weight="600">Demo lista: 2</text>
+<text class="f-text" fill="#182f2b" x="276" y="272" font-size="12">Evidencia: sem. 4</text>
+<text class="f-text" fill="#182f2b" x="276" y="298" font-size="12">Borrador pendiente</text>
+</svg><figcaption>Figura 28-5　Las mismas 10 semanas y las mismas 16 casillas de trabajo (una semana por casilla). En horizontal, las casillas se llenan por completo, pero no hay ninguna función que se pueda demostrar. En vertical, dos funciones ya tienen evidencia real.</figcaption></figure></div>
+<p>La «casilla por semana» y el «supuesto erróneo escondido en la interfaz» del planificador son supuestos didácticos, no estadísticas de ningún proyecto real. Lo que quiere que veas es una diferencia de estructura. El corte vertical hace aflorar los problemas en cuanto se conecta la primera función, que es cuando el alcance del retrabajo es menor.</p>
+
+<h2 id="sec-6">28.6 Los libros de texto también tienen versiones</h2>
+<p>Cada hecho de código de este libro se comprobó contra un único commit fijo de Strata: <code>99f3dbd0b21d1401b3769e0c0d963913607f380b</code>, investigado el 2026-10-04. Strata sigue cambiando deprisa. Las cifras, los valores por defecto y las interfaces pueden cambiar en las versiones nuevas. Cuando haya que actualizar el libro, sigue el orden de la figura 28-6.</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figura 28-6: los cuatro pasos para actualizar el libro: fijar un commit, vigilar los cambios de upstream, comparar primero los contratos y después actualizar los capítulos afectados">
+<rect class="f-accent" fill="#136d5a" x="20" y="10" width="360" height="56" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="33" font-size="13" font-weight="600" text-anchor="middle">Este libro está fijado a un solo commit</text>
+<text class="f-on" fill="#ffffff" x="200" y="55" font-size="12" text-anchor="middle">99f3dbd…, investigado el 2026-10-04</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 66V84"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="86" width="360" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="109" font-size="13" font-weight="600" text-anchor="middle">El main de upstream sigue avanzando</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="131" font-size="12" text-anchor="middle">Pueden cambiar cifras, valores e interfaces</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 142V160"/>
+<rect class="f-soft" fill="#e5f1df" x="20" y="162" width="360" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="185" font-size="13" font-weight="600" text-anchor="middle">Primero, comparar los contratos</text>
+<text class="f-text" fill="#182f2b" x="200" y="207" font-size="12" text-anchor="middle">Geometría, estado, cuantización, planificación, API</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 218V236"/>
+<rect class="f-soft" fill="#e5f1df" x="20" y="238" width="360" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="261" font-size="13" font-weight="600" text-anchor="middle">Luego, actualizar lo que se vea afectado</text>
+<text class="f-text" fill="#182f2b" x="200" y="283" font-size="12" text-anchor="middle">Cada cambio cita nuevos números de línea</text>
+</svg><figcaption>Figura 28-6　El orden para actualizar el libro: primero mirar si cambiaron los contratos y después revisar los capítulos afectados. El curso no se reescribe cada vez que se actualiza main.</figcaption></figure>
+<p>¿Por qué comparar primero los «contratos»? Porque cuando un contrato cambia, todas las derivaciones y experimentos que dependen de él dejan de valer. Strata lo ve igual. En <code>layout.hpp</code> se dice que cada campo de la geometría del modelo es un número del que depende algún kernel. Cambiarlo cambia el contrato de un kernel, no es ajustar un parámetro. <span class="ev ev-code">Hecho de código</span>[S04] Durante un trimestre puedes mantener dos versiones: una estable que no cambia en todo el trimestre y otra de investigación que sigue a upstream.</p>
+<p>Hay que aclarar dos cosas más. La primera: el código de Strata se publica con la licencia MIT [S19]. Esa licencia cubre el código del repositorio. No sustituye las licencias propias de los pesos del modelo ni de otros componentes de terceros. La segunda: este libro es material didáctico escrito de forma independiente y no representa el respaldo del proyecto original. Es una primera edición completa con la que puedes enseñar y estudiar por tu cuenta, pero todavía no la han revisado desde fuera una editorial ni varios docentes. Antes de publicarla, recomendamos una revisión cruzada de un docente de sistemas y otro de numérica de modelos, y luego usar la opinión de las clases de prueba para comprobar la dificultad para principiantes.</p>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>Abre primero un corte vertical: un token viaja de la entrada a la salida y deja datos reales que se pueden revisar; después añade funciones capa por capa. Que todas las piezas estén en verde no significa que el sistema esté conectado.</li>
+<li>Anota cinco cosas en cada compromiso: la decisión, la ganancia, el costo, cómo lo verificas y cuándo lo revisarás. Las cifras llevan unidades y condiciones.</li>
+<li>Al entregar, marca la etapa de evidencia de cada componente: código escrito, en la ruta principal, datos reales o simulado. Nunca dejes que la palabra «hecho» tape ninguna capa.</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «Lo más eficiente es terminar y probar cada módulo primero, y juntarlos al final».</strong></p>
+<p>Construir por módulos está bien. El error es «juntarlos al final». Los supuestos sobre las interfaces entre módulos solo se ponen a prueba cuando los módulos se conectan de verdad. Eso le pasó al módulo PLE de Strata: cada pieza pasó su prueba de comparación, pero la ruta principal nunca las llamó, y nadie se enteró hasta la aceptación del modelo completo. [S13] Cuanto más tarde conectes, más código se escribe sobre un supuesto equivocado y más grande es el trabajo de rehacerlo. Conecta primero una línea fina y construye sobre ella: el trabajo total suele ser menor.</p></div>
+
+<details class="deep"><summary>Más a fondo: estructura del informe, observabilidad y una última comprobación de lo aprendido</summary>
+<h3>La estructura de un buen informe</h3>
+<p>Plantea primero una pregunta que aceptes que un experimento refute. Después escribe, por turnos, la teoría, dónde está en el código fuente, el método, los datos, la interpretación y las limitaciones. Cada conclusión debe decir de qué tipo es: un hecho de código, un resultado experimental o una conjetura. Toda figura necesita unidades, número de muestras y condiciones de medición. Los enlaces al código usan el hash de un commit fijo, no solo main. Se conservan los datos de rendimiento en bruto y los registros de los fallos. Los hashes del archivo del modelo y de las dependencias van en un manifiesto. No entregues solo capturas bonitas.</p>
+<h3>Cómo se aplican las líneas rojas de la rúbrica</h3>
+<p>Si haces pasar una simulación didáctica por una medición de hardware, ninguna conclusión de ese experimento suma puntos, por muy cuidadoso que sea el resto del trabajo: los lectores ya no pueden distinguir qué cifras son fiables. Si hay una fuga de estado sin explicar, los puntos de rendimiento no pueden compensar el defecto de corrección. Lo que tienen en común las dos líneas rojas es que rompen la propia «fiabilidad de la evidencia».</p>
+<h3>Observabilidad: hacer visible el mecanismo que «no está funcionando»</h3>
+<p>El código de sesión de Strata tiene dos diseños que vale la pena copiar. Uno es el modo de depuración «sincronizar cada capa». Atrapa errores como «un kernel leyó un búfer que solo escribe una capa posterior», que normalmente son invisibles. Su precio es el costo de sincronización, así que es un parámetro de ejecución que se activa cuando hace falta. El otro es el contador de solapamiento. Si el solapamiento de CPU y GPU degenera en ejecución serial, ni los valores devueltos ni los tiempos por capa lo revelan. Solo lo detecta un conteo específico de las «capas en las que la CPU recibió su tarea mientras la GPU aún ejecutaba». [S13] En tu proyecto, todo mecanismo que afirme «aceleración», «solapamiento» o «aciertos de caché» debería llevar un contador que demuestre que de verdad funciona.</p>
+<h3>Las restricciones deben poder ser atrapadas por pruebas</h3>
+<p>Strata exige no asignar nada de VRAM mientras genera tokens. Por eso todo el estado de una sesión se dimensiona para la longitud máxima y se asigna una sola vez, al principio. El comentario señala una trampa: si una asignación ocurriera en «el primer token de una secuencia más larga», todas las pruebas actuales seguirían pasando. [S13] Dicho de otro modo, una restricción sin una prueba específica que la compruebe es solo un deseo. Cuando escribas el documento de diseño, anota junto a cada restricción «qué prueba falla si se rompe».</p>
+<h3>Una comprobación de lo aprendido al despedirte de este libro</h3>
+<p>Deberías poder explicar con tus palabras: por qué un archivo de modelo de 40 GB no necesita forzosamente 40 GB de VRAM; por qué verificar varios tokens a la vez no es conocer el futuro por adelantado; por qué un mismo puntero puede apuntar a datos de capas distintas; por qué un estado de tamaño fijo no significa que puedas volver a cualquier punto; por qué más hilos no significan que se puedan atender más sesiones; y por qué una cifra más rápida debe llevar todas sus condiciones. Estas ideas sirven para cualquier motor de inferencia. Strata es una puerta de entrada a los sistemas reales, no un destino cuyos parámetros haya que memorizar.</p>
+</details>

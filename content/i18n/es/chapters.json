@@ -1,0 +1,1457 @@
+[
+  {
+    "id": "01",
+    "title": "De un solo token a toda la computadora",
+    "deck": "Escribes una frase en el chat. ¿Qué pasa dentro de tu computadora? Primero dibujemos el mapa completo.",
+    "part": "I · Fundamentos de computación",
+    "courses": [
+      "Introducción a la computación",
+      "Ingeniería de software"
+    ],
+    "prereq": "Ninguno. Basta con haber usado una IA de chat como ChatGPT.",
+    "goals": [
+      "Explicar qué hace cada uno: el modelo, el motor de inferencia y la aplicación",
+      "Dibujar el camino que sigue una frase desde la entrada hasta la salida",
+      "Distinguir si un número es un hecho de código, un informe upstream o una estimación"
+    ],
+    "quiz": [
+      {
+        "text": "El README dice «para escribir cada palabra solo hacen falta 10 expertos». Según el código fuente, ¿cuántas elecciones de experto hace en total la generación de un token?",
+        "choices": [
+          "10",
+          "480",
+          "24.576"
+        ],
+        "correct": 1,
+        "why": "10 es la cantidad que se elige en cada capa. Las 48 capas eligen 10 cada una, 480 en total; 24.576 es el número total de expertos, no los que se usan cada vez."
+      },
+      {
+        "text": "Un experimento del navegador muestra «120 token/s». ¿Qué es este número?",
+        "choices": [
+          "La velocidad medida de Strata en tu tarjeta gráfica",
+          "Una estimación calculada con supuestos didácticos",
+          "Una velocidad que alcanza cualquier computadora"
+        ],
+        "correct": 1,
+        "why": "El experimento del navegador no ejecuta el modelo real ni mide tiempos en tu hardware. Es una estimación didáctica y no se puede llamar medición."
+      },
+      {
+        "text": "Un comentario del código dice «aquí todavía no hay caché». ¿Qué debes hacer a continuación?",
+        "choices": [
+          "Concluir de inmediato que esa función no existe",
+          "Seguir el código que se llama ahora y la configuración por defecto",
+          "Borrar ese código"
+        ],
+        "correct": 1,
+        "why": "Los comentarios pueden quedarse en una etapa antigua del desarrollo. Solo la cadena de llamadas actual, la configuración por defecto y las pruebas permiten concluir."
+      }
+    ],
+    "problem": "Un amigo dice: «Strata ejecuta un modelo de 125.000 millones de parámetros en una tarjeta de 12 GB, así que debe de comprimir el modelo a menos de 12 GB». ¿Qué está mal en esta frase? Usa este capítulo para reescribirla de forma precisa.",
+    "answer": "La cuantización sí comprime el modelo: en el formato estándar cada parámetro ocupa unos 2,25 bits. Pero todos los expertos juntos siguen ocupando unos 34 GB, mucho más que 12 GB. Strata se apoya en un almacenamiento por niveles: lo que necesita cada token y los expertos más usados van en la VRAM, todos los expertos van en la RAM, y los expertos que no están en la GPU los calcula sobre todo la CPU allí mismo, en la RAM. Una versión precisa: Strata reparte el modelo entre la GPU, la RAM y el SSD, y deja en la GPU solo lo que más se usa.",
+    "level": "Inicial"
+  },
+  {
+    "id": "02",
+    "title": "Tokens, probabilidad condicional y muestreo",
+    "deck": "El modelo no dice directamente la siguiente palabra: primero da una tabla de probabilidades y luego lanza un dado.",
+    "part": "I · Fundamentos de computación",
+    "courses": [
+      "Probabilidad",
+      "Teoría de la información",
+      "Programación"
+    ],
+    "prereq": "Capítulo 1; basta con saber multiplicar y dividir decimales y haber visto potencias de e.",
+    "goals": [
+      "Explicar con la regla de la cadena cómo el modelo genera un token tras otro",
+      "Calcular softmax a mano y explicar qué hacen la temperatura y «restar el máximo»",
+      "Distinguir distribución y muestreo, y decir por qué la semilla y el orden de la cadena de muestreo cambian el resultado"
+    ],
+    "quiz": [
+      {
+        "text": "Envías al modelo la misma frase y solo cambias las marcas de rol de la plantilla de chat. ¿El modelo lee la misma pregunta?",
+        "choices": [
+          "Sí, lo que escribiste no cambió",
+          "No, la plantilla también es entrada y la lista de IDs cambió",
+          "Depende de qué temperatura se use"
+        ],
+        "correct": 1,
+        "why": "La plantilla envuelve tus palabras y todo junto se corta en IDs. Si cambia una marca, cambia la lista de IDs, y para el modelo es otra pregunta."
+      },
+      {
+        "text": "Si restas el mismo número (por ejemplo, el máximo) a todas las puntuaciones, ¿qué pasa con las probabilidades que calcula softmax?",
+        "choices": [
+          "No cambian; solo es más difícil que haya desbordamiento",
+          "Todas se hacen más pequeñas",
+          "Se altera el orden"
+        ],
+        "correct": 0,
+        "why": "e^(z−m) = e^z ÷ e^m: numerador y denominador se dividen por el mismo número y el cociente no cambia. Tras restar el máximo, el mayor término es e^0 = 1 y no hay desbordamiento."
+      },
+      {
+        "text": "Con temperatura 0 y semilla fija, si haces dos veces la misma pregunta, ¿la respuesta es siempre idéntica letra por letra?",
+        "choices": [
+          "Siempre idéntica",
+          "No necesariamente: pequeñas diferencias de redondeo de coma flotante pueden cambiar un token",
+          "Siempre distinta"
+        ],
+        "correct": 1,
+        "why": "La temperatura 0 solo garantiza elegir la puntuación más alta en cada paso. El orden de suma de distintos kernels hace que los últimos dígitos de las puntuaciones difieran, y con candidatos casi empatados puede cambiar el token. La documentación de Strata registra este caso: hay que apagar varios ajustes para repetir byte a byte."
+      }
+    ],
+    "problem": "Puntuaciones z = [2, 1, 0], temperatura T = 1. ① Calcula las tres probabilidades y las probabilidades acumuladas. ② ¿Qué opción eligen los números aleatorios u = 0,5 y u = 0,95? ③ ¿Por qué no basta comparar el texto final de dos ejecuciones para decidir que sus puntuaciones coinciden?",
+    "answer": "① Al restar el máximo 2 sale [0, −1, −2]; las exponenciales son aproximadamente [1; 0,3679; 0,1353], con suma 1,5032, y las probabilidades son aproximadamente [0,6652; 0,2447; 0,0900], acumuladas [0,6652; 0,9100; 1]. ② u = 0,5 es menor que 0,6652, así que se elige la primera opción; u = 0,95 cae en [0,9100; 1), así que se elige la tercera. ③ Con puntuaciones distintas se puede elegir el mismo token, así que texto igual no implica puntuaciones iguales; al revés, una diferencia mínima en las puntuaciones puede cambiar un token en algún paso y bifurcar todo lo que sigue. Hay que comparar directamente las tablas de probabilidades con el mismo historial.",
+    "level": "Inicial"
+  },
+  {
+    "id": "03",
+    "title": "Un tensor es memoria con coordenadas",
+    "deck": "El álgebra lineal responde «qué se calcula»; la disposición en memoria responde «de qué casilla se toma el número».",
+    "part": "I · Fundamentos de computación",
+    "courses": [
+      "Álgebra lineal",
+      "Estructuras de datos",
+      "Organización de computadoras"
+    ],
+    "prereq": "Capítulo 1; basta con saber qué es un vector y una tabla.",
+    "goals": [
+      "Calcular a mano una matriz por un vector y explicar la diferencia entre GEMV y GEMM",
+      "Usar la forma y el stride para calcular la dirección en memoria de cualquier elemento",
+      "Explicar por qué el orden de los datos debe escribirse en la interfaz y las formas deben comprobarse al cargar"
+    ],
+    "quiz": [
+      {
+        "text": "W tiene 2 filas y 3 columnas, y x son 3 números. ¿Cuántos números tiene y = Wx y cuántas multiplicaciones-sumas hacen falta en total?",
+        "choices": [
+          "3 números, 6 operaciones",
+          "2 números, 6 operaciones",
+          "2 números, 5 operaciones"
+        ],
+        "correct": 1,
+        "why": "W tiene 2 filas, así que se hacen 2 productos escalares y salen 2 números; cada producto escalar son 3 multiplicaciones-sumas, en total 2 × 3 = 6."
+      },
+      {
+        "text": "Dos tensores tienen exactamente la misma forma. ¿Se puede usar la memoria de uno directamente como si fuera la del otro?",
+        "choices": [
+          "Sí, con la misma forma basta",
+          "No necesariamente: el stride (el orden) y el significado de los datos pueden ser distintos",
+          "Sí, siempre que ambos sean float"
+        ],
+        "correct": 1,
+        "why": "La forma solo dice qué coordenadas existen; el stride decide a qué casilla corresponde cada una. El estado GDN de Strata tiene la misma forma en la referencia y en el kernel, pero distinto orden."
+      },
+      {
+        "text": "Un arreglo tridimensional de forma (2, 3, 2) se guarda por filas (row-major). ¿Cuál es la dirección del elemento (1, 2, 0)?",
+        "choices": [
+          "8",
+          "10",
+          "11"
+        ],
+        "correct": 1,
+        "why": "El stride es (6, 2, 1), y la dirección = 1×6 + 2×2 + 0×1 = 10. Con el orden (i, j, h) saldría 8, que también es válido; por eso usar un orden equivocado no da ningún error."
+      }
+    ],
+    "problem": "Tienes que escribir la descripción de la interfaz de una función de «cálculo de experto». Recibe una entrada float* y entrega una salida float*. Escribe al menos cinco contratos que deben quedar claros e indica cuáles no puede expresar el propio tipo float* de C++.",
+    "answer": "Al menos: ① la forma (entran 2.560 números y salen 2.560 números); ② el orden o los strides (si es contiguo, qué eje es el más rápido); ③ si la entrada ya está normalizada; ④ si la salida ya se multiplicó por el peso del router (Strata fija que el pool de expertos no lo multiplica y solo se multiplica una vez al combinar); ⑤ a quién pertenece el búfer, cuánto tiempo se puede usar y si su dirección se reutiliza (Strata usa en cada capa el mismo bloque de memoria fijada para la entrada: la dirección no cambia, el contenido sí). Además hay que indicar si el puntero apunta a la memoria de la CPU o a la VRAM. float* solo dice «apunta a números de coma flotante»; no puede expresar ninguna de las anteriores, ni siquiera incluye la longitud, y solo se sostiene con la descripción de la interfaz, tipos semánticos y pruebas.",
+    "level": "Inicial"
+  },
+  {
+    "id": "04",
+    "title": "Cuantización: menos bits, no menos error",
+    "deck": "Guardar menos bits da un modelo más pequeño; el precio es el error, y el error hay que calcularlo.",
+    "part": "I · Fundamentos de computación",
+    "courses": [
+      "Análisis numérico",
+      "Teoría de la información",
+      "Organización de computadoras"
+    ],
+    "prereq": "Capítulo 3; basta con saber redondear y qué es el binario.",
+    "goals": [
+      "Explicar en qué gasta los bits cada formato, FP32, FP16 y BF16, y cómo se reparten rango y precisión",
+      "Calcular a mano un bloque de cuantización simétrica: factor de escala, códigos, valores restaurados y error",
+      "Calcular los bits reales de un formato cuantizado y explicar por qué los expertos de Strata ocupan 2,25 bits"
+    ],
+    "quiz": [
+      {
+        "text": "32 códigos de 4 bits, más un factor de escala de 16 bits. ¿Cuántos bits ocupa en realidad cada peso, en promedio?",
+        "choices": [
+          "4 bits",
+          "4,5 bits",
+          "16 bits"
+        ],
+        "correct": 1,
+        "why": "(32 × 4 + 16) ÷ 32 = 4,5. El factor de escala también ocupa sitio: los bits nominales no son los bits reales."
+      },
+      {
+        "text": "Un número es 70.000. ¿Qué pasa si se guarda en FP16 y en BF16?",
+        "choices": [
+          "En ambos cabe y con mucha exactitud",
+          "FP16 se desborda a infinito; en BF16 cabe, pero no con mucha exactitud",
+          "Los dos se desbordan"
+        ],
+        "correct": 1,
+        "why": "FP16 solo tiene 5 bits de exponente y su máximo es 65.504; BF16 tiene 8 bits de exponente, con el mismo rango que FP32, pero solo 7 bits de mantisa: 70.000 se guarda como 70.144."
+      },
+      {
+        "text": "En un grupo de 16 pesos pequeños se cuela un valor atípico muy grande, y todos comparten un factor de escala en una cuantización de 4 bits. ¿Qué pasa?",
+        "choices": [
+          "Nada: el valor atípico solo tiene su propio error",
+          "El factor de escala se infla y muchos pesos pequeños se redondean a 0",
+          "El error de todos los pesos se vuelve 0"
+        ],
+        "correct": 1,
+        "why": "El factor de escala lo decide el número de mayor valor absoluto del bloque. El valor atípico engrosa la regla y los números pequeños caen en el nivel 0. Hacer los bloques más pequeños reduce el efecto, a costa de guardar más factores de escala."
+      }
+    ],
+    "problem": "Alguien dice: «La caché KV de 4 bits de Strata solo reduce el historial de la conversación a la mitad, sin ninguna pérdida de calidad». ¿Qué tipo de evidencia necesita esa frase? Propón dos pruebas que se puedan hacer y explica qué resultado reporta la documentación upstream.",
+    "answer": "La cuantización cambia los valores de K y V; en conversaciones largas la atención los lee una y otra vez y el error puede acumularse, así que «sin ninguna pérdida» necesita evidencia muy sólida. Prueba uno: fijar el mismo historial (teacher forcing) y comparar, en cada paso, la distribución de probabilidades (por ejemplo, la divergencia KL) o la perplejidad entre KV de 8 y de 4 bits, cubriendo contextos cortos, medios y largos. Prueba dos: comparar la calidad de la salida en un mismo conjunto de tareas reales (preguntas sobre documentos largos, edición de código, conversaciones de varios turnos, «aguja en un pajar»), con la tolerancia y los casos de fallo escritos de antemano. El resultado de la documentación upstream: el KV de 4 bits reduce la memoria a la mitad y es un 4 % más rápido con 128K, pero la perplejidad en documentos largos sube entre 8 % y 12 %, y la prueba de la aguja en un pajar sigue pasando. Es, pues, un compromiso con costo, no una compresión sin pérdida.",
+    "level": "Inicial"
+  },
+  {
+    "id": "05",
+    "title": "Principios básicos del rendimiento: ancho de banda, cómputo y ruta crítica",
+    "deck": "La tarjeta tiene muchísimo cómputo; ¿por qué los tokens llegan lentos? Tres reglas para encontrar adónde se va el tiempo.",
+    "part": "I · Fundamentos de computación",
+    "courses": [
+      "Organización de computadoras",
+      "Computación paralela",
+      "Modelado de rendimiento"
+    ],
+    "prereq": "Capítulos 3 y 4; saber qué significa «cuántos bytes por segundo».",
+    "goals": [
+      "Estimar la cota inferior del tiempo de un cálculo con «latencia + datos ÷ ancho de banda» y con Roofline",
+      "Explicar por qué escribir la respuesta está limitado por el ancho de banda y leer el prompt puede aprovechar el cómputo",
+      "Usar la ley de Amdahl y la ruta crítica para decidir si una optimización merece la pena"
+    ],
+    "quiz": [
+      {
+        "text": "Un paso ocupa el 20 % del tiempo total de un token y lo optimizas hasta ser 2 veces más rápido. ¿Cuánto mejora el conjunto?",
+        "choices": [
+          "2 veces",
+          "Unas 1,11 veces",
+          "1,2 veces"
+        ],
+        "correct": 1,
+        "why": "Ley de Amdahl: tiempo nuevo = 0,8 + 0,2 ÷ 2 = 0,9, así que el conjunto es 1 ÷ 0,9 ≈ 1,11 veces más rápido. Aunque fuera infinitamente rápido, el límite sería solo 1,25 veces."
+      },
+      {
+        "text": "Al escribir la respuesta se calcula 1 solo token por vuelta y cada peso se guarda en FP16. ¿Cuál suele ser el cuello de botella?",
+        "choices": [
+          "Falta de cómputo",
+          "Falta de ancho de banda para mover datos",
+          "El disco es demasiado lento"
+        ],
+        "correct": 1,
+        "why": "Cada peso hace solo 2 operaciones pero hay que mover 2 bytes; la intensidad aritmética es aproximadamente 1, muy a la izquierda del punto de quiebre, y la mayor parte del cómputo de la tarjeta espera datos."
+      },
+      {
+        "text": "En cada capa de Strata, mientras la CPU calcula los expertos que fallaron, ¿puede la GPU empezar antes la capa siguiente?",
+        "choices": [
+          "Sí, la GPU empieza en cuanto está libre",
+          "No, la capa siguiente necesita el resultado unido de esta",
+          "Depende de si la VRAM alcanza"
+        ],
+        "correct": 1,
+        "why": "Entre capas hay una cadena residual estrictamente serie. El comentario del código dice que ese tramo de la CPU no se puede esconder en la cadena y que se acorta poniendo más expertos en la VRAM."
+      }
+    ],
+    "problem": "Supuesto didáctico: cada token generado requiere leer 0,6 GB de datos de la RAM, y el ancho de banda sostenido de la RAM es 40 GB/s. ¿Cuál es la cota inferior del tiempo de esta lectura? ¿Se puede declarar con ella que «esta máquina genera 66,7 tokens por segundo»? ¿Por qué?",
+    "answer": "La cota inferior es 0,6 ÷ 40 = 0,015 s, es decir, 15 ms, y su inverso es aproximadamente 66,7. Pero es solo la cota de «esta lectura»: no cuenta el cómputo en la GPU, los datos de otras capas, el costo de lanzar kernels, la sincronización entre CPU y GPU, el muestreo ni las cadenas de dependencia que no se pueden solapar. La velocidad real puede ser menor; y si parte de los datos están en la VRAM, más rápida, o si la decodificación especulativa produce más de un token por vuelta, también puede ser mayor. Por eso solo puede llamarse «límite teórico de esta lectura», no velocidad de extremo a extremo, y mucho menos medición.",
+    "level": "Inicial"
+  },
+  {
+    "id": "06",
+    "title": "Carga del modelo: del archivo a tensores de confianza",
+    "deck": "Abrir el archivo, leerlo a memoria y demostrar que los bytes están bien son tres cosas distintas.",
+    "part": "II · Modelo y estado",
+    "courses": [
+      "Sistemas operativos",
+      "Ingeniería de software",
+      "Estructuras de datos"
+    ],
+    "prereq": "La jerarquía de memoria del capítulo 1; los arreglos y las formas del capítulo 3; los formatos de cuantización del capítulo 4 (basta con saber «cuántos bits ocupa cada número»).",
+    "goals": [
+      "Explicar la relación entre mmap, el fallo de página y la caché de páginas, y por qué «mapeo exitoso» no significa «datos ya en memoria»",
+      "Escribir la comprobación de rango que no desborda, o ≤ F y n ≤ F − o, y explicar cómo se engaña a la forma con suma",
+      "Distinguir suma de verificación y hash criptográfico, y decir en qué etapas comprueba bytes Strata"
+    ],
+    "quiz": [
+      {
+        "text": "Mapeas con mmap un archivo de modelo de 30 GB. Justo cuando la función vuelve, ¿cuál es la afirmación más exacta?",
+        "choices": [
+          "Los 30 GB ya se leyeron por completo a memoria",
+          "Solo se estableció la correspondencia entre direcciones y archivo; los datos se leen en el primer acceso",
+          "El archivo ya se copió a la VRAM"
+        ],
+        "correct": 1,
+        "why": "mmap solo registra la correspondencia. Cuando se accede por primera vez a una página se produce un fallo de página, y solo entonces el sistema operativo la lee del disco y la deja en la caché de páginas."
+      },
+      {
+        "text": "Con enteros sin signo de 8 bits, el archivo mide F = 128 y el tensor tiene offset o = 200 y longitud n = 100. ¿Qué comprobación lo dejaría pasar por error?",
+        "choices": [
+          "o + n ≤ F",
+          "o ≤ F y n ≤ F − o",
+          "Las dos lo dejarían pasar"
+        ],
+        "correct": 0,
+        "why": "200 + 100 = 300 supera 255 y se envuelve a 44; 44 ≤ 128 se cumple y el tensor fuera de rango pasa. La forma segura comprueba primero o ≤ F, que aquí no se cumple, y lo rechaza directamente."
+      },
+      {
+        "text": "En un archivo descargado, dos bytes contiguos intercambiaron su posición. ¿Qué comprobación es la más probable que no lo detecte?",
+        "choices": [
+          "La suma de verificación de todos los bytes",
+          "El hash SHA-256",
+          "Comparar byte a byte con el original"
+        ],
+        "correct": 0,
+        "why": "La suma no se fija en el orden: al intercambiar dos bytes el total no cambia. SHA-256 es sensibilísimo a cualquier cambio, y la comparación byte a byte lo detecta, por supuesto."
+      }
+    ],
+    "problem": "En una versión temprana de Strata, al abrir el archivo de expertos en Windows se añadió la indicación de «acceso aleatorio»; el resultado fue que la velocidad cayó a 1,93 GB/s, 344 ms por token, y no se «calentaba» nunca. Explica la causa con el principio de la caché de páginas y di por qué «la elección de expertos parece aleatoria» no equivale a «sirve la indicación de acceso aleatorio».",
+    "answer": "La indicación de «acceso aleatorio» hace que el sistema apague la lectura anticipada y descarte cuanto antes las páginas leídas, porque supone que en un archivo grande de acceso aleatorio lo leído no se vuelve a leer. Pero el patrón de acceso del archivo de expertos es: los expertos que elige cada token están dispersos, pero casi todos los bytes leídos se vuelven a leer en el token siguiente. El valor de una caché depende de «si lo leído se volverá a leer» (reutilización), no de si cada acceso es contiguo. Si las páginas se descartan tan rápido como se leen, cada acceso pasa a ser un fallo de página y la velocidad cae al nivel del disco. Lo correcto es no poner ninguna indicación y dejar que la caché de páginas conserve las páginas que se usan una y otra vez; y, con RAM suficiente, ir más allá: copiar los expertos a la memoria y fijarlos.",
+    "level": "Esencial"
+  },
+  {
+    "id": "07",
+    "title": "Una capa del modelo: normalización, residuo y contratos entre módulos",
+    "deck": "48 editores escriben por turnos sus correcciones al margen: cómo una capa lee, calcula y escribe de vuelta.",
+    "part": "II · Modelo y estado",
+    "courses": [
+      "Álgebra lineal",
+      "Análisis numérico",
+      "Ingeniería de software"
+    ],
+    "prereq": "La multiplicación de matrices del capítulo 3; el concepto de experto del capítulo 10 (también puedes volver a él al llegar a MoE).",
+    "goals": [
+      "Explicar las dos semicapas de una capa: leer el residuo → mezclador o MoE → escribir de vuelta, y reconocer qué capas son QSA y cuáles GDN",
+      "Calcular a mano la normalización L2 y la RMS y explicar por qué difieren en un factor √d",
+      "Dar un ejemplo de error de interfaz «forma correcta, valores normales, significado equivocado» y explicar cómo detectarlo con pruebas de combinación"
+    ],
+    "quiz": [
+      {
+        "text": "La regla de Strata es «las capas con índice % 4 == 3 son QSA», con el índice contado desde 0. ¿Qué afirmación es correcta?",
+        "choices": [
+          "Hay una capa QSA cada 3 capas",
+          "La última de cada 4 capas es QSA, 12 de las 48",
+          "Solo la capa 3 es QSA"
+        ],
+        "correct": 1,
+        "why": "Los índices con resto 3 son 3, 7, 11 … 47; el 3 contado desde cero es la cuarta capa al contar como las personas. Es una de cada 4 capas, 12 en total, y las otras 36 son GDN."
+      },
+      {
+        "text": "x = [3, 4]. La normalización L2 da [0,6; 0,8]. ¿Cuánto es aproximadamente el resultado de la normalización RMS?",
+        "choices": [
+          "[0,6; 0,8], los dos iguales",
+          "Aprox. [0,85; 1,13], √2 veces el resultado L2",
+          "Aprox. [0,3; 0,4], la mitad del resultado L2"
+        ],
+        "correct": 1,
+        "why": "RMS = √((9 + 16) ÷ 2) ≈ 3,54; 3 ÷ 3,54 ≈ 0,85 y 4 ÷ 3,54 ≈ 1,13. L2 divide por 5 y RMS por 5 ÷ √2, así que es √2 veces mayor; con d dimensiones, √d veces."
+      },
+      {
+        "text": "El peso del router de un experto es 0,2. Si el pool de expertos ya multiplicó una vez por 0,2 y al combinar se multiplica otra vez, ¿cuál es el coeficiente final de ese experto?",
+        "choices": [
+          "0,2",
+          "0,4",
+          "0,04"
+        ],
+        "correct": 2,
+        "why": "0,2 × 0,2 = 0,04: la contribución se reduce por error 5 veces. El resultado sigue siendo un número normal y no da error, así que hay que evitarlo con el contrato (se multiplica una sola vez, al combinar) y con pruebas que comparen toda la capa."
+      }
+    ],
+    "problem": "¿Por qué un conjunto de pruebas unitarias en el que «cada operador es correcto por separado» sigue sin demostrar que una capa es correcta? Da un ejemplo con un contrato de este capítulo e indica qué prueba hay que añadir.",
+    "answer": "Las pruebas unitarias solo comprueban la salida de cada operador para una entrada dada; no comprueban «quién se encarga de qué» entre operadores. Por ejemplo, el kernel de un paso de GDN acuerda que el β que recibe ya pasó por sigmoid; si la capa se olvida de hacerlo, el kernel calcula igualmente una lista de números normales y todas las pruebas unitarias pasan. Igualmente, que el peso del router se multiplique una vez en el pool de expertos y otra en el paso de combinación, que a los resultados de los expertos de la capa anterior se les ponga el peso de esta capa o que se confundan la normalización L2 y la RMS solo producen números «que parecen razonables». Hay que añadir pruebas de combinación: con entrada e historial fijos, comparar término a término con una implementación de referencia independiente la salida de toda la capa y puntos de control intermedios como la salida de las semicapas y los inject; el registro del residuo capa por capa y el de semicapas de Strata existen justo para esto.",
+    "level": "Esencial"
+  },
+  {
+    "id": "08",
+    "title": "Atención, GQA y selección dispersa",
+    "deck": "Volver atrás con una pregunta: cómo se calcula la atención, por qué se encarece al crecer el texto y cómo el modelo de Strata mira un poco menos.",
+    "part": "II · Modelo y estado",
+    "courses": [
+      "Álgebra lineal",
+      "Diseño de algoritmos",
+      "Organización de computadoras"
+    ],
+    "prereq": "El softmax del capítulo 2; el producto punto de vectores del capítulo 3; «el esqueleto de una capa» del capítulo 7.",
+    "goals": [
+      "Calcular a mano un paso de atención: puntuación con producto punto, división entre √d, softmax y suma ponderada",
+      "Explicar la máscara causal y O(n²), y usar 12 capas × 2 cabezas KV × 256 dimensiones para obtener que la caché KV de un contexto de 32K ocupa 768 MiB",
+      "Explicar por qué son ciertas a la vez «cada paso de QSA mira como máximo 2051 posiciones» y «todo el KV sigue guardado», y distinguir las optimizaciones que solo cambian la posición de las que cambian el conjunto"
+    ],
+    "quiz": [
+      {
+        "text": "Los valores de dos posiciones anteriores son [2, 0] y [0, 4], y las dos puntuaciones escaladas son 0. ¿Cuál es la salida de la atención?",
+        "choices": [
+          "[2, 4]",
+          "[1, 2]",
+          "[0, 0]"
+        ],
+        "correct": 1,
+        "why": "Las dos puntuaciones son iguales, así que softmax da pesos de ½ y ½, y la salida = ½ × [2, 0] + ½ × [0, 4] = [1, 2]. La atención mezcla en proporción: no elige uno y tampoco suma sin más."
+      },
+      {
+        "text": "Cada capa QSA del modelo de Strata tiene 24 cabezas de consulta y 2 cabezas KV. Al calcular el tamaño de la caché KV, ¿por qué número de cabezas hay que multiplicar?",
+        "choices": [
+          "24",
+          "2",
+          "48"
+        ],
+        "correct": 1,
+        "why": "La caché guarda claves y valores, y las 24 cabezas de consulta comparten esos 2 juegos. Así, cada token guarda por capa 2 × 256 × 2 (K y V) × 2 bytes = 2 KiB, y las 12 capas suman 24.576 bytes."
+      },
+      {
+        "text": "QSA, al generar cada token, mira como máximo 2051 posiciones. ¿Se puede por eso guardar solo el KV de los últimos 2051 tokens?",
+        "choices": [
+          "Sí, total solo mira esas",
+          "No, el token siguiente puede elegir cualquier posición antigua",
+          "Sí, mientras el contexto no pase de 262K"
+        ],
+        "correct": 1,
+        "why": "Lo que se mira en cada paso es un conjunto de trabajo elegido, no una ventana fija de lo más reciente. Cada consulta elige posiciones antiguas distintas, así que hay que conservar todo el KV: se puede mover a la RAM, pero no borrar."
+      }
+    ],
+    "problem": "¿Cuántos MiB son 805.306.368 bytes? El comentario de qsa.hpp de Strata los escribe como «805 MiB». ¿Dónde está el error? En un presupuesto de VRAM de decenas de GB, ¿qué desviación causa esta confusión?",
+    "answer": "805.306.368 ÷ 2^20 = 768 MiB. El 805 son MB decimales, resultado de dividir entre 10^6, y el comentario tomó MB por MiB. 1 MiB = 1,048576 MB, así que la diferencia es de un 4,9 %; entre GiB y GB es de un 7,4 %. En un presupuesto de 12 GB de VRAM y decenas de GB de RAM, eso supone entre cientos de MB y varios GB de diferencia, suficiente para decidir si caben unos cientos de expertos más o si la VRAM se queda corta. Al hacer un presupuesto de capacidad, escribe la unidad en cada partida y usa siempre potencias de 2 o siempre potencias de 10.",
+    "level": "Esencial"
+  },
+  {
+    "id": "09",
+    "title": "GDN: recordar la historia con un estado de tamaño fijo",
+    "deck": "Sin hojear notas: borrar y reescribir una pizarra. Cómo el producto exterior, la regla Delta y el decaimiento con puerta comprimen la historia en una matriz de 128 × 128.",
+    "part": "II · Modelo y estado",
+    "courses": [
+      "Álgebra lineal",
+      "Matemáticas discretas",
+      "Computación paralela"
+    ],
+    "prereq": "El producto punto y las matrices del capítulo 3; la normalización L2 y la sigmoid del capítulo 7; la atención del capítulo 8 (para comparar).",
+    "goals": [
+      "Escribir con un producto exterior una actualización de rango uno y explicar por qué la misma clave devuelve el valor",
+      "Calcular a mano un paso de GDN de una dimensión y explicar por qué «decaer y luego escribir» da un resultado distinto del orden contrario",
+      "Calcular que el estado de las 36 capas GDN ocupa unos 112 MiB sin crecer con el contexto, y explicar por qué no se puede retroceder sin más"
+    ],
+    "quiz": [
+      {
+        "text": "La pizarra está toda en 0. Con la clave [1, 0] se escribe primero [2, 3] y luego [5, 1]. Con la regla Delta (α = β = 1) y con la suma simple, ¿qué se lee en cada caso?",
+        "choices": [
+          "Ambas devuelven [5, 1]",
+          "La regla Delta devuelve [5, 1] y la suma simple devuelve [7, 4]",
+          "La regla Delta devuelve [7, 4] y la suma simple devuelve [5, 1]"
+        ],
+        "correct": 1,
+        "why": "Antes de la segunda escritura, la regla Delta lee el valor viejo [2, 3] y escribe solo la diferencia [3, −2], con lo que la primera fila pasa a [5, 1]. La suma simple suma [5, 1] directamente a [2, 3] y obtiene [7, 4]."
+      },
+      {
+        "text": "En el modelo de Strata, ¿cuánto ocupa en total el estado principal de las 36 capas GDN (128 × 128 × 48 números FP32 por capa)?",
+        "choices": [
+          "108 MiB, sin depender de la longitud del contexto",
+          "108 GiB",
+          "108 MiB por cada token"
+        ],
+        "correct": 0,
+        "why": "Cada capa ocupa 128 × 128 × 48 × 4 bytes = 3 MiB, así que 36 capas son 108 MiB; con el historial de convolución se añaden unos 4,2 MiB. Mide esto desde el primer token y no crece con el contexto."
+      },
+      {
+        "text": "Dentro de un mismo token, las distintas columnas de la pizarra se pueden calcular en paralelo. ¿Significa eso que distintos tokens pueden actualizar el estado a la vez y sin depender unos de otros?",
+        "choices": [
+          "Sí, todos los tokens se pueden calcular juntos",
+          "No, el paso t + 1 necesita el estado del paso t",
+          "Depende de si hay suficientes hilos"
+        ],
+        "correct": 1,
+        "why": "El paralelismo ocurre en las columnas dentro de un paso: cada columna lee y escribe solo la suya. En la dirección del tiempo hay una cadena: el estado nuevo depende del viejo y los pasos van uno tras otro."
+      }
+    ],
+    "problem": "Con el ejemplo de una dimensión de este capítulo (S = 2, α = 0.5, k = 1, v = 3, β = 0.25), explica por qué, tras rechazar una palabra del borrador en la decodificación especulativa, no basta con retroceder el contador de posición. ¿Cómo lo resuelve Strata?",
+    "answer": "Cuando una palabra del borrador entra en GDN, ya cambió el estado de 2 a 1.5; retroceder el contador de posición no devuelve el estado a 2. Además, en general la recurrencia no se puede invertir: el decaimiento y la escritura Delta borraron parte de la información vieja. Lo correcto es guardar una copia instantánea, o partir de un estado conocido como correcto y reproducir solo las palabras aceptadas. La ventana de verificación de Strata no toca el estado GDN al verificar; cuando se decide aceptar las primeras n palabras, reproduce esas n palabras con las entradas guardadas en la ventana, y así avanzan el estado recurrente y el historial de convolución. La caché KV es distinta: las claves y valores de las posiciones rechazadas se sobrescriben cuando más adelante se procesen esas posiciones.",
+    "level": "Esencial"
+  },
+  {
+    "id": "10",
+    "title": "MoE: por qué un modelo grande corre en una GPU pequeña",
+    "deck": "Muchos parámetros no significan que cada paso use muchos.",
+    "part": "II · Modelo y estado",
+    "courses": [
+      "Diseño de algoritmos",
+      "Probabilidad",
+      "Álgebra lineal"
+    ],
+    "prereq": "Capítulo 1. Basta con saber qué son un token y la VRAM; los capítulos 3 y 4 ayudan a entender «Más a fondo».",
+    "goals": [
+      "Explicar qué es un experto y cómo elige el router a los expertos",
+      "Estimar cuántos parámetros usa de verdad un token",
+      "Explicar cómo reparte Strata los expertos entre la GPU y la RAM"
+    ],
+    "quiz": [
+      {
+        "text": "Cada capa tiene 512 expertos y en cada paso se eligen solo 10. ¿Se pueden borrar sin más los que no se eligen?",
+        "choices": [
+          "Sí, total esta vez no se usaron",
+          "No, el token siguiente puede necesitarlos",
+          "Sí, si el router es lo bastante preciso"
+        ],
+        "correct": 1,
+        "why": "El cómputo disperso no es una poda permanente. Borrar expertos cambia el propio modelo; la versión Coder de upstream eliminó la mitad de los expertos y su capacidad en chino se debilitó de forma notable."
+      },
+      {
+        "text": "Cuando hay más expertos en caché en la GPU, ¿qué suele pasar con la velocidad de generación?",
+        "choices": [
+          "Sube: la CPU tiene que calcular menos expertos que fallan",
+          "No cambia: la velocidad solo depende de la potencia de la GPU",
+          "Baja: la VRAM está más llena"
+        ],
+        "correct": 0,
+        "why": "En la medición de upstream, los expertos en la GPU pasaron de 1589 a 3872 y la velocidad subió de 50,9 a 62,6 tokens por segundo."
+      },
+      {
+        "text": "Las puntuaciones de los expertos en los puestos 10 y 11 difieren solo en 0.0001. Si aparece un pequeño error numérico en el cálculo, ¿qué puede pasar?",
+        "choices": [
+          "Nada, el error es demasiado pequeño",
+          "Puede cambiar un experto entero",
+          "La salida también diferirá solo en 0.0001"
+        ],
+        "correct": 1,
+        "why": "El top-k es un borde discontinuo: por pequeña que sea la diferencia de puntuación, si los puestos se intercambian, el que participa en el cálculo es otro experto."
+      }
+    ],
+    "problem": "Tienes una GPU de 12 GB y piensas cambiarla por una de 24 GB. Con la estimación «cada GB más de VRAM permite guardar unos 700 expertos más», ¿cuántos expertos más se podrán tener en caché? ¿La velocidad subirá por fuerza en proporción? Indica al menos dos factores que hagan imprecisa la estimación.",
+    "answer": "Con 12 GB más, caben unos 12 × 700 = 8400 expertos más. Pero la velocidad no sube en proporción: ① la VRAM también tiene que guardar el historial de la conversación (KV), los pesos de la atención y los búferes temporales que se usan en cada paso, y un contexto largo consume más VRAM; ② la ganancia depende de la tasa de aciertos: cuando los expertos populares ya están en la GPU, los que se añaden son en su mayoría poco usados y el beneficio marginal decrece; ③ el cuello de botella puede pasar a la CPU, al ancho de banda de la RAM o a la propia potencia de cálculo de la GPU; ④ cada formato de cuantización da un tamaño de experto distinto, así que cambia cuántos caben por GB. Para saber la ganancia real solo se puede medir, con un modelo, una longitud de contexto y una carga fijos.",
+    "level": "Esencial"
+  },
+  {
+    "id": "11",
+    "title": "PLE y n-gramas: el modelo también consulta una tabla enorme",
+    "deck": "Un hash calcula números de fila, el disco se lee por páginas y una caché de filas asociativa por conjuntos de 8 vías: cómo una tabla de 28,8 GB aporta solo 16 filas por token.",
+    "part": "II · Modelo y estado",
+    "courses": [
+      "Estructuras de datos",
+      "Sistemas operativos",
+      "Organización de computadoras"
+    ],
+    "prereq": "Capítulo 1 (jerarquía de almacenamiento) y capítulo 10 (intuición sobre expertos y caché). Saber algo de binario ayuda.",
+    "goals": [
+      "Explicar qué es un n-grama y cómo tres tokens pasan por un hash (multiplicar, XOR, resto) y se convierten en 16 números de fila",
+      "Calcular el costo de leer por páginas: por qué una fila de 90 bytes obliga a leer 4 KiB y por qué una fila que cruza páginas obliga a leer dos",
+      "Explicar con la caché asociativa por conjuntos y el puntero rotatorio el fallo por conflicto: por qué, aunque la capacidad total alcance, sigue sin haber aciertos"
+    ],
+    "quiz": [
+      {
+        "text": "En la caché de filas de PLE de Strata, cuando un conjunto se llena, ¿qué fila se sustituye?",
+        "choices": [
+          "La que lleva más tiempo sin usarse",
+          "La fila a la que apunta el puntero de reemplazo de ese conjunto, y luego el puntero avanza una posición",
+          "Una fila elegida al azar"
+        ],
+        "correct": 1,
+        "why": "El código da a cada conjunto un puntero rotatorio: la fila nueva se escribe en la vía a la que apunta el puntero, este avanza una y, tras dar la vuelta, regresa al principio. No registra cuál se usó hace poco, así que no es LRU."
+      },
+      {
+        "text": "Una fila de 200 bytes empieza en el byte 4000 de una página (de 4096 bytes). Si se lee por páginas enteras, ¿cuántas páginas hay que leer?",
+        "choices": [
+          "1 página",
+          "2 páginas",
+          "200 páginas"
+        ],
+        "correct": 1,
+        "why": "4000 + 200 = 4200, que pasa del final de esta página, 4096; la fila entra en la página siguiente y hay que leer las dos."
+      },
+      {
+        "text": "Dos trigramas distintos terminan con el hash en la misma fila. ¿Qué pasa?",
+        "choices": [
+          "El programa da error y se niega a ejecutarse",
+          "Los dos leen los mismos datos; es una colisión aceptada por diseño",
+          "El programa cambia solo a una fila vacía para guardarlo"
+        ],
+        "correct": 1,
+        "why": "Esta tabla guarda solo valores, no claves, y no detecta ni trata las colisiones. Hay muchas más combinaciones que filas, así que las colisiones existen; cada cabeza usa un módulo distinto y es difícil que dos n-gramas choquen en todas."
+      }
+    ],
+    "problem": "Un programa pasó la lectura del disco a un hilo de E/S dedicado, y el tiempo de enviar peticiones en el hilo principal bajó casi a cero, pero el tiempo total por token no se acortó. Da dos explicaciones razonables y di qué medir para distinguirlas.",
+    "answer": "Explicación uno: el hilo principal, tras enviar, necesita enseguida esos datos y no hay otro trabajo en medio; la espera solo pasó de «enviar» a «recoger el resultado» y no quedó escondida. Explicación dos: la propia lectura del disco se volvió más lenta o algo la frena, como el costo de despertar el hilo y de tomar el cerrojo, la latencia de las lecturas al azar o que el mismo archivo siga mapeado en memoria y las lecturas se serialicen. Para distinguirlas, registra para cada petición los tres instantes de envío, finalización y consumo: si la finalización ocurre mucho antes del consumo, la lectura ya estaba escondida y el cuello de botella está en otra parte; si quien consume espera siempre a la finalización, mira el tiempo de espera y los percentiles de la latencia de cada lectura.",
+    "level": "Esencial"
+  },
+  {
+    "id": "12",
+    "title": "Caché de expertos: a quién colocar, cómo repartir, cuándo cambiar",
+    "deck": "El denominador de la tasa de aciertos, la lista inicial por frecuencia, un tramo de ranuras por capa, el reemplazo con conteo con decaimiento y el orden «primero copiar, luego registrar» de un intercambio.",
+    "part": "III · Ejecución heterogénea",
+    "courses": [
+      "Estructuras de datos",
+      "Sistemas operativos",
+      "Modelado de rendimiento"
+    ],
+    "prereq": "Capítulo 10 (MoE y la intuición de la caché de expertos) y capítulo 11 (caché asociativa por conjuntos).",
+    "goals": [
+      "Explicar el denominador de la tasa de aciertos y por qué la tasa de un solo experto y la de «aciertan todos los de la capa» difieren más de diez veces",
+      "Comparar LRU, LFU y el conteo con decaimiento, y enunciar la regla de ajuste de la caché de expertos de Strata (cada 4 rondas, umbral 2, ventaja 1.5, × 0.7)",
+      "Escribir el orden correcto de un intercambio: retirar la entrada de la tabla, esperar a que termine la copia y luego registrar"
+    ],
+    "quiz": [
+      {
+        "text": "En una capa, la tasa de aciertos de cada experto es del 70 %. Si los expertos fueran independientes, ¿cuál es aproximadamente la probabilidad de que acierten los 10 expertos de la capa a la vez?",
+        "choices": [
+          "70 %",
+          "Cerca del 2,8 %",
+          "100 %"
+        ],
+        "correct": 1,
+        "why": "Que acierten todos exige que acierten los 10: 0.7 elevado a 10 ≈ 0.028. Los denominadores de los dos indicadores son distintos y no se pueden sustituir entre sí; el enrutamiento real no es independiente y lo medido hay que medirlo aparte."
+      },
+      {
+        "text": "Al intercambiar expertos, la tabla de residencia ya dice «#112 está en la ranura 5», pero los bytes todavía se están copiando. Si en ese momento la GPU calcula #112 según la tabla, ¿qué pasa?",
+        "choices": [
+          "Nada grave, solo va un poco más lento",
+          "Puede leer bytes mitad nuevos y mitad viejos, calcular mal y no dar error",
+          "El programa se cae seguro"
+        ],
+        "correct": 1,
+        "why": "La entrada de la tabla y los bytes tienen que ser válidos a la vez. Que vuelva la función de una copia asíncrona no significa que los bytes hayan llegado; registrar antes de tiempo produce falsos aciertos de «etiqueta correcta, bytes erróneos»: la salida parece normal y en realidad ya es errónea."
+      },
+      {
+        "text": "La caché de expertos temprana compartía un contador entre todas las capas y repartía las ranuras por orden de llegada, y la tasa de aciertos era de solo un 3 % aproximadamente. ¿Cuál fue la causa principal?",
+        "choices": [
+          "La VRAM era demasiado pequeña",
+          "Las primeras capas llegaron antes y ocuparon todas las ranuras, y las posteriores nunca recibían ninguna",
+          "La GPU no podía calcular las capas posteriores"
+        ],
+        "correct": 1,
+        "why": "Un token avanza desde la capa 0 y las 256 ranuras se agotan más o menos al llegar a la capa 26. La capacidad bastaba; el problema era que el reparto se enredó con el orden de los accesos. Con un tramo de ranuras por capa se arregló."
+      }
+    ],
+    "problem": "En el modo residente de poca memoria, la RAM solo guarda los expertos que la GPU no tiene. Para un intercambio de expertos en este modo, enumera tres condiciones que deben mantenerse.",
+    "answer": "Primera: los bytes del experto entrante ya están copiados por completo en la ranura de la VRAM antes de que sea visible para la GPU (antes de registrarlo en la tabla de residencia). Segunda: el experto saliente se retira de la tabla (a partir de ahí lo calcula la CPU) antes de que se sobrescriba su ranura, y sus bytes completos ya se copiaron de vuelta a la RAM, ocupando el sitio del experto entrante para que la copia de la RAM siga completando justo lo que le falta a la GPU. Tercera: el cambio de la tabla está sincronizado con los lectores concurrentes: cualquier token que elija estos dos expertos durante la copia solo puede seguir la ruta de la CPU y no debe leer un estado mitad nuevo y mitad viejo. Además hay que comprobar que el tamaño del bloque de experto no cruce el límite de la ranura, que se pueda volver atrás si hay un error y que no se supere el presupuesto de RAM.",
+    "level": "Esencial"
+  },
+  {
+    "id": "13",
+    "title": "CPU + GPU: paralelo dentro de una capa, en cola entre capas",
+    "deck": "Lo grande de calcular expertos es leer bytes; los aciertos para la GPU y los fallos para la CPU, a la vez; la dependencia de datos decide la ruta crítica.",
+    "part": "III · Ejecución heterogénea",
+    "courses": [
+      "Computación paralela",
+      "Organización de computadoras",
+      "Modelado de rendimiento"
+    ],
+    "prereq": "Capítulo 5 (intuición sobre ancho de banda y ruta crítica), capítulo 10 (MoE) y capítulo 12 (caché de expertos).",
+    "goals": [
+      "Enunciar las diferencias de diseño entre CPU y GPU y explicar con un ejemplo de SIMD que «solo se pueden calcular a la vez los datos independientes»",
+      "Explicar por qué Strata deja que la CPU calcule en el sitio los expertos que fallan, y dibujar la línea de tiempo del reparto entre GPU y CPU dentro de una capa",
+      "Explicar con la dependencia de datos y la ruta crítica por qué no se puede paralelizar entre capas y por qué reducir trabajo que no está en la ruta crítica no sirve"
+    ],
+    "quiz": [
+      {
+        "text": "Las dos ramas son independientes; la velocidad efectiva de la rama de la CPU es Bc = 40 y la de la rama de PCIe es Bp = 20. Para que los dos lados terminen a la vez, ¿qué proporción f hay que entregar a la rama de PCIe?",
+        "choices": [
+          "1/2",
+          "1/3",
+          "2/3"
+        ],
+        "correct": 1,
+        "why": "El tiempo de los dos lados es igual: (1 − f)/40 = f/20, y sale f = 20 ÷ (40 + 20) = 1/3. A la rama más lenta hay que darle menos."
+      },
+      {
+        "text": "Mientras la CPU todavía calcula los expertos de la capa l, ¿puede la GPU empezar ya la capa l + 1?",
+        "choices": [
+          "Siempre",
+          "No: la entrada de la capa l + 1 espera a que termine la fusión de la capa l",
+          "Sí, si hay suficientes hilos"
+        ],
+        "correct": 1,
+        "why": "La entrada de la capa l + 1 es el resultado de fusionar los 10 expertos de la capa l, y eso es una dependencia de datos. Por inteligente que sea la planificación, no se puede evitar: las 48 capas son una cadena en serie."
+      },
+      {
+        "text": "Upstream redujo el cálculo de expertos de la CPU por token de 18,2 a 10,2 milisegundos, pero el tiempo total del token no cambió. ¿Cuál es la causa más probable?",
+        "choices": [
+          "La medición de la CPU era errónea",
+          "El trabajo de la GPU se colocó detrás de la CPU y la longitud de la ruta crítica no cambió",
+          "No había suficiente VRAM"
+        ],
+        "correct": 1,
+        "why": "En la primera versión, el paso en que la GPU calcula los expertos con acierto estaba detrás del pool de expertos de la CPU, y el tiempo que ahorró la CPU lo ocupó la parte de la GPU. Solo al pasar a calcular en los dos lados a la vez se volvió de verdad más rápido."
+      }
+    ],
+    "problem": "Construye un ejemplo en el que «al subir la proporción que se entrega a la GPU, el conjunto va más lento», explicándolo con el tiempo de las dos ramas.",
+    "answer": "Supón que en una capa la rama de la CPU tardaba 8 milisegundos y la rama de la GPU por PCIe 7, de modo que el tiempo de unión lo decide la CPU con sus 8 milisegundos. Al entregar más expertos que fallan a la GPU, la CPU baja a 4 milisegundos, pero la rama de la GPU sube a 12 milisegundos (la transferencia por PCIe es lenta) y el tiempo de unión pasa a ser 12 milisegundos, más lento que antes. Si además se tiene en cuenta que la CPU que lee expertos y PCIe que lee memoria fijada comparten ancho de banda de memoria, que la rama de la GPU se alargue también frena a la CPU y empeora aún más. El mejor punto es donde las dos ramas terminan a la vez; más GPU no siempre es mejor.",
+    "level": "Esencial"
+  },
+  {
+    "id": "14",
+    "title": "Memoria fijada, DMA y asincronía: mover mientras se calcula",
+    "deck": "Las direcciones virtuales se mueven, el DMA solo conoce las físicas; «enviado» no significa «terminado»; el doble búfer solo es correcto gracias a dos señales.",
+    "part": "III · Ejecución heterogénea",
+    "courses": [
+      "Sistemas operativos",
+      "Programación concurrente",
+      "Organización de computadoras"
+    ],
+    "prereq": "Capítulo 6 (archivos y mapeo en memoria), capítulo 12 (intercambio en la caché de expertos) y capítulo 13 (reparto entre CPU y GPU).",
+    "goals": [
+      "Explicar con memoria virtual y paginación por qué el DMA exige memoria fijada y por qué Strata fija decenas de GB al arrancar",
+      "Distinguir las llamadas síncronas de las asíncronas y citar dos ejemplos de «volver no es terminar» en Strata (llenado de la caché, envío de la ventana de verificación)",
+      "Calcular el tiempo total de un doble búfer y explicar su condición de corrección: se lee cuando ya se copió, se escribe cuando ya se usó"
+    ],
+    "quiz": [
+      {
+        "text": "Una función de copia asíncrona ha vuelto. ¿Qué indica eso?",
+        "choices": [
+          "Que los datos ya llegaron seguro al destino",
+          "Que la copia se envió, pero no necesariamente terminó",
+          "Que el búfer de origen se puede liberar de inmediato"
+        ],
+        "correct": 1,
+        "why": "Una llamada asíncrona solo se encarga de entregar el trabajo. Si los datos llegaron o si se puede modificar el búfer de origen lo dice el evento de finalización, no que la función haya vuelto."
+      },
+      {
+        "text": "Dos búferes; cada bloque tarda 3 milisegundos en copiarse y 5 en calcularse, hay 4 bloques en total y la copia y el cálculo usan hardware independiente. ¿Cuál es el tiempo total ideal?",
+        "choices": [
+          "20 milisegundos",
+          "23 milisegundos",
+          "32 milisegundos"
+        ],
+        "correct": 1,
+        "why": "El primer bloque tarda 3 milisegundos en copiarse, los 3 tramos intermedios cuentan como el cálculo más lento, 5 milisegundos cada uno, y el último bloque tarda 5 milisegundos en calcularse: 3 + 3 × 5 + 5 = 23. Todo en serie sería 4 × 8 = 32."
+      },
+      {
+        "text": "La GPU puede leer directamente, mediante un mapeo, un bloque de memoria fijada. ¿Significa eso que los datos ya están en la VRAM?",
+        "choices": [
+          "Sí",
+          "No, cada lectura sigue pasando por PCIe",
+          "Solo en Windows"
+        ],
+        "correct": 1,
+        "why": "«La dirección a la que la GPU puede acceder» y «dónde viven realmente los datos» son cosas distintas. La memoria fijada mapeada sigue estando en los módulos de RAM del host, y que la GPU la lea implica pasar por PCIe, limitada por el ancho de banda del bus."
+      }
+    ],
+    "problem": "Un programa, al guardar su estado, a veces lee el estado viejo de la ronda anterior. Alguien añadió antes de guardar un «esperar 0,1 segundos» y el problema desapareció. ¿Por qué no es una solución fiable? ¿Cómo habría que corregirlo?",
+    "answer": "Una espera fija no establece la relación explícita de «solo se lee después de escribir»: si la máquina es más lenta, hay recursos en disputa o los datos de esta ronda son más, 0,1 segundos puede no bastar y el problema reaparece; y si la máquina es rápida, se espera de más sin necesidad. Lo correcto es esperar la señal de finalización que corresponde a esa escritura de estado, por ejemplo un evento registrado tras la escritura, o el wait_commit() que ofrece el verificador de Strata, y tratar también los casos de fallo de la espera y de tiempo agotado.",
+    "level": "Esencial"
+  },
+  {
+    "id": "15",
+    "title": "Kernels de GPU, fusión y CUDA Graph",
+    "deck": "Cada lanzamiento de kernel paga una cuota de registro: ¿cómo registrarse menos sin congelar la posición?",
+    "part": "III · Ejecución heterogénea",
+    "courses": [
+      "Computación paralela",
+      "Compiladores",
+      "Organización de computadoras"
+    ],
+    "prereq": "Capítulos 1, 5 y 13 (la jerarquía de memoria, el ancho de banda y en qué se diferencian la CPU y la GPU).",
+    "goals": [
+      "Explicar cómo se reparten el trabajo los hilos, los bloques de hilos y los warps, y por qué los hilos vecinos deben leer direcciones vecinas",
+      "Usar n × L + w y L + n × w para juzgar si una cadena de kernels está limitada por la sobrecarga de lanzamiento",
+      "Distinguir la fusión de operadores de CUDA Graph, y señalar que los valores que cambian en cada paso deben ir a un búfer de dirección fija al grabar el grafo"
+    ],
+    "quiz": [
+      {
+        "text": "Un kernel calcula solo 5 microsegundos, pero cada envío tarda 20 microsegundos. Si envías 45 kernels así uno por uno, ¿qué hace la GPU la mayor parte del tiempo?",
+        "choices": [
+          "Calcular a plena carga todo el tiempo",
+          "Esperar a que la CPU envíe el siguiente kernel",
+          "Esperar a que los datos de la VRAM pasen al SSD"
+        ],
+        "correct": 1,
+        "why": "Cuando w < L, el total es de unos n × L + w = 45 × 20 + 5 = 905 microsegundos, de los cuales la GPU calcula solo 45 × 5 = 225 microsegundos; el resto lo pasa esperando envíos. Esto es lo que significa estar «limitado por el lanzamiento»."
+      },
+      {
+        "text": "¿Son lo mismo CUDA Graph y la fusión de kernels?",
+        "choices": [
+          "Sí, un grafo junta todos los kernels en uno",
+          "No: un grafo ahorra el envío desde la CPU y sus nodos siguen siendo los kernels originales; la fusión es la que junta el cálculo en un solo kernel",
+          "Son la misma optimización del compilador con nombres distintos"
+        ],
+        "correct": 1,
+        "why": "Un grafo graba una cadena de operaciones y sus dependencias, y luego envía y repite toda la cadena de una vez, y cada nodo sigue ejecutándose por separado. La fusión reescribe el kernel para que los resultados intermedios se queden en el chip. Strata usa las dos."
+      },
+      {
+        "text": "Si capturas «la posición actual pos» en un grafo como argumento de un kernel y luego simplemente lo repites, ¿qué pasa?",
+        "choices": [
+          "El driver suma uno a pos automáticamente",
+          "Cada token escribe en la posición 0, el valor del momento de la captura; el programa no da error, pero el modelo actúa como si hubiera perdido la memoria",
+          "El grafo se niega a repetirse y da un error"
+        ],
+        "correct": 1,
+        "why": "Un grafo copia los valores de los argumentos en el momento de la captura, y la repetición nunca los vuelve a leer. El qsa.hpp de Strata pone pos, n_kv, n_bid y width en un búfer step de dirección fija; los kernels lo leen de la VRAM cada vez, y el host reescribe su contenido en cada paso."
+      }
+    ],
+    "problem": "Diseña una prueba pequeña que no necesite el modelo grande completo y que detecte el error «los parámetros de muestreo no se actualizan cuando se repite el grafo».",
+    "answer": "Fija un conjunto de logits y envía dos solicitudes seguidas: la primera voraz (greedy), la segunda con temperatura alta o con otro número aleatorio fijo. Ejecuta cada una por el camino con grafo y por un camino de referencia sin grafo, y compara los parámetros que usó realmente cada camino y los tokens que eligió. La segunda solicitud debe tomar una rama distinta de la primera y predecible. Si solo cambias la semilla aleatoria y la distribución está tan sesgada que siempre elige el mismo token, esta prueba no puede revelar el error.",
+    "level": "Esencial"
+  },
+  {
+    "id": "16",
+    "title": "Prefill: convertir muchos tokens en un problema de lotes",
+    "deck": "En la misma computadora, leer el prompt es más de veinte veces más rápido que escribir la respuesta: el secreto es el batching y el pipeline.",
+    "part": "III · Ejecución heterogénea",
+    "courses": [
+      "Computación paralela",
+      "Diseño de algoritmos",
+      "Sistemas operativos"
+    ],
+    "prereq": "Capítulos 3, 5, 10 y 14 (multiplicación de matrices, ancho de banda e intensidad aritmética, expertos MoE, DMA y asincronía).",
+    "goals": [
+      "Usar matriz × vector frente a matriz × matriz para explicar por qué el prefill es más rápido que el decode",
+      "Explicar la agrupación por experto y los compromisos del tamaño de chunk C: reutilización, VRAM temporal, latencia de cancelación",
+      "Dibujar el pipeline que solapa mover y calcular, y nombrar los estados que deben entregarse tras un chunk"
+    ],
+    "quiz": [
+      {
+        "text": "Durante el prefill todos los tokens del prompt ya se conocen. Entonces, ¿puede el 5.º token «ver» al 6.º?",
+        "choices": [
+          "Sí, de todos modos ya se conocen",
+          "No. La regla causal no cambia; el batching solo cambia cómo se organiza el cálculo",
+          "Solo para prompts en inglés"
+        ],
+        "correct": 1,
+        "why": "Una entrada conocida no significa que el modelo pueda mirar el futuro. El prefill sigue usando la máscara causal, y las capas recurrentes siguen recorriendo el chunk en orden."
+      },
+      {
+        "text": "¿Por qué la parte densa con 8 tokens juntos tarda solo unas 3 veces lo que con un token, y no 8 veces?",
+        "choices": [
+          "Porque la GPU se salta la mitad de los tokens",
+          "Porque una lectura de los pesos la comparten los 8 tokens, así que el costo del movimiento se reparte",
+          "Porque calcular juntos usa menor precisión"
+        ],
+        "correct": 1,
+        "why": "En matriz × vector, una lectura de los pesos sirve a un token; en matriz × matriz, los mismos pesos sirven a todo el lote. El cálculo se hace entero, pero el movimiento se paga una vez. La tabla por defecto de spec/controller.hpp indica 3,0× para 8 tokens."
+      },
+      {
+        "text": "Durante el prefill, Strata pone el búfer del chunk en ranuras prestadas de la caché de expertos. Mientras corre el prefill, ¿pueden los expertos que antes estaban en esas ranuras seguir contando como «aciertos»?",
+        "choices": [
+          "Sí, la dirección no ha cambiado",
+          "No. Sus bytes se han sobrescrito, así que hay que moverlos de nuevo y volver a llenarlos tras el prefill",
+          "Sí, siempre que los presupuestos sumen menos que la VRAM"
+        ],
+        "correct": 1,
+        "why": "La dirección sigue ahí, pero el contenido ahora es el búfer del chunk. La condición de seguridad es que en cada momento la etiqueta coincida con los bytes de la ranura: mientras están prestadas no cuentan como aciertos, y solo cuando termina el rellenado pueden anunciarse otra vez."
+      }
+    ],
+    "problem": "El mismo prompt se lee una vez con C = 1 y otra con C = 8192, y las respuestas finales no son idénticas palabra por palabra. ¿Por qué no puedes concluir de inmediato que un lado tiene un error, ni descartarlo con «es solo punto flotante»?",
+    "answer": "El cálculo por lotes y el de uno en uno pueden seguir caminos de redondeo distintos (upstream ha documentado que los modelos IQ redondean distinto en los kernels de expertos de un token y de varios tokens), y una diferencia diminuta en los logits puede hacer que algún token se bifurque. Pero la diferencia también puede venir de un error real en la entrega del estado, en la máscara causal o en la disposición de los datos. Compara con el mismo historial fijo: los tensores intermedios, los expertos elegidos y los números de índice, y la capa donde el error empieza a crecer. Luego juzga con tolerancias y umbrales de calidad fijados de antemano. Comprueba aparte y de forma exacta los contratos no numéricos, como las posiciones de estado, la máscara y los números de índice.",
+    "level": "Esencial"
+  },
+  {
+    "id": "17",
+    "title": "Capacidad de la KV, conjuntos de trabajo y almacenamiento por niveles",
+    "deck": "¿Cuántos bytes hacen falta para recordar una conversación, son GB o GiB, y viven en la VRAM o en la RAM?",
+    "part": "IV · Reutilización y especulación",
+    "courses": [
+      "Sistemas operativos",
+      "Organización de computadoras",
+      "Modelado de rendimiento"
+    ],
+    "prereq": "Capítulos 1, 4, 8 y 12 (jerarquía de memoria, cuantización, atención, reemplazo de caché).",
+    "goals": [
+      "Calcular los bytes de KV de una conversación como 12 capas × 2 cabezas × 256 dimensiones × 2 × bytes por elemento",
+      "Distinguir GB (10⁹) de GiB (2³⁰) y detectar errores en los que el número y la unidad no coinciden",
+      "Explicar la tabla de páginas y el streaming de KV: la VRAM guarda solo las páginas en uso, el historial completo está en la RAM y los fallos se traen con CLOCK"
+    ],
+    "quiz": [
+      {
+        "text": "Cuando Strata guarda la KV en FP16, ¿qué tamaño tiene la KV principal para un contexto de 128K (131.072 tokens)?",
+        "choices": [
+          "Exactamente 3 GiB",
+          "12 GiB",
+          "108 MiB"
+        ],
+        "correct": 0,
+        "why": "12 capas × 2 cabezas × 256 dimensiones × 2 (K, V) × 2 bytes = 24.576 bytes por token; multiplicado por 131.072 son 3.221.225.472 bytes, exactamente 3 × 2³⁰, que son 3 GiB (unos 3,22 GB)."
+      },
+      {
+        "text": "¿Cómo debes escribir 805.306.368 bytes?",
+        "choices": [
+          "805 MiB",
+          "805 MB, que son 768 MiB",
+          "768 MB"
+        ],
+        "correct": 1,
+        "why": "Dividido entre 10⁶ da 805,3 MB, y entre 2²⁰ da 768 MiB. Un comentario del código de Strata escribe «805 MiB», emparejando el número decimal con la unidad binaria."
+      },
+      {
+        "text": "Una conversación de 256K corre con el streaming de KV activado, y la VRAM guarda la KV de solo 32.768 posiciones. ¿Puede el modelo seguir viendo el contenido anterior?",
+        "choices": [
+          "No, el historial anterior se ha borrado",
+          "Sí: el historial completo está en la RAM, y las páginas seleccionadas se traen a la VRAM antes de leerse",
+          "Solo puede ver 1 de cada 4 tokens"
+        ],
+        "correct": 1,
+        "why": "Estar residente y estar guardado son cosas distintas. La documentación de upstream dice que con streaming la atención lee exactamente los mismos valores; solo cambia dónde vive la KV. Cuánto permanece en la VRAM afecta solo a la velocidad."
+      }
+    ],
+    "problem": "Un informe cuenta la KV de Strata sobre 48 capas y dice «esta es una estimación conservadora, así que está bien». ¿Por qué el informe sigue fallando?",
+    "answer": "Solo las 12 capas QSA tienen KV, así que contar 48 capas hace que el resultado salga 4 veces demasiado grande. Pecar de prudente no es lo mismo que tener el modelo correcto: una atribución falsa hace que la gente juzgue mal el cuello de botella, compre el hardware equivocado o desactive funciones útiles. Cuenta con las 12 capas reales y enumera después el margen como una partida propia, en vez de hacer pasar un error estructural por margen.",
+    "level": "Esencial"
+  },
+  {
+    "id": "18",
+    "title": "Decodificación especulativa: adivina con audacia, confirma con rigor",
+    "deck": "Adivina unos cuantos tokens y verifícalos de una vez: ¿cómo se deshace una apuesta fallida y por qué la respuesta no cambia?",
+    "part": "IV · Reutilización y especulación",
+    "courses": [
+      "Probabilidad",
+      "Diseño de algoritmos",
+      "Sistemas de bases de datos"
+    ],
+    "prereq": "Capítulos 2, 9, 14 y 16 (muestreo y números aleatorios, el estado recurrente de GDN, síncrono frente a asíncrono, procesamiento por lotes).",
+    "goals": [
+      "Enunciar la regla «aceptar hasta el primer desacuerdo» y explicar por qué se descarta todo borrador posterior",
+      "Relacionar la decodificación especulativa con la predicción de saltos y la ejecución especulativa de la CPU",
+      "Decir, estado por estado, cómo se deshacen GDN, el indexer, PLE y KV cuando se confirman las a + 1 primeras filas"
+    ],
+    "quiz": [
+      {
+        "text": "En la ventana, el 2.º borrador difiere de la elección del objetivo, y el 3.er borrador coincide por casualidad con el texto original. ¿Puede aceptarse el 3.º?",
+        "choices": [
+          "Sí, es correcto",
+          "No, se adivinó tras una palabra equivocada, así que su premisa ya no se sostiene",
+          "Depende de lo larga que sea la ventana"
+        ],
+        "correct": 1,
+        "why": "La corrección se cumple como cadena a lo largo del prefijo: un borrador posterior tiene una premisa correcta solo si todo lo anterior coincidió. El bucle de Strata while (window[a+1] == outv[a]) ++a se detiene en el primer desacuerdo."
+      },
+      {
+        "text": "Con el muestreo por temperatura activado, ¿cómo decide Strata si un borrador puede aceptarse?",
+        "choices": [
+          "El borrador escribe directamente por el objetivo, sin verificación",
+          "Solo si es exactamente igual al resultado muestreado reproducible del objetivo para esta fila",
+          "Se acepta con probabilidad min(1, p/q)"
+        ],
+        "correct": 1,
+        "why": "El número aleatorio de cada fila lo fijan la semilla y la posición absoluta, y el borrador debe ser igual al resultado muestreado del objetivo para esa fila. min(1, p/q) es el método del artículo clásico, no el del código de Strata que leyó este libro."
+      },
+      {
+        "text": "Una ventana aceptó solo 1 borrador. ¿Basta con deshacer el contador de posición?",
+        "choices": [
+          "Sí",
+          "No: GDN debe reproducir, el indexer debe restaurar una instantánea y PLE debe restaurar la instantánea correspondiente",
+          "Solo hay que tratar la KV"
+        ],
+        "correct": 1,
+        "why": "Los distintos estados se deshacen de maneras distintas. Las ranuras extra de KV en realidad no necesitan nada y esperan a ser sobrescritas en la ronda siguiente; GDN, el indexer y PLE vuelven cada uno al estado del prefijo a su manera."
+      }
+    ],
+    "problem": "Quieres añadir a Strata un «búfer de estadísticas por secuencia» (por ejemplo, uno que cuente con qué frecuencia ha aparecido cada token). Escribe para él una lista de comprobación de seguridad de la decodificación especulativa.",
+    "answer": "① Qué rango del historial cubre; ② si la ventana de verificación lo escribe provisionalmente mientras corre; ③ si necesita una instantánea, reproducir entradas registradas, o se puede sobrescribir de forma natural; ④ cómo hace commit(n_keep) que refleje solo las n_keep primeras filas (ojo: n_keep = borradores aceptados + 1); ⑤ cómo se invalida la parte rechazada; ⑥ quién confirma que las lecturas y escrituras asíncronas han terminado, y con qué evento (por ejemplo wait_commit tras un commit asíncrono); ⑦ cómo se limpia con un token de fin, una cancelación o una restauración de sesión; ⑧ compáralo punto por punto con el resultado de referencia sin especulación con el mismo historial fijo.",
+    "level": "Esencial"
+  },
+  {
+    "id": "19",
+    "title": "Cuántos borradores adivinar: valor esperado, costo y aprendizaje sobre la marcha",
+    "deck": "Un token bien adivinado sale gratis, pero verificar toma tiempo. ¿Cuántas apuestas compensan más, y qué pasa si la tasa de aceptación cambia?",
+    "part": "IV · Reutilización y especulación",
+    "courses": [
+      "Probabilidad",
+      "Optimización",
+      "Estadística"
+    ],
+    "prereq": "Capítulo 18 (decodificación especulativa y commit). La caché de expertos del capítulo 10 ayuda, pero no es imprescindible.",
+    "goals": [
+      "Usar tasas de aceptación condicionales para calcular los tokens esperados confirmados por ronda, y explicar por qué las apuestas extra dan rendimientos decrecientes",
+      "Explicar por qué se comparan los «tokens esperados confirmados por milisegundo» y no la tasa de aceptación ni la longitud de la ventana",
+      "Estimar una tasa de aceptación cambiante con una media móvil exponencial, y tratar bien las posiciones de borrador que nunca se compararon"
+    ],
+    "quiz": [
+      {
+        "text": "Tres borradores tienen tasas de aceptación condicionales 0,8, 0,6 y 0,5. ¿Cuántos tokens confirma en promedio una ronda?",
+        "choices": [
+          "2,52",
+          "2,9",
+          "3,0"
+        ],
+        "correct": 0,
+        "why": "E = 1 + 0,8 + 0,8×0,6 + 0,8×0,6×0,5 = 1 + 0,8 + 0,48 + 0,24 = 2,52. El 1 inicial es el token propio del modelo grande; el borrador i solo es útil si los i primeros se aceptan todos."
+      },
+      {
+        "text": "Una ronda adivinó 3 y el 1.º se rechazó de inmediato. ¿Cómo debe actualizarse la estimación de la posición 3?",
+        "choices": [
+          "Anotar un fallo",
+          "No actualizar: no se comparó en esta ronda",
+          "Anotar un acierto"
+        ],
+        "correct": 1,
+        "why": "Una vez rechazado el 1.er borrador, las posiciones posteriores no se comparan; el resultado es «no visto». Anotar un fallo arrastra hacia abajo las estimaciones de las posiciones profundas, y el controlador concluye por error que las ventanas largas no compensan. El observe de Strata actualiza solo las posiciones aceptadas y el primer rechazo."
+      },
+      {
+        "text": "Cuando el controlador elige la longitud de la ventana, ¿qué número quiere maximizar de verdad?",
+        "choices": [
+          "El número de borradores",
+          "La tasa de aceptación de los borradores",
+          "Tokens esperados confirmados ÷ tiempo por ronda"
+        ],
+        "correct": 2,
+        "why": "El objetivo es más tokens por milisegundo. Al crecer la ventana, el número esperado de tokens crece cada vez más despacio mientras el tiempo de ronda sigue subiendo, así que la velocidad tiene un pico. Una tasa de aceptación alta con rondas más caras aún puede ser más lenta en conjunto."
+      }
+    ],
+    "problem": "El controlador de Strata actualiza las tasas de aceptación con una media móvil exponencial con α = 0,05. ¿Qué pasaría con α = 0,5? Explícalo en términos de velocidad de reacción y ruido, y calcula la vida media para los dos valores de α.",
+    "answer": "Vida media = ln 0,5 ÷ ln(1 − α). Son unas 13,5 rondas para α = 0,05 y exactamente 1 ronda para α = 0,5. Con α = 0,5 la estimación alcanza casi de inmediato tras un cambio de tema, pero cada aceptación o rechazo la hace saltar mucho (la desviación típica en régimen estable es de unos √(α ÷ (2 − α) × p(1 − p)), que con p = 0,86 sube de unos 0,056 a unos 0,20). El controlador cambiaría de ventana constantemente, y unos pocos rechazos casuales podrían incluso empujar la estimación por debajo del umbral y detener los borradores. Mirando solo las dos funciones de Controller, una vez que se dejan de usar borradores no hay observaciones nuevas, así que la estimación nunca puede recuperarse. α es un equilibrio entre «reaccionar rápido» y «no dejarse engañar por el ruido».",
+    "level": "Esencial"
+  },
+  {
+    "id": "20",
+    "title": "Reutilización de prefijos, instantáneas y copia en escritura",
+    "deck": "¿Por qué una pregunta de seguimiento se responde casi al instante? El motor guardó el prefijo que ya leyó. Pero «la misma pregunta» no es «el mismo estado», y guardar la KV no es guardar toda la conversación.",
+    "part": "IV · Reutilización y especulación",
+    "courses": [
+      "Sistemas de bases de datos",
+      "Sistemas operativos",
+      "Ingeniería de software"
+    ],
+    "prereq": "Capítulos 9, 17 y 18. Basta con saber qué son la caché KV y el estado recurrente.",
+    "goals": [
+      "Nombrar las cuatro condiciones que debe cumplir la reutilización de prefijos: modo de steering, longitud, tokens e identidad de las imágenes",
+      "Explicar por qué la caché KV puede volver atrás «ignorando las filas posteriores» mientras que el estado recurrente solo puede hacerlo mediante checkpoints",
+      "Usar la copia en escritura para contar cuántas páginas deben copiar dos ramas que comparten un prefijo, y decir qué hace realmente Strata"
+    ],
+    "quiz": [
+      {
+        "text": "Dos solicitudes tienen exactamente los mismos ID de token; solo es distinta la imagen adjunta a la segunda. ¿Reutilizará Strata el checkpoint de la primera?",
+        "choices": [
+          "Sí, los tokens son iguales",
+          "No, la posición y el hash de la imagen también deben coincidir",
+          "Sí, siempre que las dos imágenes tengan el mismo tamaño"
+        ],
+        "correct": 1,
+        "why": "En la secuencia de tokens una imagen es solo una serie de marcadores, y marcadores idénticos pueden representar imágenes totalmente distintas. El motor registra por separado la posición de inicio y el hash del contenido de cada imagen; un hash distinto significa que no hay reutilización."
+      },
+      {
+        "text": "Quieres llevar una conversación de vuelta a su estado en el token 4. ¿Qué tipo de memoria puede volver atrás simplemente «ignorando lo que viene después», y cuál no?",
+        "choices": [
+          "La caché KV puede, el estado recurrente de GDN no",
+          "Las dos pueden",
+          "El estado recurrente de GDN puede, la caché KV no"
+        ],
+        "correct": 0,
+        "why": "La caché KV añade una fila por posición, y las filas posteriores se sobrescribirán más tarde, así que ignorarlas funciona. El estado recurrente de GDN se reescribe entero y en el sitio con cada token, así que su forma anterior ha desaparecido; solo un checkpoint guardado de antemano puede devolverlo."
+      },
+      {
+        "text": "El prefijo tiene 17 tokens a 4 por página, y tras la bifurcación tanto A como B siguen escribiendo. Con copia en escritura, ¿cuántas páginas KV deben copiarse como mínimo tras la bifurcación?",
+        "choices": [
+          "0 páginas",
+          "1 página",
+          "5 páginas"
+        ],
+        "correct": 1,
+        "why": "Las 4 primeras páginas están llenas y solo se leen, nunca se escriben, así que pueden compartirse. La página 5 contiene solo 1 token de prefijo y los dos lados escribirán en ella, así que quien escriba primero debe copiarla. Solo una copia completa necesitaría 5 páginas."
+      }
+    ],
+    "problem": "Diseña un experimento mínimo que no necesite GPU para comprobar si «la sesión A guarda una instantánea, cambia a ejecutar B y luego restaura A» filtra estado entre las sesiones.",
+    "answer": "Usa una recurrencia de juguete determinista (por ejemplo s ← 0,5s + t). Da a A y B el mismo prefijo y luego sufijos distintos, y avánzalas por turnos: ejecuta A unos pasos y guarda una instantánea, cambia a B, luego restaura A y continúa. En cada paso compara bit a bit los estados de A y B con el resultado de «repetir cada una de forma independiente desde el principio»; deben ser exactamente iguales. Luego añade algunos fallos: A se cancela a mitad y B continúa, una instantánea se trunca, una instantánea tiene un formato erróneo, el presupuesto es demasiado pequeño. La respuesta correcta es rechazar con claridad y conservar el estado original, no seguir calculando con medio estado.",
+    "level": "Esencial"
+  },
+  {
+    "id": "21",
+    "title": "Dos tarjetas gráficas: división por capas, pipeline y traspaso",
+    "deck": "Dos tarjetas gráficas resuelven primero «no cabe», no «es lento»: un token sigue haciendo cola capa por capa, y el pipeline solo empieza a girar al leer el prompt.",
+    "part": "V · Servicio y escalado",
+    "courses": [
+      "Computación paralela",
+      "Sistemas distribuidos",
+      "Modelado de rendimiento"
+    ],
+    "prereq": "Capítulos 1, 5, 10 y 16; haber leído la «ventana de verificación» del capítulo 18 ayuda.",
+    "goals": [
+      "Distinguir lo que ahorra y lo que cuesta cada una de estas formas: división por capas, paralelismo de tensores y paralelismo de solicitudes",
+      "Usar a + b + (N − 1) × max(a, b) para calcular el tiempo total de un pipeline y sus burbujas",
+      "Estimar el costo de un traspaso a partir de los bytes, el número de cruces y el ancho de banda"
+    ],
+    "quiz": [
+      {
+        "text": "La primera tarjeta necesita 4 ms para sus capas y la segunda 5 ms, sin contar las transferencias. Si se genera un solo token, ¿cuánto es lo mínimo que puede tardar?",
+        "choices": [
+          "5 ms",
+          "9 ms",
+          "4,5 ms"
+        ],
+        "correct": 1,
+        "why": "El mismo token debe terminar las capas de la primera tarjeta antes de entrar en la segunda, así que las dos partes solo pueden correr una tras otra: 4 + 5 = 9 ms. Las dos tarjetas no pueden trabajar a la vez en el mismo token."
+      },
+      {
+        "text": "Siguen siendo 4 ms y 5 ms, el prompt se corta en 8 chunks y las dos tarjetas leen escalonadas. ¿Cuánto tarda aproximadamente?",
+        "choices": [
+          "44 ms",
+          "72 ms",
+          "40 ms"
+        ],
+        "correct": 0,
+        "why": "La tarjeta más lenta marca el ritmo: total = 4 + 5 + (8 − 1) × 5 = 44 ms. 72 ms es un chunk tras otro en secuencia; 40 ms ignora la burbuja de llenado del principio."
+      },
+      {
+        "text": "¿Por qué el modo de dos tarjetas de Strata no necesita NVLink?",
+        "choices": [
+          "Cruza entre tarjetas una sola vez por ventana de verificación, con solo unos cientos de KB de datos",
+          "Parte las matrices de cada capa entre las dos tarjetas y las calcula a la vez",
+          "Cada tarjeta atiende a usuarios distintos y nunca hablan entre sí"
+        ],
+        "correct": 0,
+        "why": "Strata usa una división por capas: un token cruza entre tarjetas una vez por ventana de verificación, 51.216 bytes por token, retransmitidos por la RAM, y PCIe basta. Sincronizar en cada capa es lo que hace el paralelismo de tensores, y eso es lo que necesita una interconexión rápida."
+      }
+    ],
+    "problem": "Un amigo dice: «Añadí una segunda tarjeta gráfica y la lectura de prompts se hizo un 20% más rápida, lo que demuestra que el pipeline de división por capas es muy eficiente». ¿Qué tiene de impreciso este razonamiento? ¿Cómo lo medirías?",
+    "answer": "La VRAM extra puede guardar en caché más expertos y recortar el trabajo de la CPU, lo que por sí solo acelera las cosas y no tiene nada que ver con el pipeline. Mide por separado: la tasa de aciertos de expertos de cada tarjeta, la carga del pool de la CPU, el tiempo de traspaso y el tiempo de cada etapa por chunk. Luego usa a + b + (N − 1) × max(a, b) para estimar la ganancia teórica del pipeline puro y compárala con la medición. También puedes comparar con «no dividir cuando una tarjeta basta» (el interruptor split_skip_if_fits de upstream) para ver cuánto viene de la capacidad y cuánto del pipeline.",
+    "level": "Esencial"
+  },
+  {
+    "id": "22",
+    "title": "Portabilidad: un mismo código fuente, máquinas distintas",
+    "deck": "Un chip solo entiende sus propias instrucciones. Un código fuente debe compilarse una vez para cada tipo de máquina, y «compila» sigue estando a varios niveles de evidencia de «tiene soporte».",
+    "part": "V · Servicio y escalado",
+    "courses": [
+      "Organización de computadoras",
+      "Compiladores",
+      "Ingeniería de software"
+    ],
+    "prereq": "Capítulos 10 y 13. Basta con saber que la GPU y la CPU se reparten el cálculo de los expertos. El redondeo de punto flotante del capítulo 4 ayuda con la sección 22.4.",
+    "goals": [
+      "Explicar qué hacen el compilador, el conjunto de instrucciones y la compilación condicional, y leer un bloque de ramas #if",
+      "Explicar cómo elige Strata en la CPU, en tiempo de ejecución, los kernels AVX-512 o AVX2, y cómo convierte código fuente al estilo CUDA en un motor HIP",
+      "Distinguir los cuatro niveles de evidencia (compila, pasa las pruebas, corre en una tarjeta real, verificado por el mantenedor) y escribir una declaración de soporte que no exagere"
+    ],
+    "quiz": [
+      {
+        "text": "Strata añade el interruptor de compilación de AVX-512 solo a unos pocos archivos de kernels, y no a todo el programa. ¿Cuál es la razón principal?",
+        "choices": [
+          "Para que la compilación sea más rápida",
+          "Para que el sondeo de la CPU y el código de respaldo corran sin riesgo en CPU sin AVX-512",
+          "Porque las instrucciones AVX-512 solo pueden aparecer en un archivo"
+        ],
+        "correct": 1,
+        "why": "Cuando un archivo se compila con el interruptor de AVX-512, el compilador puede insertar instrucciones AVX-512 en cualquier parte de él. Si el sondeo y el respaldo están en archivos sin el interruptor, una CPU vieja puede «preguntar» con seguridad y decidir después qué camino tomar."
+      },
+      {
+        "text": "¿Cómo logra la compilación HIP de Strata que el código al estilo CUDA compile para tarjetas AMD?",
+        "choices": [
+          "Una herramienta reescribe de forma permanente cada archivo fuente a HIP",
+          "Al compilar, incluye a la fuerza una cabecera shim cuyas macros cambian los nombres que empiezan por cuda por nombres de hip, y se escriben a mano algunas funciones internas que HIP no tiene",
+          "Las tarjetas AMD pueden ejecutar directamente el código máquina de NVIDIA"
+        ],
+        "correct": 1,
+        "why": "El script de compilación usa -include para meter hip_compat/cuda_runtime.h en cada archivo fuente. Ese archivo tiene 82 líneas de #define que cambian los nombres. Las funciones internas como __dp4a y los intercambios de warp se implementan aparte, según la arquitectura de la GPU, en intrinsics.hpp. El código fuente no se modifica."
+      },
+      {
+        "text": "gfx1102 compila y pasa las pruebas incluidas de Strata. Según los niveles de evidencia de este capítulo, ¿qué afirmación es la más exacta?",
+        "choices": [
+          "Ya tiene soporte completo",
+          "Tiene dos niveles de evidencia, compilación y pruebas, pero aún no hay un reporte de una ejecución completa de un modelo, así que sigue contando como no verificada",
+          "No se puede usar porque no está en ninguna lista"
+        ],
+        "correct": 1,
+        "why": "El script de compilación clasifica gfx1102 como no verificada: compila y al configurar muestra una advertencia. Pasar las pruebas indica que los kernels no fallan y calculan bien. Pero que un modelo real corra en una tarjeta real y que alguien lo reproduzca es un nivel de evidencia más alto."
+      }
+    ],
+    "problem": "Añadiste un backend de GPU nuevo a Strata y solo lograste correr un decode, una vez, en una tarjeta y con un paquete de modelo. Escribe una declaración de soporte que no exagere. Incluye al menos las condiciones de compilación que hay que registrar, el alcance verificado y lo que expresamente no se probó.",
+    "answer": "Condiciones de compilación: el commit del código fuente, el compilador y su versión, la lista de arquitecturas de destino, todos los interruptores de compilación, las versiones de las bibliotecas de las que depende (como el commit fijado de ggml) y las variables de entorno de ejecución. Alcance verificado: el modelo de dispositivo y el controlador, el paquete de modelo y el formato de cuantización, el formato KV, si se probó solo decode o también prefill, la longitud de contexto y cuántos tokens se ejecutaron. Indica con claridad el nivel de evidencia: «compila», «pasan las pruebas incluidas», «error a nivel de tensor frente a una implementación de referencia» o «calidad de extremo a extremo». Partes sin probar: otras arquitecturas, otros paquetes de modelo, contextos largos, varias GPU, otro sistema operativo y demás; enuméralas una por una como «sin probar». No escribas «soporte completo» y no prometas resultados idénticos bit a bit a los de otros backends.",
+    "level": "Esencial"
+  },
+  {
+    "id": "23",
+    "title": "Del token a la API: plantillas, SSE y llamadas a herramientas",
+    "deck": "Que una respuesta aparezca palabra por palabra depende de tres puertas de «reunir primero, procesar después».",
+    "part": "V · Servicio y escalado",
+    "courses": [
+      "Redes de computadoras",
+      "Compiladores",
+      "Ingeniería de software"
+    ],
+    "prereq": "Capítulo 1 (token y tokenización). El capítulo 2 (muestreo) ayuda a entenderlo, pero no es imprescindible.",
+    "goals": [
+      "Explicar el reparto de trabajo de la capa de servicio de Strata: el servicio HTTP, el front end de texto y la frontera del motor, que tiene una sola interfaz, generate",
+      "Reconstruir una respuesta en streaming en el orden correcto: decodificación UTF-8 incremental, corte de eventos SSE en las líneas en blanco y análisis de JSON completo",
+      "Explicar por qué las etiquetas y las llamadas a herramientas de la salida del modelo también hay que retenerlas y reunirlas, y por qué la salida del modelo es entrada no confiable"
+    ],
+    "quiz": [
+      {
+        "text": "El bloque de bytes que el cliente lee de la red cada vez, ¿es siempre un evento SSE completo?",
+        "choices": [
+          "Sí, el servidor escribe un evento cada vez",
+          "No necesariamente: el límite de un bloque puede caer en cualquier parte",
+          "Solo el chino se corta; el inglés no"
+        ],
+        "correct": 1,
+        "why": "El tamaño de los bloques lo deciden la red y el sistema operativo, y pueden cortar en medio de un carácter chino, de un trozo de JSON o de un evento. El inglés también se corta. Lo que pasa es que una letra inglesa ocupa solo 1 byte y nunca queda «medio carácter»."
+      },
+      {
+        "text": "La codificación UTF-8 de «中» es E4 B8 AD. Si un bloque de bytes termina en E4, ¿qué debe hacer un decodificador correcto?",
+        "choices": [
+          "Decodificar E4 como el carácter de sustitución � y seguir leyendo",
+          "Retener E4 y esperar a que el bloque siguiente complete los 2 bytes que faltan",
+          "Descartar E4, porque no es un carácter completo"
+        ],
+        "correct": 1,
+        "why": "E4 en binario es 1110 0100, y los tres unos del principio indican que el carácter ocupa 3 bytes. Al terminar el bloque aún faltan 2 bytes de continuación, así que se retiene y se une cuando llega el bloque siguiente. Si lo decodificas como � o lo descartas, ese carácter ya no se puede recuperar."
+      },
+      {
+        "text": "Si cuentas los eventos SSE que devuelve Strata, ¿puedes saber con exactitud cuántos tokens generó el modelo?",
+        "choices": [
+          "Sí, un token por evento",
+          "No, las dos cantidades no tienen una relación fija",
+          "Sí, siempre que no haya llamadas a herramientas"
+        ],
+        "correct": 1,
+        "why": "El primer evento solo anuncia que el asistente empieza a hablar. Al leer un prompt largo se insertan comentarios keep-alive. Cuando un token trae solo medio carácter chino, no hay texto que enviar. Y mientras se retiene una etiqueta, tampoco se envía nada por un momento. Para contar tokens, mira el campo usage del final."
+      }
+    ],
+    "problem": "Un cliente decodifica a cadena cada bloque de bytes que recibe y luego analiza como JSON cada línea data que contiene. En las pruebas locales todo va bien, pero los usuarios reportan que a veces se pierden caracteres y a veces hay errores. Explica la causa y da el orden de procesamiento correcto.",
+    "answer": "En las pruebas locales, la respuesta entera suele llegar en uno o dos bloques, así que el problema no se ve. Cuando la red es lenta o pasa por un proxy, los bloques se hacen más pequeños y sus límites caen en medio de un carácter chino o de un evento. Si decodificas cada bloque por separado, el carácter cortado se vuelve basura. Si analizas como JSON una línea data incompleta, da error y ese evento se pierde. El orden correcto son tres puertas. Primero, un decodificador UTF-8 incremental une los bytes en caracteres completos y retiene los bytes incompletos. Después, el texto se acumula en un búfer y solo en una línea en blanco se recorta un evento completo, saltándose los comentarios que empiezan por dos puntos. Por último, se analiza como JSON el data completo. Método de verificación: corta el mismo flujo en bloques de 1 a 32 bytes, uno por uno, y el resultado reconstruido debe ser exactamente igual en todos.",
+    "level": "Esencial"
+  },
+  {
+    "id": "24",
+    "title": "Ciclo de vida, cancelación y fronteras de seguridad",
+    "deck": "«Detener la respuesta» es una señal que atraviesa la red, los procesos y la GPU. De «quién puede preguntar» se encarga la autenticación.",
+    "part": "V · Servicio y escalado",
+    "courses": [
+      "Sistemas operativos",
+      "Sistemas distribuidos",
+      "Ingeniería de software"
+    ],
+    "prereq": "Capítulo 23 (capa de servicio y SSE). Conocer las dos fases del capítulo 1: prefill («leer el prompt») y decode («escribir la respuesta»).",
+    "goals": [
+      "Dibujar la máquina de estados del ciclo de vida de una solicitud y explicar por qué «Cancelando» es un estado aparte",
+      "Explicar cómo cancela Strata de forma cooperativa: hilo vigilante, bandera de cancelación, punto de control del motor, STOP y vaciado hasta DONE",
+      "Explicar de qué protegen por separado escuchar por defecto solo a esta computadora, la API key y la comparación en tiempo constante"
+    ],
+    "quiz": [
+      {
+        "text": "Pulsaste «Detener» en la página y el texto dejó de moverse. ¿Eso demuestra que la GPU ya dejó de calcular para esta solicitud?",
+        "choices": [
+          "Sí, si la página se detiene, la GPU se detiene",
+          "No, la señal de cancelación hay que pasarla capa por capa y confirmarla",
+          "Solo con las respuestas cortas"
+        ],
+        "correct": 1,
+        "why": "Que la página se detenga es solo la capa de arriba. El servidor tiene que notar primero que la conexión se cayó y activar la bandera de cancelación, y luego escribir STOP al motor. El motor aún debe llegar a su siguiente punto de control para parar, y el servidor libera el FIFO solo tras leer el DONE de esa solicitud."
+      },
+      {
+        "text": "Siendo la misma cancelación, ¿por qué cancelar durante el «prefill» suele tardar mucho más que durante el «decode»?",
+        "choices": [
+          "La red es más lenta durante el prefill",
+          "El motor solo comprueba antes de empezar cada chunk, y el chunk que tiene entre manos hay que terminarlo",
+          "Durante el prefill el servidor no mira la bandera de cancelación"
+        ],
+        "correct": 1,
+        "why": "En el decode, cada token es un punto de control, y se puede parar enseguida. El prefill avanza por chunks, y should_stop se comprueba una vez antes de cada chunk. Un chunk tiene como máximo 32768 tokens, y leerlo puede llevar más de diez segundos."
+      },
+      {
+        "text": "Strata compara la API key con hmac.compare_digest y no con una comparación de igualdad de cadenas normal. ¿De qué se quiere proteger sobre todo?",
+        "choices": [
+          "De que el resultado de la comparación salga mal",
+          "De que un atacante mida el tiempo de la comparación y adivine la clave un carácter a la vez",
+          "De que la comparación sea más rápida"
+        ],
+        "correct": 1,
+        "why": "Una comparación normal termina en el primer carácter distinto, así que cuanto más largo es el prefijo acertado, más tarda, y eso filtra información. La comparación en tiempo constante recorre siempre la cadena entera, y el tiempo no depende de cuántos caracteres se acertaron."
+      }
+    ],
+    "problem": "Escribe al menos cuatro condiciones de aceptación comprobables para «cancelación completa» y explica por qué hay que poner un límite de tiempo a la espera de que el motor confirme que paró.",
+    "answer": "Condiciones de aceptación: ① desde que empieza la cancelación, no se confirma ningún token nuevo al cliente; ② el motor ya paró y escribió el DONE de esta misma solicitud (o se lo declaró perdido y se terminó su proceso); ③ la salida sobrante de esta solicitud no la lee la siguiente, y el uso no se anota por error a nombre de otra; ④ el FIFO y los demás recursos se liberan una sola vez; ⑤ el cliente recibe un final claro de «cancelada» o «fallida», no de «éxito». La espera debe tener límite porque Strata mantiene el cerrojo FIFO mientras espera el eco de STOP. Si el motor ya se colgó, una espera ilimitada dejaría en cola para siempre a todas las solicitudes de atrás. Al cumplirse el límite se lo declara perdido, se termina el proceso del motor, la VRAM y la RAM se devuelven junto con el proceso, y la siguiente solicitud reinicia el motor.",
+    "level": "Esencial"
+  },
+  {
+    "id": "25",
+    "title": "De una secuencia a varios usuarios: clase de diseño de un planificador",
+    "deck": "El Strata upstream atiende una sola secuencia a la vez. Este capítulo es una clase de diseño: con algoritmos de planificación y teoría de colas calculamos «cuánto se espera», y luego vemos qué hay que aislar para tener varias secuencias.",
+    "part": "VI · Verificación y práctica",
+    "courses": [
+      "Sistemas operativos",
+      "Teoría de colas",
+      "Sistemas distribuidos"
+    ],
+    "prereq": "Capítulos 23 y 24 (capa de servicio, FIFO y ciclo de vida de una solicitud). El enrutamiento de expertos del capítulo 10 y la caché KV del capítulo 17 ayudan a entenderlo.",
+    "goals": [
+      "Distinguir entre conexiones, solicitudes en cola, secuencias activas y secuencias por cómputo, y explicar la situación actual del Strata upstream: FIFO con una sola secuencia",
+      "Comparar FIFO, SJF y round-robin en tiempo de espera y tiempo de la primera palabra con el mismo conjunto de solicitudes, y explicar con la ley de Little y M/M/1 la relación entre utilización y espera",
+      "Explicar la idea del batching continuo, y qué estado hay que aislar y qué presupuesto hay que reservar de forma atómica antes de pasar a varias secuencias"
+    ],
+    "quiz": [
+      {
+        "text": "Cinco personas abren la página web a la vez y preguntan al mismo Strata upstream. ¿Cuántas secuencias están generando en ese momento?",
+        "choices": [
+          "Cinco, el servidor HTTP es multihilo",
+          "Una, y las demás solicitudes esperan en el cerrojo FIFO",
+          "Depende de cuánta VRAM tenga la GPU"
+        ],
+        "correct": 1,
+        "why": "El servidor HTTP multihilo deja que las cinco personas se conecten, pero delante del motor hay un cerrojo FIFO y upstream atiende una secuencia a la vez. El número de conexiones y el de secuencias activas son dos números distintos."
+      },
+      {
+        "text": "Tres solicitudes llegan a la vez, con longitudes 8, 3 y 5. ¿Qué política da el tiempo medio de espera más corto?",
+        "choices": [
+          "FIFO, por orden de llegada",
+          "SJF, la más corta primero",
+          "Round-robin con una porción de tiempo de 1"
+        ],
+        "correct": 1,
+        "why": "El orden de SJF es 3, 5, 8, con esperas de 0, 3 y 8, unos 3,67 de media. FIFO da unos 6,33. El round-robin hace que todos vean muy pronto la primera palabra, pero su espera media es 7. El costo de SJF es que hay que conocer las longitudes de antemano y puede dejar sin atender a las solicitudes largas."
+      },
+      {
+        "text": "Según el modelo M/M/1, si la utilización de un servidor sube del 80 % al 95 %, ¿cómo cambia aproximadamente el tiempo medio de permanencia?",
+        "choices": [
+          "Se alarga un poco, en proporción a la utilización",
+          "Se multiplica por 4",
+          "Casi no cambia"
+        ],
+        "correct": 1,
+        "why": "El tiempo medio de permanencia es W = tiempo de servicio ÷ (1 − ρ). Con 80 % es 5 veces el tiempo de servicio, y con 95 % es 20 veces, exactamente 4 veces más. Cuanto más cerca de la carga máxima, más bruscamente crece la espera."
+      }
+    ],
+    "problem": "Quieres que Strata atienda dos secuencias a la vez. En el código upstream, las 36 capas GDN comparten un juego de espacio temporal y las 12 capas QSA comparten otro, y el comentario dice que «nunca corren al mismo tiempo». Explica qué significa esto para la modificación a varias secuencias, y escribe las aserciones de aceptación para el caso en que dos solicitudes llegan a la vez al último slot.",
+    "answer": "El espacio temporal compartido es correcto solo por una premisa oculta: que en cada momento hay una única secuencia y que las capas se ejecutan en orden. Cuando dos secuencias calculan de verdad a la vez, la premisa deja de cumplirse, las dos escriben a la vez en el mismo espacio temporal y sus datos se cruzan. Al modificarlo hay que sacar a la luz una por una estas suposiciones de una sola secuencia. O bien la planificación garantiza que las dos secuencias nunca lo usen a la vez (exclusión mutua), o bien se da a cada secuencia concurrente su propio espacio temporal, que se incluye en el presupuesto de VRAM. Aserciones de aceptación para el último slot: exactamente una solicitud obtiene un presupuesto válido y pasa a ser secuencia activa, y la otra queda en cola o se rechaza con claridad. No se reserva nada dos veces, y un reintento no puede crear dos sesiones. Tras completar o cancelar, el presupuesto se libera exactamente una vez, y una solicitud vieja no puede volver a escribir en el estado del slot nuevo.",
+    "level": "Ampliación"
+  },
+  {
+    "id": "26",
+    "title": "Pruebas de corrección: de una fórmula a una sesión completa",
+    "deck": "El texto fluido es el que mejor engaña. Las pruebas necesitan una respuesta de referencia independiente, y antes hay que aclarar qué significa «igual».",
+    "part": "VI · Verificación y práctica",
+    "courses": [
+      "Pruebas de software",
+      "Análisis numérico",
+      "Método científico"
+    ],
+    "prereq": "Capítulo 4 (números de punto flotante) y capítulo 10 (expertos y top-k). Haber leído los capítulos 18 y 20 ayuda a entender los ejemplos de pruebas metamórficas.",
+    "goals": [
+      "Nombrar los cinco niveles de las pruebas de un motor de inferencia y qué tipo de error atrapa cada nivel",
+      "Comparar resultados en punto flotante con «tolerancia relativa + tolerancia absoluta» y juzgar cuándo hace falta igualdad bit a bit",
+      "Usar pruebas diferenciales y bugs plantados a propósito para comprobar si una prueba es de verdad eficaz"
+    ],
+    "quiz": [
+      {
+        "text": "Dos motores suman en punto flotante en órdenes distintos, y los últimos dígitos del resultado difieren. ¿Cómo debe comparar la prueba?",
+        "choices": [
+          "Deben ser iguales bit a bit; si no, es un bug",
+          "Con una tolerancia relativa más absoluta, y comprobando aparte si la palabra elegida es la misma",
+          "Basta con que ninguno de los dos se haya caído"
+        ],
+        "correct": 1,
+        "why": "La suma en punto flotante no es asociativa, así que con un orden distinto los últimos dígitos difieren de todos modos, y una comparación bit a bit daría falsas alarmas. Pero mirar solo «no se cayó» no detecta nada. La comparación con tolerancia deja pasar las diferencias de orden legítimas. La palabra elegida puede cambiar en los casi empates, así que se registra por separado."
+      },
+      {
+        "text": "Una prueba unitaria usa solo el peso 1,0 para probar la «suma ponderada». ¿Por qué no atrapa el bug de «peso aplicado dos veces»?",
+        "choices": [
+          "Porque 1,0 al cuadrado sigue siendo 1,0, y con esas entradas el bug no se delata",
+          "Porque las pruebas unitarias no pueden probar sumas",
+          "Porque el error de punto flotante oculta el bug"
+        ],
+        "correct": 0,
+        "why": "Aplicar el peso dos veces es convertir w en w². Con w = 1,0 las dos cosas son idénticas, así que la prueba pasa, claro. Con pesos asimétricos como 0,7 y 0,3, el resultado pasa de 1,6 a 0,76 y el bug queda al descubierto. Una prueba con entradas demasiado «ordenadas» nace ciega a ciertos tipos de bugs."
+      },
+      {
+        "text": "Al comparar la caché de expertos activada y desactivada, ¿por qué da Strata a las dos partes el mismo texto de referencia y compara posición por posición, en lugar de dejar que cada una genere y comparar después?",
+        "choices": [
+          "Porque generar por separado es demasiado lento",
+          "Porque tras la primera divergencia el contexto de las dos partes ya es distinto y las posiciones siguientes no se pueden comparar",
+          "Porque el texto de referencia es más corto"
+        ],
+        "correct": 1,
+        "why": "En la generación libre, en cuanto una palabra difiere, la entrada de cada paso siguiente cambia y la diferencia se contagia por todo el texto. El teacher forcing hace que las dos partes vean en cada posición el mismo contexto, y la divergencia queda fijada donde ocurrió. Solo así se puede contar «en cuántas posiciones coincide la palabra principal»."
+      }
+    ],
+    "problem": "La caché KV de Strata se guarda en páginas, y se llega a cada casilla mediante una tabla de páginas. Diseña una prueba metamórfica para «cambiar la forma de paginar no cambia la salida de la atención», y explica cómo confirmar que esa prueba es de verdad eficaz.",
+    "answer": "Construye un conjunto asimétrico de K/V y una consulta fija, y calcula primero la salida de referencia con el almacenamiento contiguo más simple. Después, con los mismos datos, guárdalos con 1, 4 y 512 casillas por página, baraja al azar el orden de las páginas físicas y actualiza la tabla de páginas a la vez, y luego calcula la atención. Exige que las casillas lógicas elegidas y la salida coincidan con la referencia. Como solo cambió el lugar de almacenamiento y el orden de las operaciones es el mismo, se puede exigir igualdad bit a bit (las pruebas de Strata lo exigen así). Por último, haz el caso negativo: baraja solo las páginas físicas sin actualizar la tabla de páginas, y la prueba debe fallar. Si el caso negativo también pasa, la prueba ni siquiera leyó la tabla de páginas.",
+    "level": "Esencial"
+  },
+  {
+    "id": "27",
+    "title": "Experimentos de rendimiento: no separar una cifra de sus condiciones",
+    "deck": "La misma máquina, ejecutada tres veces seguidas, puede variar casi el doble en velocidad. Una cifra de rendimiento debe llevar sus condiciones, el número de muestras y el método estadístico para resistir las preguntas.",
+    "part": "VI · Verificación y práctica",
+    "courses": [
+      "Estadística",
+      "Ingeniería de rendimiento",
+      "Método científico"
+    ],
+    "prereq": "Capítulo 5 (ancho de banda y throughput), capítulo 19 (decodificación especulativa), capítulo 25 (colas y planificación) y capítulo 26 (pruebas).",
+    "goals": [
+      "Leer las condiciones que hay detrás de una cifra de rendimiento y juzgar si dos cifras se pueden comparar directamente",
+      "Resumir un conjunto de mediciones con la mediana, los percentiles y la desviación estándar, y explicar por qué un valor atípico arrastra la media",
+      "Diseñar un plan de medición con calentamiento, repetición y alternancia A/B, y dejar escritas las fórmulas del TTFT y de la «velocidad»"
+    ],
+    "quiz": [
+      {
+        "text": "Los tiempos de cinco solicitudes son 8, 9, 10, 11 y 100 milisegundos. ¿Cuál es su mediana?",
+        "choices": [
+          "27,6",
+          "10",
+          "100"
+        ],
+        "correct": 1,
+        "why": "Una vez ordenados, el número del medio es 10. 27,6 es la media, que subió por culpa de aquel 100 milisegundos. 100 es el máximo, que con menos de 20 muestras también es el p95 calculado con el método del rango más cercano."
+      },
+      {
+        "text": "Al comparar las configuraciones A y B, primero se ejecuta A 3 veces seguidas y luego B 3 veces seguidas. ¿Qué problema es el más probable?",
+        "choices": [
+          "Ninguno, con el mismo número de ejecuciones es justo",
+          "Toda la lentitud de una máquina recién arrancada recae sobre A, y B parece mucho más rápida de lo que es",
+          "B se volverá más lenta sí o sí por el calentamiento de la máquina"
+        ],
+        "correct": 1,
+        "why": "Las cachés, los grafos de cómputo y la caché de archivos necesitan «calentarse», y las primeras ejecuciones suelen ser más lentas. Si se ejecuta primero toda A, toda esa lentitud cae sobre A. Hay que calentar primero y luego alternar A y B, para repartir entre los dos lados los cambios de estado de la máquina."
+      },
+      {
+        "text": "El servidor de Strata procesa una secuencia a la vez, y las solicitudes se atienden por orden de llegada. Si cinco usuarios envían solicitudes a la vez, ¿qué indicador empeora primero para los usuarios que llegan después?",
+        "choices": [
+          "El tiempo hasta el primer token (TTFT)",
+          "La velocidad de decode entre tokens",
+          "La calidad de la respuesta del modelo"
+        ],
+        "correct": 0,
+        "why": "Las solicitudes que llegan después tienen que hacer cola y esperar a que terminen las anteriores. El tiempo de cola cuenta dentro del TTFT, así que el TTFT se alarga. Cuando por fin le toca, la velocidad de decode es la misma que usándolo a solas, y la calidad de la respuesta tampoco cambia."
+      }
+    ],
+    "problem": "Alguien dice «esta tarjeta llega a 90 token/s». Añade a esa frase una explicación mínima y verificable: ¿qué condiciones e información estadística hay que escribir como mínimo?",
+    "answer": "Hay que indicar: la tarjeta gráfica, la CPU, la memoria y el controlador; la versión del motor (commit) y las opciones de compilación; el archivo del modelo y la cuantización (mejor con el hash); los tokens reales de entrada y de salida; la caché KV, el chunking, los ajustes del borrador y si las cachés están frías o calientes; el número de solicitudes activas a la vez; los parámetros de muestreo; la fórmula de la «velocidad» y los puntos de inicio y fin del cronometraje (por ejemplo, N ÷ tiempo de decode); cuántas veces se calentó, cuántas veces se repitió en firme y en qué orden; la mediana y el rango mínimo–máximo, con la primera ejecución listada aparte; y el registro en bruto de cada ejecución, el número de fallos y los resultados de las comprobaciones de calidad. Sin todo eso, es solo una observación sin explicar.",
+    "level": "Esencial"
+  },
+  {
+    "id": "28",
+    "title": "Proyecto integrador: construir una máquina de inferencia que se pueda explicar",
+    "deck": "Primero abre el corte vertical más fino y después añade funciones capa por capa. Lo que entregas no es solo código que se ejecuta, sino también el motivo de cada compromiso y la evidencia de cada componente.",
+    "part": "VI · Verificación y práctica",
+    "courses": [
+      "Ingeniería de software",
+      "Diseño de sistemas",
+      "Métodos de investigación"
+    ],
+    "prereq": "Haber completado la ruta de aprendizaje que elegiste; lectura obligatoria del capítulo 26 (pruebas) y del capítulo 27 (medición).",
+    "goals": [
+      "Planificar el proyecto del curso con «el corte vertical primero», para que la primera función produzca cuanto antes datos reales que se puedan revisar",
+      "Anotar un compromiso de ingeniería con el orden «decisión, ganancia, costo, verificación, cuándo revisarlo»",
+      "Marcar la etapa de evidencia de cada componente y autoevaluar el informe con la rúbrica"
+    ],
+    "quiz": [
+      {
+        "text": "En el módulo PLE de Strata, cada pieza pasó su prueba de comparación, pero el modelo completo no pasó la aceptación. ¿Cuál es el motivo más directo?",
+        "choices": [
+          "La tolerancia de las pruebas de comparación era demasiado laxa",
+          "La ruta principal del modelo nunca llamó a esas piezas",
+          "La tarjeta gráfica no tenía suficiente VRAM"
+        ],
+        "correct": 1,
+        "why": "El comentario del código fuente lo dice: las piezas estaban hechas y habían pasado las pruebas de comparación, pero el código del modelo nunca las llamó. Una prueba por pieza solo demuestra que la pieza es correcta, no que esté conectada al sistema. Solo una prueba que recorra toda la ruta principal lo detecta."
+      },
+      {
+        "text": "El proyecto del curso dura 10 semanas y tiene 4 funciones. Cada función pasa por 4 pasos: escribir el código, escribir las pruebas, conectarla a la ruta principal y dejar evidencia. Para tener algo que demostrar el día de la entrega, ¿qué enfoque es más seguro?",
+        "choices": [
+          "Escribir primero el código de todas las funciones y luego hacer juntas todas las pruebas y todas las conexiones",
+          "Hacer que una función funcione completa de la entrada a la salida y después pasar a la siguiente",
+          "Escribir primero el código de la función más difícil"
+        ],
+        "correct": 1,
+        "why": "Con el corte vertical primero, la primera función funciona completa en la semana 4 y en la semana 10 ya hay dos. Construyendo en horizontal, en la semana 10 no hay ninguna. Además, el corte vertical hace que un supuesto erróneo de la interfaz aflore al conectar la primera función, así que se rehace lo mínimo."
+      },
+      {
+        "text": "Has escrito el código de un componente y lo has conectado a la ruta principal, pero todavía no has conseguido un registro completo con una entrada real. ¿Qué debes poner en el informe?",
+        "choices": [
+          "Escribir «hecho»",
+          "Escribir «conectado a la ruta principal, aún sin datos reales»",
+          "No mencionar de momento este componente"
+        ],
+        "correct": 1,
+        "why": "La evidencia se marca por etapas y tal como es: código escrito, en la ruta principal, datos reales o simulado. «Hecho» haría pensar al lector que ya produjo resultados reales. No mencionarlo oculta el avance. Si anotas en qué etapa se quedó, el lector puede juzgar."
+      }
+    ],
+    "problem": "Escribe una hipótesis de optimización que aceptes que un experimento refute, y explica con qué resultado la abandonarías.",
+    "answer": "Ejemplo: manteniendo igual el archivo del modelo, la entrada, la puerta de calidad y la estrategia de borradores, aumentar el presupuesto de expertos calientes en VRAM debería reducir el tiempo que la CPU dedica a calcular expertos y subir la velocidad de decode de extremo a extremo. El experimento sigue el método del capítulo 27: tras el calentamiento, se alternan A y B con repeticiones y se informan la mediana y el rango. Si la tasa de aciertos sube, pero el costo extra de intercambio o la competencia por recursos hace que la velocidad de extremo a extremo no mejore, o si no se pasa la puerta de calidad, se abandona esa configuración y se analiza qué factor se le escapó al modelo.",
+    "level": "Integrador"
+  }
+]

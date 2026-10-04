@@ -1,0 +1,218 @@
+<div class="hook"><span class="eyebrow">부품이 전부 초록불이었던 이야기</span>
+<p>Strata의 모델에는 표를 조회하는 모듈이 있어요. 이름은 PLE예요(11장에서 배웠어요). 개발자는 이 모듈을 몇 개의 부품으로 나눴어요. 해시 계산, 큰 표에서 한 줄 읽기, 짧은 계산 하나예요. 부품은 모두 완성됐고, 모두 대조 테스트를 통과했어요. 각각 참조 스크립트, numpy, ggml의 결과와 맞았어요.</p>
+<p>그런데 모델 전체의 검수 관문 하나를 통과하지 못했어요. 이유는 소스 코드의 주석에 적혀 있었어요. 이 부품들을 <strong>모델의 주 경로가 한 번도 호출한 적이 없었던 거예요</strong>. <span class="ev ev-code">코드 사실</span>[S13] 부품은 하나하나 맞는데, 기계 전체에는 조각 하나가 빠져 있었어요. 이 장은 책의 마지막 장이에요. 여러분의 수업 프로젝트가 이 함정을 피하는 방법을 다뤄요.</p></div>
+<p class="tldr"><strong>한마디로:</strong> 시스템을 만들 때는 먼저 가장 가느다란 「수직 슬라이스」 하나를 뚫어요. 토큰 하나가 입력에서 출력까지 끝까지 가게 하고, 확인할 수 있는 증거를 남겨요. 그다음에 기능을 한 겹씩 더해요. 트레이드오프를 할 때마다 무엇을 얻고 무엇을 치르는지, 어떻게 검증하는지 적어 둬요. 제출할 때는 모든 구성 요소에 「증거가 어디까지 왔는지」를 표시해요.</p>
+
+<h2 id="sec-1">28.1 모듈은 전부 초록불인데 시스템은 틀렸어요</h2>
+<p>그림 28-1은 PLE가 처한 상황을 그린 거예요. 부품 세 개는 각자 대조 테스트를 통과했어요. 그런데 모델의 주 경로는 0번 층에서 47번 층까지 가는 동안 이 부품들을 한 번도 거치지 않았어요. 부품 하나의 테스트 보고서만 봐서는 문제가 보이지 않아요.</p>
+<figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="그림 28-1: PLE의 부품 세 개는 각자 대조 테스트를 통과했지만 모델의 주 경로가 한 번도 호출하지 않아서, 모델 전체의 검수 관문은 통과하지 못했다">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle">부품은 다 통과했는데, 부르는 곳이 없어요</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="70" y="58" font-size="13" text-anchor="middle">해시 계산</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="80" font-size="12" text-anchor="middle">✓ 대조 통과</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="58" font-size="13" text-anchor="middle">표에서 한 줄 읽기</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="80" font-size="12" text-anchor="middle">✓ 대조 통과</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="270" y="34" width="120" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="58" font-size="13" text-anchor="middle">계산 블록</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="80" font-size="12" text-anchor="middle">✓ 대조 통과</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M70 94V128M200 94V128M330 94V128"/>
+<text class="f-warn" fill="#9e5d24" x="80" y="116" font-size="13">✗ 연결 안 됨</text>
+<text class="f-warn" fill="#9e5d24" x="210" y="116" font-size="13">✗</text>
+<text class="f-warn" fill="#9e5d24" x="340" y="116" font-size="13">✗</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="132" width="380" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="157" font-size="12" text-anchor="middle">모델 주 경로: 0번 층 → 1번 층 → … → 47번 층</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 172V188"/>
+<rect class="f-warn" fill="#9e5d24" x="50" y="190" width="300" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="215" font-size="13" text-anchor="middle">모델 전체 검수 관문(C1) 통과 못 함</text>
+</svg><figcaption>그림 28-1　부품 단위 테스트를 전부 통과했다고 시스템이 연결된 것은 아니에요. 주 경로를 끝까지 걷는 테스트만이 「아예 호출되지 않았다」는 오류를 찾아내요.[S13]</figcaption></figure>
+<p>이런 오류에는 공통된 뿌리가 있어요. 층마다 「가로로」 먼저 다 만들고, 맨 마지막에야 서로 잇는 거예요. A 도시에서 B 도시로 가는 길을 만드는 일에 비유해 볼게요. 1킬로미터마다 최종 너비로 포장해 두었는데, 마지막 날에야 중간 한 구간이 끝내 이어지지 않은 걸 알게 되는 거예요. 더 안전한 방법은 좁은 길을 먼저 내는 거예요. A에서 B까지 쭉 이어서 차가 다닐 수 있게 되면, 그때부터 조금씩 넓혀요.</p>
+<p>소프트웨어에서는 이 「좁은 길」을 <dfn>수직 슬라이스</dfn>(vertical slice)라고 불러요. 기능 하나가 입구에서 출구까지 관통해요. 각 층은 꼭 필요한 작은 부분만 해요. 하지만 전체 연결은 진짜이고, 실행되고, 확인할 수 있는 결과를 내요. 추론 엔진이라면 첫 수직 슬라이스는 이래요. 문장 하나가 들어와요. 인코딩, 층별 계산, 단어 고르기를 거쳐 토큰 하나가 나와요. 그리고 중간의 핵심 데이터를 출력해서 사람이 대조할 수 있게 해요.</p>
+<p>수직 슬라이스는 아무렇게나 쓰는 코드가 아니에요. 「가늘어야」 하지만 「거칠어도」 되는 건 아니에요. 이 연결의 모든 단계에 테스트가 있어야 해요. 26장에서 배운 참조 답안과 반례도 하나도 빠지면 안 돼요. 줄이는 것은 폭이지, 정확성이 아니에요.</p>
+
+<h2 id="sec-2">28.2 시스템 설계는 트레이드오프를 적어 두는 일이에요</h2>
+<p>수직 슬라이스를 뚫고 나면, 기능을 하나 더할 때마다 선택이 생겨요. VRAM을 더 써서 속도를 얻을까, VRAM을 아낄까. 먼저 빠르게 만들까, 먼저 디버깅하기 쉽게 만들까. 이 선택에는 정답이 없어요. 하지만 적는 표준 방식은 있어요.</p>
+<aside class="primer" id="c28-system-design">
+<h3>시스템 설계와 엔지니어링 트레이드오프</h3>
+<p><dfn>시스템 설계</dfn>는 이런 질문에 답해요. 주어진 제약 안에서 부품 여러 개를 어떻게 조직해야 요구를 만족하는 하나의 전체가 될까요? 알고리즘을 짜는 일과는 달라요. 알고리즘 문제에는 보통 최적해가 있어요. 시스템 설계는 거의 언제나 여러 목표 사이의 <dfn>트레이드오프</dfn>예요. 속도, 메모리, 정확성, 디버깅 용이성, 개발 시간은 한쪽이 늘면 다른 쪽이 줄어드는 경우가 많아요.</p>
+<p>제대로 된 트레이드오프라면 적어도 다섯 가지를 적어요.</p>
+<p>① <strong>결정</strong>: 무엇을 골랐고, 무엇을 고르지 않았는지. ② <strong>얻는 것</strong>: 어떤 이득을 얻었는지. 되도록 숫자로 적어요. ③ <strong>비용</strong>: 무엇을 치렀는지. 이것도 숫자로 적어요. ④ <strong>검증</strong>: 이득을 정말 얻었는지, 비용이 정말 이만큼뿐인지 어떻게 확인하는지. ⑤ <strong>재논의 조건</strong>: 어떤 일이 생기면 이 결정을 뒤집어야 하는지.</p>
+<p>다섯째 항목을 가장 잊기 쉬워요. 이게 없으면 그때는 합리적이던 결정이 조건이 바뀐 뒤에도 남아요. 그러다 아무도 건드리지 못하는 「레거시」가 돼요. 이렇게 쌓이다가 언젠가는 갚아야 하는 비용을 엔지니어링 업계에서는 <dfn>기술 부채</dfn>(technical debt)라고 불러요.</p>
+<p>트레이드오프에는 흔한 함정이 하나 더 있어요. 잴 수 있는 한 가지만 최적화하는 거예요. 평균 속도만 보면 꼬리 지연을 희생할 수 있어요. 단위 테스트만 보면 조합 오류를 놓칠 수 있어요. 그래서 설계할 때 목표마다 어떤 지표로 잴지 미리 정해 둬야 해요.</p>
+<p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/소프트웨어_공학" target="_blank" rel="noopener noreferrer">위키백과: 소프트웨어 공학</a> · <a href="https://ko.wikipedia.org/wiki/기술_부채" target="_blank" rel="noopener noreferrer">위키백과: 기술 부채</a> · <a href="https://ko.wikipedia.org/wiki/시스템_설계" target="_blank" rel="noopener noreferrer">위키백과: 시스템 설계</a> · <a href="https://ko.wikipedia.org/wiki/트레이드오프" target="_blank" rel="noopener noreferrer">위키백과: 트레이드오프</a></p>
+</aside>
+<p>Strata의 소스 코드 주석에는 이렇게 분명하게 적힌 트레이드오프가 많아요. 그림 28-2는 그중 하나예요. QSA 층의 indexer는 읽어야 할 과거 위치를 골라내는 부분이에요. 이 indexer의 키는 더 아끼는 FP16이 아니라 FP32로 저장해요. <span class="ev ev-code">코드 사실</span>[S18]</p>
+<figure class="fig"><svg viewBox="0 0 400 336" role="img" aria-label="그림 28-2: 트레이드오프 하나의 완전한 기록: indexer의 키를 FP32로 저장하면 고른 결과가 참조와 일치하고, 비용은 32K 컨텍스트에서 약 50 MiB이다">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="14" font-weight="600" text-anchor="middle">트레이드오프 하나의 완전한 기록</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="380" height="270" rx="10"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="62" font-size="12">결정</text><text class="f-text" fill="#182f2b" x="112" y="62" font-size="12">indexer의 키를 FP16 대신 FP32로 저장</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="92" font-size="12">얻는 것</text><text class="f-text" fill="#182f2b" x="112" y="92" font-size="12">고른 위치가 참조와 완전히 같아요</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="122" font-size="12">비용</text><text class="f-text" fill="#182f2b" x="112" y="122" font-size="12">32K 컨텍스트에서 이 키가 약 50 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="152" font-size="12">이유</text><text class="f-text" fill="#182f2b" x="112" y="152" font-size="12">FP16이면 점수마다 상대 오차가 약 2⁻¹¹ 생겨요.</text>
+<text class="f-text" fill="#182f2b" x="112" y="174" font-size="12">딱 「누가 뽑히나」의 경계에 걸리는 크기예요</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="204" font-size="12">검증</text><text class="f-text" fill="#182f2b" x="112" y="204" font-size="12">고른 위치가 하나하나 똑같아야 해요.</text>
+<text class="f-text" fill="#182f2b" x="112" y="226" font-size="12">허용 오차는 두지 않아요</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="256" font-size="12">재논의 조건</text><text class="f-text" fill="#182f2b" x="112" y="256" font-size="12">INT8로 바꾸기 전에</text>
+<text class="f-text" fill="#182f2b" x="112" y="278" font-size="12">고른 결과가 뒤집히는 비율부터 재요</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="324" font-size="12" text-anchor="middle">출처: qsa.hpp 첫머리의 레이아웃 설명</text>
+</svg><figcaption>그림 28-2　완전하게 적은 트레이드오프예요. 결정, 얻는 것, 비용, 이유, 검증, 재논의 조건까지 여섯 가지가 다 있어요. 주석의 말을 그대로 옮기면, 이 정도 VRAM은 「정확성 계약에 비하면 싸다」는 거예요.[S18]</figcaption></figure>
+<p>예를 몇 개 더 볼게요. 모두 <code>session.hpp</code>에 있고, 「얻는 것」과 「치르는 것」을 나란히 적어 둔 사례예요 <span class="ev ev-code">코드 사실</span>[S13].</p>
+<ul>
+<li><strong>층마다 GPU 계산 그래프 하나.</strong> 한 층의 커널 실행(launch) 수십 번을 그래프 하나로 녹화해 두고 재생해요. 같은 일이 실측으로 2.393밀리초에서 1.585밀리초로 줄었어요. 1.51배 빨라졌어요. 이 엔진의 병목은 대역폭이 아니라 「커널을 시작하는」 오버헤드이기 때문이에요. 관련된 비용도 바로 옆에 적혀 있어요. 층마다 전문가 결과를 그 층의 가중치로 합치려면 층마다 그래프를 하나 더 써야 해요. 그래서 CPU가 GPU와 겹쳐서 일할 수 있는 구간은 공유 전문가 구간 정도로 줄어요. 주석은 이렇게 말해요. 「엄격하게 직렬인 잔차 연결에서는 층별 CPU 계산을 숨길 수 없다」 이 부분은 VRAM 안의 전문가 캐시로 풀 수밖에 없어요.</li>
+<li><strong>디버깅 스위치는 런타임 매개변수로.</strong> 「층마다 동기화하기」는 다른 방법으로는 안 보이는 오류를 잡아내요. 하지만 속도를 떨어뜨려요. 그래서 컴파일 시점 옵션이 아니라 런타임 매개변수로 만들었어요. 필요할 때 켜고, 평소에는 꺼 둬요.</li>
+<li><strong>토큰을 생성하는 동안 메모리 할당 0번.</strong> 세션에 필요한 모든 상태를 시작할 때 한 번에 할당해요. 주석에 특별히 적혀 있어요. 긴 시퀀스의 첫 토큰에서야 VRAM을 요청한다면, 지금 있는 모든 테스트는 통과해요. 이 제약만 깨져요.</li>
+</ul>
+<p>서빙 층도 마찬가지예요. Strata 서버는 한 번에 시퀀스 하나만 처리하고, 요청은 먼저 온 순서대로 받아요. 프롬프트에 출력 상한을 더한 길이가 컨텍스트 길이를 넘으면, 조용히 자르지 않고 곧바로 거절하며 400을 돌려줘요.[S15] 앞쪽 선택은 단순함을 주고 대신 상태가 섞이지 않게 해요. 뒤쪽 선택은 오류 한 번을 치르는 대신, 사용자가 잘린 결과를 모르고 받는 일이 없게 해요.</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 업계에는 「아키텍처 결정 기록」(ADR)이라는 방식이 있어요. 중요한 결정마다 배경, 결정, 결과를 담은 짧은 문서 한 장을 써요. 수업 보고서에서도 설계 선택 하나하나를 그림 28-2 형식의 작은 카드로 적을 수 있어요.</p>
+
+<h2 id="sec-3">28.3 프로젝트 세 가지, 하나를 골라요</h2>
+<p>수업 프로젝트는 세 가지예요. 가진 조건에 맞춰 골라요. 세 가지 모두 채점 기준은 같아요. 증거의 질, 분석과 엔지니어링의 완결성을 봐요. 그래픽 카드의 가격은 보지 않아요.</p>
+<p><strong>프로젝트 A: 그래픽 카드 없이 만드는 초소형 엔진.</strong> 이 책에 딸린 <code>labs/tiny_inference.py</code>에서 출발해요. 이 파일은 아주 작은 고정 랜덤 가중치와 문자 어휘 사전으로, 인코딩, 정규화, 순환 층과 어텐션 층, 전문가 라우팅, 출력, 그리디 단어 고르기를 완전한 한 줄로 이어요. 랜덤 가중치로는 의미 있는 말이 나오지 않아요. 이 프로젝트의 목표는 동작 원리를 이해하는 거예요. 채팅 모델을 학습시킨 척하는 게 아니에요. 28.5절에 단계별 경로가 있어요.</p>
+<p><strong>프로젝트 B: 잴 수 있는 최적화 하나에서 시작해요.</strong> 국소적인 방향 하나를 골라요. 양자화 블록 디코딩, 페이지 테이블 수집, 캐시 정책, 청크 크기, 드래프트 윈도 제어, 스트리밍 출력의 조각 파싱 중 하나예요. 원리 유도, 기준선, 변경, 반례, 결과, 한계를 제출해요. 한 번에 요인 하나만 바꿔요. 스위치 다섯 개를 한꺼번에 바꾸고 총 소요 시간 하나만 보여 주면 안 돼요. 그래픽 카드가 없으면 CPU 참조 구현과 수학 시뮬레이션을 해요. 그래픽 카드가 있으면 고정한 Strata 커밋에서 실제로 재현할 수 있어요.</p>
+<p><strong>프로젝트 C: 다중 사용자 설계 리뷰.</strong> 학기 끝에 억지로 상용 서비스를 만들지 말고, 「여러 시퀀스를 동시에 돌리는」 설계를 제출해요. 설계의 첫 단계는 데이터 조각마다 주인을 정하는 거예요. 그림 28-3을 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 304" role="img" aria-label="그림 28-3: 다중 사용자 설계의 데이터 소유권: 가중치는 읽기 전용으로 공유하고, 시퀀스마다 상태를 한 벌씩 갖고, 임시 작업 영역은 시간을 나눠 함께 쓴다">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle">다중 사용자 설계의 첫걸음: 데이터마다 주인 정하기</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="34" width="360" height="62" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="58" font-size="13" font-weight="600" text-anchor="middle">읽기 전용, 모든 시퀀스가 공유</text>
+<text class="f-text" fill="#182f2b" x="200" y="82" font-size="12" text-anchor="middle">모델 가중치, 전문가 데이터</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="108" width="360" height="62" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="132" font-size="13" font-weight="600" text-anchor="middle">시퀀스마다 한 벌씩</text>
+<text class="f-on" fill="#ffffff" x="200" y="156" font-size="12" text-anchor="middle">KV 캐시, GDN 순환 상태, PLE 기록</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="182" width="360" height="62" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="206" font-size="13" font-weight="600" text-anchor="middle">임시 작업 영역(scratch)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="230" font-size="12" text-anchor="middle">한 순간에 한 층만 쓰니까 같이 써도 돼요</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="272" font-size="12" text-anchor="middle">Strata의 SessionState: 가중치를 뺀,</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="292" font-size="12" text-anchor="middle">시퀀스에 필요한 모든 데이터</text>
+</svg><figcaption>그림 28-3　데이터 소유권을 세 갈래로 나눠요. Strata는 「시퀀스에 필요한 것 중 가중치가 아닌 모든 것」을 SessionState에 넣어요. GDN 층의 작업 영역은 36개 층이 함께 쓰고, 상태는 층마다 한 벌씩이에요.[S13]</figcaption></figure>
+<p>설계 문서에는 이것들을 적어요. 어떤 것이 읽기 전용 공유 객체인지, 어떤 것이 시퀀스별 상태인지, 임시 작업 영역은 누구 것인지, 스케줄링과 VRAM 예산은 어떻게 나누는지, 취소, 복원, 관측, 롤백은 어떻게 하는지예요. 그다음 25장의 동시성 검수 시나리오로 자기 설계를 반박해 봐요. 가산점은 실행되는 작은 스케줄러 또는 상태 격리 프로토타입이에요. 검증하지 않은 능력은 「미구현」으로 적어야 해요. 화면에 사용자 다섯 명이 보인다고 해서 추론 스트림 다섯 개가 실제로 돌고 있는 건 아니에요.</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 「운영체제」의 프로세스 모델과 똑같아요. 여러 프로세스가 읽기 전용 코드 세그먼트를 공유하고, 각자 개인 스택과 힙을 가져요. KV 캐시는 시퀀스마다의 「개인 메모리」예요. 보호 없이 공유하면 두 프로세스가 서로의 데이터를 덮어쓰는 것과 같아요.</p>
+
+<h2 id="sec-4">28.4 무엇을 제출할까: 구성 요소마다 증거를 표시해요</h2>
+<p>프로젝트 보고서에서 가장 흔한 문제는 코드가 틀린 게 아니에요. 「다 썼다」를 「다 했다」고 말하는 거예요. 그래서 보고서의 모든 구성 요소에 증거가 어디까지 왔는지 표시해야 해요.</p>
+<div class="table-wrap"><table><thead><tr><th>상태</th><th>뜻</th><th>내놓을 수 있는 증거</th></tr></thead><tbody>
+<tr><td>코드 작성 완료</td><td>쓰고 테스트도 했지만, 아직 주 경로에 연결하지 않았어요</td><td>단위 테스트 출력</td></tr>
+<tr><td>주 경로에 연결</td><td>주 경로가 실제로 이것을 호출해요</td><td>한 번 끝까지 실행한 로그. 호출되는 모습이 보여요</td></tr>
+<tr><td>실제 데이터</td><td>실제 입력이 이것을 거쳐 완전한 결과를 냈어요</td><td>완전한 기록 하나: 입력, 중간값, 출력. 필드가 빠짐없이 있어요</td></tr>
+<tr><td>모의, 빈 값 또는 추정</td><td>화면에는 보이지만, 뒤에는 가짜 데이터, 빈 필드, 추정값이 있어요</td><td>분명히 밝히고 「교육용 추정」이라고 표시해야 해요</td></tr>
+</tbody></table></div>
+<p>구성 요소 하나가 「코드도 다 썼고 주 경로에도 연결됐는데」 아직 실제 데이터는 내지 못한 경우는 얼마든지 있어요. 이런 상태는 있는 그대로 적어야 해요. 「완료」라는 두 글자로 덮으면 안 돼요. Strata의 소스에 좋은 예가 있어요. CPU와 GPU는 겹쳐서 일하기로 되어 있어요. 그런데 CPU가 일을 받았을 때 GPU가 이미 그 층 계산을 끝냈다면, 파이프라인 전체가 사실상 직렬로 퇴화한 거예요. 이때도 토큰은 모두 맞게 계산되고, 층별 소요 시간도 차이가 안 보여요. 그래서 작성자는 카운터를 따로 하나 추가했어요. CPU가 일을 받았을 때 GPU가 아직 실행 중이었던 층의 수를 세요. 이 겹침 장치가 「정말 일하고 있는지」 「그저 장식인지」 판단하려는 거예요. <span class="ev ev-code">코드 사실</span>[S13]</p>
+<p>보고서 자체는 이 순서로 써요. 먼저 실험으로 뒤집힐 수 있는 질문을 던져요. 예를 들면 「같은 입력과 품질 관문에서, VRAM 안의 핫 전문가 예산을 늘리면 CPU 계산 시간이 줄어드는가?」 같은 질문이에요. 그다음 이론, 소스 위치, 방법, 데이터, 해석, 한계를 차례로 적어요. 모든 그림에는 단위, 표본 수, 측정 조건을 써요. 소스 링크는 계속 바뀌는 main 브랜치가 아니라 고정한 커밋을 가리켜요. 원본 데이터와 실패 로그는 모두 보관해요. 채점은 아래 표를 따라요.</p>
+<div class="table-wrap"><table><thead><tr><th>항목</th><th>배점</th><th>확인할 수 있는 증거</th></tr></thead><tbody>
+<tr><td>원리와 유도</td><td>20</td><td>공식, 단위, 의존 관계, 전제가 맞아요</td></tr>
+<tr><td>소스와 계약</td><td>20</td><td>실제 코드를 가리키고, 현재 코드와 낡은 주석을 구별해요</td></tr>
+<tr><td>구현과 테스트</td><td>25</td><td>실행되고, 독립된 참조 답안, 반례, 경계 테스트가 있어요</td></tr>
+<tr><td>실험과 품질</td><td>20</td><td>짝 지은 비교 또는 번갈아 하는 비교, 원본 데이터, 품질 관문, 실패도 집계해요</td></tr>
+<tr><td>표현과 재현성</td><td>15</td><td>환경, 단계, 한계를 써서 다른 사람이 다시 확인할 수 있어요</td></tr>
+</tbody></table></div>
+<p>레드라인이 두 개 있어요. 교육용 시뮬레이션을 하드웨어 실측처럼 쓰면 「실험과 품질」 항목 전체가 0점이에요. 설명 없는 상태 혼용이 있으면 「구현과 테스트」 항목 전체가 0점이에요. 성능이 아무리 좋아도 정확성 결함을 상쇄하지 못해요. 아래 자가 점검표로 제출 전에 스스로 한 번 채점해 볼 수 있어요.</p>
+<div class="viz" data-viz="rubric-check"><figure class="fig"><svg viewBox="0 0 400 256" role="img" aria-label="그림 28-4: 채점표 다섯 항목의 배점: 원리 20, 소스 20, 구현과 테스트 25, 실험 20, 표현 15, 그리고 레드라인 두 개">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="14" font-weight="600" text-anchor="middle">100점은 이렇게 나눠요</text>
+<text class="f-text" fill="#182f2b" x="10" y="50" font-size="12">원리와 유도</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="36" width="200" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="312" y="51" font-size="13">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">소스와 계약</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="70" width="200" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="312" y="85" font-size="13">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="12">구현과 테스트</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="104" width="250" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="362" y="119" font-size="13">25</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="12">실험과 품질</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="138" width="200" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="312" y="153" font-size="13">20</text>
+<text class="f-text" fill="#182f2b" x="10" y="186" font-size="12">표현과 재현성</text>
+<rect class="f-accent" fill="#136d5a" x="104" y="172" width="150" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="262" y="187" font-size="13">15</text>
+<text class="f-warn" fill="#9e5d24" x="10" y="222" font-size="12">레드라인: 모의를 실측으로 쓰면 → 「실험과 품질」 0점</text>
+<text class="f-warn" fill="#9e5d24" x="10" y="246" font-size="12">레드라인: 설명 없는 상태 혼용 → 「구현과 테스트」 0점</text>
+</svg><figcaption>그림 28-4　채점표의 배점 분포예요. 「구현과 테스트」가 가장 커요. 레드라인은 하나만 걸려도 한 항목이 통째로 0점이 돼요. 인터랙티브 버전에서는 항목을 하나씩 체크하며 스스로 채점할 수 있어요.</figcaption></figure></div>
+
+<h2 id="sec-5">28.5 직접 해 보기: 첫 수직 슬라이스를 뚫어요</h2>
+<p>프로젝트 A를 예로 들게요. 첫 단계는 새 기능을 쓰는 게 아니에요. 이미 있는 연결을 한 번 끝까지 돌려 보고, 그것이 내놓는 모든 필드를 자세히 보는 거예요. 이 책의 저장소에서 이렇게 실행해요.</p>
+<p><code>python3 labs/tiny_inference.py --prompt "hello" --tokens 8</code></p>
+<p>이 책을 쓸 때 실제로 실행한 출력에는 이런 것들이 있어요. 모델 구조(4개 층, 8차원, 4개 전문가 중 2개 선택)가 있어요. 모든 가중치로 계산한 모델 지문 <code>model_id</code>도 있어요. 프롬프트의 번호는 <code>[8, 5, 12, 12, 15]</code>예요. 생성된 번호 8개와 그에 해당하는 글자는 <code>"mzjsldhx"</code>예요. 그리고 <code>"draft_matches_greedy": true</code>가 있어요. 드래프트 데모의 결과가 하나씩 생성한 결과와 완전히 같다는 뜻이에요. 글자에는 뜻이 없어요. 가중치가 랜덤이니까요. 하지만 모든 필드는 진짜로 계산한 값이에요. 이것이 여러분의 첫 「실제 데이터」 증거예요.</p>
+<p>이제 수직 슬라이스의 방식으로 한 단계씩 얹어 가요. 단계마다 먼저 실패하는 테스트를 쓰고, 그다음 구현을 써요.</p>
+<ol>
+<li><strong>모양과 소유자를 살펴요.</strong> 층마다 텐서의 모양을 출력해요. 읽기 전용 가중치와 바뀌는 상태가 각각 무엇인지 그려 봐요.</li>
+<li><strong>저장과 복원, 분할 프리필.</strong> 세션을 저장했다가 복원해서 계속 생성해요. 결과는 중단하지 않았을 때와 같아야 해요. 프롬프트를 여러 조각으로 잘라 처리해요. 결과는 한 번에 처리했을 때와 같아야 해요.</li>
+<li><strong>드래프트와 검증.</strong> 드래프트 데모의 후보를 바꿔 봐요. 어느 위치에서든 처음 거절되면 그 뒤의 드래프트를 버려요. 출력은 그리디 생성과 같아야 해요.</li>
+<li><strong>측정.</strong> 속도는 맨 마지막에 재요. 27장의 방법대로 기록으로 써요. 주의할 점이 있어요. 이 스크립트의 소요 시간을 Strata의 성능으로 삼으면 안 돼요.</li>
+</ol>
+<p><code>labs/README.md</code>의 다섯 가지 과제는 대체로 이 경로를 따라가요. 서두르지 말고 먼저 아래 플래너로 감을 잡아 보세요. 주 수가 같을 때, 가로로 넓히는 것과 세로로 자르는 것 중 어느 쪽이 마감일에 무엇을 손에 쥐여 주는지 보세요.</p>
+<div class="viz" data-viz="slice-planner"><figure class="fig"><svg viewBox="0 0 400 330" role="img" aria-label="그림 28-5: 10주차의 진행 상황. 수평으로 넓히면 완전히 시연할 수 있는 기능이 하나도 없고, 수직 슬라이스를 우선하면 기능 두 개가 끝까지 돌아간다">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">수평으로 넓히기: 10주차 시점</text>
+<text class="f-muted" fill="#5c6d66" x="89" y="46" font-size="12" text-anchor="middle">코드</text>
+<text class="f-muted" fill="#5c6d66" x="131" y="46" font-size="12" text-anchor="middle">테스트</text>
+<text class="f-muted" fill="#5c6d66" x="173" y="46" font-size="12" text-anchor="middle">연결</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="46" font-size="12" text-anchor="middle">증거</text>
+<text class="f-text" fill="#182f2b" x="10" y="72" font-size="12">뼈대</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12">저장</text>
+<text class="f-text" fill="#182f2b" x="10" y="124" font-size="12">분할</text>
+<text class="f-text" fill="#182f2b" x="10" y="150" font-size="12">드래프트</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="56" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="56" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="56" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="56" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="82" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="82" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="82" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="82" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="108" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="108" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="108" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="108" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="134" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="134" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="134" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="134" width="38" height="22" rx="3"/>
+<text class="f-warn" fill="#9e5d24" x="250" y="76" font-size="13" font-weight="600">시연 가능: 0개</text>
+<text class="f-text" fill="#182f2b" x="250" y="102" font-size="12">코드는 4개 다 썼어요</text>
+<text class="f-text" fill="#182f2b" x="250" y="128" font-size="12">증거는 하나도 없어요</text>
+<text class="f-text" fill="#182f2b" x="10" y="190" font-size="13" font-weight="600">수직 슬라이스 우선: 10주차 시점</text>
+<text class="f-muted" fill="#5c6d66" x="89" y="216" font-size="12" text-anchor="middle">코드</text>
+<text class="f-muted" fill="#5c6d66" x="131" y="216" font-size="12" text-anchor="middle">테스트</text>
+<text class="f-muted" fill="#5c6d66" x="173" y="216" font-size="12" text-anchor="middle">연결</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="216" font-size="12" text-anchor="middle">증거</text>
+<text class="f-text" fill="#182f2b" x="10" y="242" font-size="12">뼈대</text>
+<text class="f-text" fill="#182f2b" x="10" y="268" font-size="12">저장</text>
+<text class="f-text" fill="#182f2b" x="10" y="294" font-size="12">분할</text>
+<text class="f-text" fill="#182f2b" x="10" y="320" font-size="12">드래프트</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="226" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="226" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="226" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="196" y="226" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="252" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="252" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="154" y="252" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="196" y="252" width="38" height="22" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="278" width="38" height="22" rx="3"/><rect class="f-accent" fill="#136d5a" x="112" y="278" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="278" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="278" width="38" height="22" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="304" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="112" y="304" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="304" width="38" height="22" rx="3"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="196" y="304" width="38" height="22" rx="3"/>
+<text class="f-text" fill="#182f2b" x="250" y="246" font-size="13" font-weight="600">시연 가능: 2개</text>
+<text class="f-text" fill="#182f2b" x="250" y="272" font-size="12">4주차에 첫 증거</text>
+<text class="f-text" fill="#182f2b" x="250" y="298" font-size="12">드래프트는 아직 시작 전</text>
+</svg><figcaption>그림 28-5　같은 10주, 같은 16칸의 일이에요(한 칸이 한 주). 가로로 넓히면 칸은 꽉 차는데 시연할 수 있는 기능은 하나도 없어요. 세로로 자르면 기능 두 개가 이미 실제 증거를 내놓았어요.</figcaption></figure></div>
+<p>플래너의 「한 칸이 한 주」와 「인터페이스에 숨은 잘못된 가정」은 교육용 가정이에요. 실제 프로젝트를 통계로 낸 값이 아니에요. 플래너가 보여 주려는 것은 구조의 차이예요. 수직 슬라이스는 첫 기능을 연결하는 순간 문제를 드러내요. 그때가 다시 해야 하는 범위가 가장 작을 때예요.</p>
+
+<h2 id="sec-6">28.6 교재에도 버전이 있어요</h2>
+<p>이 책의 코드 사실은 모두 Strata의 고정된 커밋 하나와 대조해서 확인했어요. 커밋은 <code>99f3dbd0b21d1401b3769e0c0d963913607f380b</code>이고, 조사한 날짜는 2026-10-04예요. Strata는 아직 빠르게 바뀌고 있어요. 새 버전에서는 숫자, 기본값, 인터페이스가 바뀔 수 있어요. 교재를 갱신할 때는 그림 28-6의 순서를 따라요.</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="그림 28-6: 교재 갱신의 네 단계: 커밋 고정, 업스트림 변화 관찰, 먼저 계약 비교, 그다음 영향받는 장 새로 고침">
+<rect class="f-accent" fill="#136d5a" x="20" y="10" width="360" height="56" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="33" font-size="13" font-weight="600" text-anchor="middle">이 책은 커밋 하나에 고정돼 있어요</text>
+<text class="f-on" fill="#ffffff" x="200" y="55" font-size="12" text-anchor="middle">99f3dbd…, 조사일 2026-10-04</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 66V84"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="86" width="360" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="109" font-size="13" font-weight="600" text-anchor="middle">업스트림 main은 계속 앞으로 가요</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="131" font-size="12" text-anchor="middle">숫자, 기본값, 인터페이스가 바뀔 수 있어요</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 142V160"/>
+<rect class="f-soft" fill="#e5f1df" x="20" y="162" width="360" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="185" font-size="13" font-weight="600" text-anchor="middle">먼저 계약을 비교해요</text>
+<text class="f-text" fill="#182f2b" x="200" y="207" font-size="12" text-anchor="middle">모델 구조, 상태, 양자화, 스케줄링, API</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 218V236"/>
+<rect class="f-soft" fill="#e5f1df" x="20" y="238" width="360" height="56" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="261" font-size="13" font-weight="600" text-anchor="middle">그다음 영향받는 장과 실습을 고쳐요</text>
+<text class="f-text" fill="#182f2b" x="200" y="283" font-size="12" text-anchor="middle">바뀐 곳마다 새 소스 줄 번호를 붙여요</text>
+</svg><figcaption>그림 28-6　교재를 갱신하는 순서예요. 먼저 계약이 바뀌었는지 보고, 그다음 영향받는 장을 고쳐요. main이 한 번 갱신될 때마다 수업을 다시 쓰는 게 아니에요.</figcaption></figure>
+<p>왜 먼저 「계약」을 비교할까요? 계약이 바뀌면 그에 의존하는 유도와 실험이 전부 무효가 되기 때문이에요. Strata 스스로도 이렇게 봐요. <code>layout.hpp</code>에는 모델 구조의 모든 필드가 어떤 커널이 의존하는 수라고 적혀 있어요. 그것을 바꾸는 건 매개변수 하나를 조정하는 게 아니라 커널의 계약을 바꾸는 일이에요. <span class="ev ev-code">코드 사실</span>[S04] 학기 중에는 버전을 두 개 유지할 수 있어요. 한 학기 동안 변하지 않는 안정판 하나, 업스트림을 따라가는 연구판 하나예요.</p>
+<p>분명히 해 둘 것이 두 가지 더 있어요. 첫째, Strata의 코드는 MIT 라이선스로 공개돼요.[S19] 이 라이선스는 저장소 안의 코드에 대한 것이에요. 모델 가중치와 다른 제3자 구성 요소가 각자 가진 라이선스를 대신하지 않아요. 둘째, 이 책은 독립적으로 쓴 교육 자료예요. 원 프로젝트가 보증한 것이 아니에요. 수업과 독학에 쓸 수 있는 완전한 초판이지만, 아직 출판사나 여러 교사의 외부 검토는 받지 않았어요. 공개 배포 전에는 시스템 분야 교사와 모델 수치 분야 교사에게 각각 교차 검토를 부탁하고, 시범 강의의 피드백으로 입문 난이도를 점검하길 권해요.</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>먼저 수직 슬라이스 하나를 뚫어요. 토큰 하나가 입력에서 출력까지 가고, 확인할 수 있는 실제 데이터를 남겨요. 그다음 기능을 한 겹씩 더해요. 부품이 전부 초록불이라고 시스템이 연결된 건 아니에요.</li>
+<li>트레이드오프마다 다섯 가지를 적어요. 결정, 얻는 것, 비용, 검증 방법, 재논의 조건이에요. 숫자에는 단위와 조건을 붙여요.</li>
+<li>제출할 때 구성 요소마다 증거의 단계를 표시해요. 코드 작성 완료, 주 경로에 연결, 실제 데이터, 모의 중 하나예요. 「완료」라는 두 글자로 어느 단계도 덮지 마세요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: 「모듈을 전부 다 쓰고 다 테스트한 뒤에 마지막에 합치는 게 가장 효율적이다.」</strong></p>
+<p>모듈로 나눠 개발하는 것 자체는 잘못이 아니에요. 잘못은 「마지막에 합치는」 거예요. 모듈 사이의 인터페이스 가정은 실제로 연결했을 때에야 검증받아요. Strata의 PLE 모듈이 그랬어요. 부품은 모두 대조 테스트를 통과했지만 주 경로가 한 번도 호출하지 않았고, 모델 전체 검수 관문에서야 드러났어요.[S13] 연결이 늦을수록 잘못된 가정으로 써 놓은 코드가 많아지고, 다시 해야 하는 일도 커져요. 가는 선 하나를 먼저 연결하고 그 위에 더하는 쪽이 전체 작업량은 보통 더 적어요.</p></div>
+
+<details class="deep"><summary>한 걸음 더: 보고서 구조, 관측 가능성, 마지막 이해 점검</summary>
+<h3>좋은 보고서의 구조</h3>
+<p>먼저 실험으로 뒤집혀도 좋다고 생각하는 질문을 던져요. 그다음 이론, 소스 위치, 방법, 데이터, 해석, 한계를 차례로 써요. 결론마다 어떤 종류인지 표시해요. 코드 사실인지, 실험 결과인지, 추측인지예요. 모든 그림에는 단위, 표본 수, 측정 조건이 있어야 해요. 소스 링크는 main만 가리키지 말고 고정한 커밋 번호를 써요. 성능 원본 데이터와 실패 로그를 모두 보관해요. 모델 파일과 의존 라이브러리의 해시는 목록에 기록해요. 예쁜 스크린샷만 내지 마세요.</p>
+<h3>채점표의 레드라인은 어떻게 집행할까</h3>
+<p>교육용 시뮬레이션을 하드웨어 실측으로 속이면, 나머지가 아무리 성실해도 그 실험의 결론은 모두 0점이에요. 독자가 어떤 숫자를 믿어야 할지 더는 가릴 수 없게 되기 때문이에요. 설명 없는 상태 혼용이 있으면 성능 점수로 정확성 결함을 상쇄하지 못해요. 두 레드라인의 공통점은 「증거를 믿을 수 있다」는 것 자체를 깨뜨린다는 거예요.</p>
+<h3>관측 가능성: 「일하지 않는」 장치를 드러내기</h3>
+<p>Strata의 세션 코드에는 본받을 만한 설계가 두 가지 있어요. 하나는 「층마다 동기화」 디버그 모드예요. 「어떤 커널이 더 뒤의 층이 써야 채워지는 버퍼를 읽었다」 같은 오류를 잡아내요. 평소에는 보이지 않는 오류예요. 대가는 동기화 오버헤드라서 런타임 매개변수로 만들고, 필요할 때 켜요. 다른 하나는 겹침 카운터예요. CPU와 GPU의 겹침이 직렬로 퇴화해도 반환값과 층별 소요 시간으로는 알 수 없어요. 「CPU가 일을 받았을 때 GPU가 아직 실행 중이었던 층의 수」를 따로 세어야만 알아낼 수 있어요.[S13] 여러분의 프로젝트에서도 「가속」, 「겹침」, 「캐시 히트」를 내세우는 장치에는 정말 일하고 있음을 증명하는 카운터를 하나씩 붙여야 해요.</p>
+<h3>제약은 테스트가 잡아낼 수 있어야 해요</h3>
+<p>Strata는 토큰을 생성하는 동안 VRAM을 전혀 할당하지 않아요. 그래서 세션의 모든 상태를 시작할 때 최대 길이 기준으로 한 번에 계산하고 한 번에 할당해요. 주석은 함정 하나를 짚어요. 할당이 「더 긴 시퀀스의 첫 토큰」에서 일어난다면, 지금 있는 모든 테스트는 통과해요.[S13] 달리 말하면, 제약을 확인하는 전용 테스트가 없으면 그 제약은 바람일 뿐이에요. 설계 문서를 쓸 때는 제약마다 옆에 「이 제약을 어기면 어느 테스트가 실패하는가」를 적어 두세요.</p>
+<h3>이 책을 떠날 때의 이해 점검</h3>
+<p>여러분은 이런 것들을 자기 말로 설명할 수 있어야 해요. 40 GB짜리 모델 파일이 왜 꼭 40 GB의 VRAM을 필요로 하지는 않을까요? 토큰 여러 개를 한 번에 검증하는 것이 왜 미래를 미리 아는 것과 다를까요? 같은 포인터가 왜 서로 다른 층의 데이터를 가리킬 수 있을까요? 상태가 고정돼 있다고 왜 아무 데로나 롤백할 수 있는 건 아닐까요? 스레드가 많다고 왜 더 많은 세션을 서빙할 수 있는 건 아닐까요? 더 빠른 숫자에는 왜 완전한 조건이 따라붙어야 할까요? 이 설명은 어떤 추론 엔진에도 옮겨 쓸 수 있어요. Strata는 실제 시스템으로 들어가는 입구예요. 매개변수를 달달 외워야 하는 종착지가 아니에요.</p>
+</details>
