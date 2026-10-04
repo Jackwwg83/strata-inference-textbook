@@ -1,0 +1,216 @@
+<div class="hook"><span class="eyebrow">Seguimos con la pregunta del capítulo 10</span>
+<p>El capítulo 10 decía: Strata guarda en la VRAM los expertos que más se eligen y deja el resto en la RAM, donde la CPU los calcula en el sitio; si cambia el tema, los expertos de la VRAM también cambian. Suena razonable. Pero a la hora de escribir el código, las preguntas se encadenan: ¿a quién se coloca al empezar? La VRAM tiene varios miles de posiciones, ¿cómo se reparten entre 48 capas? ¿Cuándo se cambia y a quién? Y si, justo a mitad de un cambio, un token necesita ese experto, ¿qué se hace?</p>
+<p>Son los problemas de siempre de una caché. Este capítulo los resuelve uno por uno con la caché de expertos de Strata.</p></div>
+<p class="tldr"><strong>En una línea:</strong> la caché de expertos se llena al empezar según la frecuencia histórica y a cada capa le toca un tramo de ranuras; después, cada 4 rondas, saca a los poco usados y mete a los populares según un «conteo con decaimiento»; y al cambiar, primero retira la entrada de la tabla, espera a que se copien los bytes y solo entonces registra, de modo que la GPU nunca lee una ranura mitad nueva y mitad vieja.</p>
+
+<h2 id="sec-1">12.1 Tasa de aciertos: primero, aclarar el denominador</h2>
+<p>El primer número que se mira en una caché es la <dfn>tasa de aciertos</dfn>: qué proporción de lo que se necesita ya está en la caché. En la caché de expertos, «acierto» significa que el experto elegido está justo en la VRAM y la GPU lo calcula directamente; «fallo» significa que la CPU tiene que leer de la RAM 1,38 MB de ese experto para calcularlo.</p>
+<p>Upstream midió al desarrollar esta caché: con 4105 expertos en la VRAM, la tasa de aciertos de un solo experto es 0,6447 y el intervalo de la evaluación con diez particiones reservadas va de 0,6110 a 0,6750. <span class="ev ev-report">Informe upstream</span>[S05] El mismo comentario anota otro número: la proporción de veces que los 10 expertos de una capa aciertan <strong>todos</strong> es solo 0,0456. <span class="ev ev-report">Informe upstream</span>[S05] Los dos se llaman «tasa de aciertos» y difieren más de diez veces porque el denominador es distinto; mira la figura 12-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 280" role="img" aria-label="Figura 12-1: en la misma ejecución, la tasa de aciertos de un experto es 64,5 %, que los 10 expertos de una capa acierten todos ocurre solo el 4,6 % de las veces, y si los expertos fueran independientes sería solo cerca del 1,2 %">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="13">4105 ranuras, evaluación con reserva (upstream)</text>
+<text class="f-text" fill="#182f2b" x="20" y="52" font-size="13">Acierto de un solo experto</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="60" width="300" height="22"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="60" width="193" height="22"/>
+<text class="f-text" fill="#182f2b" x="328" y="77" font-size="13">64,5 %</text>
+<text class="f-text" fill="#182f2b" x="20" y="114" font-size="13">Aciertan los 10 de una capa: medido</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="122" width="300" height="22"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="122" width="14" height="22"/>
+<text class="f-text" fill="#182f2b" x="328" y="139" font-size="13">4,6 %</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="13">Aciertan los 10 de una capa: si fueran independientes</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="184" width="300" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="20" y="184" width="4" height="22"/>
+<text class="f-text" fill="#182f2b" x="328" y="201" font-size="13">1,2 %</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="232" font-size="13">0.645¹⁰ ≈ 1,2 %. Lo medido es más alto,</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="251" font-size="13">así que los expertos elegidos en una misma</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="270" font-size="13">capa suelen estar calientes o fríos a la vez</text>
+</svg><figcaption>Figura 12-1　Dos números que se llaman «tasa de aciertos». Contada por expertos es 64,5 %; contada como «acierta toda la capa», solo 4,6 %. Al informar una tasa de aciertos hay que decir primero cuál es el denominador.</figcaption></figure>
+<p>Esto influye de forma directa en el diseño. Si solo se pudiera tomar un camino rápido cuando «acierta toda la capa», una tasa de aciertos de expertos del 64,5 % no ayudaría: esas capas son solo el 4,6 %. El comentario de upstream concluye que no se deben diseñar los kernels de GPU agrupando por «capa entera»: hay que permitir que, dentro de una misma capa, una parte de los expertos esté en la GPU y otra en la CPU. <span class="ev ev-code">Hecho de código</span>[S05]</p>
+<aside class="primer" id="c12-hit-rate">
+<h3>Tasa de aciertos y conjunto de trabajo</h3>
+<p><dfn>Tasa de aciertos</dfn> = número de aciertos ÷ número de accesos. Parece simple; lo difícil es cómo se cuenta «un acceso»: ¿por tokens, por «capa × token», por llamadas a expertos, por expertos sin repetir o por bytes? Si cambia el denominador, el número puede cambiar en un orden de magnitud. Al informar una tasa de aciertos hay que escribir también el tamaño de la caché, si fue arranque en frío o ya calentado y con qué datos se midió.</p>
+<p>Un concepto útil es el <dfn>conjunto de trabajo</dfn> (working set): lo que de verdad se ha usado en un periodo reciente. Por ejemplo, en los últimos 100 tokens la capa 7 eligió 60 expertos distintos; esos 60 son el conjunto de trabajo actual de la capa 7. Si la caché cabe el conjunto de trabajo, la tasa de aciertos es alta; si no cabe, lo que acaba de entrar vuelve a ser expulsado y se mueve de aquí para allá sin parar. Eso es el <dfn>thrashing</dfn>.</p>
+<p>El conjunto de trabajo se desplaza con el tiempo. Los expertos que más se usan al escribir código no son los mismos que al escribir prosa. Por eso la caché tiene que responder a dos preguntas: cuál es ahora el conjunto de trabajo (las estadísticas) y cómo seguir sus cambios (la política de reemplazo, en 12.4).</p>
+<p class="further">Lecturas: <a href="https://en.wikipedia.org/wiki/Working_set" target="_blank" rel="noopener noreferrer">Wikipedia: Working set (en inglés)</a> · <a href="https://en.wikipedia.org/wiki/Thrashing_%28computer_science%29" target="_blank" rel="noopener noreferrer">Wikipedia: Thrashing (en inglés)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-beyondphys-policy.pdf" target="_blank" rel="noopener noreferrer">OSTEP, capítulo 22: políticas de reemplazo de páginas (en inglés)</a></p>
+</aside>
+
+<h2 id="sec-2">12.2 A quién se coloca al empezar: una lista ordenada por frecuencia histórica</h2>
+<p>El comienzo más sencillo es «el primero que llega, se queda»: al arrancar, los primeros miles de expertos distintos que se eligen ocupan su sitio, y cuando se llena ya no cambia. El problema es que quién aparece primero depende por completo del primer tramo del prompt de esta conversación. Upstream lo midió y la tasa de aciertos con este método es solo 0,4864. <span class="ev ev-report">Informe upstream</span>[S05]</p>
+<p>Strata hace otra cosa: prepara de antemano un <dfn>perfil de expertos</dfn> (profile). Sobre un registro de accesos largo cuenta con qué frecuencia se eligió cada (capa, experto), los ordena de mayor a menor en una lista y, al empezar, llena la VRAM siguiendo la lista. Con las mismas 4105 ranuras, la tasa de aciertos en la evaluación con reserva es 0,6447. <span class="ev ev-report">Informe upstream</span>[S05] Mira la figura 12-2.</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="Figura 12-2: llenar al empezar con el que llega primero da una tasa de aciertos de 0,4864; llenar con la lista por frecuencia da 0,6447">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="13">Mismas ranuras, dos rellenos iniciales (upstream)</text>
+<text class="f-text" fill="#182f2b" x="20" y="52" font-size="13">Orden de llegada: los primeros S expertos distintos</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="60" width="300" height="24"/>
+<rect class="f-warn" fill="#9e5d24" x="20" y="60" width="146" height="24"/>
+<text class="f-text" fill="#182f2b" x="328" y="78" font-size="13">0,486</text>
+<text class="f-text" fill="#182f2b" x="20" y="116" font-size="13">Lista por frecuencia (profile)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="124" width="300" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="124" width="193" height="24"/>
+<text class="f-text" fill="#182f2b" x="328" y="142" font-size="13">0,645</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="180" font-size="13">Trabajo de CPU ∝ 1 − tasa de aciertos</text>
+</svg><figcaption>Figura 12-2　A quién se llena al empezar marca una gran diferencia. La lista sale de las estadísticas de un registro de accesos; para evaluar hay que usar otro registro que no se haya visto.</figcaption></figure>
+<p>El comentario subraya un punto: la lista se lee de un archivo, y la ventaja es que se puede «hacer la lista con este prompt y puntuarla con otro prompt», y así saber si generaliza. <span class="ev ev-code">Hecho de código</span>[S05] Hacer la lista y puntuarla con el mismo registro es como un examen a libro abierto: la nota sale inflada. El comentario menciona que el README llegó a publicar 0,6573, un número medido «sobre la propia muestra»; 0,6447 es la evaluación con reserva. <span class="ev ev-report">Informe upstream</span>[S05]</p>
+<p class="bridge"><strong>Si estudiaste aprendizaje automático:</strong> es la separación entre conjunto de entrenamiento y de prueba. Las «estadísticas de lo popular» de una política de caché también son un ajuste y pueden sobreajustar igual.</p>
+
+<h2 id="sec-3">12.3 Que las primeras capas no se lo lleven todo: un tramo de ranuras por capa</h2>
+<p>¿Cómo se reparten las ranuras entre las 48 capas? Upstream tropezó con una trampa de gran valor didáctico. La regla de admisión de las primeras versiones era: todas las capas comparten un contador y las ranuras se reparten por orden de llegada hasta agotarse. Un token avanza desde la capa 0 y cada capa elige 10 expertos; con 256 ranuras, se agotan más o menos al llegar a la capa 26. Las capas posteriores no consiguen nunca una ranura, y durante toda la ejecución la caché solo funciona en las primeras capas. <span class="ev ev-code">Hecho de código</span>[S05]</p>
+<figure class="fig"><svg viewBox="0 0 400 286" role="img" aria-label="Figura 12-3: con el reparto global por orden de llegada, las primeras 26 capas ocupan las 256 ranuras y la tasa de aciertos es 2,97 %; con un tramo por capa, una estimación sobre la misma traza alcanza 21,4 % con 8 ranuras por capa">
+<text class="f-text" fill="#182f2b" x="20" y="20" font-size="14" font-weight="600">Global: el primero que llega, se queda</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="34" width="190" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="210" y="34" width="170" height="40"/>
+<text class="f-on" fill="#ffffff" x="115" y="59" font-size="13" text-anchor="middle">Capas 0–25 lo ocupan</text>
+<text class="f-muted" fill="#5c6d66" x="295" y="59" font-size="13" text-anchor="middle">Capas siguientes: 0</text>
+<text class="f-text" fill="#182f2b" x="20" y="98" font-size="13">Medido, 256 ranuras: 1781 ÷ 60.000 = 2,97 %</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="14" font-weight="600">Por capa: cada una usa solo su tramo</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="160" width="360" height="40"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M65 160V200M110 160V200M155 160V200M200 160V200M245 160V200M290 160V200M335 160V200"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="222" font-size="13">Capa 0 ………………………………… Capa 47</text>
+<text class="f-text" fill="#182f2b" x="20" y="250" font-size="13">Misma traza, estimado: 8 por capa → 21,4 %</text>
+<text class="f-text" fill="#182f2b" x="20" y="274" font-size="13">64 por capa → 70,4 %</text>
+</svg><figcaption>Figura 12-3　A la caché no le falta capacidad; le falta equidad. El reparto global por orden de llegada dio todas las ranuras a las primeras capas que aparecieron.</figcaption></figure>
+<p>Los números del comentario llaman la atención: con 256 ranuras hubo 1781 aciertos en 60.000 accesos, una tasa del 2,97 %; y estimando sobre el mismo registro de rutas, con 8 ranuras por capa se llega al 21,4 % y con 64 por capa, al 70,4 %. La conclusión del comentario: a la caché nunca le faltó capacidad; le faltó un reparto equitativo. <span class="ev ev-report">Informe upstream</span>[S05]</p>
+<p>La solución es directa: al activar la admisión por capas, la capa l solo puede usar las ranuras de l·q a (l+1)·q, donde q es el número total de ranuras dividido entre el número de capas, y la última capa se queda con el resto. <span class="ev ev-code">Hecho de código</span>[S05] Esta corrección solo cambia «quién puede usar qué ranura» y nada más. La lección vale más que el arreglo: una tasa de aciertos baja no tiene por qué significar que la caché es pequeña; primero hay que mirar si el reparto se enredó con el orden de los accesos.</p>
+
+<h2 id="sec-4">12.4 Lo popular cambia: LRU, LFU y el conteo con decaimiento</h2>
+<p>La lista solo sirve para empezar. Charlando, el tema cambia y los expertos populares también. Para que la caché los siga, tiene que decidir «a quién sacar», y eso es la <dfn>política de reemplazo</dfn>. Veamos primero algunas clásicas.</p>
+<aside class="primer" id="c12-cache-replacement">
+<h3>Políticas de reemplazo de caché: LRU, LFU y otras</h3>
+<p>La caché está llena y hay que meter algo nuevo, así que tiene que salir algo viejo. ¿A quién se echa?</p>
+<ul>
+<li><dfn>OPT</dfn> (política óptima): se echa al que se volverá a usar más tarde. Es el mejor resultado teórico, pero exige conocer el futuro y solo sirve como referencia.</li>
+<li><dfn>FIFO</dfn> (primero en entrar, primero en salir): se echa al que entró antes. Es simple, pero también expulsa lo viejo que se usa mucho. El puntero rotatorio del capítulo 11 es un FIFO por cada conjunto.</li>
+<li><dfn>LRU</dfn> (menos recientemente usado): se echa al que lleva más tiempo sin usarse, con la idea de que «lo que se usó hace poco probablemente se vuelva a usar enseguida». Reacciona rápido, pero teme los «recorridos de una sola pasada»: una serie de datos poco usados que se usan una sola vez puede desplazar a todos los populares.</li>
+<li><dfn>LFU</dfn> (menos frecuentemente usado): se echa al que tiene el menor número acumulado de usos. No teme a los datos poco usados ocasionales, pero tiene demasiada memoria: un viejo popular con un contador grande acumulado en el pasado se resiste a irse aunque haya cambiado el tema.</li>
+<li><dfn>CLOCK</dfn> (segunda oportunidad): cada ranura tiene una marca de «usado hace poco»; un puntero da la vuelta, y si encuentra una ranura marcada le quita la marca y la deja, y solo sustituye la primera sin marca. Aproxima LRU con un costo muy pequeño y es muy usada en la paginación de los sistemas operativos.</li>
+</ul>
+<p>El defecto de LFU tiene un parche clásico: hacer que los contadores se <dfn>desvanezcan</dfn> con el tiempo, por ejemplo multiplicando todos por 0.7 cada cierto tiempo. Así los méritos viejos se van borrando y los nuevos populares tienen oportunidad de superar a los viejos. Este tipo de técnica suele llamarse «envejecimiento» (aging).</p>
+<p class="further">Lecturas: <a href="https://es.wikipedia.org/wiki/Algoritmo_de_reemplazo_de_p%C3%A1ginas" target="_blank" rel="noopener noreferrer">Wikipedia: Algoritmo de reemplazo de páginas</a> · <a href="https://en.wikipedia.org/wiki/Cache_replacement_policies" target="_blank" rel="noopener noreferrer">Wikipedia: Cache replacement policies (en inglés)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-beyondphys-policy.pdf" target="_blank" rel="noopener noreferrer">OSTEP, capítulo 22: políticas de reemplazo de páginas (en inglés)</a></p>
+</aside>
+<p>La caché de expertos de Strata elige justo el «conteo con decaimiento». La regla está en el programa de generación y todos los números se pueden comprobar: <span class="ev ev-code">Hecho de código</span> (<code>src/program/generate.cpp</code>, <code>src/core/expert_source.cpp</code>)</p>
+<ol>
+<li><strong>Contar</strong>: cada vez que una capa elige un experto, su contador suma 1, esté o no en la VRAM.</li>
+<li><strong>Ajuste periódico</strong>: por defecto se ajusta cada 4 rondas. Una ronda es un avance completo del modelo grande: verifica un lote de borradores y produce uno o varios tokens.</li>
+<li><strong>Cambiar solo si se cumple</strong>: dentro de una misma capa, un experto que no está en la VRAM es candidato solo si su contador llega al menos a 2; y el candidato debe superar en 1.5 o más al experto más frío de la VRAM para que de verdad se intercambien. Un ajuste cambia como máximo 96.</li>
+<li><strong>Todos se desvanecen</strong>: tras el ajuste, todos los contadores se multiplican por 0.7.</li>
+</ol>
+<p>¿Qué significa multiplicar por 0.7? Si un experto deja de elegirse, su contador se reduce a la mitad aproximadamente cada 2 ajustes (0.7² ≈ 0.49). Al revés, una sola «elección», sumando todos los desvanecimientos posteriores, aporta en total 1 + 0.7 + 0.49 + … = 1 ÷ (1 − 0.7) ≈ 3,3. El comentario del código usa justo esta suma para explicar el «calor» acumulado. <span class="ev ev-est">Estimación didáctica</span> La figura 12-4 dibuja el proceso de desvanecimiento.</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="Figura 12-4: cuando un experto deja de elegirse, su contador se multiplica por 0.7 en cada ajuste: 10, 7, 4,9, 3,4, 2,4, 1,7, y baja de 2 tras el quinto ajuste">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="13">El contador de un experto que ya no se elige</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="4 3" d="M30 182H390"/>
+<text class="f-warn" fill="#9e5d24" x="390" y="44" font-size="13" text-anchor="end">Línea punteada: umbral 2</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="86" width="40" height="120"/>
+<rect class="f-accent" fill="#136d5a" x="100" y="122" width="40" height="84"/>
+<rect class="f-accent" fill="#136d5a" x="160" y="147" width="40" height="59"/>
+<rect class="f-accent" fill="#136d5a" x="220" y="165" width="40" height="41"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="280" y="177" width="40" height="29"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="340" y="186" width="40" height="20"/>
+<text class="f-text" fill="#182f2b" x="60" y="78" font-size="14" text-anchor="middle">10</text>
+<text class="f-text" fill="#182f2b" x="120" y="114" font-size="14" text-anchor="middle">7</text>
+<text class="f-text" fill="#182f2b" x="180" y="139" font-size="14" text-anchor="middle">4,9</text>
+<text class="f-text" fill="#182f2b" x="240" y="157" font-size="14" text-anchor="middle">3,4</text>
+<text class="f-text" fill="#182f2b" x="300" y="169" font-size="14" text-anchor="middle">2,4</text>
+<text class="f-text" fill="#182f2b" x="360" y="168" font-size="14" text-anchor="middle">1,7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M30 206H390"/>
+<text class="f-muted" fill="#5c6d66" x="60" y="226" font-size="14" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="120" y="226" font-size="14" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="180" y="226" font-size="14" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="240" y="226" font-size="14" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="226" font-size="14" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="360" y="226" font-size="14" text-anchor="middle">5</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="246" font-size="13" text-anchor="middle">Ajustes (por defecto, uno cada 4 rondas)</text>
+</svg><figcaption>Figura 12-4　En cada ajuste se multiplica por 0.7: se reduce a la mitad cada 2 ajustes. Los viejos populares se desvanecen poco a poco, y así los nuevos tienen oportunidad de superarlos. <span class="ev ev-est">Estimación didáctica</span></figcaption></figure>
+<p>¿En qué es mejor esta regla que LRU y LFU? El simulador de abajo reduce una capa a 24 expertos, con 4 elegidos por token y solo 6 en la VRAM, y las tres políticas ven la misma serie de rutas. El tema cambia a partir del token 30; también puedes insertar un «interludio poco usado».</p>
+<div class="viz" data-viz="cache-race"><figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="Figura 12-5: resultados de tres políticas en el modelo didáctico. Tasa de aciertos total: LRU 40 %, LFU 37 %, conteo con decaimiento 44 %; en los primeros 15 tokens tras el cambio de tema, LRU acierta 26 veces, LFU 5 y el decaimiento 10">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="13">Modelo didáctico: 60 tokens, cambio de tema en el 30</text>
+<text class="f-text" fill="#182f2b" x="20" y="50" font-size="13" font-weight="600">Tasa de aciertos total</text>
+<text class="f-text" fill="#182f2b" x="20" y="78" font-size="13">LRU</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="64" width="160" height="18"/>
+<text class="f-text" fill="#182f2b" x="278" y="78" font-size="13">40 %</text>
+<text class="f-text" fill="#182f2b" x="20" y="104" font-size="13">LFU</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="90" width="148" height="18"/>
+<text class="f-text" fill="#182f2b" x="266" y="104" font-size="13">37 %</text>
+<text class="f-text" fill="#182f2b" x="20" y="130" font-size="13">Decaimiento</text>
+<rect class="f-accent" fill="#136d5a" x="110" y="116" width="176" height="18"/>
+<text class="f-text" fill="#182f2b" x="294" y="130" font-size="13">44 %</text>
+<text class="f-text" fill="#182f2b" x="20" y="166" font-size="13" font-weight="600">Aciertos en los 15 tokens tras el cambio</text>
+<text class="f-text" fill="#182f2b" x="20" y="194" font-size="13">LRU</text>
+<rect class="f-warn" fill="#9e5d24" x="110" y="180" width="156" height="18"/>
+<text class="f-text" fill="#182f2b" x="274" y="194" font-size="13">26</text>
+<text class="f-text" fill="#182f2b" x="20" y="220" font-size="13">LFU</text>
+<rect class="f-warn" fill="#9e5d24" x="110" y="206" width="30" height="18"/>
+<text class="f-text" fill="#182f2b" x="148" y="220" font-size="13">5</text>
+<text class="f-text" fill="#182f2b" x="20" y="246" font-size="13">Decaimiento</text>
+<rect class="f-warn" fill="#9e5d24" x="110" y="232" width="60" height="18"/>
+<text class="f-text" fill="#182f2b" x="178" y="246" font-size="13">10</text>
+</svg><figcaption>Figura 12-5　LRU reacciona más rápido, LFU queda frenada por los contadores que acumuló el tema viejo y el conteo con decaimiento tarda unos pasos en alcanzar, pero tiene la mejor nota total. Los números salen del modelo didáctico de este libro, no son mediciones de Strata.</figcaption></figure></div>
+<p>El simulador tiene una sola capa y 24 expertos, así que sus números no se pueden trasladar tal cual a Strata. Lo que quiere que veas es el carácter de cada política: LRU es ágil pero se desordena con datos poco usados; LFU es estable pero no sabe olvidar; el conteo con decaimiento, con «ajuste periódico + umbral + desvanecimiento», es un término medio. ¿Por qué ajustar solo cada 4 rondas y no cambiar con cada fallo? Cada intercambio tiene que mover 1,38 MB por PCIe, y entrar y salir con frecuencia ya tiene un costo; los dos umbrales (llegar a 2 y superar en 1.5) también sirven para no mover datos por una diferencia pequeña. <span class="ev ev-est">Estimación didáctica</span></p>
+<p>En realidad Strata tiene varias cachés, cada una con su política; mira la figura 12-6.</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="Figura 12-6: las tres cachés y tres políticas de reemplazo de Strata: la caché de filas PLE rota dentro de cada conjunto, la caché de expertos usa conteo con decaimiento y las páginas KV del contexto largo usan CLOCK">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="8" width="380" height="84" rx="9"/>
+<text class="f-text" fill="#182f2b" x="24" y="34" font-size="14" font-weight="600">Caché de filas PLE (RAM)</text>
+<text class="f-text" fill="#182f2b" x="24" y="58" font-size="13">Política: un puntero rotatorio por conjunto</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="80" font-size="13">Filas de solo 90 bytes; la búsqueda debe ser rápida</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="102" width="380" height="84" rx="9"/>
+<text class="f-on" fill="#ffffff" x="24" y="128" font-size="14" font-weight="600">Caché de expertos (VRAM)</text>
+<text class="f-on" fill="#ffffff" x="24" y="152" font-size="13">Política: conteo con decaimiento, cada 4 rondas</text>
+<text class="f-on" fill="#ffffff" x="24" y="174" font-size="13">Cada intercambio mueve 1,38 MB; hay que ser parco</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="196" width="380" height="84" rx="9"/>
+<text class="f-text" fill="#182f2b" x="24" y="222" font-size="14" font-weight="600">Páginas KV (VRAM, contextos de 64K o más)</text>
+<text class="f-text" fill="#182f2b" x="24" y="246" font-size="13">Política: CLOCK (segunda oportunidad)</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="268" font-size="13">La GPU elige las páginas a sustituir en cada paso</text>
+</svg><figcaption>Figura 12-6　En un mismo motor, tres cachés y tres políticas. El tamaño de lo que se guarda, cada cuánto cambia y dónde se toma la decisión determinan qué política conviene.</figcaption></figure>
+<p>La caché de páginas KV del contexto largo (el capítulo 17 la explica en detalle) guarda una parte de las páginas en la VRAM; en cada paso, un bloque de hilos de la GPU recorre con CLOCK para elegir las ranuras que se sustituyen y luego copia desde la memoria fijada (pinned) las páginas que faltan. <span class="ev ev-code">Hecho de código</span> (<code>include/strata/kernels/kv_stream.hpp</code>) La documentación de upstream dice que el instalador la activa cuando el contexto es de 64K o más y la RAM alcanza. <span class="ev ev-report">Informe upstream</span>[S03]</p>
+
+<h2 id="sec-5">12.5 Al cambiar: primero copiar, luego registrar</h2>
+<p>Decidir a quién cambiar no basta: hay que hacerlo de verdad, y este paso es donde más fácil resulta cometer errores que «parecen bien». La caché de expertos tiene dos cosas: una <dfn>tabla de residencia</dfn>, que anota en qué ranura está cada (capa, experto), o que no está en la VRAM; y los bytes que hay de verdad en las ranuras. La GPU solo mira la tabla: si la tabla dice que #112 está en la ranura 5, va a leer la ranura 5.</p>
+<p>La copia es <dfn>asíncrona</dfn>: la función que la lanza vuelve de inmediato mientras los bytes aún viajan por PCIe (el capítulo 14 lo explica). Si primero se registra en la tabla «#112 está en la ranura 5» y después se empieza a copiar, y en medio un token elige #112, la GPU leerá bytes mitad nuevos y mitad viejos. El simulador de abajo lo hace más lento:</p>
+<div class="viz" data-viz="expert-swap"><figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figura 12-7: el orden correcto de un intercambio: retirar la entrada de la tabla del experto saliente, copiar de forma asíncrona, esperar el evento de copia terminada y por último registrar al experto entrante">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="8" width="360" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="36" y="31" font-size="13" font-weight="600">① Retirar #331: la entrada pasa a «ninguno»</text>
+<text class="f-muted" fill="#5c6d66" x="36" y="52" font-size="13">Si se elige ahora, #331 lo calcula la CPU</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="72" width="360" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="36" y="95" font-size="13" font-weight="600">② Copia asíncrona #112 → ranura 5</text>
+<text class="f-muted" fill="#5c6d66" x="36" y="116" font-size="13">#112 elegido a mitad de copia: sigue la CPU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="136" width="360" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="36" y="159" font-size="13" font-weight="600">③ Llega el evento de copia terminada</text>
+<text class="f-muted" fill="#5c6d66" x="36" y="180" font-size="13">La ranura 5 ya tiene #112 completo</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="200" width="360" height="54" rx="9"/>
+<text class="f-on" fill="#ffffff" x="36" y="223" font-size="13" font-weight="600">④ Registrar #112 → ranura 5</text>
+<text class="f-on" fill="#ffffff" x="36" y="244" font-size="13">Si se elige ahora, #112 lo calcula la GPU</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="284" font-size="13">Orden inverso: la GPU lee bytes mezclados</text>
+</svg><figcaption>Figura 12-7　La entrada de la tabla apunta a la ranura solo cuando los bytes ya han llegado. El experto saliente se retira antes de la tabla y el entrante se registra después.</figcaption></figure></div>
+<p>La caché adaptativa de Strata lo hace así: en cuanto se lanza un intercambio, el experto saliente se marca de inmediato en la tabla como «no está en la VRAM» (el comentario del código dice «desde este momento está expulsado: mientras tanto lo calcula la CPU»); el entrante se anota primero en una lista de «pendientes» y solo se escribe en la tabla cuando llega el evento de finalización registrado después de la copia. <span class="ev ev-code">Hecho de código</span> (<code>src/program/generate.cpp</code>)</p>
+<p>Hay una versión más sutil. Upstream llegó a usar una consulta «no bloqueante» para saber si la copia había terminado y decidir si registrar: si había terminado, registraba, y si no, lo dejaba para la siguiente. El resultado era que un mismo experto lo calculaba la GPU en una ronda y la CPU en la siguiente, según lo rápida que fuera la copia; y como la GPU y la CPU redondean de forma distinta, el mismo prompt podía dar respuestas distintas en dos ejecuciones. Ahora, por defecto, se espera a que la copia aterrice antes de empezar la ronda siguiente. <span class="ev ev-code">Hecho de código</span> (<code>src/program/generate.cpp</code>) La documentación de upstream también avisa: para obtener resultados repetidos idénticos byte a byte hay que desactivar el intercambio adaptativo y algún otro interruptor. <span class="ev ev-report">Informe upstream</span>[S03]</p>
+<p>El modo «residente» de poca memoria añade otra restricción: la RAM solo guarda los expertos que la GPU no tiene. Los bytes del experto saliente tienen que copiarse primero de la VRAM a la RAM, ocupando el hueco que dejó el entrante, para que la copia de la RAM siga «completando justo» lo que le falta a la GPU. <span class="ev ev-report">Informe upstream</span>[S03] La interfaz tiene una función dedicada a esto. <span class="ev ev-code">Hecho de código</span>[S06]</p>
+<p class="bridge"><strong>Si estudiaste sistemas operativos:</strong> es la misma razón que en la paginación, donde «primero se marca como inválida la entrada de la tabla de páginas y solo se reutiliza el marco cuando termina la escritura»: cada cambio de una correspondencia debe esperar a que lleguen los datos de los que depende.</p>
+<p>¿Cómo se demuestra que lo que hay en la ranura es el experto que dice la tabla? La caché ofrece una función de comparación byte a byte: lee la ranura de vuelta al host y la compara byte por byte con el original de la RAM. El comentario dice que es «lo único que demuestra que la caché guarda el experto que dice guardar»; un índice de la tabla correcto con bytes erróneos produce un token de aspecto razonable, y es justo el tipo de error que más ha perjudicado a este proyecto. <span class="ev ev-code">Hecho de código</span>[S05]</p>
+
+<h2 id="sec-6">12.6 Manos a la obra: haz correr a las tres políticas</h2>
+<p>Primero, en «Carrera de tres políticas de reemplazo», ejecuta los 60 tokens y anota cómo quedan las tres tiras de aciertos después del token 30; luego activa el «interludio poco usado» y vuelve a ejecutar para ver a quién le arrasan las ranuras. Después ve a «Un intercambio: primero copiar, luego registrar» y recórrelo con el orden incorrecto, para entender por qué «etiqueta correcta, bytes erróneos» es lo más peligroso.</p>
+<p>Por último, abre el laboratorio interactivo «Trazas de caché y conflictos». Compara LRU, LFU, FIFO y la rotación de ocho vías sobre la misma serie de accesos. Las políticas del laboratorio son las versiones de manual, no el conteo con decaimiento de Strata; lo que practicas es cuánto puede cambiar la tasa de aciertos con la misma capacidad según la política, y cómo construir una serie de accesos pensada para que una política salga perdiendo.</p>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>En la tasa de aciertos, el denominador va primero: contada por expertos es 64,5 %, contada como «acierta toda la capa» es solo 4,6 %. La lista de perfil se evalúa con registros que no se han visto.</li>
+<li>Al empezar se llena según la lista de frecuencia y cada capa recibe un tramo de ranuras; el reparto global por orden de llegada deja que las primeras capas se lo lleven todo y la tasa de aciertos cae al 3 %.</li>
+<li>Después se intercambia cada 4 rondas con conteo con decaimiento (llegar a 2, superar en 1.5, todos × 0.7). Al intercambiar se retira primero la entrada de la tabla y se registra cuando la copia ha terminado.</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «Si la tasa de aciertos es baja, la caché es demasiado pequeña; basta con más VRAM».</strong></p>
+<p>No necesariamente. La versión temprana de upstream, con 256 ranuras, acertó solo el 2,97 %, y sobre el mismo registro de accesos, con 8 ranuras por capa se llega al 21,4 %. <span class="ev ev-report">Informe upstream</span>[S05] La capacidad casi no cambió; lo que cambió fue «a quién se dan las ranuras». Cuando la tasa de aciertos es baja, primero hay que revisar si el reparto es equitativo, si la política se enreda con el orden de los accesos y si el criterio de las estadísticas es correcto, y solo después hablar de más capacidad.</p></div>
+
+<details class="deep"><summary>Más a fondo: comentarios históricos, invariantes de corrección y métodos de evaluación</summary>
+<h3>Cómo pueden ser ciertas a la vez «la caché nunca expulsa» y «la caché sí cambia»</h3>
+<p>El comienzo de <code>expert_cache.hpp</code> dice que este archivo es solo el almacén de ranuras y la tabla de residencia, y que todavía no hace ningún cálculo, así que activar la caché solo hace todo más lento. <span class="ev ev-code">Hecho de código</span>[S05] Su función de admisión también dice «nunca expulsa», porque la política de expulsión debe decidirse con mediciones, y poner una política de relleno haría que todos los diseños posteriores se basaran en una tasa de aciertos equivocada. <span class="ev ev-code">Hecho de código</span>[S05] Estos comentarios se escribieron al principio del desarrollo. El motor actual sí cambia expertos, pero la acción de cambiar no está en esta clase: el programa de generación elige los pares de intercambio por conteo con decaimiento, copia directamente los bytes del experto nuevo a la ranura del viejo y luego modifica la tabla de residencia. Al leer código hay que distinguir entre «lo que esta clase no hace» y «lo que todo el sistema no hace».</p>
+<h3>Condiciones que debe mantener un intercambio</h3>
+<ul>
+<li>Cualquier entrada válida de la tabla apunta a una ranura ya llena por completo.</li>
+<li>Una ranura de la que se está leyendo para calcular no puede sobrescribirse.</li>
+<li>Tras sacar a un experto, su correspondencia vieja deja de valer de inmediato; la del entrante vale solo cuando los bytes han aterrizado.</li>
+<li>Los bloques de expertos de tamaños distintos (algunos formatos de cuantización difieren por capa) no pueden cruzar el límite de una ranura; cuando las ranuras se han repartido según el tamaño de una capa, no se pasan a otra. <span class="ev ev-code">Hecho de código</span>[S05]</li>
+<li>En modo residente, los bytes del experto saliente se copian primero a la RAM, para que la copia de la RAM siga «completando justo» lo que le falta a la GPU.</li>
+</ul>
+<h3>Síncrono o asíncrono: por qué el llenado al arrancar tiene que bloquear</h3>
+<p>El llenado normal es asíncrono, porque la copia y el kernel que la lee después están en el mismo stream y el orden se cumple de forma natural. Al llenar según la lista en el arranque no existe esa garantía: los datos de origen están en memoria normal y la verificación byte a byte lee de vuelta en otro stream «heredado», y entre el stream heredado y uno no bloqueante no hay relación de orden. La primera versión usó llenado asíncrono y la verificación informó de que «la ranura 0 ya difiere del original en el byte 0», y se negó a ejecutar. El comentario dice que la verificación cumplía con su deber. Así nació una versión específica de llenado bloqueante. <span class="ev ev-code">Hecho de código</span>[S05]</p>
+<h3>La lista se puede guardar</h3>
+<p>La documentación de upstream dice que, desde el motor 0.1.36, hay una función opcional: guardar como lista nueva el ranking que aprendió la caché adaptativa, para empezar desde ahí en el siguiente arranque. La regla de orden es: primero los que están ahora en la VRAM, luego por el calor acumulado en esta ejecución y por último por la posición en la lista original. <span class="ev ev-code">Hecho de código</span>[S05] Al escribir el archivo, primero se escribe en uno temporal y al terminar se renombra encima, así que si el proceso se cae no queda un archivo a medias. <span class="ev ev-code">Hecho de código</span>[S05]</p>
+<h3>Cómo comparar políticas de forma justa</h3>
+<p>Al informar de una política de caché, hay que escribir al menos: la capacidad total de la caché y el reparto por capa, el denominador de la tasa de aciertos, si fue arranque en frío o ya calentado, de dónde sale el registro de accesos, si la lista y la evaluación usaron registros distintos, cuánto tarda en recuperarse tras un cambio de tema y cuántos bytes entran y salen por segundo. Con solo «tasa de aciertos del 70 %», ni se puede reproducir ni sirve para estimar un presupuesto de VRAM.</p>
+</details>

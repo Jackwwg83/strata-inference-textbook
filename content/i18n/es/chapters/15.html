@@ -1,0 +1,253 @@
+<div class="hook"><span class="eyebrow">Una medición extraña</span>
+<p>Un comentario en el código fuente de Strata registra algo raro. Un programa diminuto de la GPU, llamado <code>gdn_gate</code>, procesa solo 48 números, pero cada ejecución tarda 28 microsegundos. El veredicto del autor: un kernel tan pequeño no puede tardar de verdad 28 microsegundos. <span class="ev ev-code">Hecho de código</span>[S13]</p>
+<p>La GPU termina 48 números en un parpadeo. Entonces, ¿a dónde se va el tiempo sobrante? La respuesta es el «registro»: cada vez que la CPU pide a la GPU que ejecute un programa pequeño, primero tiene que hacer un trámite de envío. Si los envías de uno en uno, un solo token necesita unos dos mil envíos. Este capítulo explica cómo reparte el trabajo la GPU, de dónde sale la cuota de registro y cómo Strata reduce esos dos mil registros a unas pocas decenas, o incluso a uno.</p></div>
+<p class="tldr"><strong>En una línea:</strong> un programa pequeño de la GPU se llama kernel, y cada lanzamiento tiene un costo fijo de decenas de microsegundos. Strata lo ahorra de dos formas: fusiona varios kernels en uno y graba todos los kernels de una capa como un CUDA Graph que se envía de una sola vez. El precio es que un grafo congela sus argumentos, así que la «posición», que cambia en cada paso, tiene que vivir en un bloque de VRAM con dirección fija.</p>
+
+<h2 id="sec-1">15.1 Cómo reparte el trabajo la GPU: hilos, bloques de hilos y warps</h2>
+<p>Imagina una enorme sala de corrección de exámenes. Hay decenas de miles de hojas y cada profesor corrige una. Los profesores se reparten en muchas aulas, y dentro de cada aula se sientan en filas de 32. Toda la fila obedece la misma orden: «pasa la página», «mira la pregunta uno», «pon la nota». La orden es la misma, pero la hoja que tiene cada uno es distinta.</p>
+<p>Así trabaja una GPU. Un programa pequeño que la CPU entrega a la GPU se llama <dfn>kernel</dfn>. Al lanzar un kernel una vez, la GPU arranca miles y miles de <dfn>hilos</dfn>. Todos los hilos ejecutan el mismo código; solo cambia el índice del dato que procesa cada uno. Primero, los hilos se agrupan en <dfn>bloques de hilos</dfn>. Los hilos de un bloque corren en la misma unidad de cómputo y pueden compartir un pequeño espacio de almacenamiento rápido. Dentro de un bloque, los hilos se alinean en grupos de 32 llamados <dfn>warps</dfn>: los 32 hilos de un warp ejecutan la misma instrucción al mismo tiempo. [R01] La figura 15-1 dibuja estos tres niveles juntos.</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="Figura 15-1: un lanzamiento de kernel crea una malla (grid), la malla se divide en bloques de hilos y cada 32 hilos de un bloque forman un warp">
+<defs><pattern id="c15-lane" width="9" height="12" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="7" height="12" rx="1"/></pattern></defs>
+<rect class="f-soft" fill="#e5f1df" x="10" y="8" width="380" height="96" rx="10"/>
+<text class="f-text" fill="#182f2b" x="22" y="28" font-size="13" font-weight="600">Un lanzamiento = una malla (grid)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="17" y="40" width="88" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="61" y="62" font-size="12" text-anchor="middle">Bloque 0</text>
+<text class="f-muted" fill="#5c6d66" x="61" y="80" font-size="12" text-anchor="middle">muchos hilos</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="40" width="88" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="154" y="62" font-size="12" text-anchor="middle">Bloque 1</text>
+<text class="f-muted" fill="#5c6d66" x="154" y="80" font-size="12" text-anchor="middle">muchos hilos</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="203" y="40" width="88" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="247" y="62" font-size="12" text-anchor="middle">Bloque 2</text>
+<text class="f-muted" fill="#5c6d66" x="247" y="80" font-size="12" text-anchor="middle">muchos hilos</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="296" y="40" width="88" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="340" y="62" font-size="12" text-anchor="middle">…</text>
+<text class="f-muted" fill="#5c6d66" x="340" y="80" font-size="12" text-anchor="middle">más bloques</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M61 92V112H200V122"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="124" width="380" height="118" rx="10"/>
+<text class="f-text" fill="#182f2b" x="22" y="144" font-size="13" font-weight="600">Un bloque de hilos: hasta 1.024 hilos</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="167" font-size="12">warp 0</text>
+<rect fill="url(#c15-lane)" x="80" y="157" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="22" y="187" font-size="12">warp 1</text>
+<rect fill="url(#c15-lane)" x="80" y="177" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="22" y="207" font-size="12">warp 2</text>
+<rect fill="url(#c15-lane)" x="80" y="197" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="224" y="232" font-size="12" text-anchor="middle">… cada fila de 32 celdas = 32 hilos</text>
+<text class="f-text" fill="#182f2b" x="200" y="262" font-size="12" text-anchor="middle">warp: 32 hilos que ejecutan la misma instrucción</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="282" font-size="12" text-anchor="middle">Cada hilo usa su índice para elegir sus datos</text>
+</svg><figcaption>Figura 15-1　Los tres niveles de trabajo de la GPU. Un lanzamiento crea una malla, la malla se divide en bloques de hilos y cada 32 hilos de un bloque forman un warp que obedece la misma orden.</figcaption></figure>
+<p>Strata está lleno de este patrón. Por ejemplo, el paginado de la caché KV del capítulo 17: el código dice que «usa un bloque de 1.024 hilos para recorrer los índices seleccionados». <span class="ev ev-code">Hecho de código</span> Otro ejemplo es la recurrencia de las capas GDN: un comentario del código observa que cada línea de la fórmula toca solo una columna del estado, y que las columnas no dependen entre sí, así que «un hilo puede encargarse de una columna entera, y ningún hilo espera a otro durante el paso». [S17]</p>
+<aside class="primer" id="c15-gpu-model">
+<h3>El modelo de programación de la GPU: hilos, bloques de hilos y warps</h3>
+<p>Intuición: una CPU se parece a unos pocos profesores todoterreno, cada uno capaz de manejar ramas y decisiones complejas. Una GPU se parece a miles de ayudantes que solo hacen cosas simples cuando se les ordena, pero son muchísimos. Para que una GPU sea rápida, hay que partir el trabajo en miles y miles de tareas pequeñas que <strong>no dependan unas de otras</strong>.</p>
+<p>Definición: el programador escribe una función kernel y, al lanzarla, indica «cuántos bloques de hilos, y cuántos hilos por bloque». En CUDA se escribe <code>vecAdd&lt;&lt;&lt;4, 256&gt;&gt;&gt;(A, B, C)</code>: 4 bloques de 256 hilos, 1.024 hilos en total, y cada uno usa <code>threadIdx.x + blockDim.x × blockIdx.x</code> para calcular de qué elemento es responsable. En las GPU de NVIDIA actuales, un bloque de hilos tiene como máximo 1.024 hilos, y los hilos de un bloque forman warps de 32. [R01]</p>
+<p>Un dato concreto: cuando un warp lee la VRAM y sus 32 hilos leen direcciones <strong>vecinas</strong>, el hardware puede fundirlas en muy pocas transacciones de memoria. Esto se llama <dfn>acceso coalescido</dfn>. Si las direcciones están muy separadas, la lectura se parte en muchas transacciones, y cada una aprovecha solo una pequeña parte de los bytes que trae. El ejemplo de Strata de la sección siguiente muestra qué tan grande es la diferencia.</p>
+<p>Relación con el capítulo: un kernel es la unidad de trabajo más pequeña que la CPU entrega a la GPU. Cuanto más pequeños y numerosos son los kernels, más se nota el costo de la «entrega» en sí.</p>
+<p class="further">Para seguir leyendo: <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html" target="_blank" rel="noopener noreferrer">NVIDIA CUDA Programming Guide: Programming model</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/intro-to-cuda-cpp.html" target="_blank" rel="noopener noreferrer">NVIDIA: Intro to CUDA C++ (con el ejemplo vecAdd)</a> · <a href="https://es.wikipedia.org/wiki/CUDA" target="_blank" rel="noopener noreferrer">Wikipedia: CUDA</a> · <a href="https://en.wikipedia.org/wiki/Thread_block_(CUDA_programming)" target="_blank" rel="noopener noreferrer">Wikipedia: Thread block</a> (en inglés)</p>
+</aside>
+<p class="bridge"><strong>Si estudiaste informática:</strong> un warp es la unidad de ejecución de SIMT (una instrucción, varios hilos). Una instrucción mueve 32 hilos, como una instrucción vectorial SIMD; pero cada hilo tiene sus propios registros y su propio contador de programa y puede tomar una rama distinta, a cambio de que los dos lados de la rama se ejecuten uno tras otro. El capítulo 13 explica en detalle la diferencia entre SIMD y SIMT.</p>
+
+<h2 id="sec-2">15.2 Hilos vecinos leen direcciones vecinas: la disposición de los datos importa</h2>
+<p>Con las mismas matemáticas, una disposición de datos distinta puede cambiar la velocidad varias veces. La figura 15-2 compara dos formas de leer.</p>
+<figure class="fig"><svg viewBox="0 0 400 324" role="img" aria-label="Figura 15-2: cuando hilos vecinos leen direcciones vecinas, una transacción es útil por completo; cuando los hilos vecinos están muy separados, cada lectura de 32 bytes aprovecha solo 4 bytes">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">Coalescido: hilos vecinos, direcciones vecinas</text>
+<circle class="f-soft" fill="#e5f1df" cx="44" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="44" y="46" font-size="12" text-anchor="middle">0</text>
+<circle class="f-soft" fill="#e5f1df" cx="88" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="88" y="46" font-size="12" text-anchor="middle">1</text>
+<circle class="f-soft" fill="#e5f1df" cx="132" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="132" y="46" font-size="12" text-anchor="middle">2</text>
+<circle class="f-soft" fill="#e5f1df" cx="176" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="176" y="46" font-size="12" text-anchor="middle">3</text>
+<circle class="f-soft" fill="#e5f1df" cx="220" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="220" y="46" font-size="12" text-anchor="middle">4</text>
+<circle class="f-soft" fill="#e5f1df" cx="264" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="264" y="46" font-size="12" text-anchor="middle">5</text>
+<circle class="f-soft" fill="#e5f1df" cx="308" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="308" y="46" font-size="12" text-anchor="middle">6</text>
+<circle class="f-soft" fill="#e5f1df" cx="352" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="352" y="46" font-size="12" text-anchor="middle">7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 52L40 84M88 52L66 84M132 52L92 84M176 52L118 84M220 52L144 84M264 52L170 84M308 52L196 84M352 52L222 84"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="86" width="224" height="22" rx="3"/>
+<text class="f-on" fill="#ffffff" x="132" y="101" font-size="12" text-anchor="middle">32 bytes contiguos, útiles</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="132" font-size="12">8 hilos × 4 bytes: una transacción de memoria</text>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="13" font-weight="600">Con salto: hilos vecinos, direcciones lejanas</text>
+<circle class="f-soft" fill="#e5f1df" cx="44" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="44" y="194" font-size="12" text-anchor="middle">0</text>
+<circle class="f-soft" fill="#e5f1df" cx="88" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="88" y="194" font-size="12" text-anchor="middle">1</text>
+<circle class="f-soft" fill="#e5f1df" cx="132" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="132" y="194" font-size="12" text-anchor="middle">2</text>
+<circle class="f-soft" fill="#e5f1df" cx="176" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="176" y="194" font-size="12" text-anchor="middle">3</text>
+<circle class="f-soft" fill="#e5f1df" cx="220" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="220" y="194" font-size="12" text-anchor="middle">4</text>
+<circle class="f-soft" fill="#e5f1df" cx="264" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="264" y="194" font-size="12" text-anchor="middle">5</text>
+<circle class="f-soft" fill="#e5f1df" cx="308" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="308" y="194" font-size="12" text-anchor="middle">6</text>
+<circle class="f-soft" fill="#e5f1df" cx="352" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="352" y="194" font-size="12" text-anchor="middle">7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 200L28 232M88 200L72 232M132 200L116 232M176 200L160 232M220 200L204 232M264 200L248 232M308 200L292 232M352 200L336 232"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="26" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="26" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="70" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="114" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="114" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="158" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="158" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="202" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="246" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="246" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="290" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="334" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="334" y="234" width="5" height="22"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="280" font-size="12">8 transacciones × 32 B; solo sirven los 4 B marcados</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="306" font-size="12">GDN antiguo de Strata: hilos a ~24,5 KB</text>
+</svg><figcaption>Figura 15-2　Leer los mismos 8 números con dos disposiciones mueve 8 veces más datos en una que en otra. Cuando los hilos de un warp leen direcciones vecinas, el hardware las funde en una transacción.</figcaption></figure>
+<p>Las capas GDN de Strata lo aprendieron por las malas. Un comentario del kernel fusionado lo explica: el código original hacía que un warp se encargara de una columna del estado, con 32 hilos bajando por las 128 filas. Pero el estado se guarda como «fila, cabeza, columna», así que dos hilos vecinos leían datos separados por unos 24,5 KB. Como resultado, cada sector de 32 bytes que se traía entregaba solo 4 bytes útiles, y cada capa tardaba 47,6 microsegundos solo en mover 6,3 MB de estado. <span class="ev ev-code">Hecho de código</span></p>
+<p>Tras la reescritura, un bloque de hilos se encarga de una cabeza entera, y sus 512 hilos se disponen como «grupo de filas, columna». Las 128 columnas de una fila forman justo una lectura contigua de 512 bytes. <span class="ev ev-code">Hecho de código</span> La idea es la misma de la figura 15-2: que los hilos vecinos lean direcciones vecinas. El kernel básico de GDN sigue la misma regla: el estado se guarda como (i, h, j) con j cambiando más rápido, así que, con i fija, un warp que lee a lo largo de j toca memoria contigua. [S17]</p>
+<p>La disposición de los datos es una elección «gratis»: el estado es un búfer de ejecución, no son pesos del modelo, así que puedes ordenarlo como quieras. Pero el código avisa de que las dos disposiciones indexan los mismos tres números. Si quien lee y quien escribe no coinciden en la disposición, el programa sigue corriendo y los resultados salen mal en silencio. [S17]</p>
+
+<h2 id="sec-3">15.3 Cada lanzamiento de kernel paga una «cuota de registro»</h2>
+<p>Volvamos a la medición extraña del principio. Para que la CPU haga correr un kernel en la GPU, pasa por el driver: revisa los argumentos, empaqueta el comando y lo pone en la cola de envío. Este papeleo se ejecuta en la CPU y toma tiempo. Se llama <dfn>sobrecarga de lanzamiento</dfn> (launch overhead). Si el kernel calcula solo unos microsegundos y el papeleo tarda diez o veinte, la GPU termina un kernel y se queda ociosa esperando el siguiente. La figura 15-3 dibuja esa «espera».</p>
+<div class="viz" data-viz="kernel-launch"><figure class="fig"><svg viewBox="0 0 400 264" role="img" aria-label="Figura 15-3: 8 kernels pequeños enviados de tres maneras. Uno por uno tarda 165 microsegundos, fusionados de dos en dos 90 microsegundos, CUDA Graph 60 microsegundos">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">Uno por uno</text>
+<text class="f-text" fill="#182f2b" x="390" y="18" font-size="12" text-anchor="end">165 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="37" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="26" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="116.4" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="152.7" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="189.1" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="225.5" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="261.8" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="298.2" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="334.5" y="27" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="57" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="46" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="152.7" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="189.1" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="225.5" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="261.8" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="298.2" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="334.5" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="370.9" y="47" width="8.6" height="12"/>
+<text class="f-text" fill="#182f2b" x="10" y="92" font-size="13" font-weight="600">Fusionados de dos en dos</text>
+<text class="f-text" fill="#182f2b" x="390" y="92" font-size="12" text-anchor="end">90 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="111" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="100" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="116.4" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="152.7" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="189.1" y="101" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="131" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="120" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="152.7" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="189.1" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="225.5" y="121" width="17.7" height="12"/>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="13" font-weight="600">CUDA Graph</text>
+<text class="f-text" fill="#182f2b" x="390" y="166" font-size="12" text-anchor="end">60 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="185" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="174" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="175" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="205" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="194" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="195" width="72.7" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">Boceto: 8 kernels, cada uno calcula 5 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="254" font-size="12">Cada envío tarda 20 µs (las barras marcadas)</text>
+</svg><figcaption>Figura 15-3　Los kernels pequeños pasan el tiempo esperando el envío. Lanzados uno por uno, la fila de la GPU es casi todo huecos; la fusión reduce el número de envíos; CUDA Graph envía una sola vez y los nodos corren uno tras otro. Los números son supuestos didácticos.</figcaption></figure></div>
+<p>Esto no es hipotético. Un comentario de Strata lo afirma sin rodeos: «este motor está limitado por el lanzamiento, no por el ancho de banda». Cada kernel de las capas GDN midió unos 0,028 ms, incluso <code>gdn_gate</code>, que procesa solo 48 números; ese es justo el costo de un lanzamiento normal en esa máquina. Una capa GDN hace unos 19 lanzamientos, y un bloque de capa completo unos 45. <span class="ev ev-code">Hecho de código</span>[S13] El comentario no dice qué GPU ni qué versión de driver se usó, así que toma los números siguientes solo como orden de magnitud.</p>
+<p>Hagamos la cuenta. Otro comentario dice que, lanzando kernel por kernel, un token necesita unos 2.000 lanzamientos, y cada llamada al driver midió entre 10 y 22 microsegundos. <span class="ev ev-code">Hecho de código</span> Solo el «registro» cuesta a cada token entre 2.000 × 10 µs = 20 ms y 2.000 × 22 µs ≈ 44 ms. En velocidad, aunque la GPU no calculara nada, obtendrías como máximo entre 23 y 50 tokens por segundo. <span class="ev ev-est">Estimación didáctica</span></p>
+<aside class="primer" id="c15-launch-fusion">
+<h3>Sobrecarga de lanzamiento y fusión de kernels</h3>
+<p>Intuición: en un hospital haces cola para registrarte. Si cada análisis pequeño exigiera un registro nuevo, la mañana entera se iría en la ventanilla. Hay dos soluciones: juntar varios análisis en uno (<dfn>fusión de kernels</dfn>), o hacer que el médico escriba de una vez todo el conjunto de órdenes y que la enfermera recorra la lista (<dfn>CUDA Graph</dfn>).</p>
+<p>Definición: la sobrecarga de lanzamiento es el costo fijo de que la CPU prepare y envíe un kernel, y casi no depende de cuánto calcula el kernel. Supón que un kernel calcula w microsegundos y un envío tarda L microsegundos. Si envías n kernels uno por uno: con w &lt; L, el total es de unos n × L + w y la GPU pasa casi todo el tiempo esperando; con w ≥ L, el total es de unos L + n × w y los envíos quedan ocultos detrás del cálculo. <span class="ev ev-est">Estimación didáctica</span></p>
+<p>La fusión hace más que ahorrar registros. Cuando varios operadores se vuelven un solo kernel, los resultados intermedios pueden quedarse en registros o en almacenamiento dentro del chip, en vez de escribirse de vuelta en la VRAM y leerse otra vez. El precio es un kernel más complejo, que puede usar más registros y dejar que corran menos hilos a la vez en la GPU. CUDA Graph, en cambio, no cambia los kernels: graba una cadena de operaciones y sus dependencias, y luego envía y repite toda la cadena de una vez. Lo que ahorra es el costo de enviar desde la CPU. [R01]</p>
+<p>Relación con el capítulo: Strata usa las dos. La sección siguiente mira los números reales.</p>
+<p class="further">Para seguir leyendo: <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html" target="_blank" rel="noopener noreferrer">NVIDIA CUDA Programming Guide: CUDA Graphs</a> · <a href="https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/" target="_blank" rel="noopener noreferrer">Blog de PyTorch: Accelerating PyTorch with CUDA Graphs</a> (en inglés) · <a href="https://en.wikipedia.org/wiki/Loop_fission_and_fusion" target="_blank" rel="noopener noreferrer">Wikipedia: Loop fusion</a> (en inglés; la misma idea en los compiladores)</p>
+</aside>
+
+<h2 id="sec-4">15.4 Dos formas de ahorrar: fusión y CUDA Graph</h2>
+<p>La figura 15-4 pone las dos lado a lado: la fusión cambia lo que corre en la GPU, y un grafo cambia cómo envía la CPU.</p>
+<figure class="fig"><svg viewBox="0 0 400 334" role="img" aria-label="Figura 15-4: la fusión escribe tres kernels como uno y deja los resultados intermedios en el chip; CUDA Graph convierte cinco envíos en uno, y los nodos siguen siendo los cinco kernels originales">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">Fusión de kernels: varios kernels en uno</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="65" y="54" font-size="12" text-anchor="middle">Conv + SiLU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="54" font-size="12" text-anchor="middle">Norma L2 (q)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="335" y="54" font-size="12" text-anchor="middle">Norma L2 (k)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M120 49H143M255 49H278"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="86" font-size="12">3 lanzamientos; intermedios van y vuelven a VRAM</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 92V104"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="106" width="380" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="128" font-size="12" text-anchor="middle">1 kernel: conv + SiLU + dos normas L2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="160" font-size="12">1 lanzamiento, todo en el chip (fused_gdn_conv_l2)</text>
+<text class="f-text" fill="#182f2b" x="10" y="192" font-size="13" font-weight="600">CUDA Graph: grabar una vez, repetir muchas</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="202" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="102" y="222" font-size="12" text-anchor="middle">Sin grafo: uno por uno</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="232" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="243" font-size="12" text-anchor="middle">enviar kernel 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="250" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="261" font-size="12" text-anchor="middle">enviar kernel 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="268" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="279" font-size="12" text-anchor="middle">enviar kernel 3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="286" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="297" font-size="12" text-anchor="middle">enviar kernel 4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="304" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="315" font-size="12" text-anchor="middle">enviar kernel 5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="202" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="297" y="222" font-size="12" text-anchor="middle">Grafo: un solo envío</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M233 266H361"/>
+<circle class="f-accent" fill="#136d5a" cx="233" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="265" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="297" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="329" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="361" cy="266" r="10"/>
+<text class="f-muted" fill="#5c6d66" x="297" y="300" font-size="12" text-anchor="middle">Los mismos 5 kernels</text>
+<text class="f-muted" fill="#5c6d66" x="297" y="316" font-size="12" text-anchor="middle">Ahorra envíos de la CPU</text>
+</svg><figcaption>Figura 15-4　La fusión cambia lo que corre en la GPU: varios operadores se vuelven un kernel y los resultados intermedios nunca tocan la VRAM. Un grafo cambia cómo envía la CPU: toda la cadena sale de una vez, y cada nodo sigue siendo su propio kernel. Se pueden combinar.</figcaption></figure>
+<p><strong>Fusión.</strong> Strata tiene un conjunto de kernels cuyos nombres de archivo empiezan por <code>fused_</code>. Por ejemplo, el kernel único <code>fused_gdn_conv_l2</code> reemplaza tres lanzamientos: la antigua «convolución más SiLU» y dos normas L2. <code>fused_gdn_ab</code> reemplaza dos productos matriz-vector y dos kernels elemento a elemento. <span class="ev ev-code">Hecho de código</span> Leer el residual híbrido antes necesitaba seis kernels cada vez, 96 veces por token; tras la fusión necesita dos kernels. <span class="ev ev-code">Hecho de código</span></p>
+<p><strong>CUDA Graph.</strong> Strata graba los kernels de cada capa como un grafo. Un comentario da la medición: el mismo bloque de capa de 43 nodos tarda 2,393 ms lanzado uno por uno, pero solo 1,585 ms como repetición de un grafo grabado. Es 1,51 veces más rápido, y el ahorro es «todo sobrecarga de lanzamiento». <span class="ev ev-code">Hecho de código</span>[S13] Otro comentario lo dice aún más claro: la repetición hace exactamente la misma aritmética que lanzar uno por uno; la única diferencia es que «unos 2.000 lanzamientos de kernel se convierten en 48 lanzamientos de grafo». <span class="ev ev-code">Hecho de código</span></p>
+<p>¿Se puede ir más lejos? Sí. Con el modelo de driver de pantalla de Windows, cada lanzamiento de grafo también cuesta entre 0,3 y 0,4 ms. El bucle por capa lanza 96 grafos por token, y un token midió 48,6 ms, de los cuales los kernels reales en la GPU tomaron solo 12 ms. Por eso Strata escribió otra versión, «un grafo por token», que mete las 48 capas en un solo grafo. <span class="ev ev-code">Hecho de código</span> La figura 15-5 alinea las tres etapas.</p>
+<figure class="fig"><svg viewBox="0 0 400 202" role="img" aria-label="Figura 15-5: envíos por token generado, desde unos 2000 lanzamientos de kernel, a entre 48 y 96 lanzamientos de grafo, hasta 1 grafo para todo el token">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Envíos de CPU a GPU por token (barras en escala log)</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">Lanzar kernels uno por uno</text>
+<text class="f-text" fill="#182f2b" x="390" y="44" font-size="12" text-anchor="end">unos 2.000</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="52" width="344" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="10" y="94" font-size="12">Cada capa como un grafo (1–2 por capa)</text>
+<text class="f-text" fill="#182f2b" x="390" y="94" font-size="12" text-anchor="end">48–96</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="102" width="239" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="10" y="144" font-size="12">Todo el token como un solo grafo</text>
+<text class="f-text" fill="#182f2b" x="390" y="144" font-size="12" text-anchor="end">1</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="152" width="80" height="16" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="12">De comentarios de session.hpp; barras en escala log</text>
+</svg><figcaption>Figura 15-5　Strata reduce los envíos paso a paso: primero un grafo por capa, luego todo el token como un solo grafo. Cada envío que se ahorra elimina un costo fijo de decenas a cientos de microsegundos.</figcaption></figure>
+<p>¿Por qué no grabar todo el token desde el principio? Porque a mitad de cada capa la GPU tiene que ceder el paso al pool de expertos de la CPU: solo cuando la GPU llega al paso de enrutamiento sabe la CPU qué expertos calcular. Strata usó al principio «una capa» como unidad del grafo justamente para que el host pudiera intervenir entre capas, y para que el pool de expertos de la CPU empezara a trabajar mientras la GPU ejecutaba el tramo siguiente. [S13] El grafo de todo el token usa, en cambio, un kernel de un solo hilo en la GPU que espera, en el dispositivo, a que el host active una bandera, de modo que el host ya no llama al driver. <span class="ev ev-code">Hecho de código</span></p>
+
+<h2 id="sec-5">15.5 Un grafo congela sus argumentos: la posición congelada</h2>
+<p>CUDA Graph tiene una manía: durante la captura, los <strong>argumentos</strong> de un kernel se copian tal cual dentro del grafo, y cada repetición posterior usa esa copia. Strata escribió un pequeño experimento solo para confirmarlo: al repetirse, el grafo vuelve a leer los datos de sus búferes de entrada, pero no vuelve a leer los argumentos del kernel. <span class="ev ev-code">Hecho de código</span></p>
+<p>El problema es que algunos argumentos cambian con cada token. El clásico es la <strong>posición</strong>: qué número de token es este. Si la posición se pasa como argumento al kernel que escribe en la caché KV, vale 0 cuando se captura el grafo, y sigue valiendo 0 en cada repetición posterior. El simulador siguiente lo hace más lento. Primero elige «capturado por valor» y luego pulsa <strong>Paso</strong> durante unos cuantos tokens:</p>
+<div class="viz" data-viz="graph-freeze"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figura 15-6: cuando la posición se captura en el grafo por valor, los 4 tokens escriben en la posición 0; cuando el kernel lee la posición del búfer step, cada token escribe en su propia ranura">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">Mal: la posición se captura como argumento</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="28" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="53" font-size="13" text-anchor="middle">t3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="58" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="106" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="298" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="346" y="28" width="44" height="40" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="32" y="84" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="80" y="84" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="128" y="84" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="176" y="84" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="224" y="84" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="272" y="84" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="320" y="84" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="368" y="84" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="104" font-size="12">t0–t3 escriben en la ranura 0; atención ve 1</text>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="13" font-weight="600">Bien: el kernel lee pos del búfer step</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="169" font-size="13" text-anchor="middle">t0</text>
+<rect class="f-accent" fill="#136d5a" x="58" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="80" y="169" font-size="13" text-anchor="middle">t1</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="128" y="169" font-size="13" text-anchor="middle">t2</text>
+<rect class="f-accent" fill="#136d5a" x="154" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="176" y="169" font-size="13" text-anchor="middle">t3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="298" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="346" y="144" width="44" height="40" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="32" y="200" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="80" y="200" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="128" y="200" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="176" y="200" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="224" y="200" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="272" y="200" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="320" y="200" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="368" y="200" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="224" font-size="12">Búfer step: misma dirección, contenido nuevo</text>
+</svg><figcaption>Figura 15-6　Un grafo, dos formas de escribirlo. Cuando la posición se congela como argumento, todos los tokens se amontonan en la ranura 0. Cuando la posición vive en un búfer de VRAM con dirección fija, el grafo recuerda la dirección y el host reescribe el contenido en cada paso.</figcaption></figure></div>
+<p><code>qsa.hpp</code>, en Strata, detalla el daño que hace este error. Una vez congelada la posición, cada token escribe en la ranura 0, la puntuación y la selección miran solo 1 ranura, y la atención solo ve una ranura de historial. El comentario lo llama «peor que un fallo»: la salida son números finitos que parecen razonables, y el síntoma es idéntico a «el modelo no sabe usar su contexto». Todos sospecharían de la caché KV, del algoritmo de selección o de los pesos, y nadie pensaría en el grafo. <span class="ev ev-code">Hecho de código</span>[S18]</p>
+<p>Su arreglo es «un bloque de VRAM, no seis firmas de función cambiadas»: poner los cuatro números que cambian en cada paso en un diminuto <dfn>búfer step</dfn>:</p>
+<ul>
+<li><code>step[0] = pos</code>: la posición del token nuevo;</li>
+<li><code>step[1] = n_kv = pos + 1</code>: cuántas ranuras tiene la caché;</li>
+<li><code>step[2] = n_bid</code>: cuántos bloques de 4 ranuras ya están llenos;</li>
+<li><code>step[3] = width</code>: cuántas ranuras selecciona este paso, igual a min(n_kv, 2051). [S18]</li>
+</ul>
+<p>Cada kernel lee de este bloque de VRAM los números que necesita, las listas de argumentos quedan exactamente iguales de un token al siguiente, y todo el camino QSA puede capturarse como un grafo. En cada paso, el host hace una sola copia pequeña para reescribir el contenido de ese bloque de VRAM. <span class="ev ev-code">Hecho de código</span>[S18] Los cuatro números dependen unos de otros. Guardarlos en un solo lugar, calculados por un solo trozo de código, evita el error de «cambié pos y olvidé n_kv».</p>
+<p class="bridge"><strong>Si estudiaste informática:</strong> esta es exactamente la diferencia entre «paso por valor» y «paso por puntero» en C. Si el grafo graba un valor, es ese valor para siempre; si graba un puntero, cada desreferencia lee el contenido nuevo. La trampa es que la memoria a la que apunta el puntero debe seguir siendo válida todo el tiempo, y el grafo no puede comprobarlo por sí solo.</p>
+<p>El mismo razonamiento vale para el muestreo. Parámetros como la temperatura y top-p pueden ser distintos en cada solicitud, así que Strata mantiene el muestreo <strong>fuera</strong> del grafo capturado; si no, esos parámetros quedarían «cocidos para siempre dentro del grafo». <span class="ev ev-code">Hecho de código</span>[S08]</p>
+
+<h2 id="sec-6">15.6 Manos a la obra: encuentra tú mismo el cuello de botella y la congelación</h2>
+<p>Las dos figuras interactivas de este capítulo funcionan como pequeños experimentos.</p>
+<ol>
+<li><strong>Línea de tiempo de la sobrecarga de lanzamiento</strong> (figura 15-3): primero reprodúcela con los valores por defecto y anota el tiempo total y la fracción de ocupación de la GPU en las tres formas. Luego arrastra despacio el tiempo de cálculo w de cada kernel de 5 µs a 40 µs, y busca el punto donde «el grafo ya no es claramente más rápido». Verás que está más o menos donde w se acerca a L: cuando un kernel dura más que un envío, el costo del envío se oculta solo.</li>
+<li><strong>La posición congelada</strong> (figura 15-6): ejecuta 4 tokens con cada forma de escribirlo. Compara las ranuras de la caché KV y «cuántas ranuras puede ver la atención». Luego piensa: si solo comprobaras «¿el programa dio algún error y la salida es un número finito?», ¿podrías detectar la versión incorrecta?</li>
+</ol>
+<p>Para comprobarlo en una GPU real, escribe un grafo diminuto que solo haga <code>state[pos] = token</code>, repítelo con pos = 0, 1 y 2, y verifica que se escribieron las tres posiciones. Mirar solo un valor de retorno final de «éxito» no basta.</p>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>Una GPU trabaja con miles y miles de hilos: los hilos se agrupan en bloques de hilos, y cada 32 hilos de un bloque forman un warp. Haz que los hilos vecinos lean direcciones vecinas y no se desperdicia ningún movimiento de datos.</li>
+<li>Cada lanzamiento de kernel tiene una sobrecarga fija. Strata necesitaba originalmente unos 2.000 lanzamientos por token. Reduce el número de kernels con la fusión, y usa CUDA Graph para bajar los envíos a uno por capa y luego a uno por token.</li>
+<li>Un grafo congela los argumentos del kernel. Los valores que cambian en cada paso (la posición, n_kv, el ancho de selección) deben vivir en un búfer de VRAM con dirección fija que el kernel lee cada vez.</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «CUDA Graph junta muchos kernels en un kernel grande».</strong></p>
+<p>No. Un grafo solo graba una cadena de operaciones y sus dependencias. Al repetirse, cada nodo sigue siendo un kernel independiente, y los resultados intermedios siguen escribiéndose de vuelta en la VRAM. Lo que ahorra es el costo de enviar desde la CPU. Lo que de verdad junta el cálculo en un kernel es la fusión de kernels, y eso exige reescribir el kernel. Las dos resuelven problemas distintos, y Strata usa ambas. [R01]</p></div>
+
+<details class="deep"><summary>Más a fondo: el costo de la fusión, tres deberes de la captura de grafos y cómo verificar</summary>
+<h3>La fusión no es gratis</h3>
+<p>Escribir varios operadores en un solo kernel significa menos lanzamientos y menos escrituras y lecturas de resultados intermedios. El precio: dentro del kernel hay más variables vivas a la vez, así que cada hilo necesita más registros. El total de registros es fijo, así que cuanto más toma cada hilo, menos hilos pueden residir a la vez, y la GPU tiene menos «hilos de reserva» para ocultar las esperas de memoria. Esto se llama menor ocupación (occupancy). El código también es más complejo y más difícil de probar. Por eso la fusión debe decidirse midiendo. Por ejemplo, la lectura fusionada del residual híbrido de Strata tiene varias variantes. En cada tarjeta, el motor primero las ejecuta con pesos aleatorios y adopta solo la variante más nueva que coincide bit a bit con la de referencia. <span class="ev ev-code">Hecho de código</span></p>
+<p>Un ejemplo didáctico: una capa con 20 lanzamientos de 5 µs de sobrecarga en el host cada uno gasta unos 100 µs solo en lanzamientos. Para operadores pequeños que calculan apenas unos microsegundos, es mucho; si cada kernel calcula varios milisegundos, esos mismos 100 µs son un redondeo. Todos son valores supuestos, pensados para juzgar «¿vale la pena optimizar?», no mediciones. <span class="ev ev-est">Estimación didáctica</span></p>
+<h3>Tres deberes de la captura de grafos</h3>
+<p><code>graph.hpp</code> deja por escrito tres cosas como condiciones previas de la interfaz, y cada una viene de un pequeño experimento específico. <span class="ev ev-code">Hecho de código</span></p>
+<ol>
+<li><strong>Esperar debe llamar al driver, no solo leer memoria.</strong> Con el modelo de driver de pantalla de Windows, el envío de comandos se agrupa por lotes. Un bucle de espera activa que solo leía memoria, sin llamar al driver, dio 5.907.703 vueltas en 500 ms sin que el kernel llegara siquiera a empezar; los datos solo cambiaron cuando algún código llamó al driver. Por eso la espera se cambió para consultar un evento una y otra vez. Cada consulta cuesta unos 0,021 ms, y es una «consulta», no una «sincronización».</li>
+<li><strong>Un grafo vuelve a leer los búferes de entrada, no los argumentos del kernel.</strong> En 8 repeticiones, cada una con una entrada pinned nueva, los resultados siempre siguieron el ritmo; pero los argumentos se copian en los nodos durante la captura y no se leen nunca más. Todo valor que cambia en cada paso (posición, base de la tabla de páginas, ID de token) debe ser <strong>dato</strong> en la VRAM, no un argumento.</li>
+<li><strong>Las direcciones fijas son tarea de quien llama.</strong> El grafo guarda el grafo, no la memoria. Todo búfer que use el código capturado debe asignarse antes de la captura y no reasignarse nunca después.</li>
+</ol>
+<p>Vale la pena aprender dos defensas más. Una captura que da 0 nodos es un error inmediato, porque «un grafo que no hace nada» se repetiría en silencio para siempre, sin producir errores ni salida. Y si queda un error de CUDA dentro del cuerpo de la captura, la captura se abandona en vez de instanciar un grafo roto. <span class="ev ev-code">Hecho de código</span></p>
+<h3>No tomes un camino de ejecución por todo el motor</h3>
+<p>Strata tiene varios tipos de grafo a la vez: <code>SessionGraphs</code>, con uno o dos por capa (un tramo antes del enrutamiento y otro después de combinar los expertos) [S13]; el grafo multi-token de la ventana de verificación de la decodificación especulativa (capítulo 18) [S08]; el <code>TokenGraph</code> de todo el token; y los grafos de prefijo usados para medir tiempos etapa por etapa. Si un encabezado dice «un grafo por capa», no puedes concluir de ahí que el motor nunca captura un grafo más grande. El código fuente suele mantener lado a lado un camino de referencia, uno de depuración, uno rápido e implementaciones elegidas según la capacidad del dispositivo; el contexto de la llamada y las condiciones que activan un camino forman parte de cualquier conclusión. Es lo mismo que «una función con varias versiones especializadas» de un curso de compiladores.</p>
+<h3>Verificación: direcciones, valores y estado</h3>
+<p>Una optimización con grafos debe verificar al menos tres cosas: los valores que cambian en cada paso se actualizan bien en cada ronda; las direcciones capturadas siguen siendo válidas en todas las repeticiones; y el estado tras una repetición coincide con el del camino de referencia que no usa grafo. Una trampa típica de tiempo de vida: se libera un búfer al terminar una solicitud, pero se conserva el objeto grafo para la siguiente, y la repetición siguiente lee y escribe memoria liberada.</p>
+<p>Las pruebas también deben poder «ver» el error. Repetir el mismo prompt con la misma temperatura no prueba nada sobre si el cambio de parámetros funciona. Una forma mejor: fija los logits, ejecuta dos solicitudes seguidas, una voraz (greedy) y otra con temperatura alta (o con distintos números aleatorios fijos), y compara los parámetros realmente usados y los resultados con la implementación de referencia sin grafo. La segunda solicitud debe tomar una rama distinta de la primera y predecible.</p>
+<p>Solo el trabajo avanzado con GPU necesita un profiler: registrar el tiempo de lanzamiento, el tiempo de kernel, el uso de registros y el tiempo de repetición, y usar luego una comparación A/B de extremo a extremo para juzgar si una optimización local acortó de verdad la ruta crítica. Los comentarios de Strata contienen un contraejemplo: en una ronda, los tiempos por etapa medidos sin grafo salieron 4 veces más altos que el costo real del mismo trabajo ya capturado como grafo, y casi llevaron la optimización en la dirección equivocada. <span class="ev ev-code">Hecho de código</span></p>
+</details>

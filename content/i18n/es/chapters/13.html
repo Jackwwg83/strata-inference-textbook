@@ -1,0 +1,179 @@
+<div class="hook"><span class="eyebrow">Algo contraintuitivo</span>
+<p>Strata hace que la tarjeta gráfica y el procesador trabajen a la vez. Suena como contratar a dos obreros: debería ir mucho más rápido. Pero en los registros de desarrollo de upstream hay un caso así: recortaron el cálculo de expertos que la CPU hace por cada token de 18,2 milisegundos a 10,2, y la CPU de verdad trabajaba casi la mitad. ¿Resultado? El tiempo total para generar un token no se movió. <span class="ev ev-report">Informe upstream</span> (comentario de <code>include/strata/core/hit_hook.hpp</code>)</p>
+<p>¿Adónde fueron a parar esos 8 milisegundos? Este capítulo parte del carácter de la CPU y de la GPU, sigue con «quién espera a quién» y termina en una sola expresión: la ruta crítica.</p></div>
+<p class="tldr"><strong>En una línea:</strong> en calcular un experto, lo grande es leer bytes, así que la CPU calcula en el sitio los expertos que están en la RAM; dentro de una capa, los expertos que aciertan van a la GPU y los que fallan a la CPU, y ambos calculan a la vez; pero entre capas hay dependencia de datos y tienen que ir en cola, así que el trabajo de la CPU no se puede esconder y solo se puede reducir con la caché.</p>
+
+<h2 id="sec-1">13.1 Dos procesadores, dos caracteres</h2>
+<p>La CPU es como unos pocos maestros todoterreno; la GPU, como una nave con una cadena de montaje de miles de personas. Los maestros son pocos, pero cada uno puede resolver por su cuenta trabajos complejos que se deciden sobre la marcha; en la nave hay mucha gente, y lo que mejor se le da es que «todos hagan a la vez el mismo movimiento sencillo». La figura 13-1 es un esquema.</p>
+<aside class="primer" id="c13-cpu-gpu">
+<h3>CPU y GPU: SIMD y SIMT</h3>
+<p>La <dfn>CPU</dfn> (unidad central de procesamiento) tiene pocos núcleos: el Ryzen 5 7600 de la máquina de pruebas de upstream tiene 6. <span class="ev ev-report">Informe upstream</span>[S03] Cada núcleo es muy «listo»: tiene una caché grande, predice saltos y ejecuta fuera de orden, y sirve para programas con un flujo de control complejo. Además, la CPU puede calcular varios números a la vez: una instrucción <dfn>SIMD</dfn> (una instrucción, varios datos) hace la misma operación sobre una fila de números. Los registros de AVX-512 tienen 512 bits y en ellos caben 16 números de coma flotante de 32 bits, es decir, 16 «carriles». Los kernels de expertos de la CPU de Strata están escritos con AVX-512 o AVX2. <span class="ev ev-report">Informe upstream</span>[S02]</p>
+<p>La <dfn>GPU</dfn> (unidad de procesamiento gráfico) dedica la superficie del chip a una gran cantidad de unidades de cálculo sencillas; una tarjeta gráfica de juegos corriente tiene varios miles. Su modo de ejecución se llama <dfn>SIMT</dfn> (una instrucción, varios hilos): las GPU de NVIDIA agrupan los hilos de 32 en 32 (un warp), y todos los de un grupo ejecutan a la vez la misma instrucción, cada uno con sus datos. [R01] Además lleva una VRAM (memoria de video) con un ancho de banda mucho mayor: la VRAM de la RTX 5070 ronda los 672 GB/s, mientras que una RAM DDR5-5200 de doble canal ronda los 83 GB/s (el capítulo 1 los compara).</p>
+<p>Las dos tienen algo en común: solo rinden a fondo cuando <strong>hacen a la vez muchas copias independientes del mismo trabajo</strong>. Si cada paso tiene que esperar el resultado del anterior, por más carriles que haya hay que avanzar casilla a casilla. El simulador de abajo te lo deja ver con tus propios ojos.</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="Figura 13-1: una CPU son unos pocos núcleos potentes, cada uno con 16 carriles SIMD; una GPU son miles de unidades de cálculo sencillas que ejecutan la misma instrucción en grupos de 32">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="14" font-weight="600" text-anchor="middle">CPU: 6 núcleos potentes</text>
+<rect class="f-accent" fill="#136d5a" x="14" y="34" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="73" y="34" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="132" y="34" width="54" height="54" rx="6"/>
+<rect class="f-accent" fill="#136d5a" x="14" y="94" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="73" y="94" width="54" height="54" rx="6"/><rect class="f-accent" fill="#136d5a" x="132" y="94" width="54" height="54" rx="6"/>
+<text class="f-on" fill="#ffffff" x="41" y="66" font-size="13" text-anchor="middle">Núcleo</text><text class="f-on" fill="#ffffff" x="100" y="66" font-size="13" text-anchor="middle">Núcleo</text><text class="f-on" fill="#ffffff" x="159" y="66" font-size="13" text-anchor="middle">Núcleo</text>
+<text class="f-on" fill="#ffffff" x="41" y="126" font-size="13" text-anchor="middle">Núcleo</text><text class="f-on" fill="#ffffff" x="100" y="126" font-size="13" text-anchor="middle">Núcleo</text><text class="f-on" fill="#ffffff" x="159" y="126" font-size="13" text-anchor="middle">Núcleo</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="172" font-size="13" text-anchor="middle">Cada núcleo tiene</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="189" font-size="13" text-anchor="middle">16 carriles SIMD</text>
+<text class="f-text" fill="#182f2b" x="300" y="20" font-size="14" font-weight="600" text-anchor="middle">GPU: miles de unidades</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="214" y="34" width="172" height="114"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.8" d="M214 48H386M214 62H386M214 76H386M214 90H386M214 104H386M214 118H386M214 132H386M228 34V148M242 34V148M256 34V148M270 34V148M284 34V148M298 34V148M312 34V148M326 34V148M340 34V148M354 34V148M368 34V148"/>
+<rect class="f-accent" fill="#136d5a" x="214" y="34" width="172" height="14"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="172" font-size="13" text-anchor="middle">Una fila = un grupo,</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="189" font-size="13" text-anchor="middle">todas a la vez</text>
+<text class="f-text" fill="#182f2b" x="200" y="214" font-size="13" text-anchor="middle">CPU: buena en trabajo complejo, paso a paso</text>
+<text class="f-text" fill="#182f2b" x="200" y="238" font-size="13" text-anchor="middle">GPU: buena en montones de trabajo idéntico</text>
+</svg><figcaption>Figura 13-1　Dos filosofías de diseño. La CPU tiene pocos núcleos y potentes, y cada uno lleva un grupo de carriles SIMD; la GPU tiene muchas unidades sencillas que ejecutan la misma instrucción en grupos. Esquema, sin escala.</figcaption></figure>
+<p class="further">Lecturas: <a href="https://es.wikipedia.org/wiki/SIMD" target="_blank" rel="noopener noreferrer">Wikipedia: SIMD</a> · <a href="https://en.wikipedia.org/wiki/Single_instruction,_multiple_threads" target="_blank" rel="noopener noreferrer">Wikipedia: Single instruction, multiple threads (en inglés)</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA CUDA Programming Guide (en inglés)</a></p>
+</aside>
+<div class="viz" data-viz="simd-lanes"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figura 13-2: sumar 16 números uno a uno exige 16 pasos, con SIMD, 16 a la vez, basta 1 paso, y una cadena de sumas necesita 16 pasos aunque haya 16 carriles">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="14" font-weight="600">¿Cuántos pasos para 16 números?</text>
+<text class="f-text" fill="#182f2b" x="20" y="56" font-size="13">Uno a uno</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="42" width="256" height="20"/>
+<text class="f-text" fill="#182f2b" x="376" y="80" font-size="13" text-anchor="end">16 pasos</text>
+<text class="f-text" fill="#182f2b" x="20" y="112" font-size="13">SIMD ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="98" width="16" height="20"/>
+<text class="f-text" fill="#182f2b" x="144" y="113" font-size="13">1 paso</text>
+<text class="f-text" fill="#182f2b" x="20" y="160" font-size="13">Cadena de sumas</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="146" width="256" height="20"/>
+<text class="f-text" fill="#182f2b" x="376" y="184" font-size="13" text-anchor="end">16 pasos</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="214" font-size="13">Cadena de sumas: cada celda espera a la anterior,</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="232" font-size="13">así que más carriles no ayudan</text>
+</svg><figcaption>Figura 13-2　Que se pueda paralelizar depende de si hay dependencias entre los datos. Las 16 sumas independientes se hacen en un paso; una suma encadenada solo puede ir paso a paso.</figcaption></figure></div>
+<p class="bridge"><strong>Si estudiaste organización de computadoras:</strong> SIMD son las instrucciones vectoriales (SSE y AVX en x86, NEON en ARM); el SIMT de la GPU se puede entender como «el hardware empaqueta solo un grupo de hilos en un vector ancho para ejecutarlo»; cuando los saltos de los hilos del grupo divergen, se ejecutan por tandas.</p>
+
+<h2 id="sec-2">13.2 Por qué la CPU también puede calcular expertos: lo grande es leer bytes</h2>
+<p>Si la GPU calcula mucho más rápido, ¿por qué se atreve Strata a dejar que la CPU calcule expertos? Porque en calcular un experto lo difícil no es calcular, sino leer. Un experto ocupa 1,38 MB, y cada parámetro se multiplica y suma una o dos veces, de modo que las unidades de cálculo pasan casi todo el tiempo esperando a que los datos lleguen de la memoria. El comentario del pool de expertos de la CPU en upstream lo dice sin rodeos: los kernels de expertos están limitados por el ancho de banda de memoria, con 6 núcleos se midieron unos 42,55 GB/s, y la velocidad es casi proporcional al número de núcleos. <span class="ev ev-code">Hecho de código</span> (<code>include/strata/kernels/cpu/pool.hpp</code>)</p>
+<p>Si el cuello de botella es leer bytes, que los bytes viajen menos. El capítulo 10 calculó que mover los expertos que fallan hasta la GPU por PCIe cuesta, solo en el traslado, más de 10 milisegundos por token. A la inversa, llevar el «trabajo» hasta donde están los datos exige mover mucho menos, como en la figura 13-3.</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figura 13-3: mover 10 expertos a la GPU exige transferir 13,8 MB; pasar el trabajo a la CPU solo exige enviar 10 KB de entrada y recibir 100 KB de resultados">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="14" font-weight="600">Opción 1: mover los expertos a la GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="34" width="110" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="61" font-size="13" text-anchor="middle">RAM</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="34" width="110" height="44" rx="6"/>
+<text class="f-on" fill="#ffffff" x="325" y="61" font-size="13" text-anchor="middle">GPU</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M132 56H262"/>
+<path class="f-muted" fill="#5c6d66" d="M268 56l-9-5v10z"/>
+<text class="f-warn" fill="#9e5d24" x="200" y="100" font-size="13" text-anchor="middle">10 × 1,38 MB = 13,8 MB por PCIe</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="14" font-weight="600">Opción 2: pasar el trabajo a la CPU</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="158" width="110" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="185" font-size="13" text-anchor="middle">CPU + RAM</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="158" width="110" height="44" rx="6"/>
+<text class="f-on" fill="#ffffff" x="325" y="185" font-size="13" text-anchor="middle">GPU</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M268 170H138"/>
+<path class="f-muted" fill="#5c6d66" d="M132 170l9-5v10z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M132 192H262"/>
+<path class="f-muted" fill="#5c6d66" d="M268 192l-9-5v10z"/>
+<text class="f-text" fill="#182f2b" x="200" y="226" font-size="13" text-anchor="middle">Se envía: 2560 entradas de esta capa ≈ 10 KB</text>
+<text class="f-text" fill="#182f2b" x="200" y="250" font-size="13" text-anchor="middle">Se recibe: 10 × 2560 números ≈ 100 KB</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="284" font-size="13" text-anchor="middle">Cada experto de 1,38 MB se queda donde está</text>
+</svg><figcaption>Figura 13-3　Mover datos o mover cálculo. Los expertos no se mueven y van y vienen la entrada y el resultado: por PCIe pasan más de cien veces menos bytes. <span class="ev ev-est">Estimación didáctica</span></figcaption></figure>
+<p>La interfaz se acuerda así: en cada capa, la GPU entrega al lado de la CPU la entrada normalizada, los números de los 10 expertos elegidos y sus pesos, y espera recibir 10 × 2560 números. <span class="ev ev-code">Hecho de código</span>[S06] Un número son 4 bytes, así que la entrada son unos 10 KB y el resultado unos 100 KB, más de cien veces menos que 13,8 MB. <span class="ev ev-est">Estimación didáctica</span></p>
+<p>El lado de la CPU es un <dfn>pool de expertos</dfn>: un hilo de trabajo por núcleo físico, y el primer núcleo se reserva para el bucle principal. Los 10 expertos de cada capa se reparten entre esos hilos para calcular a la vez; el host tiene que recoger los 10 resultados y sumarlos antes de que pueda empezar la capa siguiente, así que cada capa es una «barrera». <span class="ev ev-code">Hecho de código</span> (<code>pool.hpp</code>)</p>
+<p class="bridge"><strong>Si estudiaste sistemas operativos:</strong> los hilos se fijan a núcleos físicos, no a procesadores lógicos. Los dos hyper-threads de un núcleo físico comparten las mismas unidades de ejecución y la misma caché, y si dos hilos que leen memoria se amontonan, el ancho de banda se reduce a la mitad. El comentario del código registra además una medición: cuando el hilo del bucle principal no está fijado a su propio núcleo, el pool de expertos baja de 36,32 GB/s a 26,9 GB/s. <span class="ev ev-report">Informe upstream</span> (comentario de <code>pool.hpp</code>)</p>
+<p>Según las mediciones de la etapa de desarrollo de upstream, antes de que existiera la caché de expertos, la CPU tenía que leer 663,6 MB de datos de expertos por token, que a unos 40 GB/s son 16,2 milisegundos, y entonces un token tardaba unos 53 milisegundos. <span class="ev ev-report">Informe upstream</span>[S05] Esa parte de la CPU era el mayor gasto de toda la máquina.</p>
+
+<h2 id="sec-3">13.3 Dentro de una capa: los aciertos para la GPU, los fallos para la CPU, a la vez</h2>
+<p>Con la caché de expertos, los 10 expertos de una capa se dividen en tres grupos: <span class="ev ev-code">Hecho de código</span> (<code>src/core/expert_source.cpp</code>, <code>src/program/generate.cpp</code>)</p>
+<ol>
+<li>Los que están en la VRAM (aciertos): los calcula la GPU directamente.</li>
+<li>De los que fallan, una parte, elegida según una proporción, la lee la GPU por PCIe desde memoria fijada y la calcula. Esa proporción es por defecto 0.2 para los modelos Q2_0 y 0.55 para los demás formatos nativos.</li>
+<li>Los demás fallos los calcula la CPU en el sitio.</li>
+</ol>
+<p>El orden importa: la parte de la GPU se decide y se publica primero, para que la GPU se ponga en marcha antes, y luego la CPU empieza la suya. <span class="ev ev-code">Hecho de código</span> (comentario de <code>expert_source.cpp</code>) La documentación de upstream menciona que, si se pone la cuota de PCIe en 0, todos los fallos vuelven a la CPU y la generación va más lenta. <span class="ev ev-report">Informe upstream</span>[S03]</p>
+<p>El simulador de abajo dibuja una capa como una línea de tiempo. Los números son estimaciones didácticas: cada experto son 1,38 MB, la CPU lee a 40 GB/s, la VRAM a 672 GB/s y PCIe a 63 GB/s; la atención más el enrutamiento se suponen 0,25 milisegundos y la fusión, 0,05.</p>
+<div class="viz" data-viz="layer-timeline"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="Figura 13-4: línea de tiempo de una capa con una tasa de aciertos del 65 % y una cuota de PCIe del 20 %. La GPU calcula primero la atención y el enrutamiento; después la GPU y la CPU calculan expertos a la vez, la rama de la CPU es más larga y es la ruta crítica">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="13">Una capa (aciertos 65 %, cuota de PCIe 20 %)</text>
+<text class="f-text" fill="#182f2b" x="20" y="58" font-size="13">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="40" width="160" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="230" y="40" width="25" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="293" y="40" width="32" height="26"/>
+<text class="f-on" fill="#ffffff" x="150" y="58" font-size="13" text-anchor="middle">Atención + router</text>
+<text class="f-text" fill="#182f2b" x="20" y="108" font-size="13">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="230" y="90" width="63" height="26"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M293 32V124"/>
+<text class="f-text" fill="#182f2b" x="20" y="152" font-size="13">↑ 0.25 ms: ruta lista, se reparten expertos</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="13">Rama GPU 0.039 ms, rama CPU 0.098 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="200" font-size="13">Línea punteada: unión; la CPU es la más lenta</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="232" font-size="13" font-weight="600">Capa = 0.25 + max(0.098, 0.039) + 0.05</text>
+</svg><figcaption>Figura 13-4　Paralelismo dentro de una capa. El punto de unión lo decide el lado más lento: mientras la rama de la CPU sea más larga, por rápida que sea la GPU tiene que esperar. <span class="ev ev-est">Estimación didáctica</span></figcaption></figure></div>
+<p>La primera versión de upstream tropezó justo con «quién va primero». Entonces, el paso en que la GPU calculaba los aciertos se colocó <strong>después</strong> del pool de expertos de la CPU: la CPU de verdad tenía la mitad de trabajo (de 18,2 a 10,2 milisegundos), pero la mitad de la GPU solo se movió de «al lado» a «detrás», y el camino entero no se acortó nada. Luego se cambió a dos pasos: la GPU empieza a calcular los expertos que aciertan en un búfer aparte, mientras la CPU calcula los que fallan; cuando el resultado de la CPU llega a la GPU, se suman las dos partes. Un búfer más y una suma más devolvieron el paralelismo de verdad. <span class="ev ev-report">Informe upstream</span> (comentario de <code>hit_hook.hpp</code>) Puedes reproducirlo en el simulador desactivando «Calcular a la vez».</p>
+
+<h2 id="sec-4">13.4 Entre capas: la dependencia bloquea el paralelismo</h2>
+<p>Dentro de una capa se puede paralelizar. ¿Se puede hacer que, mientras la CPU aún calcula la capa l, la GPU empiece ya la capa l + 1? No. La entrada de la capa l + 1 es el resultado de la capa l una vez fusionados sus 10 expertos. Esta línea es una cadena eslabón a eslabón (figura 13-5).</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="Figura 13-5: dentro de cada capa, los 10 expertos se pueden repartir entre la CPU y la GPU y calcular a la vez; pero la entrada de la capa l+1 espera a que termine la fusión de la capa l, así que entre capas hay que ir en cola">
+<rect class="f-accent" fill="#136d5a" x="20" y="10" width="360" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="32" font-size="13" text-anchor="middle">Capa l: atención + enrutamiento (GPU)</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="56" width="174" height="40" rx="7"/>
+<text class="f-text" fill="#182f2b" x="107" y="81" font-size="13" text-anchor="middle">Aciertos (GPU)</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="206" y="56" width="174" height="40" rx="7"/>
+<text class="f-text" fill="#182f2b" x="293" y="81" font-size="13" text-anchor="middle">Fallos (CPU)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="108" width="360" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="130" font-size="13" text-anchor="middle">Fusionar los 10 resultados en el flujo residual</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" d="M200 142V166"/>
+<path class="f-muted" fill="#5c6d66" d="M200 172l-6-9h12z"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="174" width="360" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="196" font-size="13" text-anchor="middle">Capa l+1: su entrada es el resultado de la capa l</text>
+<text class="f-text" fill="#182f2b" x="20" y="236" font-size="13">En horizontal (una capa): puede ir en paralelo</text>
+<text class="f-text" fill="#182f2b" x="20" y="260" font-size="13">En vertical (de capa a capa): hay que esperar</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="288" font-size="13" font-weight="600">La cadena de 48 capas es la ruta crítica</text>
+</svg><figcaption>Figura 13-5　La dependencia de datos decide hasta dónde se puede paralelizar. Los expertos de una misma capa no dependen unos de otros; entre capas, todo está encadenado.</figcaption></figure>
+<aside class="primer" id="c13-dependence">
+<h3>Dependencia de datos y ruta crítica</h3>
+<p>Entre dos cálculos, si el segundo usa el resultado del primero, hay una <dfn>dependencia de datos</dfn> (más exactamente, una dependencia de «escritura antes que lectura»). Dos pasos con dependencia solo pueden hacerse uno tras otro; los que no tienen dependencia pueden hacerse a la vez.</p>
+<p>Dibuja todos los cálculos en un grafo: cada cálculo es un punto y cada dependencia, una flecha. De principio a fin, la cadena de flechas más larga es la <dfn>ruta crítica</dfn>. Todo el trabajo tarda como mínimo ese tiempo, tengas los obreros que tengas. Para ir más rápido solo hay dos caminos: acortar un paso de la ruta crítica o sacar un paso de la ruta crítica y ponerlo a un lado, en paralelo con otros pasos.</p>
+<p>A la inversa, acortar un paso que <strong>no</strong> está en la ruta crítica no sirve para nada. El caso del principio es así: la CPU hizo 8 milisegundos menos de trabajo, pero al sacarlos, la parte de la GPU ocupó su lugar y la longitud de la ruta crítica no cambió. Es la misma razón que la ley de Amdahl del capítulo 5: si solo optimizas una parte, la ganancia total la limita el resto.</p>
+<p class="further">Lecturas: <a href="https://es.wikipedia.org/wiki/M%C3%A9todo_de_la_ruta_cr%C3%ADtica" target="_blank" rel="noopener noreferrer">Wikipedia: Método de la ruta crítica</a> · <a href="https://es.wikipedia.org/wiki/Dependencia_de_datos" target="_blank" rel="noopener noreferrer">Wikipedia: Dependencia de datos</a></p>
+</aside>
+<p>El código fuente de Strata lo deja escrito como conclusión. Cada capa se divide en dos grafos de cálculo de la GPU: el primero va de la atención al enrutamiento y al experto compartido; el segundo se encarga de fusionar los resultados de los expertos y escribirlos en el flujo principal, y no puede arrancar hasta que la CPU devuelve su resultado; así los resultados de los expertos de la capa l se emparejan con los pesos de ruta de la propia capa l. El precio: el tiempo que queda para solapar la CPU y la GPU es solo el tramo corto del experto compartido. El comentario dice que un pool de expertos de la CPU por capa no se puede esconder detrás de una cadena residual estrictamente en serie. <span class="ev ev-code">Hecho de código</span>[S13]</p>
+<p>El comentario de la caché da cifras: el pipeline de entonces escondía solo 1,055 milisegundos de 19,035 milisegundos de trabajo de la CPU, y el 96 % quedaba a la vista en la ruta crítica, «porque la cadena residual es estrictamente en serie». Así que la única salida es leer menos bytes: poner una parte de los expertos en la VRAM y que la CPU solo lea los que fallan. <span class="ev ev-report">Informe upstream</span>[S05] Esa es la razón de ser de la caché de expertos del capítulo 12.</p>
+
+<h2 id="sec-5">13.5 Cómo demostrar que de verdad hubo paralelismo</h2>
+<p>«La CPU y la GPU están ocupadas» no equivale a «están ocupadas a la vez». En los dos casos de la figura 13-6, el tiempo total de ocupación de ambos lados es el mismo, pero el tiempo total es muy distinto.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figura 13-6: con paralelismo real, la CPU empieza a trabajar mientras la GPU aún calcula; con paralelismo falso, la CPU empieza cuando la GPU ya terminó; el tiempo ocupado de los dos lados es el mismo y el total es más largo">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="14" font-weight="600">Paralelismo real</text>
+<text class="f-text" fill="#182f2b" x="20" y="54" font-size="13">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="38" width="160" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="88" font-size="13">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="150" y="72" width="140" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="300" y="88" font-size="13">fin</text>
+<text class="f-text" fill="#182f2b" x="20" y="132" font-size="14" font-weight="600">Paralelismo falso</text>
+<text class="f-text" fill="#182f2b" x="20" y="164" font-size="13">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="148" width="160" height="24"/>
+<text class="f-text" fill="#182f2b" x="20" y="198" font-size="13">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="230" y="182" width="140" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="228" font-size="13">La CPU empieza cuando la GPU ya está libre: serie</text>
+</svg><figcaption>Figura 13-6　El mismo tiempo ocupado, distinto solapamiento. Mirando solo la utilización no se distinguen los dos casos.</figcaption></figure>
+<p>El código de sesión de Strata cuenta justo esto: en cada capa, cuando el host ve el «timbre» (la señal con la que la GPU avisa de que «las rutas ya están elegidas»), ¿el grafo de cálculo de la GPU sigue ejecutándose? Si sigue, la CPU tiene una ventana que se solapa con la GPU; si ya terminó, la CPU trabaja cuando la GPU está libre y todo el pipeline equivale a una ejecución en serie. Este contador se llama <code>rings_mid_graph</code>, y el comentario lo describe como la magnitud de diagnóstico para saber «si el timbre es solo decoración». <span class="ev ev-code">Hecho de código</span>[S13]</p>
+<p>El comentario también explica por qué hace falta: en los dos casos se calculan tokens correctos y cada capa tarda lo mismo; la diferencia solo se manifiesta como «el solapamiento no escondió nada». Otro contador anota los milisegundos desde que se lanza el grafo de cálculo hasta que se ve el timbre, y la ventana que puede usar la CPU es «la duración de la capa menos ese valor». <span class="ev ev-code">Hecho de código</span>[S13] Que la configuración diga «solapamiento activado» es solo una intención; lo que cuenta como comportamiento es la línea de tiempo de eventos.</p>
+
+<h2 id="sec-6">13.6 Manos a la obra: busca el punto de equilibrio</h2>
+<p>Primero usa el simulador «Dentro de una capa: GPU y CPU calculan a la vez» de este capítulo: lleva la tasa de aciertos a 0 % y luego a 65 % y mira adónde pasa la ruta crítica; desactiva «Calcular a la vez» para reproducir la lección de la primera versión de upstream; pulsa «Poner la cuota óptima» para ver cómo las dos ramas miden lo mismo. Luego ve a «Calcular 16 a la vez, o esperar paso a paso» y ejecuta los tres algoritmos.</p>
+<p>Después abre el laboratorio interactivo «Reparto de trabajo entre CPU y GPU». Tiene solo dos ramas: la CPU y «pasar a la GPU por PCIe». Cambia la velocidad efectiva de los dos lados y la proporción del reparto y busca la proporción con el menor tiempo total. Tarea del laboratorio: reduce a la mitad la velocidad efectiva de la rama de PCIe y explica por qué el mejor reparto ya no es «mitad y mitad». Ojo: el laboratorio y el simulador suponen que las dos ramas no se disputan recursos; en una máquina real, la CPU que lee expertos y PCIe que lee memoria fijada usan el mismo ancho de banda de memoria.</p>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>Lo grande de calcular expertos es leer bytes. Si la CPU calcula en el sitio los expertos que están en la RAM, por PCIe solo pasan 10 KB de entrada y 100 KB de resultados.</li>
+<li>Dentro de una capa, los expertos que aciertan van a la GPU, una parte de los fallos va a la GPU por PCIe y el resto a la CPU; todos calculan a la vez y, en la unión, se espera al lado más lento.</li>
+<li>Entre capas hay dependencia de datos, y las 48 capas son una sola ruta crítica. El trabajo de la CPU no se puede esconder y solo se puede reducir con la caché; optimizar pasos que no están en la ruta crítica no sirve.</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «Si la CPU y la GPU calculan juntas, la velocidad se duplica; si la CPU hace la mitad de trabajo, el tiempo total baja otro tanto».</strong></p>
+<p>El tiempo total solo se acorta si lo que se ahorra está en la ruta crítica. Upstream bajó el trabajo de la CPU de 18,2 a 10,2 milisegundos y el token no fue ni un poco más rápido, porque la parte de la GPU se colocó detrás de la de la CPU. <span class="ev ev-report">Informe upstream</span> De igual modo, «utilización de la GPU al 100 %» tampoco dice nada: puede estar girando en vacío esperando, o calculando un trabajo que podría haberse paralelizado. Lo que hay que mirar es la ruta crítica y la línea de tiempo de eventos.</p></div>
+
+<details class="deep"><summary>Más a fondo: la fórmula de reparto, por qué no es exacta y las trampas de la concurrencia</summary>
+<h3>La fórmula de reparto de las dos ramas</h3>
+<p>Sea D la cantidad de datos de expertos que queda por calcular, y f la proporción que se entrega a la «rama de la GPU por PCIe»; el resto va a la CPU. Convierte la capacidad de procesamiento sostenida de la rama de la CPU en Bc bytes por segundo y la de la rama de PCIe en Bp bytes por segundo, y supón que no se influyen entre sí:</p>
+<div class="equation">T(f) ≈ max((1 − f)·D / Bc, f·D / Bp) ＋ T fusión</div>
+<p>Lo más rápido es que las dos ramas midan lo mismo, lo que da f = Bp ÷ (Bc ＋ Bp). Si Bc = 40 y Bp = 20, f = 1/3, y no «mitad y mitad». <span class="ev ev-est">Estimación didáctica</span> Este Bp no es el ancho de banda nominal de PCIe, sino la velocidad efectiva, que incluye todos los costos de esa rama.</p>
+<h3>Por qué el óptimo real no está aquí</h3>
+<p>La fórmula supone que cada rama usa sus propios recursos, pero en una máquina real se los disputan: la CPU que lee expertos y la GPU que lee por PCIe memoria fijada pasan por los mismos canales de memoria; PCIe puede estar transfiriendo a la vez páginas KV de un contexto largo; el tamaño de los expertos, que un mismo experto lo reutilicen varios tokens de una ventana de verificación, el costo de lanzar la GPU y la fijación de hilos del host a núcleos cambian la velocidad efectiva de los dos lados. Por eso las cuotas por defecto de Strata (0.2 para Q2_0 y 0.55 para los demás formatos nativos) salen de mediciones y no de esta fórmula. <span class="ev ev-code">Hecho de código</span> (<code>generate.cpp</code>) La fórmula sirve para plantear hipótesis; al ajustar, hay que registrar el tiempo de finalización de cada rama, los bytes movidos y el tiempo total, y volver a validar con otro conjunto de tareas.</p>
+<h3>¿Está bien calculado? El tiempo cuadra y el resultado es erróneo</h3>
+<p><code>hit_hook.hpp</code> registra un error de concurrencia de manual. En la primera versión, el paso «la GPU calcula primero los aciertos» leía la lista de aciertos que se decidía en el callback del pool de expertos, y ese callback se ejecutaba después. Así leía la lista de la <strong>capa anterior</strong> y calculaba los expertos de la capa anterior en el lugar de esta. El programa seguía produciendo tokens y el tiempo era normal, pero comparado con la respuesta estándar, la divergencia KL media subió de 9,69×10⁻² a 1,03 y la coincidencia del token más probable bajó de 0,867 a 0,333. La solución fue que este paso reciba directamente los números publicados por el router de esta capa. <span class="ev ev-code">Hecho de código</span> (<code>hit_hook.hpp</code>)</p>
+<h3>Una condición de carrera en el pool de hilos</h3>
+<p>Cuando el pool de expertos de la CPU esperaba a que terminara un lote de tareas, al principio solo esperaba a que «contador de terminadas = número de tareas». Pero en una tarjeta con mucha VRAM, la mayoría de los expertos aciertan y los hilos de trabajo suelen estar dormidos; un lote de tareas demasiado pequeño termina antes de que los hilos dormidos despierten. Un hilo que despierta puede coger tareas del <strong>lote siguiente</strong> y hacer dos veces la misma tarea, o sumar al contador después de que el host lo pusiera a cero, y entonces «contador = número de tareas» no se cumple nunca y la GPU espera para siempre. La solución es llevar un número de lote en cada toma de tarea: el puntero de tarea es una palabra de 64 bits que guarda «lote | número de tareas | índice», se toma una tarea con comparar-e-intercambiar y solo tiene éxito si el lote coincide, de modo que un hilo rezagado no puede tomar nada. <span class="ev ev-code">Hecho de código</span> (<code>pool.hpp</code>) La documentación de upstream registra este bloqueo como issue #29, corregido en el motor 0.1.12.</p>
+<h3>Donde comentario y diseño no coinciden</h3>
+<p>En la segunda mitad de <code>session.hpp</code> hay un comentario más antiguo que dice «el solapamiento viene de la latencia de una capa: el resultado del pool de expertos lo consume la capa siguiente». <span class="ev ev-code">Hecho de código</span> (<code>session.hpp</code>) Pero el comentario anterior sobre los dos grafos de cálculo dice justo lo contrario: para que los expertos de la capa l no se emparejen con los pesos de ruta de la capa l + 1, la fusión tiene que quedarse en esta capa. <span class="ev ev-code">Hecho de código</span>[S13] Ante una contradicción así, manda el orden de llamadas actual y las pruebas.</p>
+<h3>Si la GPU y la CPU calculan el mismo experto, los últimos dígitos pueden diferir</h3>
+<p>Los kernels de la GPU y de la CPU redondean de forma distinta. Quién calcula cada experto depende del estado de la caché y de la cuota de PCIe, así que con el mismo prompt, repetir la ejecución puede no dar la misma respuesta byte a byte. La documentación de upstream dice que, para obtener resultados reproducibles, se puede poner la cuota de PCIe en 0 y algún otro interruptor, a costa de que la generación sea más lenta. <span class="ev ev-report">Informe upstream</span>[S03]</p>
+</details>
