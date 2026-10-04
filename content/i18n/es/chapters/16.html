@@ -1,0 +1,236 @@
+<div class="hook"><span class="eyebrow">La misma computadora, dos velocidades</span>
+<p>La tabla de velocidades de upstream de Strata tiene dos columnas de números. En la misma computadora con una RTX 5070, leer un prompt de 32K tokens va a 2.171 tokens por segundo; escribir la respuesta va a solo 81,8 tokens por segundo. <span class="ev ev-report">Informe upstream</span>[S03]</p>
+<p>El mismo modelo, las mismas 48 capas, la misma tarjeta gráfica. ¿Por qué «leer» es más de veinte veces más rápido que «escribir»? El secreto cabe en una palabra: batching. Este capítulo explica por qué calcular juntos gana a calcular de uno en uno, qué tan grande debe ser un chunk y cómo lograr que mover datos y calcular ocurran al mismo tiempo.</p></div>
+<p class="tldr"><strong>En una línea:</strong> durante el decode el modelo solo puede calcular un token a la vez, así que cada lectura de los pesos se usa una sola vez. Durante el prefill todo el prompt ya se conoce, así que miles de tokens pueden calcularse como un solo chunk, y cada lectura de los pesos la comparte todo el chunk. Strata lee como máximo 8.192 tokens por chunk, y empieza a mover los expertos de la capa siguiente mientras la capa actual todavía calcula.</p>
+
+<h2 id="sec-1">16.1 Por qué leer el prompt es más de veinte veces más rápido que escribir la respuesta</h2>
+<p>Empecemos por los números. La figura 16-1 muestra las dos velocidades que upstream midió en una computadora.</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="Figura 16-1: mediciones de upstream de la velocidad de prefill y decode. El prefill va de 536 a 2171 tokens por segundo, el decode de 74 a 93">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Upstream, mismo PC: prefill vs decode (tokens/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">1K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="36" width="69.1" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="135" y="46" font-size="12">536</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="52" width="11.3" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="77" y="62" font-size="12">87,3</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12">4K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="86" width="167.5" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="233" y="96" font-size="12">1.299</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="102" width="12" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="78" y="112" font-size="12">93,0</text>
+<text class="f-text" fill="#182f2b" x="10" y="148" font-size="12">32K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="136" width="280" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="346" y="146" font-size="12">2.171</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="152" width="10.6" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="77" y="162" font-size="12">81,8</text>
+<text class="f-text" fill="#182f2b" x="10" y="198" font-size="12">128K</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="186" width="271.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="338" y="196" font-size="12">2.107</text>
+<rect class="f-warn" fill="#9e5d24" x="60" y="202" width="9.5" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="76" y="212" font-size="12">73,7</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="226" width="10" height="10"/><text class="f-muted" fill="#5c6d66" x="24" y="235" font-size="12">Prefill</text>
+<rect class="f-warn" fill="#9e5d24" x="84" y="226" width="10" height="10"/><text class="f-muted" fill="#5c6d66" x="98" y="235" font-size="12">Decode</text>
+<text class="f-muted" fill="#5c6d66" x="154" y="235" font-size="12">RTX 5070 12 GB, Q2_0, v0.1.26</text>
+</svg><figcaption>Figura 16-1　En la misma computadora, el prefill es de unas 6 a casi 30 veces más rápido que el decode, y la brecha crece con la longitud del prompt. Las barras están a escala; las del decode son tan cortas que apenas se ven. Datos de la documentación de upstream. [S03]</figcaption></figure>
+<p>La documentación de upstream enumera la configuración de la prueba: una tarjeta gráfica RTX 5070 de 12 GB, una CPU Ryzen 5 7600, 64 GB de RAM DDR5-5200, Windows, el motor 0.1.26, el modelo Q2_0, y la decodificación especulativa activada mientras se escribe la respuesta. <span class="ev ev-report">Informe upstream</span>[S03]</p>
+<p>La brecha viene de una diferencia básica entre las dos fases. Durante el <dfn>decode</dfn> («escribir la respuesta»), el token siguiente se desconoce hasta que se elige el anterior, así que los tokens solo pueden salir de uno en uno. Durante el <dfn>prefill</dfn> («leer el prompt»), todos los tokens del prompt ya están ahí, así que un bloque grande de ellos puede entrar junto al modelo. Ojo: «calcular juntos» no significa «espiarse entre sí»: el quinto token sigue viendo solo los 4 primeros. La regla causal del modelo no cambia en absoluto; solo cambia la forma de organizar el cálculo.</p>
+
+<h2 id="sec-2">16.2 Por qué calcular juntos es más rápido: matriz × vector frente a matriz × matriz</h2>
+<p>Imagina a un profesor que corrige exámenes de opción múltiple. Para cada examen, saca la plantilla de respuestas de un armario, revisa el examen y la guarda. Si los exámenes llegan de uno en uno, casi todo el tiempo se va en sacar y guardar la plantilla. Si llegan 50 a la vez, el profesor saca la plantilla una vez, revisa los 50 y la guarda; repartido entre 50 exámenes, sacarla casi no cuesta nada.</p>
+<p>En un modelo, la «plantilla de respuestas» son los pesos. Para cada capa, los pesos de esa capa deben leerse de la VRAM hacia las unidades de cómputo. La figura 16-2 dibuja los dos casos lado a lado.</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="Figura 16-2: en matriz × vector, una lectura de los pesos sirve a un token; en matriz × matriz, una lectura de los pesos la comparte todo un chunk de tokens">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="12" font-weight="600" text-anchor="middle">Matriz × vector: 1 token</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="34" width="100" height="100" rx="4"/>
+<text class="f-text" fill="#182f2b" x="70" y="89" font-size="13" text-anchor="middle">Pesos W</text>
+<text class="f-text" fill="#182f2b" x="137" y="89" font-size="14" text-anchor="middle">×</text>
+<rect class="f-accent" fill="#136d5a" x="152" y="34" width="12" height="100" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="158" y="152" font-size="12" text-anchor="middle">1 columna</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="172" font-size="12" text-anchor="middle">Pesos leídos una vez,</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="188" font-size="12" text-anchor="middle">usados por 1 token</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="12" font-weight="600" text-anchor="middle">Matriz × matriz: C tokens</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="34" width="100" height="100" rx="4"/>
+<text class="f-text" fill="#182f2b" x="270" y="89" font-size="13" text-anchor="middle">Pesos W</text>
+<text class="f-text" fill="#182f2b" x="335" y="89" font-size="14" text-anchor="middle">×</text>
+<rect class="f-accent" fill="#136d5a" x="346" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="358" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="370" y="34" width="9" height="100" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="382" y="34" width="9" height="100" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="391" y="152" font-size="12" text-anchor="end">C columnas</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="172" font-size="12" text-anchor="middle">Pesos leídos una vez,</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="188" font-size="12" text-anchor="middle">compartidos por C tokens</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M200 30V194"/>
+<text class="f-text" fill="#182f2b" x="200" y="218" font-size="12" text-anchor="middle">Más tokens, más cálculo; pesos movidos una vez</text>
+</svg><figcaption>Figura 16-2　El decode es «matriz × vector»: una lectura de los pesos sirve a un token. El prefill es «matriz × matriz»: los mismos pesos sirven a todo un chunk de tokens.</figcaption></figure>
+<aside class="primer" id="c16-batching">
+<h3>Batching: matriz × vector frente a matriz × matriz</h3>
+<p>Intuición: mover datos y calcular son dos facturas separadas. Si calculas token a token, mueves todo el conjunto de pesos cada vez, y mover se vuelve el costo principal. Si calculas un lote de tokens juntos, pagas el movimiento una vez mientras el cálculo sigue siendo el mismo, así que el «cálculo hecho por cada byte movido» sube. El capítulo 5 llamó a esta razón intensidad aritmética; decide si un programa está limitado por el ancho de banda o por el cálculo.</p>
+<p>Definición: los pesos de una capa forman una matriz W de m × n. La entrada de un token es un vector x de longitud n. Calcular W·x es un <dfn>producto matriz-vector</dfn> (GEMV): lee m × n pesos y hace unas 2mn multiplicaciones-sumas. Si alineas los vectores de C tokens en una matriz X de n × C, calcular W·X es un <dfn>producto matriz-matriz</dfn> (GEMM): sigue leyendo m × n pesos, pero el cálculo crece a unas 2mnC. La intensidad aritmética sube a unas C veces la original.</p>
+<p>Un número concreto: el controlador de decodificación especulativa de Strata tiene una tabla por defecto de «cuántas veces más tarda la parte densa con n tokens a la vez que con un token». Con 2 tokens es 1,05×, con 4 es 1,45×, con 8 es 3,0×. <span class="ev ev-code">Hecho de código</span> Es decir, con 8 tokens juntos cada uno cuesta en promedio 3,0 ÷ 8 ≈ 38% de lo que costaría calcularlo solo. <span class="ev ev-est">Estimación didáctica</span></p>
+<p>Relación con el capítulo: durante el prefill C puede ser de miles, y por eso el prefill es mucho más rápido. El batching también tiene un precio: necesita más almacenamiento temporal para los resultados intermedios de todo el chunk, y cada chunk tarda más en terminar.</p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/Matriz_%28matem%C3%A1tica%29" target="_blank" rel="noopener noreferrer">Wikipedia: Matriz (matemática)</a> · <a href="https://es.wikipedia.org/wiki/Multiplicaci%C3%B3n_de_matrices" target="_blank" rel="noopener noreferrer">Wikipedia: Multiplicación de matrices</a> · <a href="https://en.wikipedia.org/wiki/Basic_Linear_Algebra_Subprograms" target="_blank" rel="noopener noreferrer">Wikipedia: BLAS</a> (en inglés; de ahí vienen GEMV y GEMM)</p>
+</aside>
+<div class="viz" data-viz="batch-reuse"><figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="Figura 16-3: poner n tokens en una sola pasada densa. 2 tokens cuestan solo un 5% más, 4 cuestan 1,45 veces, 8 cuestan 3 veces, mucho menos que las n veces de hacerlos uno por uno">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Pasada densa con n tokens (× tiempo de 1 token)</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">n = 1</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="34" width="35" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="101" y="44" font-size="12">1,0×</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="49" width="35" height="12" rx="2"/>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">n = 2</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="78" width="36.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="103" y="88" font-size="12">1,05×</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="93" width="70" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="136" y="103" font-size="12">2×</text>
+<text class="f-text" fill="#182f2b" x="10" y="132" font-size="12">n = 4</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="122" width="50.8" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="117" y="132" font-size="12">1,45×</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="137" width="140" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="206" y="147" font-size="12">4×</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">n = 8</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="166" width="105" height="12" rx="2"/><text class="f-text" fill="#182f2b" x="171" y="176" font-size="12">3,0×</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="181" width="280" height="12" rx="2"/><text class="f-muted" fill="#5c6d66" x="346" y="191" font-size="12">8×</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">Fuerte: razón upstream · Claro: uno por uno (n×)</text>
+</svg><figcaption>Figura 16-3　La parte densa es mucho más barata junta que uno por uno: 8 tokens tardan solo 3 veces más. Los números son los valores por defecto de spec/controller.hpp; el comentario dice que vienen de mediciones matriz-vector de upstream. La versión interactiva te deja arrastrar n y mirar cada caso.</figcaption></figure></div>
+<p>Strata usa el mismo truco en otros sitios. La ventana de verificación de la decodificación especulativa envía varios tokens a la vez, y el código describe el costo de esta ventana como «los pesos densos se leen una sola vez y los comparten T tokens». [S08] La lectura fusionada del residual híbrido también tiene una versión multi-token en la que hasta 8 tokens comparten los pesos, y «los pesos se leen una sola vez para todos». <span class="ev ev-code">Hecho de código</span></p>
+<p class="bridge"><strong>Si estudiaste informática:</strong> esto es la «localidad de acceso a memoria» de Arquitectura de Computadoras y los niveles de BLAS del álgebra lineal numérica. BLAS-2 (matriz × vector) está limitado por el ancho de banda; solo BLAS-3 (matriz × matriz) mantiene ocupadas del todo las unidades de cómputo. El prefill convierte una serie de llamadas BLAS-2 en BLAS-3.</p>
+
+<h2 id="sec-3">16.3 Batching de los expertos: agrupar por experto</h2>
+<p>La parte densa es fácil: todos los tokens usan los mismos pesos. La parte de expertos es más complicada: cada token elige 10 expertos por capa, y tokens distintos eligen expertos distintos. Strata primero <strong>agrupa por experto</strong>: reúne los tokens que eligieron el mismo experto, lee los pesos de ese experto una vez y calcula todo el grupo. [S12] La figura 16-4 muestra un esquema a escala reducida.</p>
+<figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="Figura 16-4: seis tokens eligen dos expertos cada uno. Tras reagruparlos por experto, los pesos de cada experto se leen una sola vez, para todos los tokens que lo eligieron">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12" font-weight="600">Por token (esquema: cada token elige 2 expertos)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="39" y="42" font-size="12" text-anchor="middle">t1</text><text class="f-muted" fill="#5c6d66" x="39" y="58" font-size="12" text-anchor="middle">E3 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="74" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="103" y="42" font-size="12" text-anchor="middle">t2</text><text class="f-muted" fill="#5c6d66" x="103" y="58" font-size="12" text-anchor="middle">E3 E5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="138" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="167" y="42" font-size="12" text-anchor="middle">t3</text><text class="f-muted" fill="#5c6d66" x="167" y="58" font-size="12" text-anchor="middle">E1 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="231" y="42" font-size="12" text-anchor="middle">t4</text><text class="f-muted" fill="#5c6d66" x="231" y="58" font-size="12" text-anchor="middle">E1 E3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="266" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="295" y="42" font-size="12" text-anchor="middle">t5</text><text class="f-muted" fill="#5c6d66" x="295" y="58" font-size="12" text-anchor="middle">E5 E7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="330" y="26" width="58" height="40" rx="6"/><text class="f-text" fill="#182f2b" x="359" y="42" font-size="12" text-anchor="middle">t6</text><text class="f-muted" fill="#5c6d66" x="359" y="58" font-size="12" text-anchor="middle">E3 E7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 70V88"/>
+<text class="f-muted" fill="#5c6d66" x="210" y="84" font-size="12">reagrupar por experto</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="96" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="113" font-size="12" text-anchor="middle">E1</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="96" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="113" font-size="12" text-anchor="middle">t3</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="96" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="113" font-size="12" text-anchor="middle">t4</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="113" font-size="12" text-anchor="end">1 lectura, 2 tokens</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="126" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="143" font-size="12" text-anchor="middle">E3</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="143" font-size="12" text-anchor="middle">t1</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="143" font-size="12" text-anchor="middle">t2</text>
+<rect class="f-soft" fill="#e5f1df" x="164" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="186" y="143" font-size="12" text-anchor="middle">t4</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="126" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="236" y="143" font-size="12" text-anchor="middle">t6</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="143" font-size="12" text-anchor="end">1 lectura, 4 tokens</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="156" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="173" font-size="12" text-anchor="middle">E5</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="156" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="173" font-size="12" text-anchor="middle">t2</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="156" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="173" font-size="12" text-anchor="middle">t5</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="173" font-size="12" text-anchor="end">1 lectura, 2 tokens</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="186" width="44" height="24" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="203" font-size="12" text-anchor="middle">E7</text>
+<rect class="f-soft" fill="#e5f1df" x="64" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="86" y="203" font-size="12" text-anchor="middle">t1</text>
+<rect class="f-soft" fill="#e5f1df" x="114" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="136" y="203" font-size="12" text-anchor="middle">t3</text>
+<rect class="f-soft" fill="#e5f1df" x="164" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="186" y="203" font-size="12" text-anchor="middle">t5</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="186" width="44" height="24" rx="5"/><text class="f-text" fill="#182f2b" x="236" y="203" font-size="12" text-anchor="middle">t6</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="203" font-size="12" text-anchor="end">1 lectura, 4 tokens</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">Los resultados vuelven a sus tokens;</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="254" font-size="12">se suman según el peso del router</text>
+</svg><figcaption>Figura 16-4　Agrupar por experto: 12 «llamadas a expertos» leen los pesos de los expertos solo 4 veces. A escala real los números son mucho mayores, y la reutilización también.</figcaption></figure>
+<p>Escalémoslo al tamaño real: un chunk de 8.192 tokens, cada uno eligiendo 10 expertos por capa, da 81.920 llamadas a expertos en una capa, y cada capa tiene solo 512 expertos. En promedio cada experto lo comparten 81.920 ÷ 512 = 160 tokens. <span class="ev ev-est">Estimación didáctica</span> Un comentario del código dice además que, cuando un chunk llega a 1.024 tokens o más, se eligen «casi todos» los 512 expertos de cada capa. <span class="ev ev-code">Hecho de código</span></p>
+<p>Tras agrupar, ¿de dónde salen los expertos? Los expertos calientes guardados en caché en la VRAM se leen directamente. Los demás viajan desde la zona de expertos en la RAM, por un «búfer circular» de memoria fijada (pinned), hasta la GPU en un stream de copia aparte. [S12] Tras el cálculo, los resultados deben volver al orden original de los tokens y luego sumarse con el peso de enrutamiento de cada token. Si pones un resultado en el lugar equivocado, se suma a otro token.</p>
+<p>Fíjate en la diferencia con el decode. Durante el decode, los expertos que fallan se calculan sobre todo en el sitio, en la CPU, en la RAM (capítulo 10). Durante el prefill cada experto lo comparten cientos o miles de tokens, así que moverlo a la GPU y calcularlos juntos compensa.</p>
+
+<h2 id="sec-4">16.4 ¿Qué tan grande debe ser un chunk? ¿Más grande siempre es mejor?</h2>
+<p>El prompt se corta en <dfn>chunks</dfn> (bloques de procesamiento) y se lee un chunk cada vez; cada chunk pasa por las 48 capas antes de que empiece el siguiente. [S12] Cuanto más grande es el chunk, más tokens comparten los pesos y los expertos. Pero más grande no siempre es mejor. El modelo didáctico siguiente dibuja el equilibrio:</p>
+<div class="viz" data-viz="prefill-chunk"><figure class="fig"><svg viewBox="0 0 400 220" role="img" aria-label="Figura 16-5: en el modelo didáctico, la velocidad de prefill sube rápido cuando el chunk crece de 1 token a 2048, y luego se aplana cerca del techo de 2500 tokens por segundo">
+<text class="f-muted" fill="#5c6d66" x="10" y="14" font-size="12">Modelo didáctico, prompt 32K: tokens/s por chunk C</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="14" y="179" width="36" height="1"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="62" y="178.5" width="36" height="1.5"/>
+<rect class="f-accent" fill="#136d5a" x="110" y="174" width="36" height="6"/>
+<rect class="f-accent" fill="#136d5a" x="158" y="156.2" width="36" height="23.8"/>
+<rect class="f-accent" fill="#136d5a" x="206" y="85.8" width="36" height="94.2"/>
+<rect class="f-accent" fill="#136d5a" x="254" y="42.1" width="36" height="137.9"/>
+<rect class="f-accent" fill="#136d5a" x="302" y="41.1" width="36" height="138.9"/>
+<rect class="f-accent" fill="#136d5a" x="350" y="40.6" width="36" height="139.4"/>
+<text class="f-text" fill="#182f2b" x="32" y="172" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="80" y="172" font-size="12" text-anchor="middle">27</text>
+<text class="f-text" fill="#182f2b" x="128" y="168" font-size="12" text-anchor="middle">107</text>
+<text class="f-text" fill="#182f2b" x="176" y="150" font-size="12" text-anchor="middle">425</text>
+<text class="f-text" fill="#182f2b" x="224" y="80" font-size="12" text-anchor="middle">1.683</text>
+<text class="f-text" fill="#182f2b" x="272" y="37" font-size="12" text-anchor="middle">2.462</text>
+<text class="f-text" fill="#182f2b" x="320" y="36" font-size="12" text-anchor="middle">2.481</text>
+<text class="f-text" fill="#182f2b" x="368" y="36" font-size="12" text-anchor="middle">2.490</text>
+<text class="f-muted" fill="#5c6d66" x="32" y="196" font-size="12" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="196" font-size="12" text-anchor="middle">16</text>
+<text class="f-muted" fill="#5c6d66" x="128" y="196" font-size="12" text-anchor="middle">64</text>
+<text class="f-muted" fill="#5c6d66" x="176" y="196" font-size="12" text-anchor="middle">256</text>
+<text class="f-muted" fill="#5c6d66" x="224" y="196" font-size="12" text-anchor="middle">1024</text>
+<text class="f-muted" fill="#5c6d66" x="272" y="196" font-size="12" text-anchor="middle">2048</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="196" font-size="12" text-anchor="middle">4096</text>
+<text class="f-muted" fill="#5c6d66" x="368" y="196" font-size="12" text-anchor="middle">8192</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="214" font-size="12">Supón W = 600 ms, u = 0,4 ms, pipeline activado</text>
+</svg><figcaption>Figura 16-5　Con chunks pequeños, el cálculo de cada chunk es demasiado corto para cubrir un viaje de los pesos, así que la velocidad crece casi en proporción al tamaño del chunk. Pasado el punto de equilibrio, la velocidad se pega al techo de cálculo. Los números vienen de un modelo didáctico, no de mediciones de Strata.</figcaption></figure></div>
+<p>¿Cómo elige el Strata real el tamaño del chunk? La explicación de upstream: el texto largo se lee en chunks grandes de como máximo 8.192 tokens cada uno, y por eso los documentos largos se leen a más de 1.000 tokens por segundo. [S02] Con <code>--prefill auto</code>, el motor elige de una tabla de candidatos: el búfer más grande que se mantiene dentro del límite de préstamo. El máximo por defecto es 8.192, y el usuario puede subirlo explícitamente a 16.384 o 32.768. <span class="ev ev-code">Hecho de código</span> Para estimar «cuánto tardará el prefill», el servidor también supone como máximo 32.768 tokens por chunk. [S15]</p>
+<p>El precio de un chunk grande es la VRAM temporal. Los resultados intermedios de un chunk de 8.192 tokens ocupan mucho espacio. La respuesta de Strata es «tomar prestado» de la caché de expertos: durante el prefill presta algunas ranuras del final de la caché al búfer del chunk, y tras el prefill vuelve a llenar los expertos originales. Cada solicitud toma prestado solo el tamaño que necesita su propio prompt. [S12] La figura 16-6 muestra un conjunto de mediciones de un comentario del código.</p>
+<figure class="fig"><svg viewBox="0 0 400 198" role="img" aria-label="Figura 16-6: una GPU de 12 GB leyendo un prompt de 32K. Con chunks de 4096, 6144 y 8192 se alcanzan 791, 878 y 973 tokens por segundo">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Comentario de upstream: GPU 12 GB, Q2_0, prompt 32K</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">Chunk 4096</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="35" width="162.6" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="258" y="48" font-size="12">791 tokens/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">Chunk 6144</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="75" width="180.4" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="276" y="88" font-size="12">878 tokens/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="128" font-size="12">Chunk 8192</text>
+<rect class="f-accent" fill="#136d5a" x="90" y="115" width="200" height="18" rx="3"/><text class="f-text" fill="#182f2b" x="296" y="128" font-size="12">973 tokens/s</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="164" font-size="12">Chunk 8192 presta el 69% de la caché de expertos</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="186" font-size="12">Chunk mayor: más rápido, pero toma más VRAM</text>
+</svg><figcaption>Figura 16-6　En el motor real, subir el chunk de 4.096 a 8.192 hizo el prefill un 23% más rápido; el precio fue prestar la mayor parte de la caché de expertos durante el prefill. El comentario no dice qué versión del motor usó.</figcaption></figure>
+<p>La aceleración es 973 ÷ 791 ≈ 1,23×. <span class="ev ev-est">Estimación didáctica</span> Chunks aún más grandes pueden ser un poco más rápidos todavía: el comentario registra una RTX 5090 leyendo un prompt de 32K a 5.624 tokens por segundo con chunks de 8.192 tokens, y a 6.465 tokens por segundo con todo el prompt como un solo chunk (32.768). Pero eso exige mucha VRAM, así que está desactivado por defecto. <span class="ev ev-code">Hecho de código</span></p>
+<p>Los chunks tampoco pueden ser demasiado pequeños. Un comentario del código señala que por debajo de unos 1.000 tokens por chunk el motor cambia a otro conjunto de kernels, y la salida de Q2_0 cambia, así que el modo «mover todos los expertos» tiene un mínimo de 1.024. <span class="ev ev-code">Hecho de código</span> Además, el motor comprueba «¿debo parar?» solo antes de que empiece cada chunk, así que cuanto más grande es el chunk, más tiene que esperar una solicitud cancelada. [S12]</p>
+
+<h2 id="sec-5">16.5 Pipeline: esta capa calcula mientras la siguiente va en camino</h2>
+<p>Una vez cortado el prompt, cada chunk todavía tiene que atravesar 48 capas. Cada capa hace dos cosas: mover a la GPU los expertos que necesita y luego calcular. Si las dos se turnan, el canal de copia queda ocioso mientras la GPU calcula, y la GPU queda ociosa mientras se mueven los datos. Strata las solapa: mientras la capa actual calcula la atención, los expertos de la capa siguiente ya están cruzando PCIe. [S02]</p>
+<aside class="primer" id="c16-pipeline">
+<h3>Pipeline: varias etapas trabajando a la vez</h3>
+<p>Intuición: lavar la ropa tiene dos pasos, «lavar» y «secar». Con una lavadora y una secadora, lo inteligente es meter la segunda carga en la lavadora mientras la primera está en la secadora. Cada carga tarda lo mismo que antes, pero todo el montón termina mucho antes.</p>
+<p>Definición: divide un trabajo en varias etapas en secuencia, cada una a cargo de una unidad distinta. Mientras el trabajo i está en la etapa 2, el trabajo i+1 ya empezó la etapa 1. Esto es un <dfn>pipeline</dfn>. Cuando funciona de forma estable, el tiempo total lo fija la etapa más lenta, no la suma de todas las etapas. La figura 16-7 muestra un ejemplo con dos etapas y cuatro capas.</p>
+<p>Un pipeline necesita dos cosas: las etapas deben usar unidades distintas (aquí, el motor de copia y las unidades de cómputo), y debe haber un búfer entre ellas que guarde lo que «ya llegó pero aún no se calculó». Si el búfer es demasiado pequeño, el movimiento se detiene y espera.</p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/Segmentaci%C3%B3n_%28electr%C3%B3nica%29" target="_blank" rel="noopener noreferrer">Wikipedia: Segmentación (electrónica)</a> · <a href="https://es.wikipedia.org/wiki/Segmentaci%C3%B3n_de_instrucciones" target="_blank" rel="noopener noreferrer">Wikipedia: Segmentación de instrucciones</a> · <a href="https://es.wikipedia.org/wiki/Buffer_m%C3%BAltiple" target="_blank" rel="noopener noreferrer">Wikipedia: Buffer múltiple</a> (el búfer entre etapas)</p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="Figura 16-7: mover y calcular por turnos toma 8 intervalos de tiempo; solapados, solo 5">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12" font-weight="600">Sin solape: copiar y luego calcular</text>
+<text class="f-text" fill="#182f2b" x="390" y="16" font-size="12" text-anchor="end">8 intervalos</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="38" font-size="12">Copia</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="58" font-size="12">Cálculo</text>
+<rect class="f-soft" fill="#e5f1df" x="60" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="79.5" y="38" font-size="12" text-anchor="middle">L1</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="119.5" y="58" font-size="12" text-anchor="middle">L1</text>
+<rect class="f-soft" fill="#e5f1df" x="140" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="159.5" y="38" font-size="12" text-anchor="middle">L2</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="199.5" y="58" font-size="12" text-anchor="middle">L2</text>
+<rect class="f-soft" fill="#e5f1df" x="220" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="239.5" y="38" font-size="12" text-anchor="middle">L3</text>
+<rect class="f-accent" fill="#136d5a" x="260" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="279.5" y="58" font-size="12" text-anchor="middle">L3</text>
+<rect class="f-soft" fill="#e5f1df" x="300" y="26" width="39" height="16"/><text class="f-text" fill="#182f2b" x="319.5" y="38" font-size="12" text-anchor="middle">L4</text>
+<rect class="f-accent" fill="#136d5a" x="340" y="46" width="39" height="16"/><text class="f-on" fill="#ffffff" x="359.5" y="58" font-size="12" text-anchor="middle">L4</text>
+<text class="f-text" fill="#182f2b" x="10" y="96" font-size="12" font-weight="600">Con solape: calcula l, copia l+1</text>
+<text class="f-text" fill="#182f2b" x="390" y="96" font-size="12" text-anchor="end">5 intervalos</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="118" font-size="12">Copia</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="138" font-size="12">Cálculo</text>
+<rect class="f-soft" fill="#e5f1df" x="60" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="79.5" y="118" font-size="12" text-anchor="middle">L1</text>
+<rect class="f-soft" fill="#e5f1df" x="100" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="119.5" y="118" font-size="12" text-anchor="middle">L2</text>
+<rect class="f-soft" fill="#e5f1df" x="140" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="159.5" y="118" font-size="12" text-anchor="middle">L3</text>
+<rect class="f-soft" fill="#e5f1df" x="180" y="106" width="39" height="16"/><text class="f-text" fill="#182f2b" x="199.5" y="118" font-size="12" text-anchor="middle">L4</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="119.5" y="138" font-size="12" text-anchor="middle">L1</text>
+<rect class="f-accent" fill="#136d5a" x="140" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="159.5" y="138" font-size="12" text-anchor="middle">L2</text>
+<rect class="f-accent" fill="#136d5a" x="180" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="199.5" y="138" font-size="12" text-anchor="middle">L3</text>
+<rect class="f-accent" fill="#136d5a" x="220" y="126" width="39" height="16"/><text class="f-on" fill="#ffffff" x="239.5" y="138" font-size="12" text-anchor="middle">L4</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="176" font-size="12">Strata: la capa siguiente llega durante la atención</text>
+</svg><figcaption>Figura 16-7　Cuando las dos etapas duran lo mismo, solapar comprime 8 intervalos de tiempo en 5. Cuantas más capas, más te acercas a «pagar solo una etapa».</figcaption></figure>
+<p>En Strata, el búfer es ese búfer circular de memoria fijada. Un comentario del código registra cuánto importa su tamaño: leyendo Q2_0 con chunks de 8.192 tokens, un anillo de 96 ranuras lee 1.153 tokens por segundo, y 384 ranuras llegan a 1.294, porque «los expertos de la capa siguiente pueden llegar durante la fase de atención de esta capa». <span class="ev ev-code">Hecho de código</span></p>
+<p>Con varias tarjetas gráficas, el pipeline gana un nivel más: cada tarjeta es dueña de un tramo de capas, y en cuanto el tramo anterior entrega los resultados intermedios de un chunk al tramo posterior, empieza a leer el chunk siguiente. En palabras del comentario de la interfaz, mientras el tramo posterior lee el chunk c, el tramo anterior ya está leyendo el chunk c+1. [S12]</p>
+<p>Por último, no olvides la entrega. Cuando un chunk termina, el motor debe dejar el estado de la sesión exactamente como «estaría tras leer token a token hasta aquí»: el estado recurrente de GDN y el historial de convolución, la caché KV y el indexer de QSA, el historial de PLE. No puede faltar ninguno, para que el decode retome sin costuras desde el token siguiente. [S12]</p>
+
+<h2 id="sec-6">16.6 Manos a la obra: encuentra un chunk que sea rápido y aun así quepa</h2>
+<ol>
+<li>Primero juega con la figura interactiva de arriba (figura 16-5). Arrastra C de 1 a 8192 y mira dónde las barras pasan de «subir» a «meseta». Luego apaga el pipeline, juega una vez con él activado y otra desactivado con C = 1024, y compara el «tiempo por chunk».</li>
+<li>Abre el laboratorio de este libro, «División en chunks y compromiso de espacio». Con una curva de reutilización dada explícitamente, calcula a la vez la velocidad de cada tamaño de chunk y el espacio que necesita. Primero encuentra el chunk absolutamente más rápido, luego descarta los que superan el presupuesto de VRAM, y compara cuánto se aleja el «mejor factible» del «mejor absoluto». La curva de reutilización y el espacio por token del laboratorio son parámetros inventados, no el asignador de Strata.</li>
+<li>Piénsalo: si se lee el mismo prompt con C = 1 y con C = 8192, ¿debería ser igual el estado final? Responde después de leer «Más a fondo».</li>
+</ol>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>El decode es matriz × vector: una lectura de los pesos sirve a un token. El prefill es matriz × matriz: una lectura de los pesos sirve a todo un chunk. En la misma computadora, el prefill puede ser más de veinte veces más rápido que el decode.</li>
+<li>La parte de expertos se procesa por lotes agrupando por experto: los tokens que eligieron el mismo experto van juntos y sus pesos se leen una sola vez. Chunks más grandes significan más reutilización, pero toman más VRAM prestada y hacen más lenta la cancelación. El valor por defecto de Strata es como máximo 8.192 tokens por chunk.</li>
+<li>El pipeline solapa mover y calcular: mientras la capa actual calcula, los expertos de la capa siguiente ya van en camino. El tiempo total lo fija la etapa más lenta.</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «Durante el prefill se conocen todos los tokens, así que pueden verse entre sí y la regla causal ya no importa».</strong></p>
+<p>Falso. El batching solo cambia cómo se organiza el cálculo; no cambia las reglas del modelo. El token i sigue viendo solo los tokens anteriores. El prefill sigue usando la máscara causal, y las capas recurrentes siguen recorriendo el chunk en orden. Que una entrada sea «conocida» y que pueda «ver el futuro» son dos cosas distintas.</p></div>
+
+<details class="deep"><summary>Más a fondo: la entrega del estado, las diferencias de redondeo y cuándo es seguro tomar VRAM prestada</summary>
+<h3>La entrega es más que el último vector</h3>
+<p>Cuando un chunk termina, el estado que hay que entregar incluye el estado recurrente y el estado de convolución de GDN, la KV y el indexer de QSA, el historial de PLE y el estado relacionado con las capas de borrador. [S12][S13] Si conservas solo la última fila de logits y descartas estos estados, el siguiente paso de decode ya no trabaja sobre el mismo historial.</p>
+<p>Una prueba sólida: lee la misma cadena de tokens con distintos chunkings, como C = 1, C = 7 y C = 32, y compara el estado en los límites de los chunks y la salida que sigue con un historial fijo. Las muestras con más probabilidad de romperse: una longitud que apenas cruza el límite de un chunk, un último chunk que no está lleno, un prompt muy corto, una cancelación a mitad del prefill y un decode que empieza justo después del prefill.</p>
+<h3>El batching cambia el redondeo, pero «punto flotante» no es excusa para todo</h3>
+<p>El cálculo por lotes y el de uno en uno pueden seguir caminos de redondeo distintos. La documentación de upstream da un ejemplo: con modelos de la familia IQ, la CPU calcula los expertos de un token con el producto punto de ggml, pero los de varios tokens con el kernel multi-token propio de Strata, y los dos redondean de forma ligeramente distinta. Así que, incluso con temperatura 0, el mismo prompt puede producir otra respuesta igual de razonable porque los borradores difieren. Upstream añadió un interruptor que hace que todos los grupos usen el kernel multi-token. [S03]</p>
+<p>Por eso, cuando C = 1 y un C grande no dan una salida idéntica palabra por palabra, no puedes concluir de inmediato que un lado tiene un error, y tampoco puedes descartarlo con «es solo punto flotante». Compara con el mismo historial fijo: los tensores intermedios, los expertos elegidos y los números de índice, y la capa donde el error empieza a crecer. Luego juzga con tolerancias y umbrales de calidad fijados de antemano. Los «contratos no numéricos», como las posiciones de estado, la máscara causal y los números de índice, deben comprobarse aparte y de forma exacta.</p>
+<h3>Cuándo es seguro tomar VRAM prestada</h3>
+<p>El búfer del chunk toma ranuras prestadas de la caché de expertos, lo que plantea dos problemas. Primero, mientras las ranuras están prestadas, los expertos que vivían allí han desaparecido, así que la tabla de enrutamiento debe dejar de tratarlos como «aciertos». En el código, esos expertos se mueven desde la RAM durante el prefill y se vuelven a llenar después. [S12] Segundo, solo cuando termina el rellenado puede el motor volver a anunciar qué experto vive en cada ranura. Mostrar que «los presupuestos suman menos que la VRAM» no prueba que el préstamo sea seguro. Lo que debes probar es que «en cada momento, la etiqueta coincide con los bytes de la ranura».</p>
+<h3>Los varios tamaños de chunk de la documentación</h3>
+<p>En upstream aparecen tamaños de chunk distintos en sitios distintos: el readme dice «como máximo 8.192 tokens» [S02]; un párrafo antiguo del documento de detalles aún dice 2.048; el servidor usa 32.768 como cota superior para estimar el tiempo de espera [S15]; el modo auto del motor tiene por defecto un máximo de 8.192 y puede subirse explícitamente a 32.768. <span class="ev ev-code">Hecho de código</span> Estos números no se contradicen; responden a preguntas distintas (valor por defecto, valor histórico, cota superior). En las fórmulas, este libro siempre escribe el tamaño del chunk como la variable C.</p>
+<h3>Los límites de la fórmula didáctica de costo</h3>
+<p>Las figuras interactivas de este capítulo y el laboratorio «División en chunks y compromiso de espacio» usan una fórmula de costo simplificada de la forma T ≈ N ÷ r(C) + ⌈N ÷ C⌉ × costo fijo por chunk, donde r(C) es una curva de reutilización fijada explícitamente. Puede mostrar dos cosas, «el costo fijo se reparte» y «el espacio es limitado», pero no puede predecir el throughput real de Strata. La velocidad real también depende de la tasa de aciertos de expertos, el ancho de banda de PCIe, los hilos de copia de la CPU, el cálculo de atención que crece con la longitud del contexto, y más.</p>
+<p>En experimentos avanzados con GPU, cambia solo C cada vez, mantén todo lo demás fijo (cuantización, formato de KV, borradores, entrada, estado de la caché) y luego explica los cambios de velocidad y calidad.</p>
+</details>

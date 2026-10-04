@@ -1,0 +1,298 @@
+<div class="hook"><span class="eyebrow">Quizá lo hayas notado</span>
+<p>Cuando ves escribir a Strata, a veces parece soltar de golpe una tira de palabras en vez de sacarlas una a una. El README lo explica así: un ayudante pequeño adivina primero las siguientes palabras, y el modelo grande comprueba todas esas apuestas de una vez, así que la misma respuesta llega de 1,6 a 1,8 veces más rápido. <span class="ev ev-report">Informe upstream</span>[S01]</p>
+<p>La documentación de upstream también dice que la capa de adivinación integrada en el modelo adivina como máximo 3 tokens a la vez. <span class="ev ev-report">Informe upstream</span>[S02] Aquí está el enigma: una apuesta acertada es un token gratis, así que ¿por qué no adivinar 10 de golpe? Este capítulo responde dos preguntas: cuántas apuestas compensan más, y cómo cambia de opinión el motor sobre la marcha cuando la tasa de aceptación no deja de variar.</p></div>
+<p class="tldr"><strong>En una línea:</strong> cada token adivinado de más aporta cada vez menos a la ganancia esperada, que se reduce como una serie geométrica, mientras que el tiempo de verificar una ronda sigue creciendo. Strata compara los «tokens esperados confirmados por milisegundo» y actualiza sus tasas de aceptación sobre la marcha con una media móvil exponencial.</p>
+
+<h2 id="sec-1">19.1 Adivinar una vez, comprobar una vez: ¿cuántos tokens da una ronda?</h2>
+<p>Un repaso rápido de la <dfn>decodificación especulativa</dfn> del capítulo 18: primero adivina barato, luego deja que el modelo grande califique las apuestas. Quien adivina es la <dfn>capa MTP</dfn> (predicción de varios tokens) integrada en el modelo, y los candidatos que adivina se llaman <dfn>borradores</dfn>. <span class="ev ev-report">Informe upstream</span>[S02]</p>
+<p>El modelo grande alinea «el último token confirmado + k borradores» en una fila y la recorre por sus 48 capas una sola vez. Esa única pasada le dice, para todas las posiciones a la vez, «esto es lo que creo que va aquí». Esta fila es la <dfn>ventana de verificación</dfn>, y mide k + 1. La figura 19-1 recorre un ejemplo con k = 3.</p>
+<figure class="fig"><svg viewBox="0 0 400 296" role="img" aria-label="Figura 19-1: una ronda de decodificación especulativa. Se adivinan tres borradores; los dos primeros coinciden con el modelo grande, el tercero no, y la ronda confirma 3 tokens">
+<text class="f-muted" fill="#5c6d66" x="150" y="22" font-size="12" text-anchor="middle">previo</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="22" font-size="12" text-anchor="middle">borrador 1</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="22" font-size="12" text-anchor="middle">borrador 2</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="22" font-size="12" text-anchor="middle">borrador 3</text>
+<text class="f-text" fill="#182f2b" x="10" y="46" font-size="13" font-weight="600">① Borrador</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="63" font-size="12">MTP adivina 3</text>
+<rect class="f-soft" fill="#e5f1df" x="125" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="150" y="55" font-size="15" text-anchor="middle">vamos</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="185" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="210" y="55" font-size="15" text-anchor="middle">al</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="245" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="270" y="55" font-size="15" text-anchor="middle">gran</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="305" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="55" font-size="15" text-anchor="middle">zoo</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="13" font-weight="600">② Verificar</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="123" font-size="12">48 capas, una pasada</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="185" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="210" y="115" font-size="15" text-anchor="middle">al</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="245" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="270" y="115" font-size="15" text-anchor="middle">gran</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="305" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="115" font-size="15" text-anchor="middle">lago</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="144" font-size="12" text-anchor="middle">Lo que dice el modelo grande</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="13" font-weight="600">③ Comparar</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="193" font-size="12">parar al primer fallo</text>
+<text class="f-text" fill="#182f2b" x="210" y="184" font-size="13" text-anchor="middle">igual</text>
+<text class="f-text" fill="#182f2b" x="270" y="184" font-size="13" text-anchor="middle">igual</text>
+<text class="f-warn" fill="#9e5d24" x="330" y="184" font-size="13" font-weight="600" text-anchor="middle">difiere</text>
+<text class="f-text" fill="#182f2b" x="10" y="232" font-size="13" font-weight="600">④ Confirmar</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="249" font-size="12">2 aceptados + 1 propio</text>
+<rect class="f-accent" fill="#136d5a" x="185" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="210" y="241" font-size="15" text-anchor="middle">al</text>
+<rect class="f-accent" fill="#136d5a" x="245" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="270" y="241" font-size="15" text-anchor="middle">gran</text>
+<rect class="f-accent" fill="#136d5a" x="305" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="330" y="241" font-size="15" text-anchor="middle">lago</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 80H390M10 154H390M10 204H390"/>
+<text class="f-text" fill="#182f2b" x="200" y="284" font-size="12" text-anchor="middle">Una pasada confirma 3 tokens; se descarta «zoo»</text>
+</svg><figcaption>Figura 19-1　Una ronda de decodificación especulativa: 3 apuestas, las 2 primeras coinciden con el modelo grande, la 3.ª no. La respuesta propia del modelo grande en la 3.ª posición, «lago», se confirma de paso, así que esta ronda rinde 3 tokens.</figcaption></figure>
+<p>La regla es simple: compara de izquierda a derecha y para en el primer desacuerdo. Todos los borradores coincidentes anteriores se <strong>aceptan</strong>, más la respuesta propia del modelo grande donde se detuvo. Así que, si se aceptan a borradores, la ronda confirma a + 1 tokens. El bucle de generación de Strata cuenta exactamente así: compara cada borrador de la ventana con la salida del modelo grande y luego llama a <code>commit(a + 1)</code>. <span class="ev ev-code">Hecho de código</span></p>
+<p>Aunque ninguna apuesta acierte, la ronda sigue recibiendo 1 token propio del modelo grande, igual que sin adivinar. Las apuestas erróneas no pueden empeorar la respuesta, porque el modelo grande tiene la última palabra en cada palabra. <span class="ev ev-report">Informe upstream</span>[S02] Una apuesta fallida cuesta solo una cosa: la verificación de esta ronda calculó en vano unas cuantas posiciones de más.</p>
+
+<h2 id="sec-2">19.2 ¿Cuántos por ronda en promedio? Entra el valor esperado</h2>
+<p>No puedes saber de antemano cuántos borradores aceptará una ronda. Lo que sí podemos calcular es cuántos acepta <strong>en promedio</strong>, que es el <dfn>valor esperado</dfn>.</p>
+<p>Sea pᵢ la <dfn>tasa de aceptación condicional</dfn> del i-ésimo borrador: la probabilidad de que el borrador i se acepte, dado que los i − 1 borradores anteriores se aceptaron todos. La palabra «dado» importa: cuando se rechaza un borrador anterior, los posteriores ni siquiera llegan a compararse.</p>
+<p>El borrador i solo es útil si los i primeros se aceptan todos, lo que tiene probabilidad p₁ × p₂ × … × pᵢ. Suma la «probabilidad de ser útil» de cada posición y obtienes el número esperado de tokens confirmados por ronda:</p>
+<div class="equation">E = 1 + p₁ + p₁p₂ + … + p₁p₂…pₖ</div>
+<p>El 1 inicial es el token propio del modelo grande, que cada ronda recibe seguro. El código de Strata multiplica y suma los términos uno a uno exactamente así. <span class="ev ev-code">Hecho de código</span>[S09] Si todas las posiciones tienen la misma tasa de aceptación p, esta suma son los k + 1 primeros términos de una sucesión geométrica. El recuadro siguiente muestra por qué añadir más términos «se queda sin fuelle».</p>
+<aside class="primer" id="c19-expected-value">
+<h3>Valor esperado y serie geométrica</h3>
+<p>Intuición: el valor esperado es «el resultado medio después de hacer algo muchísimas veces». Un dado justo puede caer en cualquier cosa de 1 a 6 en una tirada, pero en promedio da 3,5. El <dfn>valor esperado</dfn> se define así: multiplica cada resultado por su probabilidad y súmalos todos.</p>
+<p>Para contar «tokens por ronda» hay un camino más cómodo: suma la «probabilidad de ser usada» de cada posición. La posición 1 siempre se usa, con probabilidad 1; la posición 2 se usa con probabilidad p; la posición 3 con p²… así que E = 1 + p + p² + … + pᵏ. Una suma donde cada término es el anterior multiplicado por el mismo número es una <dfn>serie geométrica</dfn>, y tiene una fórmula hecha: E = (1 − pᵏ⁺¹) ÷ (1 − p).</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="Figura 19-2: con p igual a 0,86 y 3 borradores, las cuatro posiciones aportan en promedio 1, 0,86, 0,74 y 0,64, unos 3,24 en total">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">Ganancia media por posición, 3 borradores (p = 0,86)</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="12">Del modelo</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="38" width="220" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="326" y="52" font-size="12">1 (fijo)</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">Borrador 1</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="70" width="189.2" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="295" y="84" font-size="12">p = 0,86</text>
+<text class="f-text" fill="#182f2b" x="10" y="116" font-size="12">Borrador 2</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="102" width="162.7" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="269" y="116" font-size="12">p² ≈ 0,74</text>
+<text class="f-text" fill="#182f2b" x="10" y="148" font-size="12">Borrador 3</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="134" width="139.9" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="246" y="148" font-size="12">p³ ≈ 0,64</text>
+<text class="f-text" fill="#182f2b" x="10" y="182" font-size="12" font-weight="600">Total E = 1 + 0,86 + 0,74 + 0,64 ≈ 3,24 tokens</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">Con infinitos borradores: E → 1 ÷ (1 − p) ≈ 7,1</text>
+</svg><figcaption>Figura 19-2　Cada apuesta extra multiplica su aportación por p una vez más, así que cada barra es más corta que la anterior. Tres apuestas dan 3,24 tokens de promedio; ni infinitas pasarían de 7,1.</figcaption></figure>
+<p>Así que la ganancia de adivinar más no deja de encogerse: con p = 0,86, el 8.º borrador aporta solo 0,86⁸ ≈ 0,30 tokens. Una serie geométrica también tiene un techo: cuando el número de términos tiende a infinito, la suma se acerca a 1 ÷ (1 − p). Con p = 0,86, ni infinitas apuestas dan más de unos 7,1 tokens por ronda de promedio.</p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/Esperanza_%28matem%C3%A1tica%29" target="_blank" rel="noopener noreferrer">Wikipedia: Esperanza (matemática)</a> · <a href="https://es.wikipedia.org/wiki/Serie_geom%C3%A9trica" target="_blank" rel="noopener noreferrer">Wikipedia: Serie geométrica</a> · <a href="https://es.wikipedia.org/wiki/Distribuci%C3%B3n_geom%C3%A9trica" target="_blank" rel="noopener noreferrer">Wikipedia: Distribución geométrica</a></p>
+</aside>
+<p class="bridge"><strong>Si estudiaste informática:</strong> llama N a los «tokens confirmados en una ronda», una variable aleatoria. El método anterior es la fórmula de la suma de colas de la probabilidad, E[N] = Σ P(N ≥ i). Vale para cualquier distribución, así que la derivación no necesita que las posiciones sean independientes; solo encadena probabilidades condicionales.</p>
+<p>Ahora metamos los números de Strata. El código empieza cada posición MTP con una tasa de aceptación de 0,86, y un comentario dice que se midió en el mismo modelo. <span class="ev ev-code">Hecho de código</span>[S09] Con 3 apuestas, E = 1 + 0,86 + 0,74 + 0,64 ≈ 3,24. La documentación de upstream informa de que en la práctica una pasada de verificación confirma de 2,4 a 3,2 tokens de promedio. <span class="ev ev-report">Informe upstream</span>[S02] Los dos están en el mismo rango, así que 0,86 es un punto de partida razonable. La tasa de aceptación real cambia con el texto, algo que la sección 19.4 trata en detalle. <span class="ev ev-est">Estimación didáctica</span></p>
+
+<h2 id="sec-3">19.3 La otra mitad de la cuenta: las ventanas más anchas cuestan más de verificar</h2>
+<p>Si verificar fuera gratis, más apuestas serían siempre mejor. Pero verificar toma tiempo. El modelo de costo de Strata, <code>step_ms</code>, divide el tiempo de una ronda en cuatro partes: <span class="ev ev-code">Hecho de código</span>[S09]</p>
+<ul>
+<li><strong>Parte densa</strong>: la atención y todo lo demás que debe calcular cada token. Cuanto más ancha es la ventana, más lenta es esta parte; el código usa una tabla de multiplicadores indexada por la longitud de la ventana.</li>
+<li><strong>Expertos en la CPU</strong>: los expertos que no están en la caché de la GPU los calcula la CPU (mira el capítulo 10). Cuantos más tokens hay en la ventana, más expertos <strong>distintos</strong> se usan y más ocupada está la CPU.</li>
+<li><strong>Sincronización</strong>: una sobrecarga fija de coordinación por ronda.</li>
+<li><strong>Borradores</strong>: la capa MTP también necesita tiempo para adivinar cada borrador.</li>
+</ul>
+<p>Los valores por defecto de estas partes están en el archivo de cabecera: parte densa 11 ms, los 480 expertos en la CPU 15,8 ms, tasa de aciertos de la VRAM 55%, sincronización 2,4 ms y 1,2 ms por borrador MTP. Un comentario dice que valores por defecto como la tabla de multiplicadores vienen de mediciones del 23 de septiembre, y que 11 ms es el objetivo del plan y debería sustituirse por un valor medido dentro del motor. <span class="ev ev-code">Hecho de código</span> La figura 19-3 mete estos valores por defecto en la fórmula para mostrar cómo crecen las cuatro partes al ensancharse la ventana.</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="Figura 19-3: con los parámetros por defecto de Strata, una ronda crece de 20,5 milisegundos sin adivinar a 92,0 milisegundos con 8 apuestas">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">Una ronda: cuatro partes (ms, barras a escala)</text>
+<text class="f-text" fill="#182f2b" x="10" y="54" font-size="12">k = 0</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="40" width="34.7" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="90.7" y="40" width="22.4" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="113.1" y="40" width="7.6" height="20"/>
+<text class="f-text" fill="#182f2b" x="127" y="55" font-size="12">20,5</text>
+<text class="f-text" fill="#182f2b" x="10" y="94" font-size="12">k = 1</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="80" width="36.4" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="92.4" y="80" width="39.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="132.2" y="80" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="139.8" y="80" width="3.8" height="20"/>
+<text class="f-text" fill="#182f2b" x="150" y="95" font-size="12">27,8</text>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="12">k = 3</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="120" width="50.3" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="106.3" y="120" width="70.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="177.1" y="120" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="184.7" y="120" width="11.3" height="20"/>
+<text class="f-text" fill="#182f2b" x="202" y="135" font-size="12">44,4</text>
+<text class="f-text" fill="#182f2b" x="10" y="174" font-size="12">k = 8</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="160" width="114.4" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="170.4" y="160" width="137.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="308.2" y="160" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="315.8" y="160" width="30.2" height="20"/>
+<text class="f-text" fill="#182f2b" x="352" y="175" font-size="12">92,0</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="24" y="205" font-size="12">Denso</text>
+<rect class="f-warn" fill="#9e5d24" x="70" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="84" y="205" font-size="12">Expertos CPU</text>
+<rect class="f-muted" fill="#5c6d66" x="180" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="194" y="205" font-size="12">Sync</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="240" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="254" y="205" font-size="12">Borrador</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="226" font-size="12">La CPU crece con k, pero más lento que los tokens</text>
+</svg><figcaption>Figura 19-3　Cuando la ventana crece de 1 token a 9, una ronda solo se alarga unas 4,5 veces. La razón: los tokens de una misma ventana suelen elegir los mismos expertos, así que una lectura de los pesos sirve a varios tokens. <span class="ev ev-est">Estimación didáctica</span></figcaption></figure>
+<p>Mira la parte de la CPU. Si 9 tokens usaran cada uno un conjunto de expertos totalmente distinto, la CPU tendría 9 veces el trabajo de 1 token. Sin embargo, la tabla de multiplicadores del código llega como máximo a 5,2 veces, y un comentario dice que la tabla viene de trazas de enrutamiento medidas. <span class="ev ev-code">Hecho de código</span> Los tokens de una misma ventana suelen elegir los mismos expertos; es el efecto de los «expertos calientes» del capítulo 10.</p>
+<p>Con el numerador y el denominador en la mano, el objetivo está claro: <strong>velocidad = tokens esperados confirmados por ronda ÷ tiempo por ronda</strong>. El controlador calcula esto para cada k y elige el más rápido. <span class="ev ev-code">Hecho de código</span>[S09] La figura interactiva siguiente te despliega el cálculo.</p>
+<div class="viz" data-viz="draft-window"><figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="Figura 19-4: con los parámetros por defecto de Strata y p igual a 0,86, velocidad para k de 0 a 8; k igual a 3 es el más rápido, con unos 72,8 tokens por segundo">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">Tokens/s por ventana (p = 0,86, costos del código)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="102.4" width="26" height="97.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="85" y="66" width="26" height="134"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="124" y="58.6" width="26" height="141.4"/>
+<rect class="f-accent" fill="#136d5a" x="163" y="54.4" width="26" height="145.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="61.4" width="26" height="138.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="241" y="67.2" width="26" height="132.8"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="280" y="73.8" width="26" height="126.2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="319" y="80.2" width="26" height="119.8"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="358" y="84.8" width="26" height="115.2"/>
+<text class="f-text" fill="#182f2b" x="59" y="118" font-size="12" text-anchor="middle">49</text>
+<text class="f-text" fill="#182f2b" x="98" y="61" font-size="12" text-anchor="middle">67</text>
+<text class="f-text" fill="#182f2b" x="137" y="53" font-size="12" text-anchor="middle">71</text>
+<text class="f-text" fill="#182f2b" x="176" y="49" font-size="12" font-weight="600" text-anchor="middle">73</text>
+<text class="f-text" fill="#182f2b" x="215" y="56" font-size="12" text-anchor="middle">69</text>
+<text class="f-text" fill="#182f2b" x="254" y="62" font-size="12" text-anchor="middle">66</text>
+<text class="f-text" fill="#182f2b" x="293" y="68" font-size="12" text-anchor="middle">63</text>
+<text class="f-text" fill="#182f2b" x="332" y="75" font-size="12" text-anchor="middle">60</text>
+<text class="f-text" fill="#182f2b" x="371" y="79" font-size="12" text-anchor="middle">58</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="5 4" d="M40 97.6H390"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 200H390"/>
+<text class="f-muted" fill="#5c6d66" x="59" y="216" font-size="12" text-anchor="middle">k=0</text>
+<text class="f-muted" fill="#5c6d66" x="98" y="216" font-size="12" text-anchor="middle">k=1</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="216" font-size="12" text-anchor="middle">k=2</text>
+<text class="f-text" fill="#182f2b" x="176" y="216" font-size="12" font-weight="600" text-anchor="middle">k=3</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="216" font-size="12" text-anchor="middle">k=4</text>
+<text class="f-muted" fill="#5c6d66" x="254" y="216" font-size="12" text-anchor="middle">k=5</text>
+<text class="f-muted" fill="#5c6d66" x="293" y="216" font-size="12" text-anchor="middle">k=6</text>
+<text class="f-muted" fill="#5c6d66" x="332" y="216" font-size="12" text-anchor="middle">k=7</text>
+<text class="f-muted" fill="#5c6d66" x="371" y="216" font-size="12" text-anchor="middle">k=8</text>
+<text class="f-text" fill="#182f2b" x="10" y="238" font-size="12">Mejor: k = 3, 72,8 tokens/s (1,49× de 48,8)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="256" font-size="12">Discontinua: sin borrador × 1,05 (umbral)</text>
+</svg><figcaption>Figura 19-4　La velocidad primero sube y luego baja. Tres apuestas son lo más rápido; más allá, cada borrador extra aporta cada vez menos mientras la verificación se encarece. <span class="ev ev-est">Estimación didáctica</span></figcaption></figure></div>
+<p>Los números de esta figura salen de meter los valores por defecto del código en la fórmula, no de mediciones: sin adivinar, una ronda toma 20,5 ms, es decir, 48,8 tokens por segundo; con 3 apuestas, una ronda toma 44,4 ms, rinde 3,24 tokens de promedio y va a 72,8 por segundo. <span class="ev ev-est">Estimación didáctica</span> Lo que muestra es la forma: la curva tiene un pico, y dónde está el pico depende de la tasa de aceptación y de los costos.</p>
+<p>Hay un umbral más. La mejor ventana debe superar a no adivinar en más de un 5%, o el controlador no la usará y simplemente no adivina. <span class="ev ev-code">Hecho de código</span>[S09] El comentario de la cabecera describe este 5% como un ajuste del plan. <span class="ev ev-code">Hecho de código</span> La ventaja: la propia estimación de aceptación tiene error, así que una «ganancia» de uno o dos por ciento bien puede ser una ilusión creada por ese error.</p>
+
+<h2 id="sec-4">19.4 Las tasas de aceptación cambian: aprender sobre la marcha</h2>
+<p>0,86 es solo un punto de partida. Cuando escribes código, lo que viene suele poder adivinarse por lo anterior; cuando escribes un poema nuevo, es mucho más difícil. La documentación de upstream también señala que el mismo prompt con otra respuesta puede cambiar la velocidad de salida en unos puntos porcentuales, porque cambió el número de borradores aceptados. <span class="ev ev-report">Informe upstream</span>[S03] Así que la tasa de aceptación hay que estimarla sobre la marcha. La herramienta de Strata para eso es la media móvil exponencial.</p>
+<aside class="primer" id="c19-ema">
+<h3>Media móvil exponencial (EMA)</h3>
+<p>Intuición: quieres saber la temperatura media reciente, pero no quieres guardar el registro de cada día. El truco es guardar un solo número, la «estimación», y cada vez que llega una temperatura nueva, empujar la estimación un pasito hacia ella:</p>
+<div class="equation">nueva estimación = estimación anterior + α × (dato nuevo − estimación anterior)</div>
+<p>Esta es la <dfn>media móvil exponencial</dfn>, y α (entre 0 y 1) es el peso de actualización. Al desarrollarla, el dato más reciente tiene peso α, el anterior α(1 − α), el anterior a ese α(1 − α)²… Los datos más viejos pesan menos, decayendo de forma exponencial, de ahí el nombre. Necesita la memoria de un solo número, y cada actualización cuesta una multiplicación y dos sumas o restas.</p>
+<p>α fija el equilibrio. Una α grande sigue rápido pero la desvían fácilmente uno o dos resultados casuales; una α pequeña es estable pero tarda mucho en reaccionar cuando las cosas cambian. Una medida cómoda es la <strong>vida media</strong>: cuántas actualizaciones hacen falta para que el peso de los datos viejos baje a la mitad, que es ln 0,5 ÷ ln(1 − α). Con α = 0,05 son unas 13,5 actualizaciones; con α = 0,3 son menos de 2.</p>
+<p>El controlador de Strata usa exactamente esta fórmula para actualizar la tasa de aceptación de cada posición: una aceptación cuenta como 1, un rechazo como 0. <span class="ev ev-code">Hecho de código</span>[S09] El α por defecto del archivo de cabecera es 0,05. <span class="ev ev-code">Hecho de código</span></p>
+<p class="further">Para seguir leyendo: <a href="https://es.wikipedia.org/wiki/Media_m%C3%B3vil" target="_blank" rel="noopener noreferrer">Wikipedia: Media móvil</a> · <a href="https://en.wikipedia.org/wiki/Exponential_smoothing" target="_blank" rel="noopener noreferrer">Wikipedia: Exponential smoothing</a> (en inglés) · <a href="https://www.rfc-editor.org/rfc/rfc6298" target="_blank" rel="noopener noreferrer">RFC 6298: Computing TCP's retransmission timer</a> (en inglés)</p>
+</aside>
+<p class="bridge"><strong>Si estudiaste informática:</strong> en redes de computadoras, TCP estima el tiempo de ida y vuelta (RTT) con una EMA: SRTT ← (1 − 1/8) × SRTT + 1/8 × la nueva muestra de RTT, como en la RFC 6298. Estimar una tasa de aceptación y estimar el retardo de red son el mismo tipo de problema: los datos son ruidosos, el entorno cambia y la memoria es escasa.</p>
+<p>Hay una trampa en la contabilidad. Digamos que esta ronda adivinó 3 y el 1.º se rechazó de inmediato. ¿Cómo deben anotarse los borradores 2 y 3? Nunca llegaron a compararse. Están <strong>sin observar</strong>, no son «fallos». La estadística llama <dfn>censura</dfn> a esta situación, en la que el resultado nunca se vio.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figura 19-5: tras rechazarse el borrador 1, la contabilidad correcta anota un fallo solo en la posición 1; la contabilidad errónea anota también fallos en las posiciones 2 y 3, que no se comprobaron">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">3 borradores, 1.º rechazado: ¿qué anotar del resto?</text>
+<text class="f-text" fill="#182f2b" x="10" y="58" font-size="13" font-weight="600">Esta ronda</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="130" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="167.5" y="49" font-size="12" text-anchor="middle">Posición 1</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="66" font-size="12" font-weight="600" text-anchor="middle">Rechazado</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="49" font-size="12" text-anchor="middle">Posición 2</text>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="66" font-size="12" text-anchor="middle">Sin mirar</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="300" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="49" font-size="12" text-anchor="middle">Posición 3</text>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="66" font-size="12" text-anchor="middle">Sin mirar</text>
+<text class="f-text" fill="#182f2b" x="10" y="112" font-size="13" font-weight="600">Correcto</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="129" font-size="12">Así lo hace Strata</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="120" font-size="12" text-anchor="middle">fallo</text>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="120" font-size="12" text-anchor="middle">omitir</text>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="120" font-size="12" text-anchor="middle">omitir</text>
+<text class="f-text" fill="#182f2b" x="10" y="172" font-size="13" font-weight="600">Incorrecto</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="189" font-size="12">sin ver = fallo</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="180" font-size="12" text-anchor="middle">fallo</text>
+<text class="f-warn" fill="#9e5d24" x="252.5" y="180" font-size="12" text-anchor="middle">fallo</text>
+<text class="f-warn" fill="#9e5d24" x="337.5" y="180" font-size="12" text-anchor="middle">fallo</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 88H390M10 146H390M10 204H390"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="226" font-size="12">Mal: la estimación de p₃ → 0,86³ ≈ 0,64; real 0,86</text>
+</svg><figcaption>Figura 19-5　Anota solo las posiciones que de verdad se compararon. Si cuentas «sin ver» como «fallado», las posiciones posteriores cargan cada vez con más culpa injusta, y el controlador concluye por error que las ventanas largas no compensan.</figcaption></figure>
+<p><code>observe</code>, en Strata, actualiza solo las posiciones aceptadas más el primer rechazo; deja en paz todas las posiciones posteriores. <span class="ev ev-code">Hecho de código</span>[S09] Hay también el caso opuesto: cuando todas las apuestas de una ronda se aceptan, las posiciones más allá de la ventana tampoco se probaron. Si nunca se actualizaran, la ventana no podría crecer jamás. El código lo resuelve empujando las estimaciones de esas posiciones un pasito hacia la estimación de la posición observada más profunda. <span class="ev ev-code">Hecho de código</span>[S09]</p>
+<p>El rastreador siguiente te deja sentir los dos efectos por ti mismo: el equilibrio de α y el efecto de la regla de contabilidad.</p>
+<div class="viz" data-viz="draft-ema"><figure class="fig"><svg viewBox="0 0 400 258" role="img" aria-label="Figura 19-6: la tasa de aceptación real baja de 0,86 a 0,55 en la ronda 150; la estimación con α igual a 0,05 es suave pero lenta, la de α igual a 0,3 sigue rápido pero da saltos">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">La aceptación cae 0,86 → 0,55: dos α la persiguen</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="44" font-size="12" text-anchor="end">1,0</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="119" font-size="12" text-anchor="end">0,5</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="194" font-size="12" text-anchor="end">0</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width=".6" d="M40 40H380M40 115H380M40 190H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="2 3" d="M210 30V190"/>
+<text class="f-muted" fill="#5c6d66" x="214" y="36" font-size="12">cambio de tema</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40.0 61.0L43.4 47.2L46.8 42.5L50.2 40.8L53.6 40.3L57.0 62.1L60.4 47.6L63.8 87.6L67.2 101.3L70.6 92.5L74.0 111.6L77.4 86.6L80.8 56.0L84.2 45.5L87.6 73.4L91.0 51.4L94.4 75.4L97.8 52.2L101.2 44.2L104.6 117.9L108.0 66.7L111.4 49.2L114.8 88.1L118.2 56.5L121.6 45.7L125.0 41.9L128.4 85.7L131.8 55.7L135.2 45.4L138.6 41.8L142.0 72.1L145.4 51.0L148.8 120.3L152.2 112.5L155.6 64.9L159.0 48.5L162.4 42.9L165.8 41.0L169.2 62.4L172.6 92.7L176.0 89.6L179.4 57.0L182.8 45.8L186.2 64.1L189.6 48.2L193.0 42.8L196.4 41.0L199.8 40.3L203.2 40.1L206.6 40.0L210.0 62.1L213.4 124.1L216.8 167.4L220.2 160.2L223.6 179.8L227.0 186.5L230.4 143.8L233.8 75.6L237.2 128.7L240.6 101.9L244.0 83.3L247.4 86.3L250.8 87.4L254.2 56.3L257.6 90.6L261.0 155.9L264.4 79.8L267.8 53.6L271.2 111.7L274.6 131.7L278.0 170.0L281.4 106.6L284.8 94.4L288.2 80.7L291.6 130.5L295.0 124.6L298.4 136.1L301.8 104.4L305.2 93.6L308.6 156.9L312.0 133.7L315.4 139.2L318.8 105.5L322.2 107.5L325.6 116.7L329.0 66.3L332.4 80.5L335.8 98.9L339.2 82.3L342.6 131.0L346.0 124.8L349.4 145.6L352.8 121.2L356.2 99.4L359.6 127.4L363.0 101.5L366.4 114.6L369.8 132.7L373.2 148.3L376.6 130.7L380.0 71.1"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M40.0 61.0L43.4 58.0L46.8 55.4L50.2 53.2L53.6 51.3L57.0 56.5L60.4 54.1L63.8 59.6L67.2 64.3L70.6 68.0L74.0 77.9L77.4 79.3L80.8 73.7L84.2 68.9L87.6 71.9L91.0 67.3L94.4 70.5L97.8 66.2L101.2 62.5L104.6 73.9L108.0 69.0L111.4 64.9L114.8 68.9L118.2 64.7L121.6 61.2L125.0 58.2L128.4 63.1L131.8 59.8L135.2 57.0L138.6 54.6L142.0 59.6L145.4 56.8L148.8 69.0L152.2 72.4L155.6 67.8L159.0 63.8L162.4 60.4L165.8 57.5L169.2 61.8L172.6 66.2L176.0 69.6L179.4 65.3L182.8 61.7L186.2 65.4L189.6 61.8L193.0 58.7L196.4 56.0L199.8 53.7L203.2 51.8L206.6 50.1L210.0 55.4L213.4 67.8L216.8 85.3L220.2 93.4L223.6 107.2L227.0 119.0L230.4 121.6L233.8 110.0L237.2 114.6L240.6 111.1L244.0 107.7L247.4 105.2L250.8 103.0L254.2 94.0L257.6 93.8L261.0 107.5L264.4 97.9L267.8 89.7L271.2 96.8L274.6 103.0L278.0 115.4L281.4 111.4L284.8 108.4L288.2 105.4L291.6 110.7L295.0 114.5L298.4 118.1L301.8 114.1L305.2 110.7L308.6 122.0L312.0 124.2L315.4 126.4L318.8 121.2L322.2 117.2L325.6 120.0L329.0 108.6L332.4 106.0L335.8 104.1L339.2 101.7L342.6 107.5L346.0 111.8L349.4 116.2L352.8 112.8L356.2 109.5L359.6 113.9L363.0 110.5L366.4 114.3L369.8 118.0L373.2 121.5L376.6 123.8L380.0 111.8"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="6 4" d="M40 61H210V107.5H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M10 210H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="214" font-size="12">Gruesa: α = 0,05, suave, ~12 rondas de retraso</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M10 230H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="234" font-size="12">Fina: α = 0,3, sigue rápido pero a saltos</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="6 4" d="M10 250H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="254" font-size="12">Rayas: tasa real (el controlador no la ve)</text>
+</svg><figcaption>Figura 19-6　El eje horizontal es la ronda (300 en total); el vertical es la estimación de aceptación del borrador 1. Una α pequeña es estable pero va un compás por detrás; una α grande reacciona rápido pero el ruido la arrastra. Las aceptaciones son números aleatorios simulados. <span class="ev ev-est">Estimación didáctica</span></figcaption></figure></div>
+<p>Cuanto más profunda es la posición, menos oportunidades tiene de compararse: el borrador 3 recibe un registro solo cuando los dos primeros se aceptan. Por eso las posiciones profundas se actualizan más despacio que las superficiales. Por eso, en el rastreador, la curva de p₃ reacciona claramente más perezosa que la de p₁ tras el cambio de tema. <span class="ev ev-est">Estimación didáctica</span></p>
+
+<h2 id="sec-5">19.5 ¿Cuál ejecuta de verdad Strata?</h2>
+<p>El controlador descrito hasta ahora vive en <code>src/spec/controller.cpp</code>. Se compila en la biblioteca <code>strata_spec</code> y tiene su propia prueba unitaria, <code>controller_test</code>. <span class="ev ev-code">Hecho de código</span> Pero abre el programa principal de generación, <code>generate.cpp</code> (el origen del ejecutable <code>strata</code>), y verás que incluye otra cabecera, <code>draft_policy.hpp</code>; el bucle de generación llama a <code>DraftPolicy</code>. En el código del motor que revisó este libro, no encontramos ninguna llamada a <code>Controller</code>. <span class="ev ev-code">Hecho de código</span> La figura 19-7 pone los dos lado a lado.</p>
+<figure class="fig"><svg viewBox="0 0 400 268" role="img" aria-label="Figura 19-7: Controller estima el costo con un modelo de fórmula y decide la ventana MTP, y solo se llama desde pruebas unitarias; DraftPolicy usa tiempos medidos, solo decide si pasar a borradores de lookup, y la llama el bucle principal de generación">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="185" height="200" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="32" font-size="13" font-weight="600">Controller</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="50" font-size="12">src/spec/controller.cpp</text>
+<text class="f-text" fill="#182f2b" x="22" y="76" font-size="12">Elige la ventana MTP k</text>
+<text class="f-text" fill="#182f2b" x="22" y="100" font-size="12">También compara lookup</text>
+<text class="f-text" fill="#182f2b" x="22" y="124" font-size="12">Costo: modelo fórmula</text>
+<text class="f-text" fill="#182f2b" x="22" y="148" font-size="12">Tasas: EMA, α = 0,05</text>
+<text class="f-text" fill="#182f2b" x="22" y="172" font-size="12">Umbral: 5% más rápido</text>
+<text class="f-warn" fill="#9e5d24" x="22" y="196" font-size="12">Uso: pruebas unitarias</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="10" width="185" height="200" rx="8"/>
+<text class="f-text" fill="#182f2b" x="217" y="32" font-size="13" font-weight="600">DraftPolicy</text>
+<text class="f-muted" fill="#5c6d66" x="217" y="50" font-size="12">src/spec/draft_policy.cpp</text>
+<text class="f-text" fill="#182f2b" x="217" y="76" font-size="12">--spec fija ventana MTP</text>
+<text class="f-text" fill="#182f2b" x="217" y="100" font-size="12">Solo: ¿pasar a lookup?</text>
+<text class="f-text" fill="#182f2b" x="217" y="124" font-size="12">Costo: medido por ronda</text>
+<text class="f-text" fill="#182f2b" x="217" y="148" font-size="12">MTP: media medida</text>
+<text class="f-text" fill="#182f2b" x="217" y="172" font-size="12">Umbral: 3% más rápido</text>
+<text class="f-text" fill="#182f2b" x="217" y="196" font-size="12" font-weight="600">Uso: bucle generación</text>
+<text class="f-text" fill="#182f2b" x="200" y="236" font-size="12" text-anchor="middle">Mismo objetivo: tokens esperados confirmados por ms</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="256" font-size="12" text-anchor="middle">Cambia el denominador: fórmula vs cronómetro</text>
+</svg><figcaption>Figura 19-7　Un objetivo, dos implementaciones. La que decide de verdad dentro del bucle de generación es la de la derecha: ya no adivina el costo con una fórmula, sino que registra cuánto tardó realmente cada ventana.</figcaption></figure>
+<p>Empecemos por el lado MTP. En el bucle de generación, la longitud de la ventana MTP viene de la opción de arranque <code>--spec</code> y permanece fija en cada ronda salvo la primera. Solo se acorta cuando se fija <code>--spec-min-p</code>: cuando la confianza de la capa de borrador en un borrador cae por debajo de ese umbral, no se añaden más borradores a la ventana. <span class="ev ev-code">Hecho de código</span> La documentación de upstream dice que MTP adivina como máximo 3 a la vez. <span class="ev ev-report">Informe upstream</span>[S02]</p>
+<p><code>DraftPolicy</code> se ocupa de otra cosa: el <dfn>prompt lookup</dfn>. Si el texto que se escribe repite un pasaje del contexto, por ejemplo al copiar unas líneas existentes mientras se edita código, lo que siguió a ese pasaje la vez anterior probablemente lo seguirá otra vez, y puede usarse directamente como borrador. Los borradores de lookup miden como máximo 5, y se usan solo cuando la tasa de aceptación medida y el costo dicen ambos que compensa. Upstream informa de una edición de código un 6–11% más rápida y ningún cambio en texto normal. <span class="ev ev-report">Informe upstream</span>[S02] El bucle de generación tiene una condición previa más: cuando MTP está activado, el primer token del borrador de lookup debe coincidir con el primer borrador del propio MTP antes de preguntar a <code>DraftPolicy</code> para que decida. <span class="ev ev-code">Hecho de código</span></p>
+<p><code>DraftPolicy</code> sigue usando la fórmula de este capítulo: en el lado de lookup, E(k) = 1 + q + q² + … + qᵏ, donde q es una tasa de aceptación registrada en cubos según «cuánto duró la coincidencia»; en el lado MTP usa directamente el rendimiento medio medido por ronda. El denominador ya no es una fórmula sino el tiempo medido por ronda para cada longitud de ventana, suavizado con una EMA con α = 0,1; para las longitudes que no ha medido, convierte desde las medidas con una curva de forma preestablecida. Una ventana de lookup debe superar a la ventana MTP en más de un 3% para ser elegida. <span class="ev ev-code">Hecho de código</span></p>
+<p>Es una gran lección de ingeniería: por detallado que sea tu modelo de costo, no puede ganar a medir directamente. Los tiempos de ronda cambian con la máquina y con la longitud del contexto; los valores medidos siguen a la máquina automáticamente.</p>
+
+<h2 id="sec-6">19.6 Manos a la obra: encuentra tú mismo la mejor ventana</h2>
+<p>Abre el laboratorio de este capítulo, «Hasta qué longitud vale la pena adivinar un borrador». Usa una fórmula de costo más simple: un tiempo base más un costo fijo de verificación y de borrador por cada borrador, con la misma tasa de aceptación p en todas las posiciones. Compara los tokens esperados, el tiempo y la ganancia neta para k de 0 a 5.</p>
+<ol>
+<li>Pon p en 0: cada k tiene un valor esperado de 1, y los borradores solo añaden tiempo. La mejor respuesta debería ser k = 0.</li>
+<li>Pon p en 1: el valor esperado es exactamente k + 1. Mira si ahora gana siempre la ventana más larga.</li>
+<li>Mantén p fijo y sube el costo del borrador: encuentra el punto donde el mejor k vuelve a caer a 0.</li>
+</ol>
+<p>Después, compáralo con las dos figuras interactivas de este capítulo. El costo del laboratorio es una recta; en el modelo de costo de Strata, los expertos compartidos hacen que la parte de la CPU crezca más despacio que una recta, mientras que el multiplicador denso salta bruscamente cuando la ventana llega a 5 tokens. Otra curva de costo mueve el pico.</p>
+
+<div class="recap"><h3>Recuerda estas tres ideas</h3><ol>
+<li>Tokens esperados por ronda E = 1 + p₁ + p₁p₂ + …: cada apuesta extra multiplica su aportación por otra tasa de aceptación, así que los rendimientos decrecen. Con p = 0,86, ni infinitas apuestas pasan de 7,1.</li>
+<li>Lo que hay que optimizar es velocidad = E ÷ tiempo por ronda. Las ventanas más anchas cuestan más de verificar, así que la curva de velocidad tiene un pico; además, adivinar debe superar a no adivinar por un margen claro para valer la pena.</li>
+<li>Estima las tasas de aceptación sobre la marcha con una EMA: una α grande reacciona rápido pero tiembla, una α pequeña es estable pero lenta. Las posiciones que nunca se compararon están «sin observar» y no deben contarse como fallos.</li>
+</ol></div>
+<div class="myth"><p><strong>Error común: «Una tasa de aceptación más alta siempre significa más velocidad».</strong></p>
+<p>La tasa de aceptación es solo parte del numerador. Supón que un método de borrador más listo pero más lento sube el rendimiento esperado por ronda de 2 a 2,5 tokens, pero el tiempo de ronda pasa de 10 ms a 15 ms: la velocidad baja de 200 tokens por segundo a unos 167. <span class="ev ev-est">Estimación didáctica</span> Para juzgar un método de borrador, mira los tokens confirmados por milisegundo, no solo cuántas apuestas acertaron.</p></div>
+
+<details class="deep"><summary>Más a fondo: probabilidad condicional, censura, exploración y criterios de aceptación</summary>
+<h3>La fórmula de la esperanza no necesita suponer independencia</h3>
+<p>pᵢ se define como «la probabilidad condicional de que el borrador i se acepte, dado que los i − 1 primeros se aceptaron todos». El borrador i aporta si y solo si los i primeros se aceptan todos, y la regla de la multiplicación de la probabilidad condicional da esa probabilidad directamente como p₁p₂…pᵢ, sin afirmar que las posiciones sean independientes. Ejemplo: p = [0,8, 0,6, 0,5] da E = 1 + 0,8 + 0,48 + 0,24 = 2,52. Si adivinar más verificar toma 18 ms por ronda, la velocidad es de unos 140 tokens/s; sin adivinar una ronda toma 8 ms, 125 tokens/s, así que la ganancia neta es de un 12% aproximadamente. Son ejercicios didácticos, no pruebas de rendimiento de Strata. <span class="ev ev-est">Estimación didáctica</span></p>
+<p>El <code>expected</code> del código se usa de dos maneras: MTP pasa un arreglo por posición; los borradores de lookup usan la misma q en todas las posiciones, que es una serie geométrica. <span class="ev ev-code">Hecho de código</span>[S09]</p>
+<h3>El modelo de costo, término por término</h3>
+<p>En <code>step_ms(k)</code>, n = k + 1, acotado entre 1 y K_MAX + 1. Parte densa = <code>dense_ms × dense_ratio[n−1]</code>. Parte de la CPU = (1 − tasa de aciertos) × <code>cpu_all_miss_ms</code> × U × (1 + <code>extra_use_cost</code> × (n ÷ U − 1)), donde U es cuántas veces más expertos distintos usa la ventana que un solo token, y n ÷ U es cuántos tokens usan cada experto en promedio. Parte de borradores = k × tiempo por borrador. <span class="ev ev-code">Hecho de código</span>[S09] Valores por defecto del archivo de cabecera: K_MAX = 8; <code>extra_use_cost</code> = 0,25, es decir, que cada token extra que usa el mismo experto cuesta solo el 25% de una lectura; los borradores de lookup cuestan 0,01 ms cada uno, casi gratis. <span class="ev ev-code">Hecho de código</span></p>
+<p>Aplicar sin condiciones a cada borrador el ideal de «los pesos se leen una sola vez» sobreestima la ganancia; ignorar por completo la reutilización de expertos la subestima. El valor real de U depende del enrutamiento y debe medirse.</p>
+<h3>Los valores a priori no son constantes físicas</h3>
+<p>La tasa de aceptación inicial de MTP, 0,86, y el valor a priori de lookup por cubos de longitud de coincidencia, {0,35, 0,6, 0,8, 0,92}, son solo puntos de partida. Los comentarios dicen que el primero se midió en el mismo modelo y el segundo viene de una repetición offline, y que luego ambos se aprenden por sesión. <span class="ev ev-code">Hecho de código</span>[S09] Cambia el idioma, la cuantización o la tarea, y cambian tanto la calidad de los borradores como la reutilización de expertos. <code>DraftPolicy</code> tiene su propio valor a priori de lookup: {0,75, 0,88, 0,93, 0,96}, cada uno con peso de 4 observaciones, así que unas pocas rondas de datos reales lo sustituyen; las observaciones viejas decaen con un factor de 0,97 por ronda. <span class="ev ev-code">Hecho de código</span></p>
+<h3>Censura, posiciones más allá de la ventana y «exploración»</h3>
+<p>Tras rechazarse el primer borrador, las posiciones posteriores ya no están bajo la condición «todos los borradores anteriores aceptados», así que no se observan. Anotarlas como 0 crea un bucle que se refuerza solo: cuanto más corta es la ventana, peor se ven las posiciones profundas, y menos dispuesto está el controlador a probar de nuevo una ventana larga. Cuando se acepta todo, pasa lo contrario: las posiciones más allá de la ventana nunca se probaron, y el código las acerca a la estimación de la posición observada más profunda, o la ventana no podría crecer jamás. <span class="ev ev-code">Hecho de código</span>[S09]</p>
+<p>Mirando solo las dos funciones de <code>Controller</code>, hay otro límite que conviene notar: una vez elegido «no adivinar», <code>observe</code> vuelve de inmediato y las estimaciones dejan de actualizarse. <span class="ev ev-code">Hecho de código</span>[S09] Si alguna vez el ruido empuja la estimación por debajo del umbral, estas dos funciones por sí solas nunca pueden volver a aprender el camino, y quien las llama debe explorar aparte. (Una prueba del módulo de este capítulo lo demuestra exactamente.) <code>DraftPolicy</code> explora de forma explícita: una ventana de lookup cuyo tiempo nunca se ha medido se prueba directamente en sus 3 primeros usos, siempre que su estimación de aceptación sea al menos 0,85. El comentario dice que la verificación garantiza que la salida no cambia; lo único que está en juego es la velocidad de esta ronda. <span class="ev ev-code">Hecho de código</span></p>
+<h3>¿Pueden los borradores cambiar la salida?</h3>
+<p>En principio, no: cada token confirmado es elección del propio modelo grande. Pero la documentación de upstream señala una excepción de punto flotante: con modelos cuantizados IQ, la CPU usa kernels distintos para calcular un experto para un token y para varios tokens, y su redondeo difiere ligeramente; cuántos tokens comparten un experto depende de los borradores de la ventana de verificación. Así que, incluso con temperatura 0, el mismo prompt puede producir una respuesta distinta pero igual de razonable. Fijar <code>STRATA_IQ_MT_MIN=1</code> hace que todos los grupos usen el kernel multi-token, y la respuesta deja de depender de los borradores. <span class="ev ev-report">Informe upstream</span>[S03]</p>
+<h3>Criterios de aceptación</h3>
+<p>Para probar un controlador de ventana, los casos límite convencen más que una curva bonita:</p>
+<ul>
+<li>Cuando los borradores son muy caros, vuelve a k = 0.</li>
+<li>Con p = 0, los borradores extra no producen ganancia falsa.</li>
+<li>Con p = 1, E es exactamente k + 1.</li>
+<li>Las posiciones sin observar no se cuentan como fallos; cuando se acepta todo, las posiciones más allá de la ventana pueden subirse.</li>
+<li>Si supera a no adivinar en menos que el umbral, se queda en no adivinar.</li>
+</ul>
+<p>El módulo de cálculo detrás de las figuras interactivas de este capítulo tiene pruebas para estos casos límite, y su función de costo se comprobó término por término contra los valores por defecto del código. El propio <code>controller_test</code> de upstream prueba el mismo tipo de propiedades: con los valores a priori elige de 2 a 5 borradores, apaga la especulación tras rechazos sostenidos, y la ventana se ensancha tras una aceptación total sostenida. <span class="ev ev-code">Hecho de código</span></p>
+</details>
