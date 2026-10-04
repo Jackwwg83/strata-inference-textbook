@@ -1,0 +1,181 @@
+/* Chapter 05 widgets: a roofline you can climb by batching or by shrinking bytes, and Amdahl's law as two bars.
+   All visible text lives in the T table below, keyed by language (zh is the master). */
+(function (root) {
+  'use strict';
+  const { Viz } = root;
+  const M = root.VizMath.roofline;
+  const P = 50e12, B = 672e9;               // P is a teaching assumption; B is the RTX 5070 VRAM spec used in ch01/ch10
+  const BATCH = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+  const SPEEDUPS = [1, 1.5, 2, 3, 4, 8, 16, Infinity];
+  const sig = (x, d = 3) => Number(x.toPrecision(d)).toString();
+
+  const T = Viz.t({
+    zh: {
+      code: 'ROOFLINE', title: '两块天花板', tag: '教学推演 · 算力 P 为假设值',
+      intro: '横轴是<b>算术强度</b> I：每从显存读 1 字节，能做几次运算。斜线是带宽的天花板（B × I），平线是算力的天花板（P）。拖动“同时算几个 token”、切换权重格式，看那个点落在哪块天花板下面。按 <b>单步</b> 跟着算一遍。',
+      lgPoint: '当前这次计算', lgRef: '参照：写答案（b = 1，FP16）', lgRoof: '天花板：min(P, B × I)',
+      steps: ['数运算量', '数字节', '算 I', '和拐点比', '定瓶颈'],
+      bLabel: '同时算几个 token（b）', bStep: '▶ 单步',
+      formats: [['FP16', 2, '2 字节'], ['Q8_0', 34 / 32, '1.0625 字节'], ['Q2_0', 18 / 64, '0.28125 字节']],
+      axX: '算术强度 I（FLOP/字节，对数刻度）', axY: '能达到的算力（TFLOPS，对数刻度）',
+      plotLabel: 'roofline 图：横轴算术强度，纵轴可达算力',
+      ridge: (r) => `拐点 ≈ ${r}`,
+      ready: '<span class="c">$</span> ready. 按 [ ▶ 单步 ] 开始',
+      r0: (b) => `<span class="c">数运算量</span>：b = ${b} 个 token，每个权重对每个 token 做 1 次乘法、1 次加法 → 每个权重 ${2 * b} 次运算`,
+      r1: (bpw, fmt) => `<span class="c">数字节</span>：每个权重 ${bpw}（${fmt}），从显存读一次。这里只算权重，忽略输入输出`,
+      r2: (b, bpw, I) => `<span class="m">算术强度</span>：I = ${2 * b} ÷ ${bpw} ≈ ${I} 次运算/字节`,
+      r3: (I, r, left) => `<span class="w">和拐点比</span>：拐点 = P ÷ B = 50 万亿 ÷ 6720 亿 ≈ ${r}。I = ${I}，在拐点${left ? '左边' : '右边'}`,
+      r4m: (perf, pct) => `<span class="y">结论</span>：带宽受限。最多只能用到 ${perf} TFLOPS，是算力上限的 ${pct}%，其余时间在等数据`,
+      r4c: '<span class="y">结论</span>：算力受限，能用满 50 TFLOPS。再加大 b，每个 token 也不会更快',
+      sI: '算术强度 I', sIF: '<b>= 2b ÷ 每个权重的字节数</b><br>单位：次运算/字节',
+      sPerf: '能达到的算力', sPerfF: '<b>= min(P, B × I)</b><br>P = 50 TFLOPS（假设），B = 672 GB/s',
+      sBound: '瓶颈在哪', vMem: '带宽', vComp: '算力', sBoundF: (r) => `<b>拐点 = P ÷ B ≈ ${r}</b><br>I 小于拐点，就是在等数据`,
+      try: [
+        'b = 1、FP16：I = 1，只能用到约 0.67 TFLOPS，不到上限的 2%。写答案时，显卡大部分时间在等数据。',
+        '把 b 拉到 <b>128</b>：点越过拐点，爬上平顶。一次算很多 token（读题），同一份权重被用很多次。',
+        '换成 <b>Q2_0</b>：同样 b = 1，I 变成约 7。每个权重的字节少了，同样的带宽能喂饱更多运算（解码的额外开销这里没算）。',
+      ],
+      verdict: '① 写答案时一轮只算 1 个 token，I 只有 1 左右，远在拐点左边：速度由带宽决定，不由算力决定。<br>② 读题时一次算很多 token，I 跟着 b 变大，才爬上平顶。<br>③ 量化减少每个权重的字节，也能把 I 往右推；代价是解码要额外计算（第 4 章）。',
+
+      aCode: 'AMDAHL', aTitle: '只优化一部分，整体快多少', aTag: '教学推演 · 16% 来自 Strata 源码注释',
+      aIntro: '一个 token 的时间分成两块：要优化的部分占 f，其余占 1 − f。把要优化的部分加速 s 倍，看整条时间线缩短多少。',
+      lgRest: '没被优化的部分', lgPart: '要优化的部分', lgFast: '优化后的那部分',
+      presets: [['Strata 的 GEMV：约 16%', 16], ['占一半', 50], ['占九成', 90]],
+      fLabel: '要优化的部分占 f', sLabel: '它快了 s 倍',
+      before: '优化前', after: '优化后',
+      aReady: '<span class="c">$</span> ready. 拖动滑块，或点上面的预设',
+      aLog: (f, s, t, S) => `<span class="c">f = ${f}%，s = ${s}</span>：新时间 = ${100 - f}% + ${f}% ÷ ${s} = ${t}%，整体快 <span class="y">${S} 倍</span>`,
+      kS: '整体加速', fS: '<b>= 1 ÷ ((1 − f) + f ÷ s)</b>',
+      kCap: '加速上限（s → ∞）', fCap: '<b>= 1 ÷ (1 − f)</b><br>没被优化的部分，一点没少',
+      kT: '新的总时间', fT: '<b>= (1 − f) + f ÷ s</b><br>以优化前为 100%',
+      aTry: [
+        '点 <b>Strata 的 GEMV</b>，把 s 拉到 ∞：整体也只快约 1.19 倍。',
+        '点 <b>占九成</b>，s = 2：整体快约 1.82 倍。值得花力气的，是占大头的部分。',
+        '固定 s = 2，把 f 从 0 拉到 95%：整体加速慢慢逼近 2，但永远到不了。',
+      ],
+      aVerdict: (f, s, S, cap) => `① 要优化的部分占 ${f}%，快了 ${s} 倍，整体只快 <b>${S} 倍</b>。<br>② 就算快到无穷，整体最多快 ${cap} 倍：剩下的 ${100 - f}% 一点没少。<br>③ 所以动手优化之前，先量清楚各部分各占多少时间。Strata 的源码就是这样判断：GEMV 只占一个 token 的约 16%，改它的线程数动不了总时间。`,
+    },
+  });
+
+  Viz.register('roofline-lab', {
+    mount(el, ctx) {
+      const body = Viz.frame(el, { code: T.code, title: T.title, tag: T.tag, intro: T.intro });
+      body.insertAdjacentHTML('beforeend', Viz.legend([
+        { color: 'var(--accent)', text: T.lgPoint, glow: true },
+        { color: 'var(--a2)', text: T.lgRef },
+        { color: 'var(--muted)', text: T.lgRoof },
+      ]));
+      const pipe = Viz.pipe(body, T.steps);
+      body.insertAdjacentHTML('beforeend', '<div class="viz-cols"><div class="viz-left"></div><div class="viz-right"></div></div>');
+      const left = body.querySelector('.viz-left'), right = body.querySelector('.viz-right');
+      const W = 360, H = 250, x0 = 52, x1 = 344, y0 = 26, y1 = 206;
+      const xs = I => x0 + (Math.log10(I) + 1) / 4 * (x1 - x0), ys = tf => y1 - (Math.log10(tf) + 2) / 4 * (y1 - y0);
+      const svg = Viz.svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'viz-stage', role: 'img', 'aria-label': T.plotLabel }, left);
+      const txt = (x, y, s, anchor, color) => { const t = Viz.svg('text', { x, y, 'font-size': 12, 'text-anchor': anchor || 'start', style: `fill:${color || 'var(--muted)'}` }, svg); t.textContent = s; return t; };
+      txt(x0, 14, T.axY);
+      [0.1, 1, 10, 100, 1000].forEach(I => { Viz.svg('path', { d: `M${xs(I)} ${y0}V${y1}`, style: 'stroke:var(--frame);fill:none', 'stroke-width': 1 }, svg); txt(xs(I), y1 + 16, String(I), 'middle'); });
+      [0.01, 0.1, 1, 10, 100].forEach(v => { Viz.svg('path', { d: `M${x0} ${ys(v)}H${x1}`, style: 'stroke:var(--frame);fill:none', 'stroke-width': 1 }, svg); txt(x0 - 4, ys(v) + 4, String(v), 'end'); });
+      txt((x0 + x1) / 2, H - 6, T.axX, 'middle');
+      const r = M.ridge(P, B), Ptf = P / 1e12, Btf = B / 1e12;
+      Viz.svg('path', { d: `M${xs(0.1)} ${ys(Btf * 0.1)}L${xs(r)} ${ys(Ptf)}H${x1}`, style: 'stroke:var(--muted);fill:none', 'stroke-width': 2.5 }, svg);
+      Viz.svg('path', { d: `M${xs(r)} ${ys(Ptf)}V${y1}`, style: 'stroke:var(--muted);fill:none', 'stroke-width': 1, 'stroke-dasharray': '3 3' }, svg);
+      txt(xs(r) - 4, ys(Ptf) - 6, T.ridge(r.toFixed(0)), 'end');
+      Viz.svg('circle', { cx: xs(1), cy: ys(Btf), r: 5, style: 'fill:none;stroke:var(--a2)', 'stroke-width': 2 }, svg);
+      const drop = Viz.svg('path', { d: '', style: 'stroke:var(--accent);fill:none', 'stroke-width': 1, 'stroke-dasharray': '2 3' }, svg);
+      const dot = Viz.svg('circle', { cx: 0, cy: 0, r: 6, style: 'fill:var(--accent);filter:drop-shadow(var(--glow))' }, svg);
+      left.insertAdjacentHTML('beforeend', `<div class="viz-row" style="margin-top:8px">${T.formats.map(([n], k) => `<button type="button" class="viz-btn${k ? ' ghost' : ''}" data-fmt="${k}" style="padding:5px 10px;font-size:12px">${n}</button>`).join('')}</div>
+        <div class="viz-slider"><label>${T.bLabel}</label><input class="rl-b" type="range" min="0" max="${BATCH.length - 1}" step="1" value="0" aria-label="${Viz.esc(T.bLabel)}"><output class="rl-bo"></output></div>
+        <div class="viz-row">${Viz.button(T.bStep, 'rl-step')}</div>`);
+      const term = Viz.term(left, T.ready);
+      right.innerHTML =
+        Viz.stat({ id: 'rl-i', k: T.sI, v: '', f: T.sIF }) +
+        Viz.stat({ id: 'rl-p', k: T.sPerf, v: '', f: T.sPerfF, hot: true }) +
+        Viz.stat({ id: 'rl-b', k: T.sBound, v: '', f: T.sBoundF(r.toFixed(0)) });
+      body.insertAdjacentHTML('beforeend', Viz.tryList(T.try) + `<div class="viz-verdict" hidden>${T.verdict}</div>`);
+      const $ = s => el.querySelector(s);
+      const bIn = $('.rl-b');
+      let fmt = 0, phase = -1;
+      const state = () => { const b = BATCH[+bIn.value], bpw = T.formats[fmt][1], I = M.intensity(b, bpw), rf = M.roofline(P, B, I); return { b, bpw, I, rf }; };
+      function paint() {
+        const { b, I, rf } = state(), tf = rf.perf / 1e12, Ic = Math.min(1000, Math.max(0.1, I));
+        $('.rl-bo').textContent = b;
+        dot.setAttribute('cx', xs(Ic)); dot.setAttribute('cy', ys(tf));
+        drop.setAttribute('d', `M${xs(Ic)} ${ys(tf)}V${y1}`);
+        $('[data-s=rl-i-v]').textContent = sig(I);
+        $('[data-s=rl-p-v]').textContent = sig(tf) + ' TFLOPS';
+        $('[data-s=rl-b-v]').textContent = rf.bound === 'memory' ? T.vMem : T.vComp;
+        el.querySelectorAll('[data-fmt]').forEach(x => x.classList.toggle('ghost', +x.dataset.fmt !== fmt));
+      }
+      function step() {
+        phase = (phase + 1) % 5;
+        pipe.set(phase);
+        const { b, bpw, I, rf } = state(), f = T.formats[fmt];
+        if (phase === 0) term.log(T.r0(b));
+        if (phase === 1) term.log(T.r1(f[2], f[0]));
+        if (phase === 2) term.log(T.r2(b, sig(bpw, 4), sig(I)));
+        if (phase === 3) term.log(T.r3(sig(I), r.toFixed(0), I < r));
+        if (phase === 4) { term.log(rf.bound === 'memory' ? T.r4m(sig(rf.perf / 1e12), sig(rf.perf / P * 100, 2)) : T.r4c); $('.viz-verdict').hidden = false; }
+      }
+      el.querySelectorAll('[data-fmt]').forEach(x => { x.onclick = () => { fmt = +x.dataset.fmt; phase = -1; pipe.set(-1); paint(); }; });
+      bIn.oninput = () => { phase = -1; pipe.set(-1); paint(); };
+      $('.rl-step').onclick = step;
+      paint();
+    },
+  });
+
+  Viz.register('amdahl-bar', {
+    mount(el, ctx) {
+      const body = Viz.frame(el, { code: T.aCode, title: T.aTitle, tag: T.aTag, intro: T.aIntro });
+      body.insertAdjacentHTML('beforeend', Viz.legend([
+        { color: 'var(--frame)', text: T.lgRest },
+        { color: 'var(--accent)', text: T.lgPart, glow: true },
+        { color: 'var(--a2)', text: T.lgFast },
+      ]));
+      const track = 'position:relative;height:28px;border:1px solid var(--frame);background:transparent;display:flex;overflow:hidden';
+      const seg = 'height:100%;transition:width .35s ease';
+      body.insertAdjacentHTML('beforeend', `<div class="viz-cols"><div class="viz-left">
+        <div class="viz-row" style="margin-top:0">${T.presets.map(([l], k) => `<button type="button" class="viz-btn ghost" data-pre="${k}" style="padding:5px 8px;font-size:12px">${l}</button>`).join('')}</div>
+        <div style="font-size:13px;color:var(--ink);margin:14px 0 4px">${T.before}</div>
+        <div style="${track}"><i class="ab-r0" style="${seg};background:color-mix(in srgb,var(--frame) 70%,transparent)"></i><i class="ab-p0" style="${seg};background:var(--accent)"></i></div>
+        <div style="font-size:13px;color:var(--ink);margin:12px 0 4px">${T.after}</div>
+        <div style="${track}"><i class="ab-r1" style="${seg};background:color-mix(in srgb,var(--frame) 70%,transparent)"></i><i class="ab-p1" style="${seg};background:var(--a2)"></i></div>
+        <div class="viz-slider"><label>${T.fLabel}</label><input class="ab-f" type="range" min="0" max="95" step="1" value="16" aria-label="${Viz.esc(T.fLabel)}"><output class="ab-fo"></output></div>
+        <div class="viz-slider"><label>${T.sLabel}</label><input class="ab-s" type="range" min="0" max="${SPEEDUPS.length - 1}" step="1" value="2" aria-label="${Viz.esc(T.sLabel)}"><output class="ab-so"></output></div>
+      </div><div class="viz-right"></div></div>`);
+      const left = body.querySelector('.viz-left'), right = body.querySelector('.viz-right');
+      const term = Viz.term(left, T.aReady);
+      right.innerHTML =
+        Viz.stat({ id: 'ab-s', k: T.kS, v: '', f: T.fS, hot: true }) +
+        Viz.stat({ id: 'ab-c', k: T.kCap, v: '', f: T.fCap }) +
+        Viz.stat({ id: 'ab-t', k: T.kT, v: '', f: T.fT });
+      body.insertAdjacentHTML('beforeend', Viz.tryList(T.aTry) + '<div class="viz-verdict" hidden></div>');
+      const $ = s => el.querySelector(s);
+      const fIn = $('.ab-f'), sIn = $('.ab-s');
+      const sLabel = s => (s === Infinity ? '∞' : String(s));
+      const cur = () => { const f = +fIn.value / 100, s = SPEEDUPS[+sIn.value]; return { f, s, S: M.amdahl(f, s), cap: f < 1 ? 1 / (1 - f) : Infinity, t: (1 - f) + (s === Infinity ? 0 : f / s) }; };
+      function paint() {
+        const { f, s, S, cap, t } = cur();
+        $('.ab-fo').textContent = Math.round(f * 100) + '%';
+        $('.ab-so').textContent = sLabel(s);
+        $('.ab-r0').style.width = (1 - f) * 100 + '%'; $('.ab-p0').style.width = f * 100 + '%';
+        $('.ab-r1').style.width = (1 - f) * 100 + '%'; $('.ab-p1').style.width = (t - (1 - f)) * 100 + '%';
+        $('[data-s=ab-s-v]').textContent = S.toFixed(3) + '×';
+        $('[data-s=ab-c-v]').textContent = cap.toFixed(2) + '×';
+        $('[data-s=ab-t-v]').textContent = (t * 100).toFixed(1) + '%';
+      }
+      function report() {
+        const { f, s, S, cap, t } = cur(), fp = Math.round(f * 100);
+        term.log(T.aLog(fp, sLabel(s), (t * 100).toFixed(1), S.toFixed(3)));
+        const v = $('.viz-verdict'); v.innerHTML = T.aVerdict(fp, sLabel(s), S.toFixed(3), cap.toFixed(2)); v.hidden = false;
+      }
+      el.querySelectorAll('[data-pre]').forEach(b => { b.onclick = () => {
+        fIn.value = T.presets[+b.dataset.pre][1];
+        el.querySelectorAll('[data-pre]').forEach(o => o.classList.toggle('ghost', o !== b));
+        paint(); report();
+      }; });
+      fIn.oninput = sIn.oninput = paint;
+      fIn.onchange = sIn.onchange = report;
+      paint();
+    },
+  });
+})(typeof globalThis !== 'undefined' ? globalThis : this);

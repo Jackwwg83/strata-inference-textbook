@@ -1,20 +1,164 @@
-<h2 id="sec-1">5.1 一次计算至少需要多久？</h2>
-<p>设工作量 F 次浮点操作，需跨某个内存层级搬运 D 字节，计算上限 P 次/秒，带宽上限 B 字节/秒。忽略依赖和启动开销时：</p>
-<div class="equation">T ≥ max(F/P, D/B)，I=F/D，性能 ≤ min(P, B·I)</div>
-<p>这就是 Roofline 的核心思想。I 是算术强度。必须说明 D 穿过哪一层：DRAM、显存、PCIe 还是 SSD。把显存带宽拿来计算 RAM 里的专家读取时间，相当于把不同公路的限速写在同一段路上。</p>
-<p>下界不是预测值。真实 T 还受启动、同步、访存不规则、低占用率、页故障与串行依赖影响；即使没有某一种开销，也不意味着能同时达到所有峰值。</p>
-<h2 id="sec-2">5.2 例题：同一个权重矩阵，单流与批量不同</h2>
-<p>教学假设：某线性层有约 8 百万权重，每个 2 字节，总权重约 16 MB。一个输入向量需要约 16 MFLOP；忽略其他读写，I≈1 FLOP/byte。</p>
-<p>如果 32 个输入一起计算且权重只读一遍，工作量变成约 512 MFLOP，权重流量仍约 16 MB，理想 I≈32。激活与输出会增加流量，因此这是便于理解的近似。它解释了为什么 prefill 的 GEMM 与 decode 的 GEMV 不应该按同一套“每 token 速度”期待。</p>
-<h2 id="sec-3">5.3 依赖图决定哪些工作可以重叠</h2>
-<p>如果 A 必须先完成，B 才能读取 A 的结果，两个硬件单元都空闲也不能让 B 提前开始。Strata 的层间残差更新就是这样的因果链。会话接口中甚至明确解释：本层专家结果尚未合并，下一层就不能拿到正确残差。[S13]</p>
-<p>同层的一些 GPU 工作与 CPU 专家计算可以重叠，但重叠大小必须由时间线证明。对于可并行分支 A、B，阶段时间近似 <code>max(TA,TB)+Tjoin</code>；对串行分支则为 <code>TA+TB</code>。用“同时启动”来替代实际重叠时间，是常见的性能分析错误。</p>
-<h2 id="sec-4">5.4 Amdahl：优化局部不是优化整体</h2>
-<p>原时间中比例 f 的部分加速 s 倍，其他不变，则总加速比：</p>
-<div class="equation">S = 1 / [(1−f)+f/s]</div>
-<p>若 GEMV 占 20%，内核快两倍，总时间变为 0.8+0.2/2=0.9，总加速仅 <strong>1.111 倍</strong>。即便它无限快，上限也只有 1.25 倍。真正的优化机会取决于它在目标工作负载的关键路径占比，不取决于微基准成绩是否漂亮。</p>
-<h2 id="sec-5">5.5 指标要和用户体验对上号</h2>
-<p>TTFT 是发出请求到第一个输出 token 的时间，可能包括排队、模板、分词、prefill、首步 decode 与传输。输出吞吐率是生成 token 数除以相应解码时间，不是“最终答案字数 / 总时间”。系统总吞吐量还要把多个请求的输出相加。</p>
-<p>一个系统可以总吞吐高但每人等待很久；也可以短请求很快、长请求被饿死。因此本书后半部分会引入队列和分位数，而不是把一个 token/s 数字当成产品的全部质量。</p>
-<h2 id="sec-6">5.6 实验：把假设写在结果前面</h2>
-<p>在 Roofline 实验中输入操作数、流量、计算上限和带宽，观察瓶颈从搬运转向计算。再增加一个不可隐藏的启动时间。报告时保留所有假设和单位，标题必须写“理论下界 / 教学估计”。不能把输入一张显卡的宣传峰值后得到的结果称作那张显卡的实测。</p>
+<div class="hook"><span class="eyebrow">你可能注意到过</span>
+<p>显卡的宣传页上写着每秒几十万亿次运算。可同一张卡跑大模型，每秒只吐几十个 token。按运算次数算，生成一个 token 远用不了那么久。时间都去哪了？</p>
+<p>Strata 的源码注释里有一句很直白的结论：这个引擎“受限于启动开销，而不是带宽”。还有一句：GEMV 只占一个 token 的约 16%，所以把它优化几个百分点，“动不了总数”。<span class="ev ev-code">代码事实</span>[S13][S14] 这一章教你用三把尺子找出时间花在哪：带宽与延迟、roofline、Amdahl 定律。</p></div>
+<p class="tldr"><strong>一句话：</strong>一段计算的耗时，至少是“算的时间”和“搬数据的时间”里较长的那个；写答案时数据多、运算少，所以卡在搬运上。优化之前先量清楚各部分占多少：只占 16% 的部分，快到无穷也只能让整体快 19%。</p>
+
+<h2 id="sec-1">5.1 显卡那么快，为什么 token 还是慢</h2>
+<p>想象一位厨师，切菜快得惊人，可食材要从楼下仓库一趟趟搬上来。只要搬运跟不上，厨师刀再快也只能等着。显卡的计算单元就是这位厨师，显存、内存就是仓库，中间的通道每秒能搬多少字节，决定了厨师能不能忙起来。</p>
+<p>写答案时，每生成一个 token，都要把这一步用到的权重读一遍。第 10 章算过，光是专家数据就有约 664 MB。Strata 的源码里记着一个测量：在那台测试机上，从内存读专家的速度是 44.14 GB/s。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/core/expert_source.hpp#L378-L385" target="_blank" rel="noopener noreferrer">expert_source.hpp</a> 假如每个 token 的 663.6 MB 专家都从内存读，光读就要 663.6 MB ÷ 44.14 GB/s ≈ 15 ms，每秒最多 66 个 token，还没开始算。<span class="ev ev-est">教学推演</span></p>
+<p>这就是为什么 Strata 要把热门专家放进显存（显存读得快得多），并让 CPU 在内存里就地计算没命中的专家（数据不必过 PCIe）。上游实测的输出速度是每秒 93 个 token（RTX 5070 12 GB，Q2_0，4K 提问，引擎 0.1.26，开启投机解码），比上面那个“全从内存读”的上限还高。原因有二：大量专家根本不用从内存读；投机解码让一轮能产出不止一个 token（第 18 章）。<span class="ev ev-report">上游报告</span>[S03]</p>
+<aside class="primer" id="c05-bandwidth-latency">
+<h3>带宽与延迟</h3>
+<p>第 1 章的存储层次专栏提过这两个词，这里把它们变成一个公式。<dfn>延迟</dfn>是“发出请求到第一个字节到达”要等多久，像快递从下单到出发；<dfn>带宽</dfn>是“开始搬以后每秒能搬多少”，像货车的载重。搬一批数据的时间大约是：</p>
+<div class="equation">传输时间 ≈ 延迟 + 数据量 ÷ 带宽</div>
+<p>两项谁说了算，取决于数据量，见图 5-1。小包裹几乎全是延迟：搬 1 KB 和搬 2 KB 差不多一样久。大包裹几乎全是带宽：664 MB 的时间完全由带宽决定。所以优化小而频繁的操作，要想办法减少次数；优化大块搬运，要想办法提高带宽或者少搬。</p>
+<figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="图 5-1：搬 1 KB 几乎全是延迟，约 10 微秒；搬 664 MB 几乎全是带宽，约 10.5 毫秒">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">传输时间 = 延迟 + 数据量 ÷ 带宽</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="40" font-size="12">教学假设：延迟 10 μs，带宽 63 GB/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="77" font-size="13">搬 1 KB</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="60" width="289.5" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="379.5" y="60" width="1" height="24"/>
+<text class="f-text" fill="#182f2b" x="90" y="106" font-size="12">延迟占 99.8%，总共约 10 μs</text>
+<text class="f-text" fill="#182f2b" x="10" y="147" font-size="13">搬 664 MB</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="130" width="1" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="91" y="130" width="289.5" height="24"/>
+<text class="f-text" fill="#182f2b" x="90" y="176" font-size="12">带宽占 99.9%，总共约 10.5 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="212" font-size="12">两条各自按比例画，时间尺度相差约一千倍。警示色：延迟；主色：搬运</text>
+</svg><figcaption>图 5-1　小包裹看延迟，大包裹看带宽。同一条通道，瓶颈取决于一次搬多少。</figcaption></figure>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/带宽_(计算机)" target="_blank" rel="noopener noreferrer">维基百科：带宽（计算机）</a> · <a href="https://zh.wikipedia.org/zh-cn/延迟_(工程学)" target="_blank" rel="noopener noreferrer">维基百科：延迟（工程学）</a> · <a href="https://en.wikipedia.org/wiki/Memory_bandwidth" target="_blank" rel="noopener noreferrer">Wikipedia: Memory bandwidth</a></p>
+</aside>
+
+<h2 id="sec-2">5.2 两块天花板：roofline 模型</h2>
+<p>把“算”和“搬”放在一起看。设一段计算要做 F 次运算，要穿过某一层存储搬 D 字节；硬件每秒最多算 P 次，那一层每秒最多搬 B 字节。不考虑别的开销，耗时至少是：</p>
+<div class="equation">T ≥ max(F ÷ P, D ÷ B)</div>
+<p>两项里大的那个说了算。再定义<dfn>算术强度</dfn> I = F ÷ D：每搬 1 字节，能做几次运算。能达到的速度就被两块“天花板”压着：每秒运算次数 ≤ min(P, B × I)。画出来像一个屋顶，叫 <dfn>roofline 模型</dfn>，见图 5-2。</p>
+<div class="viz" data-viz="roofline-lab"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="图 5-2：roofline 图。斜线是带宽天花板，平线是算力天花板。一次只算一个 token 时算术强度约为 1，落在斜线上；一次算 128 个 token 时越过拐点，到达平线">
+<text class="f-muted" fill="#5c6d66" x="60" y="20" font-size="12">能达到的算力（TFLOPS，对数刻度）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M60 40V200H380"/>
+<text class="f-muted" fill="#5c6d66" x="56" y="204" font-size="12" text-anchor="end">0.01</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="164" font-size="12" text-anchor="end">0.1</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="124" font-size="12" text-anchor="end">1</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="84" font-size="12" text-anchor="end">10</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="56" font-size="12" text-anchor="end">100</text>
+<text class="f-muted" fill="#5c6d66" x="60" y="218" font-size="12" text-anchor="middle">0.1</text>
+<text class="f-muted" fill="#5c6d66" x="140" y="218" font-size="12" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="218" font-size="12" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="218" font-size="12" text-anchor="middle">100</text>
+<text class="f-muted" fill="#5c6d66" x="378" y="218" font-size="12" text-anchor="end">1000</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M60 166.9L289.7 52H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M289.7 52V200"/>
+<text class="f-muted" fill="#5c6d66" x="380" y="44" font-size="12" text-anchor="end">算力上限 P = 50 TFLOPS（假设）</text>
+<text class="f-muted" fill="#5c6d66" x="295" y="190" font-size="12">拐点 ≈ 74</text>
+<circle class="f-warn" fill="#9e5d24" cx="140" cy="126.9" r="6"/>
+<text class="f-text" fill="#182f2b" x="150" y="146" font-size="12">写答案：b = 1，I ≈ 1</text>
+<circle class="f-accent" fill="#136d5a" cx="308.6" cy="52" r="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="76" font-size="12" text-anchor="middle">读题：b = 128</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="244" font-size="12" text-anchor="middle">算术强度 I（FLOP/字节，对数刻度）</text>
+</svg><figcaption>图 5-2　roofline：斜线是带宽天花板，平线是算力天花板。写答案时一轮只算 1 个 token，点落在斜线上，算力大多闲着。带宽取 RTX 5070 显存规格 672 GB/s，FP16 权重。</figcaption></figure></div>
+<aside class="primer" id="c05-roofline">
+<h3>算力与 roofline</h3>
+<p><dfn>算力</dfn>是每秒能做多少次浮点运算，单位 FLOPS；1 TFLOPS 是每秒一万亿次。roofline 模型说：一段计算能跑多快，看它落在哪块天花板下面。两块天花板相交的地方叫<dfn>拐点</dfn>，位置是 I = P ÷ B。I 小于拐点，是<strong>带宽受限</strong>：再强的算力也在等数据；I 大于拐点，是<strong>算力受限</strong>：数据管够，运算是瓶颈。</p>
+<p>用一个矩阵乘向量来算 I。每个权重对每个输入做一次乘法、一次加法，共 2 次运算；权重如果用 FP16 存，每个 2 字节。一次只算 1 个 token 时，I = 2 ÷ 2 = 1。假设算力 P = 50 TFLOPS（教学假设），带宽 B = 672 GB/s，拐点约在 74；I = 1 时最多只能用到 0.672 TFLOPS，不到上限的 2%。<span class="ev ev-est">教学推演</span></p>
+<p>两点提醒。第一，D 必须说清是<strong>穿过哪一层</strong>的字节：显存、内存、PCIe 还是硬盘。拿显存带宽去算内存里的专家读取时间，等于把高速公路的限速套在乡间小路上。第二，这是一个<strong>下界</strong>，不是预测：真实耗时还会被启动开销、同步、不规则的访存和数据依赖拉长。</p>
+<p class="further">延伸阅读：<a href="https://en.wikipedia.org/wiki/Roofline_model" target="_blank" rel="noopener noreferrer">Wikipedia: Roofline model</a> · <a href="https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html" target="_blank" rel="noopener noreferrer">NVIDIA Nsight Compute 文档：Roofline 分析</a> · <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html" target="_blank" rel="noopener noreferrer">CUDA C++ 最佳实践指南</a></p>
+</aside>
+
+<h2 id="sec-3">5.3 一个人吃饭和一桌人吃饭</h2>
+<p>同一盘菜端上来，一个人吃和一桌人吃，端菜的力气一样，吃到的人数差了十倍。权重也是这样：读一次，给 1 个 token 用，还是给 32 个 token 用，搬运量几乎一样。</p>
+<p>算一个具体的例子。<span class="ev ev-est">教学推演</span> 某个线性层有约 800 万个权重，每个 2 字节，共约 16 MB。只算 1 个输入：约 1600 万次运算，I ≈ 1。一次算 32 个输入，权重仍只读一遍：约 5.12 亿次运算，权重流量仍约 16 MB，I ≈ 32。输入输出本身也有流量，所以这是个近似，但量级不会错。</p>
+<p>这正是第 1 章“读题快、写答案慢”的根源。读题时整段提问一起算，一份权重被几千个 token 共用；写答案时一轮只有一个 token。上游在同一台机器上测到：4K 长度的提问，读题每秒 1,299 个 token，写答案每秒 93.0 个（RTX 5070 12 GB，Q2_0，引擎 0.1.26）。<span class="ev ev-report">上游报告</span>[S03] 两者不能用同一套“每 token 多快”来期待。</p>
+<p>量化也会推高 I：同样的权重少占字节，同样的带宽能喂更多运算。第 4 章的 Q2_0 每个权重只占 0.28125 字节，算 1 个 token 的 I 就从 1 变成约 7。代价是每个权重用之前要先解码，这部分额外运算 roofline 的两块天花板里都没画。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这就是《计算机体系结构》里“访存密集”和“计算密集”的区分，和 CPU 上用分块（tiling）提高缓存复用是同一个道理：让每个读进来的字节多参与几次运算。</p>
+
+<h2 id="sec-4">5.4 依赖链：有些活就是没法并行</h2>
+<p>家里同时有洗衣机和烘干机，可一桶衣服必须先洗完才能烘。机器再多，这一桶衣服也快不了。谁必须等谁，画成一张图，从头到尾最长的那条链叫<dfn>关键路径</dfn>：总时间至少是它的长度。</p>
+<p>Strata 每一层的计算就有这样一条链。一层的输出要先合并好，下一层才能拿到正确的输入；层与层之间是严格串行的。源码注释说得很清楚：每层 CPU 算专家的那段时间，<strong>藏不进一条严格串行的残差链里</strong>。GPU 在这段时间里能并行做的，只有共享专家这一点工作，因为合并之后的一切都依赖专家的结果。<span class="ev ev-code">代码事实</span>[S13] 见图 5-3。</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 5-3：一层的时间线。GPU 先算注意力和路由，然后 GPU 算命中的专家、CPU 算没命中的专家；GPU 先算完只能空等，合并要等 CPU 算完，下一层要等合并">
+<text class="f-text" fill="#182f2b" x="10" y="45" font-size="13" font-weight="600">GPU</text>
+<text class="f-text" fill="#182f2b" x="10" y="95" font-size="13" font-weight="600">CPU</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="26" width="128" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="124" y="46" font-size="12" text-anchor="middle">注意力 + 路由</text>
+<rect class="f-soft" fill="#e5f1df" x="190" y="26" width="58" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="219" y="46" font-size="12" text-anchor="middle">命中专家</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="26" width="30" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="265" y="46" font-size="12" text-anchor="middle">空等</text>
+<rect class="f-accent" fill="#136d5a" x="282" y="26" width="30" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="297" y="46" font-size="12" text-anchor="middle">合并</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="314" y="26" width="76" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="352" y="46" font-size="12" text-anchor="middle">下一层…</text>
+<rect class="f-accent" fill="#136d5a" x="190" y="76" width="90" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="235" y="96" font-size="12" text-anchor="middle">没命中的专家</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M280 80L292 58"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M60 120H390"/>
+<text class="f-muted" fill="#5c6d66" x="390" y="136" font-size="12" text-anchor="end">时间 →（示意，不按比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">主色：关键路径。注意力 + 路由 → CPU 专家 → 合并 → 下一层</text>
+<text class="f-text" fill="#182f2b" x="10" y="188" font-size="12">下一层要用这一层合并后的结果，不能提前开始</text>
+<text class="f-text" fill="#182f2b" x="10" y="212" font-size="12">CPU 那段越长，整条链越长；GPU 在中间只能空等</text>
+</svg><figcaption>图 5-3　一层的关键路径。两路并行时，这一段的时间取决于慢的那一路；GPU 早算完也没用，合并要等 CPU。</figcaption></figure>
+<p>并行的两路 A、B，这一段的时间近似是 max(T<sub>A</sub>, T<sub>B</sub>) 加上合并的时间；串行的两步则是 T<sub>A</sub> + T<sub>B</sub>。所以对付 CPU 这段，Strata 的答案不是“更好地重叠”，而是把更多专家放进显存缓存，让 CPU 少算一些（第 10、12 章）。源码注释原话是：CPU 这一项，要靠第 3 阶段的显存缓存来解决，而不是靠这条流水线。[S13]</p>
+<p>还要提防一种错觉：“两件事同时启动了”不等于“它们真的重叠了”。Strata 专门加了一个诊断计数器，统计 CPU 是在 GPU 还在算的时候开始干活，还是 GPU 已经算完才开始。两种情况下 token 都是对的，单看每层耗时也一样，只有这个计数能告诉你重叠到底有没有发生。<span class="ev ev-code">代码事实</span>[S13]</p>
+
+<h2 id="sec-5">5.5 优化一个局部，整体快多少</h2>
+<p>假设你把占总时间 20% 的那一步优化到快 2 倍。整体快多少？不是 2 倍，也不是 1.2 倍：新时间 = 80% + 20% ÷ 2 = 90%，整体只快 1.11 倍。下面的交互图可以随意改这两个数：</p>
+<div class="viz" data-viz="amdahl-bar"><figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="图 5-4：GEMV 占 16% 时，把它加速 2 倍，总时间变成 92%，整体快 1.087 倍；加速到无穷，总时间变成 84%，整体快 1.19 倍">
+<text class="f-text" fill="#182f2b" x="10" y="30" font-size="12">优化前</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="14" width="235.2" height="22"/><text class="f-text" fill="#182f2b" x="217.6" y="30" font-size="12" text-anchor="middle">其余 84%</text>
+<rect class="f-accent" fill="#136d5a" x="335.2" y="14" width="44.8" height="22"/><text class="f-on" fill="#ffffff" x="357.6" y="30" font-size="12" text-anchor="middle">16%</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="54" font-size="12">100%</text>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">GEMV 快 2 倍</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="72" width="235.2" height="22"/><text class="f-text" fill="#182f2b" x="217.6" y="88" font-size="12" text-anchor="middle">其余 84%</text>
+<rect class="f-warn" fill="#9e5d24" x="335.2" y="72" width="22.4" height="22"/>
+<text class="f-muted" fill="#5c6d66" x="100" y="112" font-size="12">92%：整体快 1.087 倍</text>
+<text class="f-text" fill="#182f2b" x="10" y="146" font-size="12">GEMV 快到 ∞</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="130" width="235.2" height="22"/><text class="f-text" fill="#182f2b" x="217.6" y="146" font-size="12" text-anchor="middle">其余 84%</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="170" font-size="12">84%：整体快 1.19 倍，这是上限</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="194" font-size="12">16%：Strata 源码注释里 GEMV 占一个 token 的比例</text>
+</svg><figcaption>图 5-4　Amdahl 定律：没被优化的部分一点没少，它决定了整体加速的上限。</figcaption></figure></div>
+<aside class="primer" id="c05-amdahl">
+<h3>Amdahl 定律与关键路径</h3>
+<p>把总时间里比例为 f 的部分加速 s 倍，其余不变，整体加速是：</p>
+<div class="equation">S = 1 ÷ [(1 − f) + f ÷ s]</div>
+<p>这就是 <dfn>Amdahl 定律</dfn>。让 s 趋于无穷，S 趋于 1 ÷ (1 − f)：f = 16% 时上限 1.19 倍，f = 50% 时 2 倍，f = 90% 时 10 倍。结论很朴素：优化的回报由“这部分占多少”决定，不由“这部分快了多少倍”决定。</p>
+<p>它和关键路径是一对搭档。Amdahl 说“占比小的部分优化了也没用”；关键路径说“不在最长链上的部分，优化了<strong>完全</strong>没用”，因为总时间由最长的那条链决定，别的链再快也只是早点开始等。所以性能分析的第一步永远是量出时间线：哪些步骤在关键路径上，各占多少。</p>
+<p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/阿姆达尔定律" target="_blank" rel="noopener noreferrer">维基百科：阿姆达尔定律</a> · <a href="https://zh.wikipedia.org/zh-cn/关键路径" target="_blank" rel="noopener noreferrer">维基百科：关键路径</a> · <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html" target="_blank" rel="noopener noreferrer">CUDA C++ 最佳实践指南（含 Amdahl 定律一节）</a></p>
+</aside>
+<p>Strata 的源码里有一个教科书式的例子。开发者发现另一个工具把每行的线程数从 32 改成 64 后带宽更高，看起来是“免费的提速”。实测却是：带专家时 64 线程每秒 11.75 个 token，32 线程 11.99 个；不带专家时 20.19 对 20.26，在噪声范围内一样，还略差。注释给出的解释正是 Amdahl：GEMV 只占一个 token 的约 16%，那里快几个百分点，动不了总数。<span class="ev ev-code">代码事实</span>[S14] 注意这些 token/s 是开发早期的测量，和今天的速度不能直接比。</p>
+<p>同一份源码还量出了真正的大头：启动开销。一个只处理 48 个数的小内核，测出来也要约 0.028 ms，因为这就是这台机器上启动一个内核的代价；一层 GDN 要启动约 19 个内核，一个 block 约 45 个。把一个 block 的 43 个节点录成 CUDA Graph 一次重放，耗时从 2.393 ms 降到 1.585 ms，快了 1.51 倍，省下的全是启动开销。<span class="ev ev-code">代码事实</span>[S13] 见图 5-5。这是 5.1 节专栏里“小包裹看延迟”的翻版：每次启动都是一个小包裹。</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="图 5-5：同样的计算，直接逐个启动内核要 2.393 毫秒，录成 CUDA Graph 重放只要 1.585 毫秒">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">同样的工作，两种发射方式</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">直接逐个启动内核</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="56" width="280" height="22"/>
+<text class="f-text" fill="#182f2b" x="296" y="72" font-size="12">2.393 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="12">录成 CUDA Graph 后一次重放</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="114" width="185.4" height="22"/>
+<text class="f-text" fill="#182f2b" x="201" y="130" font-size="12">1.585 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">差出来的约 0.8 ms 全是启动开销：快 1.51 倍</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="188" font-size="12">一个 block 的 43 个节点；条长按比例。上游源码注释中的测量</text>
+</svg><figcaption>图 5-5　很多小内核时，耗时被启动开销主导，而不是被带宽主导。CUDA Graph 把一串启动合成一次，第 15 章细讲。</figcaption></figure>
+
+<h2 id="sec-6">5.6 指标要对上体验，然后动手</h2>
+<p>最后说清几个常被混用的指标。<dfn>首字延迟</dfn>（TTFT）是从发出请求到看到第一个 token 的时间，包括排队、套模板、分词、读题和第一步生成。<dfn>输出速度</dfn>是生成的 token 数除以生成所用的时间，不是“最终字数 ÷ 总时间”。多人同时使用时，还有<dfn>总吞吐量</dfn>：所有人的输出加起来每秒多少。一个系统可以总吞吐很高，但每个人都等很久；也可以短请求很快、长请求被一直挤到后面。所以第 25、27 章会讲排队和分位数，不能把一个 token/s 数字当成全部。</p>
+<p><strong>动手：</strong>打开本章的交互实验「算力还是带宽」。</p>
+<ol>
+<li>输入运算量、搬运量、算力和带宽，看瓶颈怎样从搬运转到计算。</li>
+<li>加一段“无法隐藏的启动时间”，看下界怎样被它抬高。</li>
+<li>把某一阶段加速 2 倍，看端到端为什么没有快 2 倍。</li>
+</ol>
+<p>报告结果时，把所有假设和单位写在数字前面，标题写“理论下界 / 教学推演”。把宣传页上的峰值算力代进去得到的数，不能叫那张显卡的实测。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>耗时至少是 max(运算量 ÷ 算力, 字节数 ÷ 带宽)；字节数要说清穿过哪一层。写答案时 I 很小，卡在搬运上。</li>
+<li>一次算多个 token 让一份权重被多次使用，I 变大，才能用上算力。这就是读题比写答案快十几倍的原因。</li>
+<li>优化前先量时间线：不在关键路径上的部分优化了没用，占比小的部分优化了也没多大用（Amdahl）。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“显卡算力翻一倍，生成速度就翻一倍。”</strong></p>
+<p>写答案时，速度主要卡在数据搬运和依赖链上，算力大多闲着，翻倍了也只是闲得更多。对 Strata 来说，显存的大小反而更要紧：上游文档说，更大的显存比更快的显卡更重要，每多 1 GB 显存大约能多放 700 个专家，每个放进显卡的专家，CPU 就少算一个。<span class="ev ev-report">上游报告</span>[S02]</p></div>
+
+<details class="deep"><summary>深入一层：下界、重叠与怎样报告性能</summary>
+<h3>下界不是预测</h3>
+<p>roofline 给的 T ≥ max(F ÷ P, D ÷ B) 只是下界。真实的 T 还受内核启动、同步、不规则访存、并行度不足、缺页和串行依赖的影响。即使某一种开销不存在，也不意味着能<strong>同时</strong>达到所有峰值。D 必须说明穿过哪一层：显存、内存、PCIe 还是硬盘；同一段计算对不同的层有不同的 I。</p>
+<h3>例题：同一个权重矩阵，单个和批量</h3>
+<p>教学假设：某线性层约 800 万个权重，每个 2 字节，约 16 MB。一个输入向量约 1600 万次运算，忽略其他读写，I ≈ 1。32 个输入一起算、权重只读一遍：约 5.12 亿次运算，权重流量仍约 16 MB，理想 I ≈ 32。激活和输出会增加流量，所以这是便于理解的近似。它解释了为什么读题的 GEMM 和写答案的 GEMV 不该按同一套速度去期待。</p>
+<h3>重叠要用时间线证明</h3>
+<p>对可以并行的两路 A、B，这一段的时间近似 max(T<sub>A</sub>, T<sub>B</sub>) + T<sub>合并</sub>；对串行的两步是 T<sub>A</sub> + T<sub>B</sub>。用“它们是同时启动的”来代替实测的重叠时间，是常见的性能分析错误。Strata 的会话代码给出了一个反例的检测办法：如果主机读到“这一层已经算完”的同时，GPU 的事件查询也显示完成，就说明那一层早结束了，CPU 是在 GPU 空闲时才开始干活，整条流水线其实等于串行。这个区别在返回值里看不出来，在每层耗时里也看不出来，所以要专门计数。[S13]</p>
+<h3>Amdahl 的两个数</h3>
+<p>若 GEMV 占 20%，内核快 2 倍，总时间变成 0.8 + 0.2 ÷ 2 = 0.9，整体只快 <strong>1.111 倍</strong>；即便它无限快，上限也只有 1.25 倍。真正的优化机会取决于它在<strong>目标负载的关键路径</strong>上占多少，不取决于微基准的成绩多漂亮。</p>
+<h3>指标的定义要写全</h3>
+<p>首字延迟可能包括排队、模板、分词、读题、第一步生成和网络传输，报告时要说清包含哪些。输出速度要说清分子分母：是生成的 token 数除以生成阶段的时间，还是别的。上游的速度表就写全了条件：显卡、CPU、内存、操作系统、引擎版本、上下文长度、生成多少 token、是否开启投机解码。[S03] 还要注意，投机解码的速度和文本内容有关，同一个提示的不同回答就能差几个百分点。[S03]</p>
+<h3>报告模板</h3>
+<p>把假设写在结果前面：硬件型号和规格、模型和量化格式、上下文长度、引擎版本、测了几次、取均值还是中位数。标题写清“理论下界”“教学推演”还是“实测”。第 27 章会把这套方法讲完整。</p>
+</details>
