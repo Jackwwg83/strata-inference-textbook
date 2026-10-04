@@ -1,11 +1,14 @@
 'use strict';
 // Fetch every external link in the chapter sources and report the ones that do not resolve.
-// Needs network access, so it is not part of `npm test`. Run: node scripts/check-links.cjs [chapter ids...]
+// Needs network access, so it is not part of `npm test`. Run: node scripts/check-links.cjs [chapter ids...] [--lang en]
 const fs = require('node:fs');
 const path = require('node:path');
 
-const dir = path.resolve(__dirname, '..', 'content/chapters');
-const only = new Set(process.argv.slice(2));
+const argv = process.argv.slice(2);
+const langAt = argv.indexOf('--lang');
+const lang = langAt >= 0 ? argv.splice(langAt, 2)[1] : 'zh';
+const dir = path.resolve(__dirname, '..', lang === 'zh' ? 'content/chapters' : `content/i18n/${lang}/chapters`);
+const only = new Set(argv);
 const links = new Map();
 for (const f of fs.readdirSync(dir).filter(f => f.endsWith('.html')).sort()) {
   const id = f.slice(0, 2);
