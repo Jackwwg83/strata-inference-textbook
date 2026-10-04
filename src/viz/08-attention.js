@@ -16,6 +16,7 @@
       angle: 'q 的方向（度）', bStep: '▶ 单步', bRestart: '从头单步',
       presets: ['找“小猫”', '找“追着”', '夹在中间', '找“跑”'],
       out: (o) => `输出 = [${o}]`,
+      sep: '，',
       ready: '<span class="c">$</span> ready. 按 [ ▶ 单步 ]，一步一步看注意力怎么算',
       l0: (s) => `<span class="c">① 打分</span>：sᵢ = q · kᵢ，方向越接近分越高：${s}`,
       l1: (s) => `<span class="c">② 缩放</span>：每个分数除以 √d = √2 ≈ 1.41，得到 ${s}。真实的 QSA 每个头 d = 256，要除以 16`,
@@ -49,6 +50,52 @@
         '把 n 拉到 <b>2K</b>：两条线一样长。上下文不超过 2051 时，QSA 的选择就是“全选”。',
         '从 <b>32K</b> 拉到 <b>262K</b>（长 8 倍）：全注意力的配对数涨约 64 倍，QSA 只涨约 8 倍。这就是 O(n²) 和 O(n) 的差别。',
         '看最后两张卡片：GQA 和“只有 12 层是注意力”加起来，让 KV 缓存小了 48 倍。262K 时是约 6 GiB 对约 288 GiB。',
+      ],
+    },
+    en: {
+      code: 'ATTN_STEP', title: 'One attention step: score, softmax, weighted sum', tag: 'Teaching estimate · 2-D toy vectors',
+      intro: 'The earlier text has 4 words. Each carries a <b>key</b> (an arrow on the plane: "what I am") and a <b>value</b> ("what I can offer"). The current word sends out a <b>query</b> q (the highlighted arrow: "what I am looking for"). Drag the slider to turn q, or press <b>Step</b> to watch the four steps of the computation.',
+      lgKey: 'Key k: the "label" of each earlier word', lgQ: 'Query q: what the current word looks for', lgW: 'Attention weight (longer bar = looks more)',
+      steps: ['Dot-product score', 'Divide by √d', 'softmax', 'Weighted sum'],
+      words: ['kitten', 'chases', 'yarn', 'runs'],
+      plane: 'The query and four keys on a 2-D plane, with each word\'s score and weight',
+      angle: 'Direction of q (degrees)', bStep: '▶ Step', bRestart: 'Step from start',
+      presets: ['Find "kitten"', 'Find "chases"', 'In between', 'Find "runs"'],
+      out: (o) => `output = [${o}]`,
+      sep: ', ',
+      ready: '<span class="c">$</span> ready. Press [ ▶ Step ] to see how attention is computed, one step at a time',
+      l0: (s) => `<span class="c">① Score</span>: sᵢ = q · kᵢ; the closer the direction, the higher the score: ${s}`,
+      l1: (s) => `<span class="c">② Scale</span>: divide each score by √d = √2 ≈ 1.41, giving ${s}. Real QSA has d = 256 per head and divides by 16`,
+      l2: (w) => `<span class="m">③ softmax</span>: take e to each power, then divide by the total; the weights are all positive and add up to 1: ${w}`,
+      l3: (o) => `<span class="y">④ Weighted sum</span>: output = Σ wᵢ · vᵢ = [${o}]. Attention does not "pick one"; it mixes all the values in proportion`,
+      again: '<span class="y">// already at the last step. Press [ Step from start ] to go again</span>',
+      sTopK: 'Word with the largest weight', sTopF: (w, p) => `<b>${w}</b> gets ${p}% of the attention<br>q points closest to its key`,
+      sSumK: 'Sum of weights', sSumF: '<b>Σ wᵢ = 1</b><br>softmax makes every weight positive and the total 1',
+      sOutK: 'Output vector', sOutF: '<b>= Σ wᵢ · vᵢ</b><br>values v: kitten [3, 0], chases [0, 2], yarn [1, 3], runs [0, −2]',
+      try: [
+        'Click <b>Find "kitten"</b>: kitten gets most of the weight and the output is close to its value [3, 0]. Whichever key the query points along is the one whose value it mostly reads.',
+        'Click <b>In between</b>: kitten and yarn get about the same weight, and the output is a blend of their values. Attention "mixes in proportion"; it does not "pick just one".',
+        'Click <b>Find "runs"</b>, then press <b>Step from start</b>: at step ③, a score gap of 1 makes the weights differ by about a factor of e. softmax amplifies the gaps between scores.',
+      ],
+
+      cCode: 'ATTN_COST', cTitle: 'How much effort looking back takes', cTag: 'Teaching estimate · counts only query–position pairs',
+      cIntro: 'Drag the slider to change the context length n. In full attention, the t-th token pairs with all t positions up to it; QSA looks at no more than 2051 picked positions each time. The bars below use a <b>log scale</b>: each step to the right multiplies the count by 10.',
+      cLgFull: 'Full attention', cLgQsa: 'QSA (at most 2051 positions each time)',
+      nLabel: 'Context length n',
+      rows: ['Positions the last token sees: full attention', 'Positions the last token sees: QSA', 'Pairs to read the whole prompt: full attention', 'Pairs to read the whole prompt: QSA'],
+      stage: 'Log-scale bar chart: pair counts of full attention and QSA',
+      sSaveK: 'Whole prompt: how much less QSA computes', sSaveF: (n) => `<b>= n(n+1)/2 ÷ Σ min(t, 2051)</b><br>n = ${Viz.fmt(n)}`,
+      sKvK: 'KV cache (FP16)', sKvF: '<b>= 12 layers × 2 KV heads × 256 × 2 (K and V) × 2 bytes × n</b><br>= 24,576 bytes × n',
+      sHypK: 'Suppose: all 48 layers full attention, 24 separate KV heads', sHypF: '<b>= the item above × 4 (layers) × 12 (heads) = × 48</b><br>a hypothetical for comparison, not Strata\'s configuration',
+      times: (x) => `× ${x}`,
+      cLog: (n, full, qsa, ratio) => `<span class="c">[n = ${n}]</span> whole prompt: full attention ${full} pairs, QSA ${qsa} pairs, ${ratio}× fewer`,
+      cReady: '<span class="c">$</span> drag the slider all the way from 1K to 262K',
+      cVerdictShort: (n) => `n = ${n} is not above 2051 yet: QSA has nothing to pick, looks at every position, and is exactly the same as full attention.`,
+      cVerdict: (n, r, kv) => `At n = ${n}, full attention's pair count grows as n², while QSA looks at no more than 2051 positions per query and grows only as n overall; reading the whole prompt takes about <b>${r}</b>× fewer pairs.<br>But the KV cache still keeps an entry for every position (about ${kv} here), because the next token may pick any old position.`,
+      cTry: [
+        'Drag n to <b>2K</b>: the two bars are the same length. When the context is no more than 2051, QSA\'s selection is "pick all".',
+        'Drag from <b>32K</b> to <b>262K</b> (8× longer): full attention\'s pairs grow about 64×, QSA\'s only about 8×. That is the difference between O(n²) and O(n).',
+        'Look at the last two cards: GQA plus "only 12 layers do attention" make the KV cache 48 times smaller. At 262K that is about 6 GiB against about 288 GiB.',
       ],
     },
   });
@@ -113,7 +160,7 @@
         const [x, y] = P(r.q);
         qLine.setAttribute('x2', x); qLine.setAttribute('y2', y);
         qDot.setAttribute('cx', x); qDot.setAttribute('cy', y);
-        qT.setAttribute('x', x + (r.q[0] >= 0 ? 8 : -16)); qT.setAttribute('y', y - 6);
+        qT.setAttribute('x', x + (r.q[0] >= 0 ? 8 : -16)); qT.setAttribute('y', y - 18);  // above the key labels at the arrow tips
         rows.forEach((row, i) => {
           row.sc.textContent = stage >= 1 ? 's÷√2=' + fmt2(r.scaled[i]) : stage >= 0 ? 's=' + fmt2(r.scores[i]) : '';
           row.bar.setAttribute('width', stage >= 2 ? r.weights[i] * 170 : 0);
@@ -125,7 +172,7 @@
         $('[data-s=as-top-f]').innerHTML = stage >= 2 ? T.sTopF(T.words[top], (r.weights[top] * 100).toFixed(0)) : '';
         $('[data-s=as-out-v]').textContent = stage >= 3 ? '[' + r.out.map(fmt2).join(', ') + ']' : '—';
       }
-      function list(arr) { return arr.map((v, i) => T.words[i] + ' ' + fmt2(v)).join('，'); }
+      function list(arr) { return arr.map((v, i) => T.words[i] + ' ' + fmt2(v)).join(T.sep); }
       function setDeg(d) { deg = d; $('input[data-k="deg"]').value = d; $('[data-o="deg"]').textContent = d + '°'; compute(); stage = 3; pipe.set(4); paint(); }
       btns.slice(0, 4).forEach((b, j) => { b.onclick = () => { setDeg(PRESET_DEG[j]); stage = -1; pipe.set(-1); paint(); term.log(`<span class="c">[${T.presets[j]}]</span> q = [${r.q.map(fmt2).join(', ')}]`); }; });
       stepBtn.onclick = () => {

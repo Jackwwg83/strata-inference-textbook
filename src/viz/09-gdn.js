@@ -49,6 +49,7 @@
       oSteps: ['衰减 / 预测', '预测 / 差额', '差额 / 写入', '写入 / 衰减', '读出'],
       sl: { S: '旧状态 S', alpha: '衰减 α', k: '键 k', v: '值 v', beta: '写入强度 β' },
       presets: ['课本例子', 'α = 0', 'β = 0', 'k = 0'],
+      sep: '，',
       pv: [{ S: 2, alpha: 0.5, k: 1, v: 3, beta: 0.25 }, { S: 2, alpha: 0, k: 1, v: 3, beta: 0.25 }, { S: 2, alpha: 0.5, k: 1, v: 3, beta: 0 }, { S: 2, alpha: 0.5, k: 0, v: 3, beta: 0.25 }],
       bStep: '▶ 单步', bAll: '▶▶ 算完', oStage: '数轴：起始状态与两种顺序得到的新状态',
       ok: ['S̄ = α · S', 'v̂ = S̄ · k', 'δ = β (v − v̂)', 'S′ = S̄ + k · δ', 'o = S′ · q'],
@@ -63,6 +64,66 @@
         '点 <b>课本例子</b>，连按单步：契约顺序得 1.5，错误顺序得 1.125。差在第 4 步，新写入的 0.25 也被打了五折。',
         '点 <b>α = 0</b>：契约顺序先把旧记忆清零，再写入 β·v = 0.75；错误顺序最后整个乘 0，什么都没留下。',
         '点 <b>β = 0</b> 或 <b>k = 0</b>：没有任何写入，两种顺序都只剩衰减，结果相同。边界情况最适合拿来写测试。',
+      ],
+    },
+    en: {
+      code: 'DELTA_MEMORY', title: 'A 2 × 2 whiteboard: how the Delta rule writes and reads', tag: 'Teaching estimate · the real state is 128 × 128 × 48 heads',
+      intro: 'Whiteboard S has only 2 × 2 = 4 numbers, yet it must remember "key → value" pairs. Three keys: apple [1, 0], banana [0, 1], orange [0.6, 0.8] (it overlaps both of the others). Press a write button to see how the four steps change the board; press a read button to see whether you get back the value written last.',
+      lgCell: 'One number of whiteboard S (brighter = larger magnitude)', lgNeg: 'Negative', lgHit: 'Cells changed in this step',
+      steps: ['Decay S̄ = αS', 'Read old v̂ = S̄ᵀk', 'Difference δ = β(v − v̂)', 'Write S = S̄ + kδᵀ'],
+      stage: 'The 2-by-2 state matrix, the key vector and this step\'s intermediate values',
+      title2: 'Board S: rows = key dims, cols = value dims',
+      colH: ['value 1', 'value 2'], keyH: 'k',
+      keyNames: ['apple', 'banana', 'orange'],
+      writes: ['Write apple → [2, 3]', 'Write banana → [1, 4]', 'Rewrite apple → [5, 1]', 'Write orange → [3, 3]'],
+      reads: ['Read apple', 'Read banana', 'Read orange'],
+      bReset: 'Clear the board',
+      ruleDelta: 'Delta rule (what GDN uses)', ruleHebb: 'Plain addition (control)', ruleLabel: 'Write rule',
+      aLabel: 'Decay α', bLabel: 'Write strength β',
+      ready: '<span class="c">$</span> the board is all 0. Start with [ Write apple → [2, 3] ]',
+      l0: (a, name) => `<span class="c">[write ${name}]</span> ① decay: multiply the whole board by α = ${a}; ${a < 1 ? 'old memories are discounted first' : 'no discount this time'}`,
+      l1: (v) => `② read the old value: v̂ = S̄ᵀk = [${v}], what the board held for this key`,
+      l2: (d, b) => `③ difference: δ = β(v − v̂) = ${b} × (target − old value) = [${d}]; write only <b>how far off</b> it is`,
+      l3: '<span class="y">④ write</span>: S = S̄ + k δᵀ; one outer product changes the whole board',
+      h1: '<span class="m">② plain addition</span>: no reading of the old value',
+      h2: (v) => `③ use v = [${v}] directly as the amount to write`,
+      h3: '<span class="y">④ write</span>: S = S̄ + k vᵀ; old and new content pile up',
+      rd: (name, r, want) => `<span class="c">[read ${name}]</span> Sᵀk = [${r}]${want ? `; the value written last is [${want}]` : '; nothing written for it yet'}`,
+      line1: (vh, d) => `v̂ = [${vh}]　δ = [${d}]`,
+      line2: (r) => `read = [${r}]`,
+      sReadK: 'Latest read', sReadF: '<b>= Sᵀk</b>: dot each column with k',
+      sErrK: 'Gap to the value written last', sErrF: '<b>= |read − last write|</b> (largest dimension)',
+      sSizeK: 'Board size (does not change with writes)', sSizeF: '<b>Toy: 2 × 2 numbers</b><br>Real, per layer: 128 × 128 × 48 heads × 4 bytes = 3 MiB',
+      vOk: (name, r) => `Reading <b>${name}</b> gives [${r}], exactly the value written last. The Delta rule reads the old value first and writes only the difference, so rewriting the same key again and again does not pile up.`,
+      vBad: (name, r, w) => `Reading <b>${name}</b> gives [${r}], but the value written last is [${w}]. The board has only 4 numbers, so contents interfere: the old value was not subtracted (plain addition), or α and β made the write incomplete.`,
+      vNone: (name) => `Nothing has been written for <b>${name}</b> yet. What you read is other content on the board that overlaps it.`,
+      try: [
+        'Press <b>Write apple</b>, <b>Rewrite apple</b>, <b>Read apple</b> in turn: the Delta rule reads back [5, 1]. Switch to <b>Plain addition</b> and do it again: it reads back [7, 4], with the old and new values piled together.',
+        'Write apple, write banana, then <b>Write orange</b>, and read all three keys: orange reads back accurately, but apple and banana have changed. 4 numbers cannot hold three overlapping memories; that is "fixed size = lossy".',
+        'Drag <b>α</b> to 0.5 and keep writing: before each write, the old content shrinks by half. The smaller α, the faster it forgets; α = 0 means starting from a blank board every time.',
+      ],
+
+      oCode: 'GDN_ORDER', oTitle: 'Order really matters: decay first, or write first?', oTag: 'Exact computation · 1-D scalar',
+      oIntro: 'Shrink the whiteboard to one number. With the same parameters, compute in both orders: the <b>contract</b> is decay, then write; a common slip is write, then decay. Press <b>Step</b> and both sides advance together.',
+      oLgOk: 'Decay, then write (GDN\'s contract)', oLgBad: 'Write, then decay (wrong order)', oLgS: 'Starting state S',
+      oSteps: ['Decay / predict', 'Predict / difference', 'Difference / write', 'Write / decay', 'Read out'],
+      sl: { S: 'Old state S', alpha: 'Decay α', k: 'Key k', v: 'Value v', beta: 'Write strength β' },
+      presets: ['Textbook example', 'α = 0', 'β = 0', 'k = 0'],
+      sep: ', ',
+      pv: [{ S: 2, alpha: 0.5, k: 1, v: 3, beta: 0.25 }, { S: 2, alpha: 0, k: 1, v: 3, beta: 0.25 }, { S: 2, alpha: 0.5, k: 1, v: 3, beta: 0 }, { S: 2, alpha: 0.5, k: 0, v: 3, beta: 0.25 }],
+      bStep: '▶ Step', bAll: '▶▶ Finish', oStage: 'Number line: the starting state and the new states from the two orders',
+      ok: ['S̄ = α · S', 'v̂ = S̄ · k', 'δ = β (v − v̂)', 'S′ = S̄ + k · δ', 'o = S′ · q'],
+      bad: ['v̂ = S · k', 'δ = β (v − v̂)', 'S_w = S + k · δ', 'S′ = α · S_w', 'o = S′ · q'],
+      oReady: '<span class="c">$</span> pick a preset or drag the sliders, then press [ ▶ Step ] (q is fixed at 1)',
+      oLog: (i, a, b) => `<span class="c">[step ${i}]</span> contract: ${a}　|　wrong order: <span class="m">${b}</span>`,
+      sOkK: 'New state, contract order', sBadK: 'New state, wrong order', sDiffK: 'Difference between them',
+      sDiffF: '<b>= wrong order − contract</b><br>both results are normal finite numbers; no error is raised',
+      oVerdictSame: (s) => `With these parameters the two orders happen to agree (both ${s}). Try "Textbook example": as long as α ≠ 1 and something is actually written, the results differ.`,
+      oVerdict: (a, b) => `The contract order gives <b>${a}</b>; the wrong order gives <b>${b}</b>. The wrong order also multiplies the freshly written information by α, as if "partly forgetting something the moment you note it down". Both numbers are reasonable, finite and in range, but only one matches the model.`,
+      oTry: [
+        'Click <b>Textbook example</b> and keep pressing Step: the contract order gives 1.5, the wrong order 1.125. The gap appears at step 4, where the newly written 0.25 is also cut in half.',
+        'Click <b>α = 0</b>: the contract order first clears the old memory, then writes β·v = 0.75; the wrong order multiplies everything by 0 at the end, leaving nothing.',
+        'Click <b>β = 0</b> or <b>k = 0</b>: nothing is written, both orders are left with just the decay, and the results agree. Edge cases make the best tests.',
       ],
     },
   });
@@ -246,7 +307,7 @@
       }
       function setP(o) { Object.assign(p, o); for (const k of Object.keys(T.sl)) { $(`input[data-k="${k}"]`).value = p[k]; $(`[data-o="${k}"]`).textContent = p[k]; } stage = -1; pipe.set(-1); render(); }
       const btns = [...el.querySelectorAll('.viz-btn')];
-      btns.slice(0, 4).forEach((b, j) => { b.onclick = () => { setP(T.pv[j]); term.log(`<span class="y">[${T.presets[j]}]</span> S = ${p.S}，α = ${p.alpha}，k = ${p.k}，v = ${p.v}，β = ${p.beta}`); }; });
+      btns.slice(0, 4).forEach((b, j) => { b.onclick = () => { setP(T.pv[j]); term.log(`<span class="y">[${T.presets[j]}]</span> S = ${p.S}${T.sep}α = ${p.alpha}${T.sep}k = ${p.k}${T.sep}v = ${p.v}${T.sep}β = ${p.beta}`); }; });
       btns[4].onclick = step;
       btns[5].onclick = () => { stage = -1; for (let i = 0; i < 5; i++) step(); };
       el.querySelectorAll('input[type=range]').forEach(r => {
