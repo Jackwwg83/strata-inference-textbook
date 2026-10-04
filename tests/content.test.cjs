@@ -64,3 +64,16 @@ test('header links to the repository and footer links the author profile',()=>{
  const app=fs.readFileSync(path.join(root,'src/app.js'),'utf8');
  assert.ok(app.includes('Book.provenance.authorUrl'),'footer must link the author profile');
 });
+test('client analytics is same-origin, opt-out aware and covers the three event types',()=>{
+ const app=fs.readFileSync(path.join(root,'src/app.js'),'utf8');
+ assert.ok(app.includes("navigator.sendBeacon('/api/collect'"),'beacon must go to same-origin endpoint');
+ assert.ok(app.includes("'strata-no-track'"),'owner opt-out flag');
+ assert.ok(app.includes('navigator.doNotTrack')&&app.includes('globalPrivacyControl'),'respect DNT and GPC');
+ for(const t of ["track('pageview'","track('chapter_done'","track('quiz_answer'"])assert.ok(app.includes(t),t);
+ const index=fs.readFileSync(path.join(root,'dist/index.html'),'utf8');
+ assert.ok(!/https?:\/\/[^"']*\/api\/collect/.test(index),'no cross-origin collector');
+ const cfg=JSON.parse(fs.readFileSync(path.join(root,'vercel.json'),'utf8'));
+ assert.equal(cfg.cleanUrls,true);
+ assert.ok(cfg.headers.some(h=>h.source==='/api/(.*)'&&h.headers.some(x=>x.key==='Cache-Control'&&x.value==='no-store')));
+ assert.ok(cfg.headers.some(h=>h.source==='/admin'&&h.headers.some(x=>x.key==='X-Robots-Tag')));
+});
