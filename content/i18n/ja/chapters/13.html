@@ -82,20 +82,22 @@
 </ol>
 <p>順番が肝心です。GPU の分を先に決めて先に公開し、GPU を先に動かします。そのあとで CPU が自分の分を始めます。<span class="ev ev-code">コード上の事実</span>（<code>expert_source.cpp</code> のコメント）上流のドキュメントによると、PCIe の割合を 0 にして、ミスをすべて CPU に戻すと、生成が遅くなります。<span class="ev ev-report">上流レポート</span>[S03]</p>
 <p>下のシミュレータは、1 つの層をタイムラインとして描きます。数字は教育用の試算です。エキスパート 1 つは 1.38 MB、CPU は 40 GB/s、VRAM は 672 GB/s、PCIe は 63 GB/s で読むものとします。アテンションとルーティングは 0.25 ミリ秒、マージは 0.05 ミリ秒と仮定しています。</p>
-<div class="viz" data-viz="layer-timeline"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="図 13-4：ヒット率 65%、PCIe の割合 20% のときの 1 つの層のタイムライン。GPU が先にアテンションとルーティングを計算し、その後 GPU と CPU が同時にエキスパートを計算する。CPU の分岐のほうが長く、これがクリティカルパスになる">
-<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">1 つの層のタイムライン（ヒット 65%、PCIe の割合 20%）</text>
-<text class="f-text" fill="#182f2b" x="20" y="58" font-size="14">GPU</text>
-<rect class="f-accent" fill="#136d5a" x="70" y="40" width="160" height="26"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="230" y="40" width="25" height="26"/>
-<rect class="f-accent" fill="#136d5a" x="293" y="40" width="32" height="26"/>
-<text class="f-on" fill="#ffffff" x="150" y="58" font-size="14" text-anchor="middle">アテンション ＋ ルーティング</text>
-<text class="f-text" fill="#182f2b" x="20" y="108" font-size="14">CPU</text>
-<rect class="f-warn" fill="#9e5d24" x="230" y="90" width="63" height="26"/>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M293 32V124"/>
-<text class="f-text" fill="#182f2b" x="20" y="152" font-size="14">↑ 0.25 ms でルーティングが終わり、エキスパートを割り振る</text>
-<text class="f-text" fill="#182f2b" x="20" y="176" font-size="14">GPU の分岐 0.039 ms、CPU の分岐 0.098 ms</text>
-<text class="f-text" fill="#182f2b" x="20" y="200" font-size="14">破線：両側が合流する点。遅いのは CPU 側</text>
-<text class="f-warn" fill="#9e5d24" x="20" y="232" font-size="14" font-weight="600">この層 ＝ 0.25 ＋ max(0.098, 0.039) ＋ 0.05</text>
+<div class="viz" data-viz="layer-timeline"><figure class="fig"><svg viewBox="0 0 400 284" role="img" aria-label="図 13-4：ヒット率 65%、PCIe の割合 20% のときの 1 つの層のタイムライン。GPU が先にアテンションとルーティングを計算し、その後 GPU と CPU が同時にエキスパートを計算する。CPU の分岐のほうが長く、これがクリティカルパスになる">
+<text class="f-muted" fill="#5c6d66" x="20" y="20" font-size="14">1 つの層のタイムライン</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="38" font-size="14">（ヒット 65%、PCIe の割合 20%）</text>
+<text class="f-text" fill="#182f2b" x="20" y="76" font-size="14">GPU</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="54" width="160" height="34"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="230" y="54" width="25" height="34"/>
+<rect class="f-accent" fill="#136d5a" x="293" y="54" width="32" height="34"/>
+<text class="f-on" fill="#ffffff" x="150" y="68" font-size="14" text-anchor="middle">アテンション</text><text class="f-on" fill="#ffffff" x="150" y="83" font-size="14" text-anchor="middle">＋ ルーティング</text>
+<text class="f-text" fill="#182f2b" x="20" y="126" font-size="14">CPU</text>
+<rect class="f-warn" fill="#9e5d24" x="230" y="108" width="63" height="26"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M293 50V142"/>
+<text class="f-text" fill="#182f2b" x="20" y="170" font-size="14">↑ 0.25 ms でルーティングが終わり、</text>
+<text class="f-text" fill="#182f2b" x="20" y="188" font-size="14">エキスパートを割り振る</text>
+<text class="f-text" fill="#182f2b" x="20" y="212" font-size="14">GPU の分岐 0.039 ms、CPU の分岐 0.098 ms</text>
+<text class="f-text" fill="#182f2b" x="20" y="236" font-size="14">破線：両側が合流する点。遅いのは CPU 側</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="268" font-size="14" font-weight="600">この層 ＝ 0.25 ＋ max(0.098, 0.039) ＋ 0.05</text>
 </svg><figcaption>図 13-4　1 つの層の中の並列実行。合流点は遅いほうで決まります。CPU の分岐が長い限り、GPU がどれだけ速くても待たされます。<span class="ev ev-est">教育用の試算</span></figcaption></figure></div>
 <p>上流の最初のバージョンは、「どちらが先か」でつまずきました。当時は、GPU がヒット分を計算するステップが、CPU のエキスパートプールの<strong>後ろ</strong>に置かれていました。CPU の仕事は確かに半分近くになりました（18.2 から 10.2 ミリ秒）。しかし GPU の半分は「横」から「後ろ」へ移っただけで、経路全体は少しも短くなりませんでした。その後、2 段階に改めました。GPU は別のバッファでヒットしたエキスパートの計算を先に始め、CPU は同時にミスした分を計算します。CPU の結果が GPU に届いたら、2 つの結果を足し合わせます。バッファが 1 つ増え、加算が 1 回増えましたが、その代わりに本当の並列が手に入りました。<span class="ev ev-report">上流レポート</span>（<code>hit_hook.hpp</code> のコメント）シミュレータで「両側が同時に計算」をオフにすれば、この出来事を再現できます。</p>
 
