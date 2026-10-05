@@ -28,7 +28,7 @@
 <text class="f-muted" fill="#5c6d66" x="208" y="303" font-size="12">一行一条命令或结果</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="388" font-size="12" text-anchor="middle">上面三层只处理文字；只有最下面一层用到显卡</text>
 </svg><figcaption>图 23-1　Strata 的服务层。HTTP 服务和文本前端只处理文字，所以不装显卡也能测试；真正的计算在最下面的常驻进程里。</figcaption></figure>
-<p><code>serve/server.py</code> 开头就写明了它的职责：在“把 token 编号映射成 token 的任何引擎”之上，提供 OpenAI 和 Anthropic 两种风格的接口。端点包括 <code>POST /v1/chat/completions</code>（OpenAI 风格，支持流式和非流式）、<code>POST /v1/messages</code>（Anthropic 风格）、<code>GET /v1/models</code>、<code>GET /health</code> 等。<span class="ev ev-code">代码事实</span>[S15]</p>
+<p><code>serve/server.py</code> 开头就写明了它的职责：在“把 token 编号映射成 token 的任何引擎”之上，提供 OpenAI 和 Anthropic 两种风格的接口。端点包括 <code>POST /v1/chat/completions</code>（OpenAI 风格，支持流式和非流式）、<code>POST /v1/messages</code>（Anthropic 风格）、<code>GET /v1/models</code>、<code>GET /health</code> 等。<span class="ev ev-code">代码事实</span>[S15] v0.1.39 又加了 OpenAI 的 Responses 接口 <code>POST /v1/responses</code>，给 Codex CLI 用。它是无状态的：服务器不保存回答，客户端每次都把整段对话发过来。文件开头的端点清单还没写上它：注释落后于代码。<span class="ev ev-code">代码事实</span></p>
 <p>它和引擎之间的约定只有一个函数：<code>Engine.generate(prompt_ids, max_new, sampling, cancel)</code>，返回一个逐个产出 token 编号的迭代器。真实的 <code>StrataEngine</code> 让一个 <code>strata --serve</code> 进程常驻，通过标准输入输出和它对话；<code>MockEngine</code> 则按剧本吐 token，让每条接口路径都能在没有显卡的机器上测试。[S15]</p>
 <p><code>serve/frontend.py</code> 开头的第一句话是：“这里的一切都是文本：没有模型，没有 GPU。”它做三件事：把 OpenAI 和 Anthropic 两种请求格式统一成聊天模板要的消息列表；用模型自带的 Jinja 模板渲染提示词，并用 10 个样例核对过和 Hugging Face 的结果一致；把流式输出增量地拆成思考、正文和工具调用，<strong>从不发出半个标签</strong>。<span class="ev ev-code">代码事实</span>[S16]</p>
 <p class="bridge"><strong>学过计算机的同学：</strong>这就是《计算机网络》里分层思想的一个小号版本：每层只和上下两层打交道，接口约定好了，层内实现可以随意替换。<code>MockEngine</code> 能顶替真引擎，正是因为边界只有 <code>generate</code> 这一个函数。</p>
@@ -86,7 +86,7 @@
 <text class="f-on" fill="#ffffff" x="18" y="268" font-size="12" font-family="monospace">data: [DONE]↵↵</text>
 <text class="f-muted" fill="#5c6d66" x="18" y="294" font-size="12">结束信号。这是 OpenAI 接口的约定，不属于 SSE 规范本身</text>
 </svg><figcaption>图 23-3　Strata 写出的一段 SSE 字节流（JSON 里的 id、model 等字段用“…”省略）。客户端靠空行判断一个事件何时完整。</figcaption></figure>
-<p>注意中间那条 <code>: keep-alive</code>。读一段很长的提问时，引擎可能好几分钟不吐 token。这期间 Strata 每 10 秒产出一个“心跳”，HTTP 层把它写成一条 SSE 注释。<span class="ev ev-code">代码事实</span> 客户端会忽略注释，但看到有字节进来，就不会以为连接断了；服务器写的时候，也能顺便发现对方是不是已经走了（第 24 章细讲）。</p>
+<p>注意中间那条 <code>: keep-alive</code>。读一段很长的提问时，引擎可能好几分钟不吐 token。这期间 Strata 每 10 秒产出一个“心跳”，HTTP 层把它写成一条 SSE 注释。<span class="ev ev-code">代码事实</span> 客户端会忽略注释，但看到有字节进来，就不会以为连接断了；服务器写的时候，也能顺便发现对方是不是已经走了（第 24 章细讲）。v0.1.39 的 Responses 接口还多做了一步：Codex CLI 只把真正的事件算作“还在工作”，不看注释，所以读长提问时，服务器每 15 秒额外发一条 <code>response.in_progress</code> 事件。<span class="ev ev-code">代码事实</span></p>
 
 <h2 id="sec-3">23.3 一个汉字，三个字节</h2>
 <p>网络只认字节，不认字。拿一个简化的事件 <code>data: {"delta":"你好"}</code> 来说，连同结尾的空行，它在线路上是 26 个字节，其中“你”和“好”各占 3 个。问题来了：TCP 连接每次交给程序的“一块”有多大，由网络和操作系统决定，跟字的边界毫无关系。一个汉字的 3 个字节，完全可能前 1 个在这一块、后 2 个在下一块。</p>
@@ -233,7 +233,7 @@
 <h3>例题：一个汉字在三个块里</h3>
 <p>“中”的三个字节 E4 B8 AD 分在三个网络块里。每块单独当完整文本解码，会得到三个替换字符。增量解码器读到 E4 时知道还缺 2 个字节，先扣住；读到 B8 还缺 1 个；读到 AD 才输出“中”。同理，<code>data: {"delta":"中"}</code> 后面的两个换行，也可能被切在冒号、引号或两个换行之间的任意位置。网络块数和 token 数之间没有固定关系。</p>
 <h3>“OpenAI 兼容”指的是一个接口子集</h3>
-<p>“兼容”要按实现了哪些端点、哪些字段、什么语义来理解，不能只凭路径长得像 <code>/v1/...</code> 就判断全部兼容。本书只描述 <code>serve/server.py</code> 开头列出的端点和边界 [S15]，没有逐个审计所有协议字段。几个读源码能确认的细节：第一个事件的 delta 是 <code>{"role":"assistant","content":""}</code>；思考内容放在 <code>reasoning_content</code> 字段；取消导致的结束，对客户端报告为 <code>stop</code>。</p>
+<p>“兼容”要按实现了哪些端点、哪些字段、什么语义来理解，不能只凭路径长得像 <code>/v1/...</code> 就判断全部兼容。本书只描述 <code>serve/server.py</code> 开头列出的端点和边界 [S15]，没有逐个审计所有协议字段。v0.1.39 新加的 <code>/v1/responses</code> 不在那份清单里。它的流式事件每条都带一行 <code>event:</code> 名字，从 <code>response.created</code> 开始，以 <code>response.completed</code>（或 incomplete、failed）结束。本书也没有审计它。<span class="ev ev-report">上游报告</span>几个读源码能确认的细节：第一个事件的 delta 是 <code>{"role":"assistant","content":""}</code>；思考内容放在 <code>reasoning_content</code> 字段；取消导致的结束，对客户端报告为 <code>stop</code>。</p>
 <h3>流已经开始了，才发现出错怎么办</h3>
 <p>HTTP 状态码在响应头里，响应头一旦发出就不能改。所以 Strata 把能提前发现的错误放在流开始之前：提问长度加上最大输出长度超过上下文时，直接回 400 拒绝，从不偷偷截断。[S15] 流开始后引擎才报错（例如引擎进程意外退出），状态码已经是 200 了，Strata 就在流里写一个带 <code>error</code> 字段的事件，再写 <code>data: [DONE]</code> 正常收尾；Anthropic 风格的接口则写一个 <code>event: error</code> 事件。<span class="ev ev-code">代码事实</span> 客户端必须检查事件内容，不能只看状态码。</p>
 <h3>模板沙箱只管模板这一层</h3>
