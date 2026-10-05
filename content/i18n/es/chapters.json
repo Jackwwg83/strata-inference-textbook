@@ -1125,7 +1125,7 @@
           "Las tarjetas AMD pueden ejecutar directamente el código máquina de NVIDIA"
         ],
         "correct": 1,
-        "why": "El script de compilación usa -include para meter hip_compat/cuda_runtime.h en cada archivo fuente. Ese archivo tiene 82 líneas de #define que cambian los nombres. Las funciones internas como __dp4a y los intercambios de warp se implementan aparte, según la arquitectura de la GPU, en intrinsics.hpp. El código fuente no se modifica."
+        "why": "El script de compilación usa -include para meter hip_compat/cuda_runtime.h en cada archivo fuente. Ese archivo tiene 88 líneas de #define que cambian los nombres. Las funciones internas como __dp4a y los intercambios de warp se implementan aparte, según la arquitectura de la GPU, en intrinsics.hpp. El código fuente no se modifica."
       },
       {
         "text": "gfx1102 compila y pasa las pruebas incluidas de Strata. Según los niveles de evidencia de este capítulo, ¿qué afirmación es la más exacta?",
@@ -1249,7 +1249,7 @@
   {
     "id": "25",
     "title": "De una secuencia a varios usuarios: clase de diseño de un planificador",
-    "deck": "El Strata upstream atiende una sola secuencia a la vez. Este capítulo es una clase de diseño: con algoritmos de planificación y teoría de colas calculamos «cuánto se espera», y luego vemos qué hay que aislar para tener varias secuencias.",
+    "deck": "El Strata upstream atiende por defecto una sola secuencia a la vez, y desde v0.1.39 se pueden activar ranuras de batching como opción. Este capítulo es una clase de diseño: con algoritmos de planificación y teoría de colas calculamos «cuánto se espera», y luego vemos qué hay que aislar para tener varias secuencias.",
     "part": "VI · Verificación y práctica",
     "courses": [
       "Sistemas operativos",
@@ -1258,20 +1258,20 @@
     ],
     "prereq": "Capítulos 23 y 24 (capa de servicio, FIFO y ciclo de vida de una solicitud). El enrutamiento de expertos del capítulo 10 y la caché KV del capítulo 17 ayudan a entenderlo.",
     "goals": [
-      "Distinguir entre conexiones, solicitudes en cola, secuencias activas y secuencias por cómputo, y explicar la situación actual del Strata upstream: FIFO con una sola secuencia",
+      "Distinguir entre conexiones, solicitudes en cola, secuencias activas y secuencias por cómputo, y explicar el comportamiento por defecto del Strata upstream (FIFO con una sola secuencia) y las ranuras de batching opcionales de v0.1.39",
       "Comparar FIFO, SJF y round-robin en tiempo de espera y tiempo de la primera palabra con el mismo conjunto de solicitudes, y explicar con la ley de Little y M/M/1 la relación entre utilización y espera",
       "Explicar la idea del batching continuo, y qué estado hay que aislar y qué presupuesto hay que reservar de forma atómica antes de pasar a varias secuencias"
     ],
     "quiz": [
       {
-        "text": "Cinco personas abren la página web a la vez y preguntan al mismo Strata upstream. ¿Cuántas secuencias están generando en ese momento?",
+        "text": "Con la configuración por defecto, cinco personas abren la página web a la vez y preguntan al mismo Strata upstream. ¿Cuántas secuencias están generando en ese momento?",
         "choices": [
           "Cinco, el servidor HTTP es multihilo",
           "Una, y las demás solicitudes esperan en el cerrojo FIFO",
           "Depende de cuánta VRAM tenga la GPU"
         ],
         "correct": 1,
-        "why": "El servidor HTTP multihilo deja que las cinco personas se conecten, pero delante del motor hay un cerrojo FIFO y upstream atiende una secuencia a la vez. El número de conexiones y el de secuencias activas son dos números distintos."
+        "why": "El servidor HTTP multihilo deja que las cinco personas se conecten, pero delante del motor hay un cerrojo FIFO y, con la configuración por defecto, upstream atiende una secuencia a la vez. El número de conexiones y el de secuencias activas son dos números distintos."
       },
       {
         "text": "Tres solicitudes llegan a la vez, con longitudes 8, 3 y 5. ¿Qué política da el tiempo medio de espera más corto?",
@@ -1388,7 +1388,7 @@
         "why": "Las cachés, los grafos de cómputo y la caché de archivos necesitan «calentarse», y las primeras ejecuciones suelen ser más lentas. Si se ejecuta primero toda A, toda esa lentitud cae sobre A. Hay que calentar primero y luego alternar A y B, para repartir entre los dos lados los cambios de estado de la máquina."
       },
       {
-        "text": "El servidor de Strata procesa una secuencia a la vez, y las solicitudes se atienden por orden de llegada. Si cinco usuarios envían solicitudes a la vez, ¿qué indicador empeora primero para los usuarios que llegan después?",
+        "text": "Con la configuración por defecto, el servidor de Strata procesa una secuencia a la vez, y las solicitudes se atienden por orden de llegada. Si cinco usuarios envían solicitudes a la vez, ¿qué indicador empeora primero para los usuarios que llegan después?",
         "choices": [
           "El tiempo hasta el primer token (TTFT)",
           "La velocidad de decode entre tokens",
