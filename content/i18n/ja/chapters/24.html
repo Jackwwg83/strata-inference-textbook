@@ -30,7 +30,7 @@
 </svg><figcaption>図 24-1　「停止」の意味は層ごとに違います。ブラウザの層がいちばん先に止まり、GPU の層がいちばん最後に止まります。間のどの層でも、誰かが信号を下へ伝えなければなりません。</figcaption></figure>
 <p>この話をはっきりさせるために、まずリクエストの<dfn>状態機械</dfn>を描いてみます。リクエストは、どの瞬間にも 1 つの状態にあり、決まったイベントだけが別の状態への移動を起こします。次は、この本の教育用のバージョンです。</p>
 <ul>
-<li><strong>キュー待ち</strong>：リクエストは着いたが、エンジンはほかの人に対応中。Strata は一度に 1 つのシーケンスしか処理しないので、後から来たものは FIFO（先入れ先出し）キューで待ちます。[S15]</li>
+<li><strong>キュー待ち</strong>：リクエストは着いたが、エンジンはほかの人に対応中。Strata は既定では一度に 1 つのシーケンスしか処理しないので、後から来たものは FIFO（先入れ先出し）キューで待ちます。[S15] v0.1.39 は、手動でオンにする <code>"parallel": N</code> を加えました。最大 N 件の会話がエンジンの中でいっしょにデコードされ、あふれたリクエストは空いたスロットを待ちます。<span class="ev ev-report">上流レポート</span>[S01] この章で扱うのは、既定の単一シーケンスの道だけです。</li>
 <li><strong>プリフィル</strong>：エンジンが質問を 1 チャンクずつ読みます（第 1 章で説明した prefill です）。</li>
 <li><strong>デコード</strong>：トークンを 1 つずつ書いて、答えを作ります。</li>
 <li><strong>完了 / キャンセル済み / 失敗</strong>：3 つの終点です。どのリクエストも、最後は必ずこのどれかに着地します。宙ぶらりんは許されません。</li>
@@ -75,7 +75,7 @@
 <text class="f-text" fill="#182f2b" x="323" y="67" font-size="13" font-weight="600" text-anchor="middle">読み取りスレッド</text>
 <text class="f-muted" fill="#5c6d66" x="323" y="88" font-size="12" text-anchor="middle">出力をためる</text>
 <rect class="f-soft" fill="#e5f1df" x="20" y="116" width="360" height="48" rx="6"/>
-<text class="f-text" fill="#182f2b" x="200" y="145" font-size="13" text-anchor="middle">FIFO ロック：エンジンを使えるのは同時に 1 リクエスト</text>
+<text class="f-text" fill="#182f2b" x="200" y="145" font-size="13" text-anchor="middle">FIFO ロック：既定では同時に 1 リクエスト</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 180V228M250 228V180"/>
 <path class="f-muted" fill="#5c6d66" d="M100 232l-5-8h10z"/>
 <path class="f-muted" fill="#5c6d66" d="M250 176l-5 8h10z"/>
@@ -84,10 +84,10 @@
 <rect class="f-accent" fill="#136d5a" x="10" y="234" width="380" height="56" rx="10"/>
 <text class="f-on" fill="#ffffff" x="200" y="257" font-size="13" font-weight="600" text-anchor="middle">エンジンプロセス：strata --serve</text>
 <text class="f-on" fill="#ffffff" x="200" y="278" font-size="12" text-anchor="middle">重み、エキスパートキャッシュ、VRAM はすべてこちらの管理</text>
-</svg><figcaption>図 24-3　サーバーとエンジンは 2 つのプロセスで、パイプを通して 1 行ずつテキストをやり取りします。サーバーの中のスレッドは、それぞれの持ち場を担当します。FIFO ロックが、エンジンを使うリクエストを同時に 1 つに保ちます。</figcaption></figure>
+</svg><figcaption>図 24-3　サーバーとエンジンは 2 つのプロセスで、パイプを通して 1 行ずつテキストをやり取りします。サーバーの中のスレッドは、それぞれの持ち場を担当します。既定の設定では、FIFO ロックが、エンジンを使うリクエストを同時に 1 つに保ちます。</figcaption></figure>
 <p>サーバーは、Python の <code>subprocess.Popen</code> で <code>strata --serve</code> を起動し、その標準入力と標準出力を両方ともパイプにつなぎます。<span class="ev ev-code">コード上の事実</span> エンジンは重みを読み込み終えると、まず <code>INFO</code> を何行か書き、続いて、コンテキスト長を添えた <code>READY</code> を 1 行書きます。この行に <code>stop</code> も付いていれば、このエンジンのバージョンは途中での停止に対応しているということです。サーバーは <code>READY</code> を読んではじめて、エンジンを「生きている」とみなします。その後、サーバーが <code>GEN</code> コマンドを 1 行書いてリクエストを出すと、エンジンは <code>T</code>（トークン 1 つ）、<code>PP</code>（プリフィルの進み具合）、<code>DONE</code>（終了）、<code>ERR</code>（エラー）のどれかを返します。</p>
 <p>専用の読み取りスレッドもあります。エンジンの出力を 1 行ずつキューに入れる役です。これで、リクエストを処理するスレッドは「タイムアウト付きで」次の行を待てます。待っても来なければ、先にハートビートを送ったり、キャンセルフラグを確認したりできます。ただぼんやり待ち続けることはありません。<span class="ev ev-code">コード上の事実</span></p>
-<p>エンジンプロセスが予期せず終了することもあります。コードには専用の <code>EngineDied</code> 例外があり、コメントには最もよくある原因が書かれています。Linux でメモリ不足のときに、OOM killer に終了させられることです。[S15] このとき、現在のリクエストはエラーで終わり、次のリクエストが来たときに、サーバーが同じコマンドでエンジンを再起動します。</p>
+<p>エンジンプロセスが予期せず終了することもあります。コードには専用の <code>EngineDied</code> 例外があり、コメントには最もよくある原因が書かれています。Linux でメモリ不足のときに、OOM killer に終了させられることです。[S15] このとき、現在のリクエストはエラーで終わり、次のリクエストが来たときに、サーバーが同じコマンドでエンジンを再起動します。v0.1.39 からは、新しいプロセスが <code>READY</code> と言う前に終了した場合、サーバーは 15 秒おいてもう一度試し、最大 3 回まで繰り返します。死んだばかりのエンジンが握っていた VRAM は、戻ってくるまでしばらくかかることがあるからです。<span class="ev ev-code">コード上の事実</span></p>
 <p>エンジンを通常どおり止めるときにも、作法があります。サーバーは 3 段階で進め、各段階で最大 20 秒待ちます（図 24-4）。</p>
 <figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="図 24-4：エンジンプロセスの終了は 3 段階。まず QUIT を書いて自分で終了させ、だめなら terminate、それでもだめなら kill。3 段階でも終了しなければエラーを報告する">
 <text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">エンジンプロセスの終了：まず丁寧に、だめなら強制</text>
@@ -191,7 +191,7 @@
 <p>照合の仕方にも注意が必要です。普通の文字列比較は、違う文字に出会うとすぐ戻ってきます。当てた先頭部分が長いほど、比較にかかる時間も長くなります。攻撃者が時間を測れば、キーを 1 文字ずつ当てられます。処理時間や消費電力のような「副産物」から情報を漏らす攻撃を<dfn>サイドチャネル攻撃</dfn>と呼び、そのうち時間を使うものを<dfn>タイミング攻撃</dfn>と呼びます。防ぐには、<dfn>定数時間比較</dfn>を使います。何文字目から違っていても、文字列全体を比べ終えてから結果を返す方法です。</p>
 <p class="further">さらに読む：<a href="https://en.wikipedia.org/wiki/API_key" target="_blank" rel="noopener noreferrer">Wikipedia：API key（英語）</a> · <a href="https://ja.wikipedia.org/wiki/%E3%82%B5%E3%82%A4%E3%83%89%E3%83%81%E3%83%A3%E3%83%8D%E3%83%AB%E6%94%BB%E6%92%83" target="_blank" rel="noopener noreferrer">Wikipedia：サイドチャネル攻撃</a> · <a href="https://developer.mozilla.org/ja/docs/Web/HTTP/Reference/Headers/Authorization" target="_blank" rel="noopener noreferrer">MDN：Authorization ヘッダー</a> · <a href="https://docs.python.org/ja/3/library/hmac.html" target="_blank" rel="noopener noreferrer">Python ドキュメント：hmac.compare_digest</a> · <a href="https://www.rfc-editor.org/rfc/rfc6750" target="_blank" rel="noopener noreferrer">RFC 6750：Bearer トークン</a></p>
 </aside>
-<p>Strata の第 1 の防御線は、<strong>既定ではローカルだけを待ち受ける</strong>ことです。サーバーは既定で <code>127.0.0.1</code> を待ち受けるので、ほかの機器はそもそもつながりません。<span class="ev ev-code">コード上の事実</span> このとき README は、アプリには API キーとして何を入れてもよい、と伝えています。[S01] スマホやほかのコンピュータからアクセスしたいときは、待ち受けを <code>0.0.0.0</code> に変える必要があります。README の原文は「必ずキーを付けること」です。[S01] 待ち受けアドレスを変えたのにキーを設定していないと、サーバーは起動時に警告を 1 行出します。API キーがないので、ネットワーク内の誰でもこのモデルを使える、という警告です。<span class="ev ev-code">コード上の事実</span></p>
+<p>Strata の第 1 の防御線は、<strong>既定ではローカルだけを待ち受ける</strong>ことです。サーバーは既定で <code>127.0.0.1</code> を待ち受けるので、ほかの機器はそもそもつながりません。<span class="ev ev-code">コード上の事実</span> このとき README は、アプリには API キーとして何を入れてもよい、と伝えています。[S01] スマホやほかのコンピュータからアクセスしたいときは、待ち受けを <code>0.0.0.0</code> に変える必要があります。README の原文は「必ずキーを設定すること」です。[S01] 待ち受けアドレスを変えたのにキーを設定していないと、サーバーは起動時に警告を 1 行出します。API キーがないので、ネットワーク内の誰でもこのモデルを使える、という警告です。<span class="ev ev-code">コード上の事実</span></p>
 <p>キーを設定したあとは、<code>/v1/*</code> へのリクエストは必ずキーを付けなければなりません。<code>Authorization: Bearer …</code> と書くか、<code>x-api-key</code> ヘッダに書きます（Anthropic 流のクライアントはこちらを使います）。照合には <code>hmac.compare_digest</code> を使い、コードのコメントには「定数時間」と書かれています。照合に失敗したら 401 を返し、種別は <code>authentication_error</code> です。<span class="ev ev-code">コード上の事実</span> 判断の全体は図 24-7 のとおりです。</p>
 <figure class="fig"><svg viewBox="0 0 400 326" role="img" aria-label="図 24-7：Strata の API キー検査の流れ。キー未設定ならそのまま通す。設定済みならクライアントのキーを取り出し、定数時間で比較して、一致すれば処理し、不一致なら 401 を返す">
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="8" width="200" height="34" rx="8"/>
