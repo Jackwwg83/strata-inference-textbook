@@ -1,0 +1,302 @@
+<div class="hook"><span class="eyebrow">بطاقتان، لكن ليس ضعف السرعة</span>
+<p>في ملف README لمشروع Strata سطر واحد عن هذا الموضوع: يمكن لبطاقتَي رسوميات أو ثلاث أن تشغّل النموذج معًا. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S01] وفي وثائق المصدر الأصلي قياسات حقيقية: بطاقة RTX 5080 مع بطاقة RTX 3090 تقرآن المُطالبات الطويلة أسرع بنحو 20%، لكن سرعة توليد الإجابة تكاد تساوي سرعة RTX 5080 وحدها.</p>
+<p>أضفتَ بطاقة بسعة 24 GB ولم تسرع الإجابات. فأين ذهب المال؟ يشرح هذا الفصل ثلاثة أمور: كيف تتقاسم البطاقتان العمل، ولماذا لا يصير الـ token الواحد أسرع، وكم من البيانات يجب أن ينتقل فعلًا بين البطاقتين.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> تقطع Strata طبقاتها الـ 48 إلى قسم أمامي وقسم خلفي، وتتولى كل بطاقة قسمًا. يظل الـ token يمر بالبطاقة الأولى ثم بالثانية، فلا يصير الـ token الواحد أسرع. أما المكسب الحقيقي فهو أمران: تستطيع البطاقتان تخزين ضعف عدد الخبراء في الذاكرة المؤقتة، وتعملان معًا كخط أنابيب عند قراءة المُطالبة.</p>
+
+<h2 id="sec-1">21.1 كيف تتقاسم بطاقتان العمل؟</h2>
+<p>تخيّل شخصين ينقلان أثاث بيت. يمكن أن يحمل أحدهما غرفة النوم والآخر غرفة الجلوس. ويمكن أن يحملا معًا الأريكة الكبيرة نفسها. ويمكن أن ينقل كل منهما بيتًا مختلفًا. الطرق الثلاث كلها «عمل مشترك»، لكن عدد مرات التشاور يختلف تمامًا. وكذلك البطاقات المتعددة: هناك ثلاث طرق شائعة للتقسيم، يعرضها الشكل 21-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="الشكل 21-1: ثلاث طرق لتقسيم العمل بين بطاقات الرسوميات. تقسيم الطبقات يعطي كل بطاقة عدة طبقات، والتوازي الموتّري يقسم الطبقة الواحدة، وتوازي الطلبات يعطي كل بطاقة نسخة كاملة من النموذج">
+<text class="f-text" fill="#182f2b" x="69" y="18" font-size="13" font-weight="600" text-anchor="middle">تقسيم الطبقات</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="35" font-size="12" text-anchor="middle">توازي خط الأنابيب</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">التوازي الموتّري</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="35" font-size="12" text-anchor="middle">تقسيم الطبقة الواحدة</text>
+<text class="f-text" fill="#182f2b" x="331" y="18" font-size="13" font-weight="600" text-anchor="middle">توازي الطلبات</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="35" font-size="12" text-anchor="middle">توازي البيانات</text>
+<rect class="f-accent" fill="#136d5a" x="14" y="50" width="110" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="69" y="66" font-size="12" text-anchor="middle">GPU A</text>
+<text class="f-on" fill="#ffffff" x="69" y="82" font-size="12" text-anchor="middle">الطبقات 0-18</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M69 90V104"/>
+<rect class="f-soft" fill="#e5f1df" x="14" y="106" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="69" y="122" font-size="12" text-anchor="middle">GPU B</text>
+<text class="f-text" fill="#182f2b" x="69" y="138" font-size="12" text-anchor="middle">الطبقات 19-47</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="50" width="110" height="96" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="66" font-size="12" text-anchor="middle">مصفوفة الطبقة نفسها</text>
+<rect class="f-accent" fill="#136d5a" x="151" y="74" width="47" height="64" rx="4"/>
+<text class="f-on" fill="#ffffff" x="174.5" y="96" font-size="12" text-anchor="middle">A</text>
+<text class="f-on" fill="#ffffff" x="174.5" y="114" font-size="12" text-anchor="middle">النصف</text>
+<text class="f-on" fill="#ffffff" x="174.5" y="130" font-size="12" text-anchor="middle">الأيسر</text>
+<rect class="f-soft" fill="#e5f1df" x="202" y="74" width="47" height="64" rx="4"/>
+<text class="f-text" fill="#182f2b" x="225.5" y="96" font-size="12" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="225.5" y="114" font-size="12" text-anchor="middle">النصف</text>
+<text class="f-text" fill="#182f2b" x="225.5" y="130" font-size="12" text-anchor="middle">الأيمن</text>
+<rect class="f-accent" fill="#136d5a" x="276" y="50" width="110" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="331" y="66" font-size="12" text-anchor="middle">GPU A</text>
+<text class="f-on" fill="#ffffff" x="331" y="82" font-size="12" text-anchor="middle">نموذج كامل · طلب 1</text>
+<rect class="f-soft" fill="#e5f1df" x="276" y="106" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="331" y="122" font-size="12" text-anchor="middle">GPU B</text>
+<text class="f-text" fill="#182f2b" x="331" y="138" font-size="12" text-anchor="middle">نموذج كامل · طلب 2</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M134.5 8V228M265.5 8V228"/>
+<text class="f-text" fill="#182f2b" x="69" y="168" font-size="12" text-anchor="middle">بين البطاقات:</text>
+<text class="f-text" fill="#182f2b" x="69" y="186" font-size="12" text-anchor="middle">مرة لكل نافذة</text>
+<text class="f-text" fill="#182f2b" x="200" y="168" font-size="12" text-anchor="middle">بين البطاقات:</text>
+<text class="f-text" fill="#182f2b" x="200" y="186" font-size="12" text-anchor="middle">مرتان لكل طبقة</text>
+<text class="f-text" fill="#182f2b" x="331" y="168" font-size="12" text-anchor="middle">بين البطاقات:</text>
+<text class="f-text" fill="#182f2b" x="331" y="186" font-size="12" text-anchor="middle">شبه معدومة</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="206" font-size="12" text-anchor="middle">توفّر ذاكرة الفيديو</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="206" font-size="12" text-anchor="middle">يستحق مع وصلة</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="206" font-size="12" text-anchor="middle">مناسب لعدة</text>
+<text class="f-muted" fill="#5c6d66" x="69" y="224" font-size="12" text-anchor="middle">تستخدمه Strata</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="224" font-size="12" text-anchor="middle">سريعة فقط</text>
+<text class="f-muted" fill="#5c6d66" x="331" y="224" font-size="12" text-anchor="middle">مستخدمين معًا</text>
+</svg><figcaption>الشكل 21-1　الفرق بين الطرق الثلاث هو «كم مرة يجب أن نتشاور». تقسيم الطبقات يعبر بين البطاقات مرة واحدة لكل نافذة تحقق. التوازي الموتّري يتزامن عند كل طبقة. توازي الطلبات لا يحتاج إلى تواصل تقريبًا، لكن كل بطاقة يجب أن تتسع للنموذج كله.</figcaption></figure>
+<p>تستخدم Strata الطريقة الأولى: <dfn>تقسيم الطبقات</dfn>، أي أن تُقطع طبقات النموذج بالترتيب إلى عدة أقسام، وتتولى كل بطاقة قسمًا متصلًا واحدًا. وتقول وثائق المصدر الأصلي ذلك بصراحة: هذا توازي خط أنابيب (حسب الطبقات)، وليس توازيًا موتّريًا. ينتقل الـ token من بطاقة إلى التي تليها مرة واحدة لكل نافذة تحقق، لا مرتين عند كل طبقة. <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+<p>في الشيفرة يقوم بهذا العمل دالة اسمها <code>set_stage</code>. كل <dfn>قسم</dfn> (stage، أي الطبقات التي تتولاها بطاقة واحدة) يشغّل الطبقات <code>[layer_begin, layer_end)</code> فقط. القسم الذي لا يبدأ من الطبقة 0 يستلم البيانات من القسم السابق. والقسم الذي لا ينتهي عند الطبقة الأخيرة يسلّم البيانات إلى التالي، ولا يحمل رأس الإخراج. <span class="ev ev-code">حقيقة من الشيفرة</span>[S08]</p>
+<aside class="primer" id="c21-parallelism">
+<h3>توازي خط الأنابيب والتوازي الموتّري</h3>
+<p>إذا لم يتسع نموذج كبير في بطاقة واحدة، فهناك طريقتان أساسيتان لقطعه. القطع الأفقي حسب الطبقات يسمى <dfn>توازي خط الأنابيب</dfn>: مثل خط إنتاج في مصنع، تنتهي المرحلة الأولى فتمرر المنتج إلى الثانية. والقطع الرأسي، أي تقسيم مصفوفة الطبقة الواحدة الكبيرة إلى عدة أجزاء، يسمى <dfn>التوازي الموتّري</dfn> (tensor parallelism): مثل شخصين يحملان أريكة معًا، وعند كل خطوة يجب أن يعدّا «واحد، اثنان، ثلاثة» ليتوافقا.</p>
+<p>تقع تكلفة الطريقتين في مكانين مختلفين. خط الأنابيب ينقل البيانات مرة واحدة فقط عند حدود الأقسام، لكن كل قطعة بيانات يجب أن تنهي القسم السابق قبل أن تدخل القسم التالي، فلا يمكن توفير زمن انتظار القطعة الواحدة. أما التوازي الموتّري فتحسب فيه البطاقتان الطبقة الواحدة معًا فعلًا، لكن يجب دمج النصفين بعد كل طبقة. في طريقة Megatron-LM الكلاسيكية تجري طبقة Transformer الواحدة عمليتي دمج في الحساب الأمامي. فمع 48 طبقة يصير المجموع 96 عملية.</p>
+<p>وهناك طريقة ثالثة: <dfn>توازي البيانات</dfn> (ونسميه هنا توازي الطلبات). تحمل كل بطاقة نسخة كاملة من النموذج وتعالج طلبات مختلفة. لا تحتاج إلى تواصل بين البطاقات تقريبًا، بشرط أن تتسع بطاقة واحدة للنموذج كله.</p>
+<p>تواجه Strata مشكلة «لا تتسع بطاقة واحدة»، وبطاقات الحواسيب المنزلية يربط بينها عادةً PCIe فقط، بلا خط سريع مخصص. لذلك اختارت الطريقة الأقل تواصلًا: تقسيم الطبقات.</p>
+<p class="further">قراءات إضافية: <a href="https://ar.wikipedia.org/wiki/%D8%AA%D9%88%D8%A7%D8%B1%D8%AF_%28%D8%AD%D9%88%D8%B3%D8%A8%D8%A9%29" target="_blank" rel="noopener noreferrer">ويكيبيديا: توارد (حوسبة)</a> · <a href="https://ar.wikipedia.org/wiki/%D8%AD%D9%88%D8%B3%D8%A8%D8%A9_%D9%85%D8%AA%D9%88%D8%A7%D8%B2%D9%8A%D8%A9" target="_blank" rel="noopener noreferrer">ويكيبيديا: حوسبة متوازية</a> · <a href="https://pytorch.org/docs/stable/distributed.pipelining.html" target="_blank" rel="noopener noreferrer">وثائق PyTorch: Pipeline Parallelism</a> · <a href="https://huggingface.co/docs/transformers/perf_train_gpu_many" target="_blank" rel="noopener noreferrer">Hugging Face: مقارنة طرق التوازي على عدة GPU</a> · <a href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener noreferrer">ورقة Megatron-LM</a></p>
+</aside>
+
+<h2 id="sec-2">21.2 الـ token الواحد يقف في الطابور طبقةً بعد طبقة</h2>
+<p>عند توليد الإجابة، يجب أن يمر كل token من الطبقة 0 إلى الطبقة 47. الطبقة 19 تحتاج نتيجة الطبقة 18، والطبقة 18 تحتاج نتيجة الطبقة 17. سلسلة الاعتماد هذه لا تنفصل. لذلك عندما تحسب البطاقة الأولى القسم الأمامي، لا تستطيع الثانية إلا الانتظار. وعندما تحسب الثانية القسم الخلفي، تبقى الأولى عاطلة. انظر الشكل 21-2.</p>
+<figure class="fig"><svg viewBox="0 0 400 196" role="img" aria-label="الشكل 21-2: عند توليد token واحد، تنهي GPU A طبقات القسم الأمامي ثم تسلّم إلى GPU B لتحسب طبقات القسم الخلفي. تعمل البطاقتان بالتناوب وتنتظران بالتناوب">
+<text class="f-muted" fill="#5c6d66" x="8" y="18" font-size="12">الخط الزمني لتوليد token واحد (رسم توضيحي، والمحور الأفقي هو الزمن)</text>
+<text class="f-text" fill="#182f2b" x="8" y="56" font-size="12">GPU A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="40" width="330" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="40" width="130" height="24"/>
+<text class="f-on" fill="#ffffff" x="125" y="56" font-size="12" text-anchor="middle">الطبقات 0-18</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="56" font-size="12" text-anchor="middle">انتظار</text>
+<text class="f-text" fill="#182f2b" x="8" y="100" font-size="12">GPU B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="84" width="330" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="214" y="84" width="176" height="24"/>
+<text class="f-on" fill="#ffffff" x="302" y="100" font-size="12" text-anchor="middle">الطبقات 19-47 + رأس الإخراج</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="100" font-size="12" text-anchor="middle">انتظار</text>
+<rect class="f-warn" fill="#9e5d24" x="190" y="68" width="24" height="12"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M190 64L202 68M214 80L214 84"/>
+<text class="f-text" fill="#182f2b" x="60" y="130" font-size="12">التسليم: 51,216 بايت لكل token، عبر الذاكرة</text>
+<text class="f-text" fill="#182f2b" x="8" y="156" font-size="12" font-weight="600">الـ token نفسه: يمر بـ A ثم بـ B، لا يمكن معًا</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="176" font-size="12">أرقام الطبقات من سجل المصدر الأصلي عند K = 19،</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="192" font-size="12">أما أطوال الأزمنة فرسم توضيحي</text>
+</svg><figcaption>الشكل 21-2　عند توليد الإجابة، يجب أن ينهي الـ token طبقات البطاقة الأولى قبل أن يدخل البطاقة الثانية. تعمل البطاقتان بالتناوب وتنتظران بالتناوب، فلا ينخفض زمن الـ token الواحد إلى النصف.</figcaption></figure>
+<p>وقياسات المصدر الأصلي تؤكد ذلك: RTX 5080 مع RTX 3090 تعطيان سرعة توليد تساوي تقريبًا سرعة 5080 وحدها، وأسرع قليلًا عند كتابة الشيفرة. <span class="ev ev-report">تقرير المصدر الأصلي</span> (نموذج Coder، سياق 32K، المعالج Ryzen 9 9950X3D. عند كتابة قصة: بطاقة واحدة 83-87 token/s، وأفضل تقسيم للبطاقتين 84 token/s. وعند كتابة شيفرة: 88-105 و110. لا تذكر الوثيقة إصدار المحرك، وتاريخ مجلد النتائج 2026-09-29.)</p>
+<p>فماذا تريد من البطاقة الثانية؟ تريد <strong>السعة</strong>. شرحنا في الفصل 10 أن الخبراء الذين لم يدخلوا ذاكرة الفيديو تحسبهم وحدة CPU في الذاكرة، وحسابها بطيء. بعد تقسيم الطبقات، تخزّن كل بطاقة خبراء طبقاتها فقط، فتخزّن البطاقتان معًا نحو ضعف ما تخزّنه بطاقة واحدة. وتقول وثائق المصدر الأصلي إن بطاقتين (16 GB و24 GB) تكادان تسعان خبراء نموذج Coder كلهم، و«السرعة تأتي من هنا»: فالـ CPU لا يكاد يُستخدم عند التوليد. <span class="ev ev-report">تقرير المصدر الأصلي</span> يبيّن الشكل 21-3 ما تحمله كل بطاقة.</p>
+<figure class="fig"><svg viewBox="0 0 400 296" role="img" aria-label="الشكل 21-3: بعد تقسيم الطبقات، تحمل كل بطاقة نسخة من الأوزان الكثيفة، وحالة جلستها، ومخزن المُطالبة المؤقت، وذاكرة خبراء طبقاتها فقط. وتحمل البطاقة الأخيرة رأس الإخراج وطبقة المسودة. وخبراء الذاكرة العادية يُحفظون في نسخة واحدة">
+<text class="f-text" fill="#182f2b" x="102" y="22" font-size="13" font-weight="600" text-anchor="middle">GPU A (الرئيسية)</text>
+<text class="f-text" fill="#182f2b" x="297" y="22" font-size="13" font-weight="600" text-anchor="middle">GPU B (الأخيرة)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="30" width="185" height="180" rx="8"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="30" width="185" height="180" rx="8"/>
+<rect class="f-soft" fill="#e5f1df" x="20" y="40" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="56" font-size="12" text-anchor="middle">نسخة الأوزان الكثيفة ≈ 3.4 GB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="68" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="84" font-size="12" text-anchor="middle">حالة جلستها (مع KV)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="96" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="112" font-size="12" text-anchor="middle">مخزن المُطالبة ≈ 1.5 GB</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="124" width="165" height="76" rx="4"/>
+<text class="f-on" fill="#ffffff" x="102.5" y="146" font-size="12" text-anchor="middle">ذاكرة خبراء</text>
+<text class="f-on" fill="#ffffff" x="102.5" y="164" font-size="12" text-anchor="middle">الطبقات 0-18</text>
+<text class="f-on" fill="#ffffff" x="102.5" y="182" font-size="12" text-anchor="middle">يأخذ باقي ذاكرة</text>
+<text class="f-on" fill="#ffffff" x="102.5" y="196" font-size="12" text-anchor="middle">الفيديو</text>
+<rect class="f-soft" fill="#e5f1df" x="215" y="40" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="56" font-size="12" text-anchor="middle">نسخة الأوزان الكثيفة ≈ 3.4 GB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="68" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="84" font-size="12" text-anchor="middle">حالة جلستها (مع KV)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="96" width="165" height="24" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="112" font-size="12" text-anchor="middle">مخزن المُطالبة ≈ 1.5 GB</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="215" y="124" width="165" height="40" rx="4"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="140" font-size="12" text-anchor="middle">رأس الإخراج + طبقة المسودة</text>
+<text class="f-text" fill="#182f2b" x="297.5" y="157" font-size="12" text-anchor="middle">≈ 0.8 GB</text>
+<rect class="f-accent" fill="#136d5a" x="215" y="168" width="165" height="32" rx="4"/>
+<text class="f-on" fill="#ffffff" x="297.5" y="188" font-size="12" text-anchor="middle">ذاكرة خبراء الطبقات 19-47</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M102 210V228M297 210V228"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="228" width="380" height="40" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="244" font-size="12" text-anchor="middle">الذاكرة (RAM): نسخة واحدة من كل الخبراء تتشاركها البطاقتان</text>
+<text class="f-text" fill="#182f2b" x="200" y="260" font-size="12" text-anchor="middle">وتحسب CPU خبراء لا يخزّنهم أحد</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="284" font-size="12" text-anchor="middle">أرقام GB تقريبية من وثيقة نموذج Coder، والمخزن على 2048 دفعة</text>
+</svg><figcaption>الشكل 21-3　افتراضيًا تحمل كل بطاقة نسخة من الأوزان الكثيفة، لكنها تخزّن خبراء طبقاتها فقط. فما يكسبه تقسيم الطبقات أساسًا هو «ضعف عدد الخبراء القابل للتخزين».</figcaption></figure>
+<p>انتبه إلى الثمن: افتراضيًا تحمل كل بطاقة نسخة من الأوزان الكثيفة، ولكل بطاقة حالة جلسة ومخزن مُطالبة خاصان بها. لذلك لا ينصح المصدر الأصلي بضم بطاقة ذاكرتها أقل من 8 GB. <span class="ev ev-report">تقرير المصدر الأصلي</span> أضاف الإصدار v0.1.39 مفتاحًا اختياريًا هو <code>STRATA_STAGE_TRIM=1</code>: عندما تحدد نقطة القطع يدويًا، تحمّل كل بطاقة الأوزان الكثيفة لطبقاتها فقط، وتذهب الذاكرة الموفّرة إلى ذاكرة الخبراء. اختبر المصدر الأصلي نموذج Coder على بطاقتَي MI50 سعة 16 GB لكل منهما: ارتفع عدد الخبراء في ذاكرة الفيديو من 8,819 إلى 10,626، وارتفعت سرعة التوليد من 39.2 إلى 41.7 token/s. هذا المفتاح يُفعَّل يدويًا حاليًا، ولأن مواضع الخبراء تتغير قد يختلف الخرج اختلافًا طفيفًا. <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+
+<h2 id="sec-3">21.3 عند قراءة المُطالبة، يبدأ خط الأنابيب بالدوران</h2>
+<p>قراءة المُطالبة حالة مختلفة. المُطالبة الطويلة معروفة كلها قبل أن نبدأ القراءة، فتقطّعها Strata إلى <dfn>دفعات</dfn> (chunk) كثيرة وتقرأها دفعة بعد دفعة. شرحنا التقسيم إلى دفعات في الفصل 16. عندها تتداخل البطاقتان: حين تقرأ البطاقة الثانية الدفعة c، تكون الأولى قد بدأت قراءة الدفعة c+1. وهذا بالضبط ما يقوله تعليق واجهة prefill: القسم الذي ليس الأخير ينسخ البيانات إلى مخزنين مؤقتين <strong>اثنين</strong> في ذاكرة مثبّتة، ثم يشغّل القسم التالي في خيط آخر، «فحين يقرأ القسم التالي الدفعة c، يقرأ هذا القسم الدفعة c+1». <span class="ev ev-code">حقيقة من الشيفرة</span>[S12]</p>
+<p>غسل الملابس مثال جيد. تغسل الغسالة دفعة في 4 دقائق، وتجفف المجففة دفعة في 5 دقائق. إذا كانت عندك دفعة واحدة فلا مفر من 9 دقائق. وإذا كانت عندك 8 دفعات، فحين تدخل الدفعة الأولى المجففة تدخل الثانية الغسالة. تصير المجففة هي الإيقاع: تخرج دفعة كل 5 دقائق. الزمن الكلي هو 4 دقائق في البداية، و8 مرات تجفيف تأخذ 40 دقيقة، فالمجموع 44 دقيقة. أما لو عملنا كل شيء بالتتابع فسنحتاج 8 × 9 = 72 دقيقة.</p>
+<p>الفترة الأولى التي تنتظر فيها المجففة الدفعة الأولى، والفترة الأخيرة التي لا تجد فيها الغسالة ما تغسله، تسمى <dfn>فقاعات</dfn>: محطات في خط الأنابيب تنتظر بلا عمل. يرسم المحاكي أدناه البطاقتين على خط زمني، ويمكنك تغيير زمن كل قسم وعدد الدفعات وزمن النقل لترى أين تقع الفقاعات:</p>
+<div class="viz" data-viz="layer-pipeline"><figure class="fig"><svg viewBox="0 0 400 218" role="img" aria-label="الشكل 21-4: الخط الزمني لخط أنابيب البطاقتين. قيمة a تساوي 4 ms وقيمة b تساوي 5 ms و4 دفعات تستغرق 24 ms في المجموع، وفي البداية والنهاية فترة انتظار">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="12">قراءة 4 دفعات: A لكل دفعة 4 ms، وB لكل دفعة 5 ms، بلا نقل</text>
+<text class="f-text" fill="#182f2b" x="8" y="55" font-size="12">GPU A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="36" width="324" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="114" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="181.5" y="37" width="52.5" height="26"/>
+<rect class="f-accent" fill="#136d5a" x="249" y="37" width="52.5" height="26"/>
+<text class="f-on" fill="#ffffff" x="86" y="55" font-size="12" text-anchor="middle">1</text>
+<text class="f-on" fill="#ffffff" x="140" y="55" font-size="12" text-anchor="middle">2</text>
+<text class="f-on" fill="#ffffff" x="207.5" y="55" font-size="12" text-anchor="middle">3</text>
+<text class="f-on" fill="#ffffff" x="275" y="55" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="343" y="55" font-size="12" text-anchor="middle">انتظار</text>
+<text class="f-text" fill="#182f2b" x="8" y="103" font-size="12">GPU B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="84" width="324" height="28"/>
+<text class="f-muted" fill="#5c6d66" x="87" y="103" font-size="12" text-anchor="middle">انتظار</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="114" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="181.5" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="249" y="85" width="66" height="26"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="316.5" y="85" width="66" height="26"/>
+<text class="f-text" fill="#182f2b" x="147" y="103" font-size="12" text-anchor="middle">1</text>
+<text class="f-text" fill="#182f2b" x="214.5" y="103" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="282" y="103" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="349.5" y="103" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="60" y="130" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="114" y="130" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="181.5" y="130" font-size="12" text-anchor="middle">9</text>
+<text class="f-muted" fill="#5c6d66" x="249" y="130" font-size="12" text-anchor="middle">14</text>
+<text class="f-muted" fill="#5c6d66" x="316.5" y="130" font-size="12" text-anchor="middle">19</text>
+<text class="f-muted" fill="#5c6d66" x="384" y="130" font-size="12" text-anchor="end">24 ms</text>
+<text class="f-text" fill="#182f2b" x="60" y="152" font-size="12">الملء: B تنتظر أن تسلّم A الدفعة 1</text>
+<text class="f-text" fill="#182f2b" x="60" y="170" font-size="12">التفريغ: A أنهت القراءة وB تُنهي ما بقي</text>
+<text class="f-text" fill="#182f2b" x="10" y="192" font-size="12">4 دفعات = 24 ms = 5 × 4 + 4</text>
+<text class="f-text" fill="#182f2b" x="10" y="208" font-size="12">وبطاقة واحدة بالتتابع تحتاج 4 × 9 = 36 ms</text>
+</svg><figcaption>الشكل 21-4　البطاقة الأبطأ تحدد الإيقاع: تخرج دفعة كل 5 ms. الزمن الكلي = a + b + (N − 1) × max(a, b). وكلما زاد عدد الدفعات صغرت نسبة الفقاعات في البداية والنهاية.</figcaption></figure></div>
+<p>قارن استنتاج المحاكي بقياسات المصدر الأصلي: مع RTX 5080 وRTX 3090 نفسيهما، ارتفعت قراءة مُطالبة 16K من 1,726-2,017 token/s لبطاقة واحدة إلى 2,039، وقراءة 28K من 1,970 إلى 2,357. وتشرح الوثيقة ذلك بأن «كل بطاقة تقرأ طبقاتها بينما تقرأ الأخرى الدفعة التالية»، والتسارع نحو 18%-20%. <span class="ev ev-report">تقرير المصدر الأصلي</span> (الظروف كما في القسم السابق.)</p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذا هو نفسه خط أنابيب التعليمات في مقرر «بنية الحاسوب». خط من 5 مراحل لا يجعل التعليمة الواحدة أسرع، بل يجعل تعليمة تنتهي في كل دورة. الإنتاجية (throughput) تحددها أبطأ مرحلة، والملء في البداية والتوقف عند الاعتماد هما الفقاعات. «المرحلة» في تقسيم الطبقات هي مجموعة من الطبقات، و«التعليمة» هي دفعة من المُطالبة.</p>
+
+<h2 id="sec-4">21.4 ما حجم الطرد، وما عرض الطريق؟</h2>
+<p>عندما تتبادل البطاقتان التسليم، ماذا يجب أن ينتقل فعلًا؟ بالحدس: الذي يجري بين طبقة وأخرى لكل token هو متجه من 2560 بُعدًا، أي 2560 رقمًا. لكن التسليم في Strata أكبر. يحدد الملف <code>verify.hpp</code> أن مخزن التسليم المؤقت يضع لكل token ثلاثة أشياء: المتبقّي R (عدد hc × n_embd من الأرقام)، ومتجهًا لم تكتبه الطبقة السابقة بعد (عدد n_embd من الأرقام)، وhc معامل حقن. <span class="ev ev-code">حقيقة من الشيفرة</span>[S08] نعوّض بهندسة النموذج hc = 4 وn_embd = 2560 [S04]:</p>
+<div class="equation">4 × 2560 + 2560 + 4 = 12,804 float = 51,216 byte / token</div>
+<p>لماذا لا ننقل 2560 رقمًا فقط؟ لأن المتبقّي في هذا النموذج هو نفسه 4 متجهات بطول 2560، ولأن الطبقة الأخيرة تؤجّل كتابة إلى بداية الطبقة التالية. وحتى «يكمل القسم التالي كأن شيئًا لم يُقسَّم»، يجب أن يستلم هذا كله. وتقول تعليقات الشيفرة إن هذا التقسيم <strong>متطابق بت ببت</strong> (bit-exact): سواء قسّمنا أم لا، تخرج الأرقام نفسها تمامًا. <span class="ev ev-code">حقيقة من الشيفرة</span>[S08]</p>
+<p>عند قراءة المُطالبة يكون المنقول هو جزء المتبقّي: لكل token ما مقداره 4 × 2560 رقمًا من نوع float، أي 40,960 بايت. الدفعة الافتراضية 2048 token، فيكون المنقول 2048 × 40,960 = 83,886,080 بايت، أي نحو 84 MB. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>src/prefill/prefill.cpp</code>)<span class="ev ev-est">تقدير تعليمي</span> أما عند توليد الإجابة فتقول الوثيقة إن التسليم يحدث مرة لكل نافذة تحقق، «بضع مئات من KB، عبر ذاكرة مثبّتة». <span class="ev ev-report">تقرير المصدر الأصلي</span> وبحساب 51,216 بايت لكل token، تكون نافذة من 5 رموز نحو 256 KB، وهذا يطابق.</p>
+<p>عرفنا حجم الطرد، وبقي أن نعرف عرض الطريق. يشرح الركن التالي الطريق بين البطاقتين.</p>
+<aside class="primer" id="c21-interconnect">
+<h3>عرض نطاق الربط: PCIe وNVLink</h3>
+<p>تُركَّب بطاقة الرسوميات في فتحة <dfn>PCIe</dfn> على اللوحة الأم. PCIe ناقل تسلسلي يتكون من عدة <dfn>مسارات</dfn> (lane) متجاورة، كطريق متعدد الحارات: «×16» يعني 16 حارة، و«×4» يعني 4 حارات. وكل جيل جديد من PCIe يضاعف سرعة الحارة الواحدة.</p>
+<p>بحساب الذروة النظرية في كل اتجاه: PCIe 3.0 ×16 نحو 15.8 GB/s، وPCIe 4.0 ×16 نحو 31.5 GB/s، وPCIe 5.0 ×16 نحو 63 GB/s. وإذا ركّبت البطاقة في فتحة ×4 فلن يبقى إلا الربع.</p>
+<p><dfn>NVLink</dfn> خط سريع مخصص تمدّه NVIDIA بين البطاقات. في H100 بمراكز البيانات 18 وصلة NVLink 4.0 بمجموع 900 GB/s في الاتجاهين، أي نحو 450 GB/s في كل اتجاه، وهذا أكثر من PCIe 4.0 ×16 بعشرة أضعاف وأكثر. أما أزواج البطاقات المنزلية فلا تملكه عادةً، ولا تسير إلا عبر PCIe. يضع الشكل 21-5 هذه الطرق جنبًا إلى جنب.</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="الشكل 21-5: عرض النطاق النظري في كل اتجاه للوصلات الشائعة. PCIe 4.0 ×4 نحو 7.9، وPCIe 3.0 ×16 نحو 15.8، وPCIe 4.0 ×16 نحو 31.5، وPCIe 5.0 ×16 نحو 63، وNVLink 4.0 نحو 450 GB/s">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">الذروة النظرية في كل اتجاه، GB/s (طول الشريط بالمقياس)</text>
+<text class="f-text" fill="#182f2b" x="10" y="46" font-size="12">PCIe 4.0 ×4</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="34" width="3.9" height="16"/>
+<text class="f-text" fill="#182f2b" x="130" y="47" font-size="12">7.9</text>
+<text class="f-text" fill="#182f2b" x="10" y="76" font-size="12">PCIe 3.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="64" width="7.7" height="16"/>
+<text class="f-text" fill="#182f2b" x="134" y="77" font-size="12">15.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="12">PCIe 4.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="94" width="15.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="142" y="107" font-size="12">31.5</text>
+<text class="f-text" fill="#182f2b" x="10" y="136" font-size="12">PCIe 5.0 ×16</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="124" width="30.8" height="16"/>
+<text class="f-text" fill="#182f2b" x="157" y="137" font-size="12">63</text>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="12">NVLink 4.0</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="154" width="220" height="16"/>
+<text class="f-text" fill="#182f2b" x="346" y="167" font-size="12">450</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="198" font-size="12">NVLink 4.0: مجموع 18 وصلة في H100.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="216" font-size="12">أما أزواج البطاقات المنزلية فتسير عادةً عبر PCIe فقط</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="238" font-size="12">كل جيل من PCIe يضاعف السرعة؛ ×16 تعني 16 مسارًا متجاورًا</text>
+</svg><figcaption>الشكل 21-5　الطرق على اللوحات الأم المنزلية أضيق بكثير. التوازي الموتّري يتزامن عند كل طبقة، فيخسر كثيرًا بلا خط سريع مثل NVLink. أما تقسيم الطبقات فيسلّم مرة واحدة بين الأقسام، وPCIe يكفيه.</figcaption></figure>
+<p>إلى جانب عرض النطاق هناك <dfn>زمن الاستجابة</dfn> (latency): حتى لو نقلت بايتًا واحدًا، فعليك دفع كلفة ثابتة للبدء والمزامنة. إذا نقلت طردًا كبيرًا واحدًا دفعتَ الزمن مرة واحدة، وإذا نقلت 96 طردًا صغيرًا دفعتَه 96 مرة. يشرح الفصل 5 عرض النطاق وزمن الاستجابة بالتفصيل، وفي ركن <a href="#chapter/01/c01-memory-hierarchy">«التسلسل الهرمي للذاكرة»</a> بالفصل 1 مقارنة بين عروض النطاق لكل مستوى.</p>
+<p class="further">قراءات إضافية: <a href="https://ar.wikipedia.org/wiki/%D9%85%D8%B3%D8%B1%D9%89_%D8%A7%D9%84%D8%B1%D8%A8%D8%B7_%D8%A7%D9%84%D8%B3%D8%B1%D9%8A%D8%B9_%D8%A8%D9%8A%D9%86_%D8%A7%D9%84%D9%85%D9%83%D9%88%D9%86%D8%A7%D8%AA_%D8%A7%D9%84%D8%B7%D8%B1%D9%81%D9%8A%D8%A9" target="_blank" rel="noopener noreferrer">ويكيبيديا: مسرى الربط السريع بين المكونات الطرفية (PCI Express)</a> · <a href="https://en.wikipedia.org/wiki/NVLink" target="_blank" rel="noopener noreferrer">ويكيبيديا (بالإنجليزية): NVLink</a> · <a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/overview.html" target="_blank" rel="noopener noreferrer">وثائق NVIDIA NCCL: نظرة عامة على الاتصال بين عدة بطاقات</a></p>
+</aside>
+<p>لنضع الطرد والطريق معًا في الحساب. تقارن الحاسبة أدناه كلفة التواصل لطريقتين من تقسيم العمل على وصلات مختلفة. صف التوازي الموتّري مقارنة افتراضية فقط، فـ Strata لا تعمل هكذا:</p>
+<div class="viz" data-viz="link-budget"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="الشكل 21-6: على PCIe 4.0 ×16 يستغرق تسليم تقسيم الطبقات نحو 36 ميكروثانية لكل نافذة، والتوازي الموتّري الافتراضي نحو 1116 ميكروثانية، وتسليم دفعة مُطالبة واحدة نحو 5.3 ms">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">PCIe 4.0 ×16، زمن ثابت 10 µs لكل عبور، ونافذة من 5 رموز</text>
+<text class="f-text" fill="#182f2b" x="10" y="50" font-size="12">تقسيم الطبقات</text>
+<rect class="f-accent" fill="#136d5a" x="120" y="38" width="7.5" height="16"/>
+<text class="f-text" fill="#182f2b" x="134" y="51" font-size="12">≈ 36 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="70" font-size="12">2 × (10 µs + 256 KB ÷ 31.5 GB/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="100" font-size="12">توازٍ موتّري</text>
+<rect class="f-warn" fill="#9e5d24" x="120" y="88" width="230" height="16"/>
+<text class="f-on" fill="#ffffff" x="344" y="101" font-size="12" text-anchor="end">≈ 1116 µs</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="120" font-size="12">96 × (10 µs + 51 KB ÷ 31.5 GB/s)</text>
+<text class="f-text" fill="#182f2b" x="10" y="150" font-size="12">تسليم دفعة مُطالبة (2048 token): ≈ 5.3 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="170" font-size="12">قراءة هذه الدفعة نفسها نحو ثانية</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="188" font-size="12">(بتقدير نحو 2,000 token/s من المصدر الأصلي)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="214" font-size="12">زمن الاستجابة افتراض تعليمي؛ والتوازي الموتّري</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="232" font-size="12">للمقارنة فقط وليس طريقة Strata</text>
+</svg><figcaption>الشكل 21-6　كلفة التواصل في تقسيم الطبقات صغيرة إلى حد يمكن إهماله. وكلفة التوازي الموتّري تأتي أساسًا من عدد مرات المزامنة، إذ يُضرب الزمن الثابت في كل عبور 96 مرة.</figcaption></figure></div>
+<p>المعادلات كلها على الشكل. <span class="ev ev-est">تقدير تعليمي</span> والاستنتاجان هما: الأول، عند توليد الإجابة يحتاج تسليم تقسيم الطبقات في كل نافذة إلى عشرات الميكروثواني فقط. وبحسب قياس المصدر الأصلي (نحو 84 token/s) يستغرق الـ token الواحد نحو 12 ms، والتسليم أقل من 1% منه. الثاني، عند قراءة المُطالبة يستغرق تسليم دفعة بحجم 84 MB ذهابًا وإيابًا على PCIe 4.0 ×16 نحو 5.3 ms، بينما تستغرق قراءة الدفعة نفسها قرابة ثانية. من هنا يجرؤ المصدر الأصلي على القول: «لا حاجة إلى NVLink، ولا إلى وصول البطاقات إلى ذاكرة بعضها مباشرة، ويعمل الأمر حتى في فتحة ×4 أو ×1». <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+
+<h2 id="sec-5">21.5 كل بطاقة تتولى طبقاتها فقط</h2>
+<p>بعد تقسيم الطبقات، يجب أن تكون لكل بطاقة «ذاكرتها» الخاصة: ذاكرة KV المؤقتة أو الحالة المتكررة لكل طبقة. كانت الطريقة المبكرة أن يخصص كل قسم حالة للطبقات الـ 48 كلها مع أنه يشغّل جزءًا منها فقط. وتسمي تعليقات <code>session.hpp</code> هذا «العلّة القديمة للمخازن بحجم النموذج الكامل». أما الآن فتملك كل جلسة حالة الطبقات <code>[layer_lo, layer_hi)</code> فقط. <span class="ev ev-code">حقيقة من الشيفرة</span>[S13]</p>
+<p>وهنا تفصيل يسهل الخطأ فيه. ما زالت الطبقات في الشيفرة تُرقَّم بالرقم <strong>العام</strong>، لكن المصفوفة تحوي صفوف هذا القسم فقط. لذلك عند أخذ حالة الطبقة g من نوع GDN، يجب أولًا طرح رقم أول طبقة GDN في هذا القسم، وهو <code>gdn_ord0</code>. وإذا أخطأتَ في الطرح قرأتَ حالة طبقة أخرى بلا أي رسالة خطأ. وإذا لم يكن في قسم ما أي طبقة QSA، فما زالت الشيفرة تخصص له حالة QSA «رئيسية»، لأن أشياء يتشاركها النموذج كله، مثل جدول ترميز الموضع الدوراني، تُقرأ منها. <span class="ev ev-code">حقيقة من الشيفرة</span>[S13]</p>
+<p>وموضع القطع مهم أيضًا. الدالة <code>session_bytes</code>، التي تحسب عدد البايتات التي يحتاجها قسم من الطبقات، حساب خالص، فيمكنها أن «تسعّر» طريقة قطع مرشحة قبل تخصيص أي ذاكرة. <span class="ev ev-code">حقيقة من الشيفرة</span>[S13] وتقول وثائق المصدر الأصلي إن الوضع التلقائي الافتراضي يجرّب كل طرق القطع لبطاقتين أو ثلاث، ويختار الطريقة التي تتسع فيها ذاكرات البطاقات لأكبر عدد من «الخبراء الساخنين». ويطبع سجل التشغيل الاختيار، مثل: «K = 19، تتسع الذاكرة لـ 11,767 من أصل 12,288 مدخلًا في الملف الشخصي». <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+<p>وأخيرًا الحفظ. شرح الفصل 20 لقطات الجلسة. عند قراءة المُطالبة تتقدم البطاقة الأولى على الثانية بدفعة أو أكثر في الغالب. فإذا ضممنا حالتَي البطاقتين مباشرة في لحظة ما، حصلنا على مسخ: «القسم الأمامي قرأ حتى الدفعة 3 والقسم الخلفي حتى الدفعة 2». انظر الشكل 21-7.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="الشكل 21-7: عند قراءة المُطالبة تتقدم GPU A على GPU B بدفعة. ضمّ الحالتين الراهنتين للبطاقتين مباشرة يعطي حفظًا غير متسق؛ والطريقة الصحيحة أن تحفظ كل بطاقة نسخة عند إنهاء الدفعة نفسها">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="12">تقدم البطاقتين في لحظة ما</text>
+<text class="f-text" fill="#182f2b" x="8" y="48" font-size="12">GPU A</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="30" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="140" y="30" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="216" y="30" width="70" height="26" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="292" y="30" width="70" height="26" rx="3"/>
+<text class="f-on" fill="#ffffff" x="99" y="48" font-size="12" text-anchor="middle">دفعة 1</text>
+<text class="f-on" fill="#ffffff" x="175" y="48" font-size="12" text-anchor="middle">دفعة 2</text>
+<text class="f-on" fill="#ffffff" x="251" y="48" font-size="12" text-anchor="middle">دفعة 3</text>
+<text class="f-text" fill="#182f2b" x="327" y="48" font-size="12" text-anchor="middle">دفعة 4</text>
+<text class="f-text" fill="#182f2b" x="8" y="92" font-size="12">GPU B</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="74" width="70" height="26" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="140" y="74" width="70" height="26" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="216" y="74" width="70" height="26" rx="3"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="292" y="74" width="70" height="26" rx="3"/>
+<text class="f-on" fill="#ffffff" x="99" y="92" font-size="12" text-anchor="middle">دفعة 1</text>
+<text class="f-on" fill="#ffffff" x="175" y="92" font-size="12" text-anchor="middle">دفعة 2</text>
+<text class="f-text" fill="#182f2b" x="251" y="92" font-size="12" text-anchor="middle">دفعة 3</text>
+<text class="f-muted" fill="#5c6d66" x="327" y="92" font-size="12" text-anchor="middle">دفعة 4</text>
+<text class="f-warn" fill="#9e5d24" x="8" y="128" font-size="12">خطأ: الضم الآن يجعل A عند نهاية الدفعة 3،</text>
+<text class="f-warn" fill="#9e5d24" x="8" y="144" font-size="12">وB عند نهاية الدفعة 2</text>
+<text class="f-text" fill="#182f2b" x="8" y="168" font-size="12">صحيح: كل بطاقة تحفظ نسختها عند</text>
+<text class="f-text" fill="#182f2b" x="8" y="184" font-size="12">إنهاء الدفعة نفسها</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="206" font-size="12">تستخدم Strata الاستدعاء on_stage_chunk لأخذ الحالة في هذه اللحظة</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="224" font-size="12">مظلّل = انتهت قراءته؛ خلفية فاتحة = قيد القراءة؛ إطار فارغ = لم يحن دوره</text>
+</svg><figcaption>الشكل 21-7　تقدم البطاقتين غير متزامن. يجب أن يتحاذى الحفظ عند نهاية الدفعة نفسها: تحفظ كل بطاقة نسختها عند إنهاء تلك الدفعة، ولا يجوز في لحظة ما ضم «الحالتين الراهنتين» للطرفين.</figcaption></figure>
+<p>طريقة Strata أن تعطي كل قسم استدعاءً هو <code>on_stage_chunk</code>: كلما قرأت بطاقة دفعة، ووقفت حالتها عند نهاية هذه الدفعة تمامًا، استُدعي. وينص التعليق على أن الأقسام الأولى تكون عند إبلاغ القسم الأخير «متقدمة بدفعة أو أكثر»، لذلك يجب أخذ نسخة كل قسم من الحفظ في منتصف المُطالبة عند هذا الاستدعاء. <span class="ev ev-code">حقيقة من الشيفرة</span>[S12]</p>
+
+<h2 id="sec-6">21.6 تطبيق عملي: ابحث عن الفقاعة، وفكّر هل تضيف بطاقة</h2>
+<p>ليس لهذا الفصل صفحة مختبر مستقلة، فالمخططان التفاعليان هما منصة التجارب. نقترح أن تلعب هكذا:</p>
+<ol>
+<li>في «خط أنابيب البطاقتين» ثبّت a = 4 وb = 5، وارفع عدد الدفعات من 1 إلى 8، وسجّل الزمن الكلي في كل مرة، وتحقق من 5N + 4. ثم اضبط زمن النقل على 1 ms واضغط «فقط token واحد»، وانظر لماذا تصير البطاقتان أبطأ من واحدة.</li>
+<li>اجعل a وb غير متوازنتين كثيرًا (مثل 2 و8)، وانظر كم تنتظر البطاقة السريعة. هذا سبب نصيحة المصدر الأصلي: «ضع أسرع بطاقة في المقدمة، ودع التقسيم التلقائي يوزع الطبقات حسب قدرة التخزين المؤقت». <span class="ev ev-report">تقرير المصدر الأصلي</span></li>
+<li>في «كم يستغرق تسليم واحد» بدّل الوصلات وغيّر زمن الاستجابة، وانظر هل يأتي الفرق بين التوازي الموتّري وتقسيم الطبقات من البايتات أم من عدد المرات.</li>
+</ol>
+<p>وللمصدر الأصلي نصائح عملية أخرى، يمكن فهمها بنتائج المحاكي. <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+<ul>
+<li><strong>لا تضم بطاقة أبطأ بكثير لمجرد زيادة العدد.</strong> أضيفت بطاقة RTX 2080 Ti إلى 5080 مع 3090 فانخفضت سرعة التوليد إلى 68 token/s (قصة) و90 (شيفرة). كل بطاقة إضافية تضيف جولة تسليم وانتظار في كل نافذة.</li>
+<li><strong>إذا اتسعت بطاقة واحدة فلا تقسّم.</strong> أضاف الإصدار 0.1.31 مفتاحًا اختياريًا: عندما تتسع البطاقة الأولى لكل الخبراء الشائعين والسياق، يستخدمها وحدها. على R9700 بسعة 32 GB مع RX 9070 XT وبنموذج Coder، ارتفعت قراءة مُطالبة 4K بعد تفعيله من 1,244 إلى 1,776 token/s، والتوليد من نحو 51 إلى نحو 60؛ أما مُطالبة 16K فصارت أبطأ بنحو 5%.</li>
+<li><strong>البطاقات القديمة تسلك مسارًا تجريبيًا.</strong> ما زالت وثيقة البطاقات المتعددة تنص على أن كل بطاقة يجب أن تكون قدرتها الحسابية 7.5 فأعلى (RTX 20 وما بعدها). وأضاف الإصدار v0.1.39 محركًا تجريبيًا بـ CUDA 12 للبطاقات القديمة مثل Pascal وVolta. وتقول وثيقة البطاقات القديمة أيضًا إنه عندما يشترك V100 وRTX 30 أو 40 في نموذج واحد تشغّل البطاقتان هذا المحرك. وليس لدى القائمين على المشروع هذه البطاقات، فتحققوا فقط من أن الشيفرة تُبنى وأن اختبارات الوحدات تنجح. الوثيقتان لا تتفقان، لذلك يجب أن ننظر أيضًا في الإصدار والمصدر عند السؤال «أي البطاقات مدعومة».</li>
+</ul>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>للبطاقات المتعددة ثلاث طرق للتقسيم: تقسيم الطبقات (توازي خط الأنابيب)، والتوازي الموتّري، وتوازي الطلبات. تستخدم Strata تقسيم الطبقات لأنه الأقل تواصلًا بين البطاقات، ويكفيه PCIe المنزلي.</li>
+<li>طبقات الـ token الواحد يجب أن تُحسب طبقة بعد طبقة، وتقسيم الطبقات لا يجعله أسرع. ما تجلبه البطاقتان هو ضعف عدد الخبراء في الذاكرة المؤقتة، وعمل البطاقتين بالتداخل عند قراءة المُطالبة: الزمن الكلي = a + b + (N − 1) × max(a, b).</li>
+<li>الذي يُسلَّم هو الحالة الرياضية الكاملة: 51,216 بايت لكل token عند التوليد، ونحو 84 MB لكل دفعة عند قراءة المُطالبة. البايتات قليلة والمرات قليلة، فكلفة التواصل صغيرة. ويجب أن يتحاذى الحفظ عند اللحظة التي تنهي فيها كل بطاقة الدفعة نفسها.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «إذا ركّبتُ بطاقتين تضاعفت سرعة التوليد.»</strong></p>
+<p>طبقات الـ token الواحد بينها اعتماد متسلسل، فلا تستطيع البطاقتان إلا العمل بالتناوب. في قياسات المصدر الأصلي كانت سرعة التوليد مع 5080 وحدها تقريبًا كمعها مع 3090، وإضافة 2080 Ti جعلتها أبطأ. تأتي سرعة البطاقتين من الذاكرة الإضافية التي تقلّل حساب الـ CPU للخبراء، ومن خط الأنابيب عند قراءة المُطالبات الطويلة، وليس من «جمع قدرتين حسابيتين». <span class="ev ev-report">تقرير المصدر الأصلي</span></p></div>
+
+<details class="deep"><summary>تعمّق أكثر: عقد التسليم، وبروتوكول المخزنين، وكيف تقدّر مكسب البطاقتين</summary>
+<h3>لماذا يجب أن يكون التسليم 12,804 رقمًا</h3>
+<p>ينص تعليق <code>Verifier::set_stage</code> على أن التسليم يحوي لكل token المتبقّي R (hc × n_embd)، والمتجه bo الذي لم تكتبه الطبقة الأخيرة بعد (n_embd)، وinject (hc). ويطوي القسم التالي هذه الكتابة عند قراءة الطبقة الأولى، تمامًا كما تفعل النافذة غير المقسّمة، ولذلك يكون التقسيم متطابقًا بت ببت. ويجب أن يكون المؤشران كلاهما ذاكرة ظاهرة للجهاز (ذاكرة مثبّتة مربوطة؛ وإذا كان القسمان على بطاقتين فيجب أن تكون أيضًا portable). <span class="ev ev-code">حقيقة من الشيفرة</span>[S08] وعدد أرقام float المسلَّمة تعطيه الدالة <code>handoff_floats</code>، وصيغتها هي <code>hc*n_embd + n_embd + hc</code>. [S08]</p>
+<p>لو نقلنا «الحالة المخفية» ذات الـ 2560 بعدًا فقط لضاعت النُّسخ الثلاث الأخرى من المتبقّي والكتابة المؤجلة. لا ينهار البرنامج، بل يخطئ في الحساب بصمت. والدرس: صيغة التواصل بين الأجهزة يجب أن تعكس العقد الرياضي كاملًا، ولا يجوز حذف شيء منها بحجة أن «البعد المخفي 2560». كما يوفّر المصدر الأصلي وضع فحص: الخيار <code>--layer-split K --split-device 0</code> يشغّل القسمين على بطاقة واحدة، وهو مخصص للتحقق من تطابق التسليم بت ببت، وليس وضع تسريع. <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+<h3>بروتوكول التسليم بمخزنين</h3>
+<p>في <code>prefill.cpp</code> يخصص القسم الأول عند التهيئة، بـ <code>cudaHostAlloc(..., cudaHostAllocPortable)</code>، كتلتين من الذاكرة المثبّتة، تتسع كل منهما لصفوف المتبقّي لدفعة مُطالبة كاملة (chunk × D × 4 بايت، حيث D = 4 × 2560). <span class="ev ev-code">حقيقة من الشيفرة</span> وبعد قراءة كل دفعة يفعل أربعة أشياء بالترتيب:</p>
+<ol>
+<li>ينسخ صفوف المتبقّي من ذاكرة الفيديو إلى مخزن التسليم الحالي، وينتظر انتهاء النسخ؛</li>
+<li>يستدعي <code>on_stage_chunk</code>، وحالة هذا القسم عندها تقف عند نهاية هذه الدفعة تمامًا؛</li>
+<li>ينتظر أن ينهي القسم التالي قراءة الدفعة السابقة (حتى لا يقرأ المخزن الذي سيُكتب فوقه)؛</li>
+<li>يشغّل القسم التالي في خيط آخر ليقرأ هذه الدفعة، ثم ينتقل إلى المخزن الآخر ويتابع قراءة الدفعة التالية.</li>
+</ol>
+<p>لنفرض أن القسم الأول يستغرق a′ لكل دفعة (شاملًا النسخ إلى الخارج)، والثاني b′ لكل دفعة (شاملًا النسخ إلى الداخل). الخطوة 3 تعني أن لحظة بدء القسم الأول قراءة الدفعة c+1 تساوي لحظة بدء الثاني قراءة الدفعة c. ويُستنتج من ذلك أن الفرق بين بدايتَي دفعتين متتاليتين في القسم الثاني هو max(a′, b′)، وأن الدفعة الأولى تبدأ عند a′، وأن الأخيرة تنتهي بعد بدئها بـ b′، فيكون الزمن الكلي = a′ + b′ + (N − 1) × max(a′, b′). وعندما a′ = 4 وb′ = 5 وN = 8 يكون 44 ms، بينما التتابع دفعة بعد دفعة 72 ms. <span class="ev ev-est">تقدير تعليمي</span> وهذا هو النموذج الذي يستخدمه محاكي هذا الفصل، وقد فُحصت الاعتمادات وقواعد المخزن دفعة بعد دفعة في <code>tests/viz-21.test.cjs</code>.</p>
+<p>مع ثلاث بطاقات فأكثر غيّر الإصدار v0.1.39 طريقة الانتظار في الخطوة 3. كان القسم التالي، بعد أن ينهي دفعة، ينتظر قسمه التالي هو أيضًا، فينتقل الانتظار حتى البطاقة الأخيرة. أما الآن فينتظر كل قسم خليفته <strong>المباشر</strong> فقط: القسم الأوسط يسلّم الدفعة ويعود، وعند انتهاء المُطالبة كلها يجري الإنهاء مرة واحدة. <span class="ev ev-code">حقيقة من الشيفرة</span>[S12] وقد قاس المصدر الأصلي على 4 بطاقات RTX 3060 قراءة أسرع بنسبة 10%-28%. <span class="ev ev-report">تقرير المصدر الأصلي</span> ومع بطاقتين لا يوجد قسم أوسط، فيبقى خط الأنابيب كما كان.</p>
+<p>وإذا كان نقل كل دفعة يشغل مورِدًا حرجًا أيضًا فيجب أن يدخل في a′ أو b′، ولا يصح اعتباره غير موجود. هل تستطيع البطاقتان الوصول المباشر إلى ذاكرة بعضهما، وهل يلزم المرور بالذاكرة العادية، وطوبولوجيا اللوحة الأم، والعبور بين عقد NUMA، كلها تغيّر هذا الرقم. واختارت Strata أكثر الطرق تحفظًا: كل شيء يمر عبر الذاكرة، ولا اعتماد على وصول البطاقات إلى ذاكرة بعضها.</p>
+<h3>الترقيم العام و«القسم الذي لا يحوي طبقة QSA»</h3>
+<p>يوضح تعليق حالة الجلسة أن <code>qsa_states</code> و<code>gdn_state</code> يحتفظان بالترقيم العام وتقل صفوف المصفوفة فقط، فيجب على مستخدم كل طبقة أن يطرح <code>gdn_ord0</code>. أما الاستخدام على مستوى النموذج كله، الذي كان يُكتب <code>qsa_states[0]</code> (جدول RoPE المشترك، وهوية التخزين المؤقت لـ prefill، وrope الذي يستعيره MTP)، فصار يقرأ <code>qsa_states[primary]</code>. وإذا لم تكن في قسم طبقة QSA فما زالت تُخصَّص حالة رئيسية واحدة. والتخصيص الافتراضي للنطاق الكامل يطابق التخصيص القديم للنموذج كله بايتًا ببايت. <span class="ev ev-code">حقيقة من الشيفرة</span>[S13] ويجب أن تغطي الاختبارات حالات الحافة مثل «قسم بلا طبقة QSA» و«نقطة القطع قرب الطبقة 1».</p>
+<h3>يجب أن ينتمي الحفظ إلى الحد نفسه</h3>
+<p>عقد <code>on_stage_chunk</code> هو: يُستدعى عندما ينهي كل قسم دفعة، وتكون الـ stream الخاصة به قد تزامنت، وحالته واقفة عند نهاية هذه الدفعة. ويُستدعى القسم الأخير قبل <code>on_chunk</code>، ويعمل على خيط ذلك القسم نفسه، والجهاز الحالي هو بطاقة ذلك القسم. <span class="ev ev-code">حقيقة من الشيفرة</span>[S12] وتضيف وثائق المصدر الأصلي أن حفظ الجلسة يحفظ حالة كل بطاقة ويستعيدها، وأن الحفظ في منتصف المُطالبة تحفظ فيه كل بطاقة جزءها عند إنهاء تلك الدفعة. <span class="ev ev-report">تقرير المصدر الأصلي</span> وعلى العكس، إذا انتظرنا إبلاغ البطاقة الأخيرة بالانتهاء ثم ذهبنا لأخذ «الحالة الراهنة» للبطاقة الأولى، فسنحصل على دفعة أبعد تقدمًا، ويصير الحفظ غير متسق.</p>
+<h3>كيف تحكم على مصدر سرعة البطاقتين</h3>
+<p>«البطاقتان أسرع من بطاقة» لا تدل مباشرة على «كفاءة خط الأنابيب عالية». فالذاكرة الإضافية ترفع معدل إصابة الخبراء وتقلل حساب الـ CPU، وقد يكون هذا هو المكسب الرئيسي. لذلك يجب القياس منفصلًا: معدل إصابة الخبراء لكل بطاقة، وحجم عمل مجمّع الـ CPU، وزمن التسليم، وزمن كل قسم. والتقسيم التلقائي نفسه يبيّن الفكرة: فهو يختار الطريقة التي «تتسع فيها الذاكرة لأكبر عدد من الخبراء الساخنين»، وعند التقسيم المتساوي يترك للبطاقة الأكثر امتلاءً أكبر مساحة. <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+<h3>حالات لم تُغطَّ أو لها شروط</h3>
+<ul>
+<li>مع تعريفات WDDM في Windows وWSL2، تُثبَّت في الذاكرة منطقة الخبراء بحجم 8 GiB فقط، ويُبث الباقي عبر حلقة تجهيز مثبّتة؛ أما تعريفات Linux فليس لها هذا الحد. <span class="ev ev-report">تقرير المصدر الأصلي</span></li>
+<li>تحمل كل بطاقة افتراضيًا نسخة من الأوزان الكثيفة (ويمكن منذ v0.1.39 استخدام <code>STRATA_STAGE_TRIM=1</code> لتحميل طبقات القسم فقط) ومخزن مُطالبة خاصًا بها (نحو 1.5 GB لكل بطاقة عند 2048 دفعة افتراضيًا)، ولذلك لا يُنصح بضم بطاقات أقل من 8 GB؛ ولا يُدعم الخلط بين بطاقات NVIDIA وAMD. <span class="ev ev-report">تقرير المصدر الأصلي</span></li>
+<li>إذا كانت المُطالبة دفعة واحدة فقط، فلا يستطيع القسمان إلا القراءة بالتتابع، وتبقى بطاقة عاطلة دائمًا. أضاف الإصدار v0.1.39 مفتاحًا اختياريًا هو <code>STRATA_PREFILL_HELP=1</code>: تنقل البطاقة العاطلة جزءًا من الخبراء عبر PCIe الخاص بها، وتعيد النتيجة بعد الحساب. وقد اختبر المصدر الأصلي على بطاقتَي RTX 3090 مُطالبة 1.1K فارتفعت من 496 إلى 723 token/s؛ وعند نحو 3.3K فأكثر لا يجري التقاسم، لأن القسمين يتداخلان عندها أصلًا. ويختلف تقريبه عن المسار الافتراضي، فلا يتطابق الخرج بت ببت، ولهذا يُفعَّل يدويًا. <span class="ev ev-report">تقرير المصدر الأصلي</span></li>
+<li>لدى Strata وضع آخر للبطاقتين هو <code>--peer-device</code>: تُستخدم البطاقة الثانية ذاكرةَ خبراء فقط، وتذهب التنشيطات والنتائج ذهابًا وإيابًا عبر NVLink أو قناة وصول مباشر أخرى بين البطاقات. وهو يتعارض مع <code>--layer-split</code>، فلا يمكن اختيار إلا أحدهما. <span class="ev ev-report">تقرير المصدر الأصلي</span></li>
+<li>لا يكفي أن ينجح القبول مرة واحدة على طوبولوجيا البطاقتين المثالية. يجب أيضًا اختبار إلغاء الطلبات، والدفعة الأخيرة القصيرة جدًا، وخطأ البطاقة الثانية، وعدم توفر الوصول المباشر بين البطاقات، ثم مقارنة النتيجة بالبطاقة الواحدة بايتًا ببايت.</li>
+</ul>
+</details>
