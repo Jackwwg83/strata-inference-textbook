@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { isolateNumbers } = require('./rtl.cjs');
+const { dfnTexts, tagDfns, tagFirstUses } = require('./terms.cjs');
 const I18N = require('../src/i18n.js');
 const root = path.resolve(__dirname, '..');
 const read = p => fs.readFileSync(path.join(root, p), 'utf8');
@@ -42,7 +43,7 @@ function loadBook(lang) {
     Book.chapters = overlay(Book.chapters, tr('chapters'), 'id', ['title', 'deck', 'part', 'courses', 'prereq', 'goals', 'quiz', 'problem', 'answer', 'level']);
     Book.sources = overlay(Book.sources, tr('sources'), 'id', ['title', 'note', 'kind']);
     Book.tracks = overlay(Book.tracks, tr('tracks'), 'id', ['name', 'sub', 'desc']);
-    Book.labs = overlay(Book.labs, tr('labs'), 'id', ['title', 'category', 'description', 'assumptions', 'task']);
+    Book.labs = overlay(Book.labs, tr('labs'), 'id', ['title', 'category', 'description', 'assumptions', 'task', 'experiment']);
     Book.walkthroughs = overlay(Book.walkthroughs, tr('walkthroughs'), 'source', ['title', 'steps', 'challenge']);
     const g = tr('glossary'); if (g) Book.glossary = g;
     const c = tr('courses'); if (c) Book.courses = c;
@@ -52,6 +53,27 @@ function loadBook(lang) {
     const own = lang === 'zh' ? `content/chapters/${c.id}.html` : `content/i18n/${lang}/chapters/${c.id}.html`;
     if (!exists(own)) missing.push(`chapters/${c.id}.html`);
     c.html = read(exists(own) ? own : `content/chapters/${c.id}.html`);
+  }
+  // Term popovers: key each dfn by its position in the Chinese master, then mark the first plain use of each
+  // term per chapter. A translation gets popovers only once its term meanings are translated.
+  const terms = exists('content/terms.json') ? json('content/terms.json') : [];
+  const termTr = lang === 'zh' ? null : (exists(`content/i18n/${lang}/terms.json`) ? new Map(json(`content/i18n/${lang}/terms.json`).map(t => [t.key, t.meaning])) : null);
+  Book.terms = {};
+  if (terms.length && (lang === 'zh' || termTr)) {
+    const keyOf = new Map(terms.map(t => [t.term, t.key]));
+    // Everyday or ambiguous words (文件, 事件, 内核 …) keep their dfn popover but are not marked automatically.
+    const noAuto = new Set(terms.filter(t => t.auto === false).map(t => t.key));
+    const keysBy = {}, surfaces = new Map();
+    for (const c of Book.chapters) {
+      keysBy[c.id] = dfnTexts(read(`content/chapters/${c.id}.html`)).map(t => keyOf.get(t));
+      dfnTexts(c.html).forEach((txt, i) => { const k = keysBy[c.id][i]; if (k && txt && !surfaces.has(txt) && !noAuto.has(k)) surfaces.set(txt, k); });
+    }
+    for (const c of Book.chapters) c.html = tagFirstUses(tagDfns(c.html, keysBy[c.id]), [...surfaces], lang);
+    const surfaceOf = new Map();
+    for (const c of Book.chapters) dfnTexts(c.html).forEach((txt, i) => { const k = keysBy[c.id][i]; if (k && txt && !surfaceOf.has(k)) surfaceOf.set(k, txt); });
+    for (const t of terms) if (!Book.terms[t.key]) Book.terms[t.key] = { term: surfaceOf.get(t.key) || t.term, en: t.en, meaning: (termTr && termTr.get(t.key)) || t.meaning, chapter: t.chapter, anchor: t.anchor };
+  }
+  for (const c of Book.chapters) {
     if (RTL.has(lang)) c.html = isolateNumbers(c.html);
     c.plain = plain(c.html);
   }

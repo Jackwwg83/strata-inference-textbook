@@ -5,6 +5,8 @@
   'use strict';
   const S = {
     zh: {
+      termGlossary: '术语表', termWhere: id => `第 ${+id} 章细讲 →`,
+      expEyebrow: "实验问题", expGuess: "先猜一猜", expDo: "动手验证", expReveal: "对答案", expRight: "猜对了。", expWrong: "和你猜的不一样。", expPickFirst: "先选一个猜测，再对答案。", labAdvanced: "进阶：自己输入参数",
       // record import / validation
       errSchema: '不是可识别的学习记录（schema 1）',
       errArray: key => `${key} 应为数组`,
@@ -174,6 +176,8 @@
       sSources: '来源与阅读范围', sDisclaimer: '本教材并非 Strata 官方作品或其作者背书；引用源码保留上游 MIT 许可。不附带模型权重、字体文件或全仓库。全文尚未经过正式同行外审。',
     },
     en: {
+      termGlossary: 'Glossary', termWhere: id => `Explained in chapter ${+id} →`,
+      expEyebrow: "Experiment question", expGuess: "Guess first", expDo: "Try it", expReveal: "Check the answer", expRight: "You guessed right.", expWrong: "Not what you guessed.", expPickFirst: "Pick a guess first, then check.", labAdvanced: "Advanced: enter your own parameters",
       errSchema: 'Not a recognised learning record (schema 1)',
       errArray: key => `${key} must be an array`,
       toDark: 'Switch to dark theme', toLight: 'Switch to light theme',
@@ -323,6 +327,8 @@
       sSources: 'Sources and reading scope', sDisclaimer: 'This book is not an official Strata publication and is not endorsed by its authors. Quoted source code keeps its upstream MIT licence. No model weights, font files or full repository are included. The text has not been formally peer reviewed.',
     },
     ja: {
+      termGlossary: '用語集', termWhere: id => `第 ${+id} 章で詳しく →`,
+      expEyebrow: "実験の問い", expGuess: "まず予想する", expDo: "手を動かして確かめる", expReveal: "答え合わせ", expRight: "予想どおりです。", expWrong: "予想と違いました。", expPickFirst: "先に予想を 1 つ選んでから答え合わせしましょう。", labAdvanced: "上級：パラメータを自分で入れる",
   errSchema: '認識できる学習記録ではありません（schema 1）',
   errArray: key => `${key} は配列にしてください`,
   toDark: 'ダークテーマに切り替え', toLight: 'ライトテーマに切り替え',
@@ -472,6 +478,8 @@
   sSources: '出典と閲覧範囲', sDisclaimer: 'この教材は Strata の公式出版物ではなく、その作者の推薦も受けていません。引用したソースコードには上流の MIT ライセンスが適用されます。モデルの重み、フォントファイル、リポジトリ全体は含みません。本文は正式な査読を受けていません。',
 },
     ko: {
+      termGlossary: '용어집', termWhere: id => `${+id}장에서 자세히 →`,
+      expEyebrow: "실험 질문", expGuess: "먼저 예상해 보세요", expDo: "직접 확인하기", expReveal: "정답 확인", expRight: "예상이 맞았어요.", expWrong: "예상과 달라요.", expPickFirst: "먼저 예상을 하나 고른 뒤 정답을 확인하세요.", labAdvanced: "고급: 매개변수 직접 입력",
   errSchema: '인식할 수 있는 학습 기록이 아니에요 (schema 1)',
   errArray: key => `${key} 값은 배열이어야 해요`,
   toDark: '다크 테마로 전환', toLight: '라이트 테마로 전환',
@@ -621,6 +629,8 @@
   sSources: '출처와 읽기 범위', sDisclaimer: '이 교재는 Strata의 공식 출판물이 아니며, 그 저자들의 보증도 받지 않았어요. 인용한 소스 코드는 업스트림 MIT 라이선스를 따라요. 모델 가중치, 폰트 파일, 저장소 전체는 포함하지 않아요. 본문은 정식 동료 심사를 거치지 않았어요.',
 },
     es: {
+      termGlossary: 'Glosario', termWhere: id => `Se explica en el capítulo ${+id} →`,
+      expEyebrow: "Pregunta del experimento", expGuess: "Primero, adivina", expDo: "Compruébalo", expReveal: "Ver la respuesta", expRight: "¡Acertaste!", expWrong: "No es lo que pensabas.", expPickFirst: "Elige primero una predicción y luego comprueba.", labAdvanced: "Avanzado: introduce tus propios parámetros",
   errSchema: 'No es un registro de aprendizaje reconocible (schema 1)',
   errArray: key => `${key} debe ser un array`,
   toDark: 'Cambiar a tema oscuro', toLight: 'Cambiar a tema claro',
@@ -770,6 +780,8 @@
   sSources: 'Fuentes y alcance de lectura', sDisclaimer: 'Este libro no es una publicación oficial de Strata ni cuenta con el aval de sus autores. El código citado conserva su licencia MIT upstream. No incluye pesos de modelos, archivos tipográficos ni el repositorio completo. El texto no ha pasado una revisión formal por pares.',
 },
     ar: {
+      termGlossary: 'المسرد', termWhere: id => `يُشرح في الفصل ${+id} ←`,
+      expEyebrow: "سؤال التجربة", expGuess: "خمّن أولًا", expDo: "جرّب بنفسك", expReveal: "تحقّق من الإجابة", expRight: "تخمينك صحيح.", expWrong: "ليس كما خمّنت.", expPickFirst: "اختر تخمينًا أولًا ثم تحقّق.", labAdvanced: "متقدّم: أدخل المعاملات بنفسك",
   errSchema: 'ليس سجل تعلّم معروفًا (schema 1)',
   errArray: key => `يجب أن يكون ${key} مصفوفة`,
   toDark: 'التبديل إلى السمة الداكنة', toLight: 'التبديل إلى السمة الفاتحة',
