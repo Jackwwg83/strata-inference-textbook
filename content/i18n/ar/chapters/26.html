@@ -1,0 +1,276 @@
+<div class="hook"><span class="eyebrow">لنبدأ بتحذير يظهر عند الإقلاع</span>
+<p>كانت Strata تطبع في كل إقلاع تحذيرًا معناه: مسار حساب الخبراء على بطاقة الرسوميات «غير صحيح»، ولا يُوثَق بأي مخرجات يحسبها. ثم طرحت المسألة #23 سؤالًا مباشرًا: إذا شغّلتُ الذاكرة المؤقتة للخبراء، فهل تسوء الإجابات؟ <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+<p>أجرى المؤلف تجربة: النص نفسه، مرة بالذاكرة المؤقتة ومرة بدونها، ثم قارن توقعات النموذج موضعًا موضعًا. والنتيجة مخالفة للحدس قليلًا: في 2%-5% من المواضع يختلف «الكلمة التالية الأرجح» بين الجهتين؛ لكن في المجمل لا أحد منهما أدق من الآخر. مختلفان، وكلاهما صحيح. ومن هنا يبدأ هذا الفصل: نظام لا نستطيع حتى أن نحدد له «إجابة معيارية» قاطعة، كيف نختبره؟</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> اختبار محرك الاستدلال طبقات: الدوال الصغيرة تُقارَن بإجابة دقيقة، والمُشغِّل الواحد يُقارَن بتنفيذ مرجعي مستقل، والنموذج كله يُغذّى بالنص نفسه ويُقارَن موضعًا موضعًا. وآخر خانات الأعداد العشرية تتغير بترتيب الحساب، لذلك يجب أن نعرّف «التساوي» أولًا على أنه مقارنة بهامش تسامح. والاختبار الجيد يجب أن يثبت أيضًا أنه يلتقط فعلًا علّة وضعناها عمدًا.</p>
+
+<h2 id="sec-1">26.1 لماذا «يبدو سليمًا» هو الأخطر</h2>
+<p>للخطأ في البرنامج وجهان. الأول أن ينهار: رسالة خطأ، فخروج، فسلسلة رموز مشوهة. وهذا سهل الاكتشاف، ينكشف من أول تشغيل. والثاني أصعب: يعمل البرنامج كالمعتاد، ويُخرج عددًا عاديًّا، وتأتي الجمل سليمة، لكن المحتوى خاطئ. يجمع الشكل 26-1 النوعين.</p>
+<figure class="fig"><svg viewBox="0 0 400 242" role="img" aria-label="الشكل 26-1: الخطأ الذي ينهار البرنامج يظهر فور التشغيل؛ والخطأ الذي يبدو سليمًا يخدع الفحص السريع">
+<text class="f-text" fill="#182f2b" x="102" y="20" font-size="15" font-weight="600" text-anchor="middle">خطأ ينهار البرنامج به</text>
+<text class="f-text" fill="#182f2b" x="298" y="20" font-size="15" font-weight="600" text-anchor="middle">خطأ يبدو سليمًا</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="185" height="112" rx="10"/>
+<text class="f-text" fill="#182f2b" x="102" y="64" font-size="13" text-anchor="middle">يعطي البرنامج خطأ ويخرج</text>
+<text class="f-text" fill="#182f2b" x="102" y="92" font-size="13" text-anchor="middle">مخرجات NaN أو رموز مشوهة</text>
+<text class="f-text" fill="#182f2b" x="102" y="120" font-size="13" text-anchor="middle">ينكشف من أول تشغيل</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="32" width="185" height="112" rx="10"/>
+<text class="f-text" fill="#182f2b" x="298" y="64" font-size="13" text-anchor="middle">المخرج عدد منتهٍ عادي</text>
+<text class="f-text" fill="#182f2b" x="298" y="92" font-size="13" text-anchor="middle">والجمل المولَّدة سليمة</text>
+<text class="f-warn" fill="#9e5d24" x="298" y="120" font-size="13" font-weight="600" text-anchor="middle">لكن المحتوى خاطئ</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="170" font-size="13" text-anchor="middle">سهل الكشف: يحمرّ الاختبار فورًا</text>
+<text class="f-muted" fill="#5c6d66" x="298" y="170" font-size="13" text-anchor="middle">صعب الكشف: يحتاج إجابة مرجعية مستقلة</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 188H390"/>
+<text class="f-text" fill="#182f2b" x="200" y="210" font-size="13" text-anchor="middle">الأمثلة التي تذكرها تعليقات شيفرة Strata كلها من الجهة اليمنى:</text>
+<text class="f-text" fill="#182f2b" x="200" y="232" font-size="13" text-anchor="middle">ضرب الوزن مرتين، والتخزين بحسب العنوان، وقاعدة اقتران الرؤوس الخاطئة</text>
+</svg><figcaption>الشكل 26-1  الخطأ المنهار ينكشف فور التشغيل؛ والخطأ الذي يبدو سليمًا يخدع الفحص العابر. وأكثر ما يخشاه محرك الاستدلال هو النوع الأيمن.</figcaption></figure>
+<p>محرك الاستدلال معرّض جدًّا للنوع الأيمن من الأخطاء. والسبب بسيط: مخرجات النموذج سلسلة احتمالات، ولو أخطأ الحساب قليلًا لبقيت الكلمة المختارة «كلمة معقولة». وقد دوّن المؤلف في تعليقات شيفرة Strata هذه الأفخاخ واحدًا واحدًا <span class="ev ev-code">حقيقة من الشيفرة</span>:</p>
+<ul>
+<li><strong>التخزين بحسب العنوان.</strong> مدخل الخبراء في كل طبقة يستخدم قطعة الذاكرة نفسها، فعنوانها ثابت أبدًا ومحتواها يتغير مع كل طبقة. فإذا خُزِّن بحسب العنوان أُعيد استخدام بيانات الطبقة 0 في الطبقات الـ 47 التالية، فينتج «رمز (token) منتهٍ، يبدو معقولًا، وخاطئ تمامًا». [S06]</li>
+<li><strong>ضرب الوزن مرتين.</strong> مجمّع الخبراء لا يضرب في وزن الموجِّه (router)، وإنما تضربه خطوة الدمج. فإذا ضرب الطرفان معًا فلن يكاد يظهر ذلك في طبقة واحدة، لكن الخطأ يتضخم عبر 48 طبقة. [S06]</li>
+<li><strong>قاعدة اقتران الرؤوس.</strong> في طبقات GDN يجب أن تقترن 48 رأس قيم بـ 16 رأس مفاتيح، والقاعدة الصحيحة هي باقي القسمة (<code>h % 16</code>). ويكتب التعليق صراحة أن قاعدة أخرى هي «التجميع بالكتل» تنتج هي أيضًا مخرجات سليمة الشكل. [S17]</li>
+<li><strong>اختيار صيغة تنشيط خاطئة.</strong> أي صيغة تنشيط تُقرن بمصفوفة مكمَّمة يحدده نوع بياناتها لا اسمها. وإذا أخطأتَ انحرفت نتيجة ضرب المصفوفة في المتجه 0.6%-1.4%، ونص التعليق «متجه يبدو معقولًا، لا متجه فاسد». [S14]</li>
+</ul>
+<p>لذلك يحتاج اختبار محرك الاستدلال إلى شيء: <dfn>الإجابة المرجعية</dfn>، وتسمى أيضًا «كاشف الصواب» (test oracle)، أي مصدر مستقل يخبرك «ما النتيجة الصحيحة». قد تكون عددًا حُسب بالورقة، أو تنفيذًا آخر موثوقًا، أو قاعدة يجب أن تتحقق. وبلا إجابة مرجعية لا يستطيع الاختبار إلا أن يتأكد أن «البرنامج لم ينهر».</p>
+
+<h2 id="sec-2">26.2 كم طبقة في الاختبار: من سطر معادلة إلى جلسة كاملة</h2>
+<p>ليس واقعيًّا أن نختبر محرك الاستدلال كله دفعة واحدة. والطريقة الهندسية أن نقسمه إلى طبقات: اختبارات الطبقة الدنيا صغيرة وسريعة، وإذا فشلت دلّت بالضبط على السطر؛ واختبارات الطبقة العليا بطيئة لكنها الأقرب إلى ما يراه المستخدم فعلًا. الشكل 26-2 «سلّم اختبار» مرتب على طريقة Strata.</p>
+<figure class="fig"><svg viewBox="0 0 400 332" role="img" aria-label="الشكل 26-2: سلّم اختبار محرك الاستدلال من خمس طبقات، من الدوال الخالصة إلى الجلسة الكاملة">
+<rect class="f-accent" fill="#136d5a" x="80" y="10" width="240" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="31" font-size="14" font-weight="600" text-anchor="middle">جلسة كاملة ومهام حقيقية</text>
+<text class="f-on" fill="#ffffff" x="200" y="49" font-size="13" text-anchor="middle">اختبار الإبرة، وتكرار المحادثة، وبوابة الجودة</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="64" width="280" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="85" font-size="14" font-weight="600" text-anchor="middle">النموذج كله، بتاريخ ثابت وموضعًا موضعًا</text>
+<text class="f-on" fill="#ffffff" x="200" y="103" font-size="13" text-anchor="middle">النص نفسه، ومقارنة توقع كل موضع</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="118" width="320" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="139" font-size="14" font-weight="600" text-anchor="middle">التركيب والعقود</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="157" font-size="13" text-anchor="middle">فحص شكل كل موتّر (tensor) عند تحميل النموذج</text>
+<rect class="f-soft" fill="#e5f1df" x="25" y="172" width="350" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="193" font-size="14" font-weight="600" text-anchor="middle">المُشغِّل الواحد، مقابل تنفيذ مرجعي</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="211" font-size="13" text-anchor="middle">في src/kernels/ سبعة وثلاثون اختبار مقارنة</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="226" width="380" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="247" font-size="14" font-weight="600" text-anchor="middle">الدوال الخالصة</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="265" font-size="13" text-anchor="middle">مثل FP32 إلى BF16، بتجريب كل المدخلات الـ 2³²</text>
+<text class="f-text" fill="#182f2b" x="200" y="298" font-size="13" text-anchor="middle">كلما صعدت: اقتربت مما يراه المستخدم، وصار أبطأ وأصعب تحديدًا</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="320" font-size="13" text-anchor="middle">كلما نزلت: صار أسرع ويدل على السطر الخاطئ، وضاق ما يغطيه</text>
+</svg><figcaption>الشكل 26-2  سلّم الاختبار. كل طبقة تلتقط أخطاء مختلفة، ولا تغني طبقة عن أخرى. ونجاح الطبقات الدنيا كلها لا يعني حتمًا نجاح العليا.</figcaption></figure>
+<p>لننظر في بضع طبقات كيف تعمل Strata فعلًا.</p>
+<p><strong>أدنى طبقة هي الدوال الخالصة.</strong> تحويل عدد عشري من 32 بتًّا إلى صيغة BF16 من 16 بتًّا مدخلاته 2³² احتمالًا فقط، أي نحو 4.3 مليار. واختبار Strata يجرّبها كلها: كل مدخل يُقارَن بقاعدة التحويل في ggml (مكتبة الحساب خلف llama.cpp)، وينتهي في ثوانٍ. وقد التقط هذا الاختبار علّة حقيقية: كانت صيغة التقريب القديمة تحمل رقمًا إلى الخانة التالية عند مواجهة NaN («ليس عددًا»)، فتحوّل NaN إلى −0 أو إلى ما لا نهاية، فتُخفى بصمت قيمة NaN القادمة من المصدر الأعلى. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/src/kernels/bf16_bits_test.cpp#L1-L13" target="_blank" rel="noopener noreferrer">bf16_bits_test.cpp</a>)</p>
+<p><strong>الطبقة الثانية هي المُشغِّل الواحد.</strong> لكل نواة حسابية (kernel) على GPU اختبار مقارنة، يقارنها بتنفيذ مرجعي موثوق. ويقول تعليق في سكربت البناء بصراحة: التنفيذ المرجعي نفسه يُفحص أولًا مقابل ggml؛ و«مقارنة نواة بنسخة أخرى منها هي نفسها لا تثبت شيئًا». <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/CMakeLists.txt#L286-L288" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>)</p>
+<p><strong>الطبقة الثالثة هي التركيب والعقود.</strong> يفحص <code>layout.hpp</code> عند تحميل النموذج هل شكل كل موتّر يوافق افتراضات النواة، فإذا لم يوافق ذكر اسم الموتّر وشكله الفعلي والشكل المطلوب. ونص التعليق: يجب أن يُبلَّغ بالخطأ عند التحميل، لا أن يتحول عند الرمز رقم 4000 إلى عدد خاطئ في ضرب المصفوفات. [S04] وفي التعليق نفسه درس حقيقي آخر: في إحدى جولات التطوير حُسب حجم ذاكرة مفاتيح المُفهرِس (indexer) على أساس «4 رؤوس»، والواقع أن فيه رأسًا مشتركًا واحدًا، فكان أكبر 4 مرات. وبقي هذا الخطأ في الشيفرة جولة كاملة لأنه جعل الميزانية أكثر تحفظًا، فلم يشعر أحد بشيء. [S04]</p>
+<p><strong>والطبقتان العلويتان</strong> تشغّلان النموذج كله. وقد خصصنا لهما القسم 26.4.</p>
+<p>ولا يجوز التفريط في أي درجة من درجات السلّم. وفي Strata مثال سلبي جاهز: في النموذج وحدة اسمها PLE (وحدة البحث في الجداول التي شرحناها في الفصل 11)، كُتبت كل أجزائها واجتاز كل منها اختبار المقارنة منفردًا، لكن لا يوجد موضع في شيفرة النموذج يستدعيها فعلًا. فلم يمرّ حاجز قبول للنموذج كله (برمزه C1). <span class="ev ev-code">حقيقة من الشيفرة</span>[S13] الأجزاء كلها خضراء، والنظام خاطئ مع ذلك.</p>
+<aside class="primer" id="c26-test-levels">
+<h3>مستويات اختبار البرمجيات</h3>
+<p>اختبار النظام الكبير يُقسَّم عادةً إلى عدة مستويات. <dfn>اختبار الوحدة</dfn> لا يختبر إلا دالة واحدة أو صنفًا واحدًا: تعطيه مدخلًا وتفحص المخرج، ويعمل في ملّي ثوانٍ. و<dfn>اختبار التكامل</dfn> يصل عدة وحدات بعضها ببعض، ويفحص هل التزم الطرفان «اتفاق الواجهة» بينهما. و<dfn>اختبار النظام</dfn> (ويسمى اختبار طرف إلى طرف) يدخل من مدخل المستخدم وينظر في النتيجة النهائية. وهناك <dfn>اختبار الانحدار</dfn> الذي يخترق المستويات كلها: كلما أُصلحت علّة تُرك اختبار يعيد إنتاجها، لئلا تعود لاحقًا.</p>
+<p>والخبرة الشائعة «هرم الاختبار»: اختبارات الوحدة في القاعدة كثيرة وسريعة، واختبارات طرف إلى طرف في القمة قليلة وبطيئة. والسبب هو الكلفة: إذا فشل اختبار طرف إلى طرف فعليك أن تبحث أي طبقة فيها المشكلة؛ وإذا فشل اختبار وحدة فغالبًا يشير مباشرة إلى بضعة أسطر.</p>
+<p>وأداة شائعة أخرى هي <dfn>البديل الاختباري</dfn> (test double): كائن مزيف سلوكه مضبوط يحل محل مكوّن حقيقي مكلف. ففي طبقة الخدمة في Strata <code>MockEngine</code> يُخرج الرموز وفق سيناريو، فتُختبر كل مسارات الواجهة البرمجية على جهاز بلا GPU. <span class="ev ev-code">حقيقة من الشيفرة</span>[S15] وهو يثبت أن «طبقة بروتوكول HTTP لم تُكتب خطأ»، لكنه لا يثبت أن المحرك الحقيقي يحسب صوابًا. كل مستوى من الاختبار مسؤول فقط عن الطبقة التي يغطيها.</p>
+<p class="further">قراءة إضافية: <a href="https://en.wikipedia.org/wiki/Software_testing" target="_blank" rel="noopener noreferrer">ويكيبيديا: Software testing (بالإنجليزية)</a> · <a href="https://ar.wikipedia.org/wiki/%D8%A7%D8%AE%D8%AA%D8%A8%D8%A7%D8%B1_%D8%A7%D9%84%D9%88%D8%AD%D8%AF%D8%A9" target="_blank" rel="noopener noreferrer">ويكيبيديا: اختبار الوحدة</a> · <a href="https://ar.wikipedia.org/wiki/%D8%A7%D8%AE%D8%AA%D8%A8%D8%A7%D8%B1_%D8%A7%D9%84%D8%A7%D9%86%D8%AD%D8%AF%D8%A7%D8%B1" target="_blank" rel="noopener noreferrer">ويكيبيديا: اختبار الانحدار</a> · <a href="https://docs.python.org/3/library/unittest.html" target="_blank" rel="noopener noreferrer">وثائق Python: إطار اختبار الوحدة unittest (بالإنجليزية)</a></p>
+</aside>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذا هرم الاختبار ونموذج V في مقرر «هندسة البرمجيات». وخصوصية محرك الاستدلال أن فيه طبقة وسطى زائدة هي «المقارنة بتنفيذ مرجعي»: لأن الإجابة الصحيحة لمعظم المُشغِّلات لا يمكن حسابها بالورقة، فلا بد من تنفيذ آخر مستقل موثوق نقارن به.</p>
+
+<h2 id="sec-3">26.3 «التساوي» في الأعداد العشرية يجب أن يُعرَّف أولًا</h2>
+<p>لنعد إلى تجربة البداية. حسبت بطاقة الرسوميات وCPU الخبير المكمَّم نفسه، والبيانات متطابقة بايتًا ببايت، ومع ذلك اختلفت النتائج في آخر خانات الكسر. وتفسير المؤلف: ترتيب العمليات العشرية في الجهتين مختلف، وكلاهما تقريب جيد بالقدر نفسه للنموذج. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">تقرير cache-parity</a>)</p>
+<p>لماذا يؤثر الترتيب في النتيجة؟ لأن عدد خانات العدد العشري في الحاسوب محدود، وكل عملية جمع تقرّب مرة. خذ مثالًا متطرفًا: في الأعداد العشرية ذات 32 بتًّا (FP32) يبلغ الفرق بين عددين متجاورين قابلين للتمثيل قرب 100 مليون ثمانية. لذلك 100 مليون زائد 1 يساوي 100 مليون، وقد «أُكل» الـ 1. والأعداد الأربعة نفسها إذا غُيّر ترتيب جمعها تغيّرت الإجابة، كما في الشكل 26-3.</p>
+<div class="viz" data-viz="tolerance-lab"><figure class="fig"><svg viewBox="0 0 400 282" role="img" aria-label="الشكل 26-3: الأعداد الأربعة 100 مليون، 1، سالب 100 مليون، 1، تُجمع في FP32 بترتيبين، فتعطي 1 و0، والإجابة الصحيحة 2">
+<text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="13" text-anchor="middle">أربعة أعداد [100M, 1, −100M, 1]، تُجمع في FP32</text>
+<text class="f-text" fill="#182f2b" x="102" y="44" font-size="14" font-weight="600" text-anchor="middle">المسار A: من اليسار إلى اليمين</text>
+<text class="f-text" fill="#182f2b" x="298" y="44" font-size="14" font-weight="600" text-anchor="middle">المسار B: أزواجًا</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="54" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="73" font-size="13" text-anchor="middle">نبدأ من 100M</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="88" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="107" font-size="13" text-anchor="middle">100M + 1 = 100M (ضاع الـ 1)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="122" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="141" font-size="13" text-anchor="middle">100M − 100M = 0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="156" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="102" y="175" font-size="13" text-anchor="middle">0 + 1 = 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="54" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="298" y="73" font-size="13" text-anchor="middle">100M + 1 = 100M (ضاع الـ 1)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="88" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="298" y="107" font-size="13" text-anchor="middle">−100M + 1 = −100M (ضاع)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="122" width="185" height="28" rx="6"/>
+<text class="f-text" fill="#182f2b" x="298" y="141" font-size="13" text-anchor="middle">100M + (−100M) = 0</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="206" font-size="13" text-anchor="middle">قرب 100M تتباعد أعداد FP32 المتجاورة بمقدار 8، فإضافة 1 كأنها لم تكن</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="218" width="185" height="30" rx="6"/>
+<text class="f-on" fill="#ffffff" x="102" y="238" font-size="14" font-weight="600" text-anchor="middle">نتيجة A: 1</text>
+<rect class="f-accent" fill="#136d5a" x="205" y="218" width="185" height="30" rx="6"/>
+<text class="f-on" fill="#ffffff" x="298" y="238" font-size="14" font-weight="600" text-anchor="middle">نتيجة B: 0</text>
+<text class="f-text" fill="#182f2b" x="200" y="272" font-size="13" text-anchor="middle">الإجابة الصحيحة 2: كلا المسارين فقد معلومات، وبطريقتين مختلفتين</text>
+</svg><figcaption>الشكل 26-3  ترتيب الجمع يغيّر النتيجة العشرية. الجمع في الرياضيات يخضع لخاصية الدمج، أما الجمع العشري في الحاسوب فلا. وفي منصة التجربة أدناه تستطيع تغيير السيناريو والدقة وهامش التسامح وتجربتها بنفسك.</figcaption></figure></div>
+<p>هذا المثال متطرف عمدًا. ففي الاستدلال الحقيقي يكون الفرق عادةً في الخانة الأخيرة أو الخانتين الأخيرتين، ويسمى اختلافًا بمقدار واحد أو اثنين من <dfn>ULP</dfn> (اختصار unit in the last place، أي وحدة واحدة في آخر خانة). لكن هذا كافٍ ليفشل اختبار مثل <code>a == b</code>.</p>
+<p>والحل الهندسي أن نستخدم مقارنة بـ<dfn>هامش تسامح</dfn> (tolerance): إذا كان الفرق بين عددين صغيرًا بما يكفي عُدّا متساويين. و«صغيرًا بما يكفي» له قياسان. <dfn>التسامح النسبي</dfn> يتناسب مع حجم العدد، فمثلًا يسمح بفرق جزء من عشرة آلاف؛ و<dfn>التسامح المطلق</dfn> عتبة ثابتة، فمثلًا الفرق في حدود 10⁻⁶ يُعدّ تساويًا. ويُستعملان معًا غالبًا. والصندوق التالي يوضح السبب.</p>
+<aside class="primer" id="c26-float-tolerance">
+<h3>هامش التسامح في مقارنة الأعداد العشرية</h3>
+<p>نبدأ بالحدس. قارن 100 مليون و100 مليون وثمانية: الفرق 8 هو أصغر فرق يستطيع FP32 تمييزه، فيجب أن يُعدّا متساويين. وقارن 0.000001 و0.000009: الفرق أقل من 0.00001، لكن أحدهما 9 أضعاف الآخر، فلا يجوز طبعًا أن يُعدّا متساويين. إذن يجب أن يرتبط «كم فرقًا يُعدّ تساويًا» بحجم العدد نفسه، وهذا هو التسامح النسبي.</p>
+<p>لكن التسامح النسبي يفشل قرب الصفر. فنتيجة قيمتها النظرية 0 حُسبت 2×10⁻⁸، ونتيجة أخرى حُسبت 0 تمامًا. الفرق النسبي 100%، ومع ذلك لا فرق بينهما في المعنى العملي. وعندئذ نحتاج إلى تسامح مطلق يسندنا. والدالة <code>math.isclose</code> في المكتبة القياسية لـ Python تجمع الاثنين:</p>
+<p style="text-align:center"><code>|a − b| ≤ max(rtol × max(|a|, |b|), atol)</code></p>
+<p>قيمتاها الافتراضيتان rtol = 10⁻⁹ وatol = 0. وتنبّه الوثائق صراحة: عند المقارنة بالصفر يحكم الإعداد الافتراضي دائمًا بـ«غير متساويين»، فلا بد أن تعطي atol موجبًا بنفسك. وأيضًا لا يُعدّ NaN «قريبًا» من أي عدد، حتى من نفسه. والشكل 26-4 تحت الصندوق يرسم هذه القاعدة: المحور الأفقي حجم العدد، والرأسي الخطأ المسموح.</p>
+<p>وما مقدار التسامح؟ لا إجابة عامة. فهو يتوقف على نوع البيانات (FP32 فيه نحو 7 أرقام معنوية، وFP16 ثلاثة وشيء)، وعلى طول سلسلة الحساب، وعلى مدى حساسية ما بعدها للخطأ. والطريقة الموثوقة: قِس أولًا الفرق المعتاد بين تنفيذين <strong>كلاهما صحيح</strong>، ثم اجعل التسامح فوقه وتحت الفروق الخاطئة الواضحة.</p>
+<p>وهناك نقطة كثيرًا ما تُهمَل: التسامح لا يُجيز إلا الفروق المشروعة مثل «اختلاف الترتيب»، ولا ينقذ مشكلة أن الخوارزمية نفسها تفقد معلومات. ففي الشكل 26-3 أخطأ المساران كلاهما، ولو وسّعنا التسامح حتى يصيرا «متساويين» فلن يختبر الاختبار شيئًا.</p>
+<p class="further">قراءة إضافية: <a href="https://docs.python.org/3/library/math.html#math.isclose" target="_blank" rel="noopener noreferrer">وثائق Python: math.isclose (بالإنجليزية)</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/EPSILON" target="_blank" rel="noopener noreferrer">MDN: Number.EPSILON (دقة الآلة) (بالإنجليزية)</a> · <a href="https://ar.wikipedia.org/wiki/%D8%A3%D9%8A_%D8%A5%D9%8A_%D8%A5%D9%8A_%D8%A5%D9%8A_754" target="_blank" rel="noopener noreferrer">ويكيبيديا: أي إي إي إي 754</a> · <a href="https://en.wikipedia.org/wiki/Unit_in_the_last_place" target="_blank" rel="noopener noreferrer">Wikipedia: Unit in the last place (بالإنجليزية)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="الشكل 26-4: الخطأ المسموح يتغير مع حجم القيمة. عند القيم الصغيرة يحدده التسامح المطلق، وعند الكبيرة يحدده التسامح النسبي">
+<text class="f-muted" fill="#5c6d66" x="44" y="14" font-size="13">الخطأ المسموح (مقياس لوغاريتمي)</text>
+<path class="f-soft" fill="#e5f1df" d="M40 190V119.2H210L380 34.2V190Z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40 20V190H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M40 119.2H210L380 34.2"/>
+<text class="f-text" fill="#182f2b" x="48" y="100" font-size="13">atol = 10⁻⁸: هو الذي يسند هنا</text>
+<text class="f-text" fill="#182f2b" x="300" y="40" font-size="13" text-anchor="end">التسامح النسبي: 10⁻⁵ × |b|</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="164" font-size="13">المنطقة المظللة: إذا وقع |a − b| فيها عُدّا متساويين</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="206" font-size="13">10⁻⁹</text>
+<text class="f-muted" fill="#5c6d66" x="125" y="206" font-size="13" text-anchor="middle">10⁻⁶</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="206" font-size="13" text-anchor="middle">10⁻³</text>
+<text class="f-muted" fill="#5c6d66" x="295" y="206" font-size="13" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="206" font-size="13" text-anchor="end">10³</text>
+<text class="f-text" fill="#182f2b" x="210" y="230" font-size="13" text-anchor="middle">حجم العدد المقارَن |b| (مقياس لوغاريتمي)</text>
+</svg><figcaption>الشكل 26-4  الخطأ المسموح = max(rtol × |b|, atol). إذا كان العدد كبيرًا فالمعتبر التسامح النسبي، وإذا اقترب من الصفر فالمطلق. وفي الرسم rtol = 10⁻⁵ وatol = 10⁻⁸، للتوضيح فقط.</figcaption></figure>
+<p>فمتى يجب أن نصرّ على التطابق بتًّا ببت؟ الجواب: حين يجري الطرفان <strong>العملية نفسها بالترتيب نفسه تمامًا</strong>. مثلًا إذا نقلنا بيانات مكمَّمة من صيغة تخزين إلى أخرى، فهذه مجرد إعادة ترتيب بايتات، ويجب أن تطابق القيم المفكوكة بتًّا ببت. وهذا ما يشترطه <code>canonical_xcheck.py</code> في Strata. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/tools/canonical_xcheck.py#L1-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>) وبالعكس، حتى تحسينات المترجم قد تغيّر الترتيب. فقد عطّلت Strata عمدًا على بطاقات AMD «دمج الضرب والجمع» (FMA) في ملفين: فدمج الضرب والجمع في تعليمة واحدة يقرّب مرة واحدة فقط، وهذا يغيّر نتيجة الترجيح حين يقع العدد «في المنتصف تمامًا». <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/CMakeLists.txt#L380-L384" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>)</p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> يشرح مقرر «التحليل العددي» أن الجمع العشري يخضع للتبديل لكن لا يخضع للدمج: قد يختلف (a + b) + c عن a + (b + c). وفي GPU تقوم آلاف الخيوط بعملية الاختزال، وتحدد طريقة تجميع الجمع بتوزيع الخيوط؛ فلا يجوز أصلًا أن نتوقع أن «الصيغة الواحدة» تعطي النتيجة نفسها بتًّا ببت على CPU وعلى GPU.</p>
+
+<h2 id="sec-4">26.4 فرق ضئيل، فتتغير الكلمة</h2>
+<p>هل يؤدي فرق عددي ضئيل إلى نتيجة تُرى؟ نعم، وفي خطوة «اختيار الكلمة» بالذات. ففي النهاية يعطي النموذج لكل كلمة مرشحة درجة تسمى logit، وتُختار الكلمة ذات أعلى درجة. فإذا كانت درجتا الأولى والثانية متقاربتين جدًّا، كفى خطأ عددي ضئيل ليتبادلا الموضع.</p>
+<p>انظر في مثال. المحرك المرجعي أعطى المرشحتين الدرجتين [1.00000, 0.99999] فاختار الأولى؛ والمحرك قيد الاختبار حسب [0.99998, 1.00001] فاختار الثانية. أقصى فرق بين الجهتين 0.00002 فقط، لكن الكلمة المختارة تغيرت. وبالعكس لو كانت الدرجتان [10, 0] فلن تتغير الكلمة ولو تضاعف الخطأ عشر مرات. فـ«أقصى خطأ صغير جدًّا» و«الكلمة المختارة واحدة» أمران مختلفان، ويجب أن يُفحصا منفصلين.</p>
+<p>وفي مقارنة محركين مشكلة أخرى. إذا تركتهما يولّدان بحرية، ثم اختلفت كلمة واحدة، صار «السياق السابق» مختلفًا بعدها، وصارت كل خطوة تليها غير قابلة للمقارنة. والحل يسمى <dfn>teacher forcing</dfn> (تثبيت التاريخ): لا نترك المحرك يكمل بنفسه، بل نعطي الجهتين النص المعياري نفسه، ونقارن توقعهما لـ«الكلمة التالية» في كل موضع. يقارن الشكل 26-5 بين الطريقتين.</p>
+<figure class="fig"><svg viewBox="0 0 400 258" role="img" aria-label="الشكل 26-5: في التوليد الحر ينتقل أول اختلاف إلى كل المواضع التالية؛ وفي teacher forcing يُعطى الطرفان النص نفسه فيمكن مقارنة كل موضع مستقلًّا">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="14" font-weight="600">التوليد الحر: كلٌّ يكتب لنفسه</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="44" font-size="13">المحرك A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="98" y="46" font-size="12" text-anchor="middle">اليوم</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="124" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="146" y="46" font-size="12" text-anchor="middle">الجو</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="172" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="194" y="46" font-size="12" text-anchor="middle">جدًّا</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="220" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="242" y="46" font-size="12" text-anchor="middle">جميل</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="268" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="290" y="46" font-size="12" text-anchor="middle">،</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="316" y="28" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="338" y="46" font-size="12" text-anchor="middle">نحن</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="78" font-size="13">المحرك B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76" y="62" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="98" y="80" font-size="12" text-anchor="middle">اليوم</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="124" y="62" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="146" y="80" font-size="12" text-anchor="middle">الجو</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="172" y="62" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="194" y="80" font-size="12" text-anchor="middle">جدًّا</text>
+<rect class="f-warn" fill="#9e5d24" x="220" y="62" width="44" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="242" y="80" font-size="12" text-anchor="middle">رائع</text>
+<text class="f-muted" fill="#5c6d66" x="274" y="80" font-size="13">وبعده كله مختلف</text>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="14" font-weight="600">Teacher forcing: النص نفسه، ومقارنة موضعًا موضعًا</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="148" font-size="13">النص المعياري</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="102" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="124" y="150" font-size="12" text-anchor="middle">اليوم</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="172" y="150" font-size="12" text-anchor="middle">الجو</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="198" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="220" y="150" font-size="12" text-anchor="middle">جدًّا</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="246" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="268" y="150" font-size="12" text-anchor="middle">جميل</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="294" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="316" y="150" font-size="12" text-anchor="middle">،</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="342" y="132" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="364" y="150" font-size="12" text-anchor="middle">نحن</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="182" font-size="13">توقع A</text>
+<rect class="f-soft" fill="#e5f1df" x="102" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="124" y="184" font-size="12" text-anchor="middle">الجو</text>
+<rect class="f-soft" fill="#e5f1df" x="150" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="172" y="184" font-size="12" text-anchor="middle">جدًّا</text>
+<rect class="f-soft" fill="#e5f1df" x="198" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="220" y="184" font-size="12" text-anchor="middle">جميل</text>
+<rect class="f-soft" fill="#e5f1df" x="246" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="268" y="184" font-size="12" text-anchor="middle">،</text>
+<rect class="f-soft" fill="#e5f1df" x="294" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="316" y="184" font-size="12" text-anchor="middle">نحن</text>
+<rect class="f-soft" fill="#e5f1df" x="342" y="166" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="364" y="184" font-size="12" text-anchor="middle">نخرج</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="216" font-size="13">توقع B</text>
+<rect class="f-soft" fill="#e5f1df" x="102" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="124" y="218" font-size="12" text-anchor="middle">الجو</text>
+<rect class="f-soft" fill="#e5f1df" x="150" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="172" y="218" font-size="12" text-anchor="middle">جدًّا</text>
+<rect class="f-warn" fill="#9e5d24" x="198" y="200" width="44" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="220" y="218" font-size="12" text-anchor="middle">رائع</text>
+<rect class="f-soft" fill="#e5f1df" x="246" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="268" y="218" font-size="12" text-anchor="middle">،</text>
+<rect class="f-soft" fill="#e5f1df" x="294" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="316" y="218" font-size="12" text-anchor="middle">نحن</text>
+<rect class="f-soft" fill="#e5f1df" x="342" y="200" width="44" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="364" y="218" font-size="12" text-anchor="middle">نخرج</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="248" font-size="13">السياق السابق واحد، فلا ينتقل الخلاف في الموضع 3 إلى ما بعده</text>
+</svg><figcaption>الشكل 26-5  في التوليد الحر لا تعود المقارنة موضعًا موضعًا ممكنة بعد أول خلاف؛ أما teacher forcing فيجعل لكل موضع السياق السابق نفسه، فيبقى الخلاف محصورًا في موضعه.</figcaption></figure>
+<p>وهذه هي الطريقة التي استخدمتها Strata لتجيب عن سؤال «هل تسوّئ الذاكرة المؤقتة المخرجات»: في المحرك مفتاح يشغّله رمزًا رمزًا على النص المعياري، ويكتب logits كل موضع كاملة. عند إغلاق الذاكرة المؤقتة يحسب CPU كل الخبراء؛ وعند تشغيلها يوضع على بطاقة الرسوميات 5,130 من أكثر الخبراء استخدامًا. وشروط الاختبار: تكميم Q2_0، وRTX 5070، وأول 512 أو 1,024 رمزًا من ثلاثة نصوص ثابتة. <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+<div class="table-wrap"><table><thead><tr><th>النص</th><th>مواضع الكلمة الأولى فيها واحدة</th><th>الحيرة (perplexity): الذاكرة مغلقة</th><th>الحيرة: الذاكرة مفتوحة</th></tr></thead><tbody>
+<tr><td>مساعد برمجة (512 رمزًا)</td><td>97.7%</td><td>2.672</td><td>2.630</td></tr>
+<tr><td>وثيقة طويلة (1,024 رمزًا)</td><td>96.2%</td><td>29.844</td><td>29.843</td></tr>
+<tr><td>دردشة (1,024 رمزًا)</td><td>95.0%</td><td>18.380</td><td>18.301</td></tr>
+</tbody></table></div>
+<p>و<dfn>الحيرة</dfn> (perplexity) في الجدول تقيس مقدار «المفاجأة» التي يشعر بها النموذج أمام هذا النص الحقيقي: كلما قلّت دلّت على أن التوقع أدق. وخلاصات التقرير ثلاث: أن الذاكرة المؤقتة تغيّر في 2%-5% من المواضع «أي المرشحين شبه المتعادلين يفوز»، ومعظم الانقلابات تقع حيث الفرق بين أول درجتين دون 0.5؛ وأن حيرة الجهتين متساوية ضمن خطأ معياري واحد، فلا أحد أدق؛ وأن GPU وCPU يحسبان الخبير نفسه بترتيبين عشريين مختلفين، وهما تقريبان جيدان بالقدر نفسه. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">تقرير cache-parity</a>)</p>
+<p>يوضح هذا الجدول كيف تُجرى المقارنة الجيدة: تنظر في القرار المنفصل (هل الكلمة الأولى واحدة) وفي الجودة المتصلة (الحيرة)، وتبيّن أين تقع الانقلابات. فلو ذكرت «96% من الكلمات متطابقة» وحده ظن القارئ أن 4% أخطأت؛ ولو ذكرت «الحيرة متساوية» وحدها فقد يخفي ذلك علّة لا تظهر إلا في مواضع قليلة.</p>
+
+<h2 id="sec-5">26.5 دع الاختبار يفشل مرة أولًا: الإجابة المرجعية والحالات السلبية</h2>
+<p>إذا نجح الاختبار فماذا يثبت؟ إذا كان هذا الاختبار سينجح أيضًا أمام برنامج فيه علّة حقيقية فلا معنى لنجاحه. وطريقة فحص الاختبار نفسه بسيطة: ضع عمدًا علّة في الشيفرة، وانظر هل يلتقطها. وهذا هو <dfn>اختبار الطفرات</dfn> (mutation testing)، والنسخة التي أُفسدت تسمى «الطفرة».</p>
+<p>تعرض التجربة التالية هذا على نموذج لعبة من 48 طبقة. فيها 4 نسخ من التنفيذ و5 اختبارات. خمّن أولًا: علّة «ضرب الوزن مرتين»، أي الاختبارات تلتقطها؟</p>
+<div class="viz" data-viz="test-mutants"><figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="الشكل 26-6: جدول نتائج أربع نسخ تنفيذ في خمسة اختبارات. اختبار الدخان لم يلتقط علّة واحدة، واختبار الفرق مع التسامح التقط الثلاث كلها بلا إنذار كاذب">
+<text class="f-muted" fill="#5c6d66" x="175" y="16" font-size="12" text-anchor="middle">اختبار</text><text class="f-muted" fill="#5c6d66" x="175" y="34" font-size="12" text-anchor="middle">الدخان</text>
+<text class="f-muted" fill="#5c6d66" x="225" y="16" font-size="12" text-anchor="middle">وحدة</text><text class="f-muted" fill="#5c6d66" x="225" y="34" font-size="12" text-anchor="middle">ضعيف</text>
+<text class="f-muted" fill="#5c6d66" x="275" y="16" font-size="12" text-anchor="middle">وحدة</text><text class="f-muted" fill="#5c6d66" x="275" y="34" font-size="12" text-anchor="middle">قوي</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="16" font-size="12" text-anchor="middle">فرق</text><text class="f-muted" fill="#5c6d66" x="325" y="34" font-size="12" text-anchor="middle">دقيق</text>
+<text class="f-muted" fill="#5c6d66" x="375" y="16" font-size="12" text-anchor="middle">فرق</text><text class="f-muted" fill="#5c6d66" x="375" y="34" font-size="12" text-anchor="middle">تسامح</text>
+<text class="f-text" fill="#182f2b" x="10" y="62" font-size="12">تنفيذ صحيح (بترتيب آخر)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="152" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="175" y="62" font-size="12" text-anchor="middle">نجح</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="225" y="62" font-size="12" text-anchor="middle">نجح</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="252" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="275" y="62" font-size="12" text-anchor="middle">نجح</text>
+<rect class="f-warn" fill="#9e5d24" x="302" y="42" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="62" font-size="12" text-anchor="middle">إنذار</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="352" y="42" width="46" height="30" rx="4"/><text class="f-muted" fill="#5c6d66" x="375" y="62" font-size="12" text-anchor="middle">نجح</text>
+<text class="f-text" fill="#182f2b" x="10" y="100" font-size="12">علّة: ضرب الوزن مرتين</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="175" y="100" font-size="12" text-anchor="middle">فاتته</text>
+<rect class="f-warn" fill="#9e5d24" x="202" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="225" y="100" font-size="12" text-anchor="middle">فاتته</text>
+<rect class="f-accent" fill="#136d5a" x="252" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="275" y="100" font-size="12" text-anchor="middle">التقط</text>
+<rect class="f-accent" fill="#136d5a" x="302" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="100" font-size="12" text-anchor="middle">التقط</text>
+<rect class="f-accent" fill="#136d5a" x="352" y="80" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="375" y="100" font-size="12" text-anchor="middle">التقط</text>
+<text class="f-text" fill="#182f2b" x="10" y="138" font-size="12">علّة: إسقاط خبير</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="175" y="138" font-size="12" text-anchor="middle">فاتته</text>
+<rect class="f-accent" fill="#136d5a" x="202" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="225" y="138" font-size="12" text-anchor="middle">التقط</text>
+<rect class="f-accent" fill="#136d5a" x="252" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="275" y="138" font-size="12" text-anchor="middle">التقط</text>
+<rect class="f-accent" fill="#136d5a" x="302" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="138" font-size="12" text-anchor="middle">التقط</text>
+<rect class="f-accent" fill="#136d5a" x="352" y="118" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="375" y="138" font-size="12" text-anchor="middle">التقط</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">علّة: مدخل قديم لكل طبقة</text>
+<rect class="f-warn" fill="#9e5d24" x="152" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="175" y="176" font-size="12" text-anchor="middle">فاتته</text>
+<rect class="f-warn" fill="#9e5d24" x="202" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="225" y="176" font-size="12" text-anchor="middle">فاتته</text>
+<rect class="f-warn" fill="#9e5d24" x="252" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="275" y="176" font-size="12" text-anchor="middle">فاتته</text>
+<rect class="f-accent" fill="#136d5a" x="302" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="325" y="176" font-size="12" text-anchor="middle">التقط</text>
+<rect class="f-accent" fill="#136d5a" x="352" y="156" width="46" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="375" y="176" font-size="12" text-anchor="middle">التقط</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="212" font-size="12" text-anchor="middle">اللون الرئيسي: التقط العلّة؛ لون التحذير: فاتته العلّة، أو ظلم التنفيذ الصحيح</text>
+</svg><figcaption>الشكل 26-6  جدول نتائج اختبار الطفرات. اختبار الدخان لم يلتقط علّة واحدة؛ ولم يحقق «التقاط كل العلل بلا إنذار كاذب على التنفيذ الصحيح» إلا اختبار الفرق مع التسامح.</figcaption></figure></div>
+<p>وأجدر ما في الجدول بالتأمل خانتان. الأولى أن «اختبار الوحدة الضعيف» فاتته علّة «ضرب الوزن مرتين»: فقد استخدم الوزن 1.0، ومربع 1.0 هو 1.0. وإذا كانت مدخلات اختبار «منتظمة» أكثر من اللازم عمي عن نوع من العلل بطبيعته. والثانية أن «مدخل قديم لكل طبقة» خدع اختباري الوحدة معًا: فالعلّة ليست في الدالة المختبَرة، بل في الحلقة التي تربط الدوال. وهذا بالضبط ما قلناه في القسم 26.2: «الأجزاء كلها خضراء، والنظام خاطئ مع ذلك».</p>
+<p>وأقوى ما التقط العلل في الجدول هو <dfn>اختبار الفرق</dfn> (differential testing): نعطي المدخلات نفسها للتنفيذ المختبَر وللتنفيذ المرجعي المستقل، ونقارن المخرجات. والصندوق التالي مخصص له.</p>
+<aside class="primer" id="c26-differential-testing">
+<h3>اختبار الفرق والاختبار التحويلي</h3>
+<p>كثير من الحسابات لا إجابة معيارية لها يمكن حسابها بالورقة: ضرب مصفوفة ببعد 2560 لا يستطيع أحد أن يراجعه على الورق. وفكرة <dfn>اختبار الفرق</dfn>: نجد تنفيذًا مستقلًّا نتخذه مرجعًا، ويتلقى الطرفان المدخلات نفسها، ثم نقارن المخرجات. قد يكون المرجع بطيئًا أو ساذجًا، المهم أن يكون موثوقًا. وهكذا تفعل اختبارات المقارنة في Strata: نواة GPU تُقارَن بمسار قياسي مرجعي سبق التحقق منه، وهذا المسار نفسه فُحص أولًا مقابل ggml.</p>
+<p>ومفتاح المرجع أن يكون <strong>مستقلًّا</strong>. ففي <code>layer.cpp</code> في Strata درس مدوّن: أداتا تعبئة كلتاهما بحثتا عن مستوى إزاحات نوع من البيانات المكمَّمة باسم الحقل <code>mins</code>، والاسم الحقيقي لهذا المستوى <code>offsets</code>. اتفقت الأداتان، فأسقطتا معًا إزاحات 54 موتّرًا، بمجموع 136 MiB. وخلاصة التعليق: اتفاق أداتين لا يكون دليلًا إلا إذا كانتا لا تشتركان في الافتراض الخاطئ نفسه. <span class="ev ev-code">حقيقة من الشيفرة</span>[S14]</p>
+<p>وإذا تعذّر حتى إيجاد مرجع، فهناك <dfn>الاختبار التحويلي</dfn> (metamorphic testing): لا نعرف الإجابة الصحيحة، لكننا نعرف «إذا غُيّر المدخل هكذا فيجب أن يتغير المخرج هكذا». مثلًا ذاكرة KV المؤقتة في Strata تُخزَّن في صفحات؛ فيخزّن الاختبار البيانات نفسها بصفحات من 1 و4 و512 خانة، ويخلط جدول الصفحات، ثم يشترط أن يكون مخرج الانتباه هو نفسه تمامًا. [S18] ومثال آخر نافذة التحقق في فك الترميز التخميني: يشترط تصميمها أن تطابق الكلمة المختارة في كل موضع ما يعطيه التوليد رمزًا رمزًا بتًّا ببت. [S08] وهذه القواعد «يجب ألا يتغير» مراجع لا تحتاج إلى إجابة معيارية.</p>
+<p class="further">قراءة إضافية: <a href="https://en.wikipedia.org/wiki/Differential_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Differential testing</a> · <a href="https://en.wikipedia.org/wiki/Metamorphic_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Metamorphic testing</a> · <a href="https://en.wikipedia.org/wiki/Test_oracle" target="_blank" rel="noopener noreferrer">Wikipedia: Test oracle</a> · <a href="https://ar.wikipedia.org/wiki/%D8%A7%D8%AE%D8%AA%D8%A8%D8%A7%D8%B1_%D8%A7%D9%84%D8%B7%D9%81%D8%B1%D8%A9" target="_blank" rel="noopener noreferrer">ويكيبيديا: اختبار الطفرة</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="الشكل 26-7: مسار اختبار الفرق. المدخلات نفسها تُعطى للتنفيذ المختبَر وللمرجع المستقل، ثم تُقارَن بحسب قاعدة">
+<rect class="f-soft" fill="#e5f1df" x="130" y="8" width="140" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="14" font-weight="600" text-anchor="middle">المدخلات نفسها</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V54H100V68M200 54H300V68"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="70" width="180" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="100" y="91" font-size="14" font-weight="600" text-anchor="middle">التنفيذ المختبَر</text>
+<text class="f-on" fill="#ffffff" x="100" y="109" font-size="13" text-anchor="middle">مثل نواة GPU في Strata</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="70" width="180" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="300" y="91" font-size="14" font-weight="600" text-anchor="middle">المرجع المستقل</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="109" font-size="13" text-anchor="middle">مثل قواعد الحساب في ggml</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 118V132H300V118M200 132V146"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="148" width="300" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="169" font-size="14" font-weight="600" text-anchor="middle">المقارنة بحسب قاعدة</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="187" font-size="12" text-anchor="middle">إعادة ترتيب بايتات: تطابق بتّي؛ تغيير ترتيب الحساب: بتسامح</text>
+<text class="f-text" fill="#182f2b" x="200" y="222" font-size="12" text-anchor="middle">يجب أن يكون المرجع مستقلًّا: إذا اشتركا في افتراض خاطئ فقدت المقارنة معناها</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="242" font-size="12" text-anchor="middle">مثال مضاد: أداتان بحثتا عن الحقل mins فأسقطتا معًا البيانات نفسها</text>
+</svg><figcaption>الشكل 26-7  اختبار الفرق: تنفيذان مستقلان يتلقيان المدخلات نفسها، وتُقارَن النتائج بقاعدة تُحدَّد سلفًا. قد تكون القاعدة التطابق بتًّا ببت، وقد تكون بتسامح.</figcaption></figure>
+<p>والتقط اختبار الفرق علّة حقيقية في Strata أيضًا. ففي صيغة التكميم Q2_0 يجب عند فك الترميز ذي البتين 0-3 أن يُطرح 1 أولًا، فتكون القيم الممكنة {−d, 0, d, 2d} لا {0, d, 2d, 3d}. وإذا سقط هذا الطرح بدت معظم القيم صحيحة وهي في الحقيقة كلها مزاحة خانة. لذلك تنسخ أداة التحويل تعبير فك الترميز في ggml حرفًا بحرف، ثم تقارن بتًّا ببت. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/tools/canonical_xcheck.py#L7-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>) والملف نفسه يسجل خطأً حقيقيًّا في صيغة Q8_0: كان الترميز يُخزَّن كأنه عدد بإشارة، فهو متطابق مع مفكّكه تمامًا؛ حتى جاءت تعبئة نموذج حقيقي فتبين أن ذينك الموتّرين انزاحا عند فك الترميز بمقدار 128 ترميزًا كلها، بينما بقية الأنواع الـ 12 سليمة.</p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> في مقرر المترجمات طريقة كلاسيكية تسمى «المقارنة المتقابلة»: يُعطى البرنامج نفسه لمترجمين ويُقارَن ناتج التشغيل. وكتابة حل غاشم لمقارنته بالحل المحسَّن في مسابقات البرمجة فكرة واحدة.</p>
+
+<h2 id="sec-6">26.6 تطبيق عملي: اكتب اختبارات لمحرك مصغّر</h2>
+<p>يرافق الكتاب محرك استدلال مصغّر بـ Python الخالصة هو <code>labs/tiny_inference.py</code>: 4 طبقات، وبعد 8، ولكل طبقة 4 خبراء يُختار منهم 2، وأوزانه أعداد عشوائية ثابتة، ولا يحتاج إلى GPU. ليس تنفيذًا متوافقًا مع Strata، ومخرجاته بلا معنى لغوي، لكن السلسلة كلها «الترميز ← الحساب طبقة طبقة ← اختيار الكلمة ← الحفظ والاستعادة» حقيقية. والاختبارات العشرة المرافقة تنجح كلها في بيئة الكتاب.</p>
+<ol>
+<li><strong>اقرأ الاختبار أولًا.</strong> افتح <code>labs/test_tiny_inference.py</code> وابحث عن اختبار «المعالجة على أجزاء تساوي المعالجة دفعة واحدة». يستخدم المساواة الدقيقة. فكّر: لماذا المساواة الدقيقة صحيحة هنا؟ (تلميح: المساران يجريان العمليات نفسها بالترتيب نفسه.)</li>
+<li><strong>احقن علّة.</strong> اتبع المهمة الثالثة في <code>labs/README.md</code>، وبدّل ترتيب «الاضمحلال أولًا ثم التحديث» في الطبقة التكرارية. أي الاختبارات تفشل؟ وإن لم يفشل أي منها فأضف اختبارًا يفشل.</li>
+<li><strong>أعد كتابة قاعدة المقارنة.</strong> افترض أنك استبدلت قراءة المُطالبة رمزًا رمزًا (prefill) بضرب مصفوفات يحسب القطعة كلها معًا، فتغير ترتيب العمليات. حوّل اختبار المساواة الدقيقة إلى مقارنة بتسامح، وبيّن كيف حددتَ التسامح.</li>
+</ol>
+<p>والتجربتان التفاعليتان في هذا الفصل تحسبان فعلًا داخل المتصفح، وأرقامهما تقدير تعليمي. وصيغة التسامح في منصة التجربة هي نفسها صيغة <code>math.isclose</code> في Python؛ واختبار الطفرات يستخدم نموذج لعبة، لا نواة Strata.</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>أخطر أخطاء محرك الاستدلال الخطأ الذي «يبدو سليمًا». ويجب أن يكون للاختبار إجابة مرجعية مستقلة، ولا يكفي أن يفحص أن البرنامج لم ينهر.</li>
+<li>نتائج الأعداد العشرية تتغير بترتيب الحساب. ولا يُشترط التطابق بتًّا ببت إلا إذا كانت العملية نفسها والترتيب نفسه؛ وإلا فنقارن بتسامح نسبي مع مطلق، ونفحص الكلمة المختارة على حدة.</li>
+<li>الاختبار نفسه يجب أن يُختبر: احقن علّة عمدًا وانظر هل يفشل. ويجب أن يكون التنفيذ المرجعي مستقلًّا، لا يشارك الشيفرة المختبَرة افتراضها الخاطئ.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «إذا اختلفت أعداد CPU عن أعداد بطاقة الرسوميات ففي أحدهما علّة».</strong></p>
+<p>ليس بالضرورة. ترتيب الحساب العشري في الجهتين مختلف، فمن الطبيعي أن تختلف آخر الخانات، وقد أظهر قياس Strata أنهما بالدقة نفسها. لكن لا يجوز أيضًا أن نجيز كل شيء: فتحذير الإقلاع «مسار بطاقة الرسوميات غير صحيح» أصله عطل حقيقي، كانت المخرجات فيه تتشعب من الرمز رقم 0. ثم أُصلح العطل وغطته اختبارات مقارنة الخبراء، ومنذ الإصدار 0.1.8 استُبدل بالتحذير توضيح دقيق. <span class="ev ev-report">تقرير المصدر الأصلي</span> والتمييز بين الحالتين بالقاعدة: الفرق المشروع ينقلب في المواضع القريبة من التعادل وتبقى الحيرة، والعلّة الحقيقية كثيرًا ما تتشعب من البداية، أو تسوّئ مؤشرات الجودة بانتظام.</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: خمس طبقات من الدليل، وأفخاخ المقاييس، وحدود «التطابق بتًّا ببت»</summary>
+<h3>سلّم الدليل ذو الطبقات الخمس</h3>
+<p>الطبقة الأولى الدوال الخالصة: إزاحات العناوين والسعة وtop-k والطول المتوقع. والثانية المُشغِّل الواحد: المدخل نفسه، ومقارنة المخرج والخطأ. والثالثة التركيب: ترتيب التطبيع والبوابة ووزن الخبراء وتحديث الحالة. والرابعة توزيع النموذج كله بتاريخ ثابت. والخامسة المهام الحقيقية وسلوك الجلسات الطويلة. ونجاح الدنيا لا يستلزم نجاح العليا. وكون «مجمّع الخبراء لا يضرب في وزن الموجِّه»، وتوضيحات β ومحور الحالة في GDN، كلها تدل على أن أخطاء التركيب قد تختبئ بين وحدات تنجح كل منها في اختبارها. [S06][S17]</p>
+<h3>أي المقاييس تُسجَّل في teacher forcing</h3>
+<p>يمكن تسجيل أقصى خطأ مطلق، والخطأ النسبي، ومتوسط مربع الخطأ، وتباعد KL، وهل تغيرت الكلمة الأولى، وهل تغير رقما الخبير الذي اختاره الموجِّه والموضع الذي اختاره المُفهرِس. ولكل مقياس فخ: الخطأ النسبي يتشوه إذا اقتربت القيمة المرجعية من 0؛ وتباعد KL يجب أن يُبيَّن فيه كيف طُبّعت الاحتمالات وكيف عولج الاحتمال الصفري؛ ونسبة تطابق الكلمة الأولى يجب أن تُقرأ مع توزيع «الفرق بين أول مرشحتين». وتنص Strata في مُفهرِس QSA على أن المواضع المختارة يجب أن تكون <strong>متطابقة تمامًا</strong>، بلا تسامح، لأن اختيار خانة مختلفة يغيّر مدخل الانتباه. ولذلك تخزّن مفاتيح المُفهرِس بـ FP32 لا FP16: فـ FP16 يضيف إلى كل درجة اضطرابًا نسبيًّا نحو 2⁻¹¹، وهذا يقع تمامًا على حدّ الاختيار. والثمن قليل: عند سياق 32K تبلغ هذه المفاتيح بـ FP32 نحو 50 MiB. [S18]</p>
+<h3>علاقات تحويلية جاهزة للاستعمال</h3>
+<p>إذا طُبّق التبديل نفسه على جدول الصفحات وعلى البيانات معًا فيجب ألا تتغير نتيجة الانتباه المنطقية؛ وإذا قُطّع المدخل نفسه إلى كتل مختلفة فيجب أن يكون تسليم الحالة بين الكتل متكافئًا؛ وإذا حُفظت ثم استُعيدت ثم استؤنفت فيجب أن يكون ذلك كأنها لم تغادر؛ وإذا أُغلقت المسودة فيجب أن يتفق ذلك مع دلالة مسار الهدف المقابل. [S08][S18] وهذه العلاقات تولّد اختبارات قوية كثيرة، لكن يجب أن تُكتب فيها هوامش التسامح ومسار الأعداد: عند الانتقال بين CPU وGPU، أو تغيير تنفيذ ضرب المصفوفات، أو تغيير مسار التكميم، لا يُضمَن التطابق بتًّا ببت؛ فلا يجوز أن تُجاز كل الفروق، ولا أن تُتجاهل حدود التقريب المعروفة.</p>
+<h3>«التطابق بتًّا ببت» له حدود</h3>
+<p>تتعهد نافذة التحقق في Strata في ملف الترويسة بأن الكلمة المختارة في كل موضع تطابق التوليد رمزًا رمزًا بتًّا ببت. [S08] لكن الوثائق الأصلية تسجل أيضًا أنه عند التكميم من سلسلة IQ يحسب CPU الرمز الواحد وعدة رموز بنواتين تقريبهما مختلف قليلًا، فقد تعطي المُطالبة نفسها بدرجة حرارة (temperature) 0 إجابة أخرى جيدة بالقدر نفسه بحسب المسودة أو حالة الذاكرة المؤقتة أو استئناف الجلسة (المسألة #152). وبعد ضبط <code>STRATA_IQ_MT_MIN=1</code> تسلك كل الحالات نواة الرموز المتعددة، فلا تعود الإجابة تعتمد على المسودة. وإذا أردت في الخدمة تكرارًا على مستوى البايت فأضف أيضًا <code>--prompt-cache 0 --adapt-swaps 0 --pcie-frac 0</code>. وقياس المؤلف الفعلي (IQ3_XXS، ومُطالبة من 3.6K رمز، و4 مرات): بتشغيل المفاتيح الثلاثة كلها ظهرت إجابة واحدة في 4 مرات؛ وبدون <code>--pcie-frac 0</code> ظهرت إجابتان (الأولى مختلفة)؛ وبكل القيم الافتراضية إجابتان أيضًا. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03] وما في ملف الترويسة هدف تصميمي، وما في الوثائق حدّ مقيس، ويجب قراءة الاثنين.</p>
+<h3>قائمة حالات سلبية تُحقن عمدًا</h3>
+<p>احقن في الاختبار هذه الأخطاء عمدًا: تحويل ربط الرؤوس من باقي القسمة إلى القسمة الصحيحة؛ واستخدام تطبيع RMS بدل تطبيع L2؛ وذاكرة تنشيط مؤقتة لكل طبقة تُحكَم بالمؤشر وحده؛ وضرب وزن الموجِّه مرتين؛ وتجميد عداد المواضع؛ ونسيان تاريخ PLE عند استعادة الجلسة. ويجب أن يفشل الاختبار فشلًا ثابتًا ويشير إلى أول عقد انتُهك. وإذا بقي الاختبار ينجح بعد الحقن فغالبًا لا يفحص إلا أن «العملية لم تنهر». ولا يجوز أن يشترك التنفيذ المرجعي مع الشيفرة المختبَرة في افتراض خاطئ، وحالة الأداتين اللتين أخطأتا اسم الحقل في <code>layer.cpp</code> تصلح للنقاش في الحصة الدراسية. [S14]</p>
+<h3>ما الاختبارات التي يمكن تشغيلها من المستودع العام</h3>
+<p>يصرح تعليق <code>CMakeLists.txt</code> في Strata بأن مجموعة الاختبارات الكاملة والاختبارات الدقيقة (microbenchmarks) موضوعة في <code>tests/</code> و<code>bench/micro/</code>، وأن الشيفرة العامة لا تتضمنها، لذلك مفتاح بناء الاختبارات مطفأ افتراضيًّا. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/CMakeLists.txt#L87-L92" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>) وكذلك التنفيذ المرجعي <code>ref/gdn.py</code> الذي يذكره تعليق <code>gdn.hpp</code> لا يوجد في مجلد <code>ref/</code> من المستودع العام، وليس فيه إلا <code>load.py</code>. واختبارات المقارنة والقياسات المذكورة في هذا الفصل مأخوذة من تعليقات الشيفرة العامة وملفات الاختبار والتقارير؛ ولم يعد الكتاب تشغيلها على GPU.</p>
+<h3>ماذا يثبت اختبار الكتاب المرافق</h3>
+<p>تفحص اختبارات <code>labs/tiny_inference.py</code> المعالجة على أجزاء، والحفظ والاستعادة، وإعادة التشغيل المرجعي، وقبول المسودة المضبوط. وهي تثبت شيفرة الكتاب التعليمية، و<strong>لا</strong> تثبت تنفيذ GPU في Strata الأصلية. أما إرسال Strata والتكميم والتنفيذ غير المتزامن والأوزان الحقيقية فيحتاج كلٌّ إلى تحقق مستقل في بيئته.</p>
+</details>

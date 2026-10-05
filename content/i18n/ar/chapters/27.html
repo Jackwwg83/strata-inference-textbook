@@ -1,0 +1,233 @@
+<div class="hook"><span class="eyebrow">انظر أولًا إلى ثلاثة أعداد</span>
+<p>يقول README في Strata: على RTX 5070 تكتب نسخة Q2_0 ‏94 رمزًا (token) في الثانية. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S01] ويبدو هذا العدد قاطعًا.</p>
+<p>والآن انظر إلى اختبار قدّمه أحد أعضاء المجتمع: بطاقة RTX 3090، ونموذج Coder، ومُطالبة (prompt) طولها 32K، وبالإعداد نفسه ثلاث مرات متتالية في أقل من 30 ثانية. فكانت سرعات الإخراج في المرات الثلاث 52.7 و66.8 و97.4 رمزًا في الثانية. <span class="ev ev-report">تقرير المصدر الأصلي</span> والفرق بين الأسرع والأبطأ قارب الضعف. فكم سرعة هذا الجهاز حقًّا؟ يشرح هذا الفصل كيف نقيس حتى يصمد عدد السرعة أمام الأسئلة.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> لا معنى لعدد الأداء إلا إذا حمل شروطه وعدد عيّناته وطريقته الإحصائية: أحمِ الجهاز أولًا، ثم كرّر، وأبلغ بالوسيط ومدى التذبذب، وأفرد التشغيل الأول وحده، واكتب بوضوح بأي صيغة حُسبت «السرعة».</p>
+
+<h2 id="sec-1">27.1 الجهاز نفسه، وثلاث سرعات في 30 ثانية</h2>
+<p>انظر أولًا إلى السجل الخام لهذه التشغيلات الثلاثة. مصدرها تقرير اختبار قدّمه المجتمع إلى مستودع Strata، بإصدار المحرك 0.1.26، وبطاقة RTX 3090، ونموذج Coder، ومُطالبة 32K. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/bench/results/2026-09-29-rtx3090-epyc-milan/README.md" target="_blank" rel="noopener noreferrer">تقرير اختبار RTX 3090</a>)</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="الشكل 27-1: الجهاز نفسه شُغّل ثلاث مرات متتالية، فكانت سرعة الإخراج 52.7 و66.8 و97.4 رمزًا في الثانية، والوسيط 66.8 والمتوسط 72.3">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="13">الجهاز نفسه والإعداد نفسه، مُطالبة 32K، سرعة الإخراج في ثلاث مرات متتالية</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40 110H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 106V114M137.1 106V114M234.3 106V114M331.4 106V114"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="128" font-size="13" text-anchor="middle">40</text>
+<text class="f-muted" fill="#5c6d66" x="137.1" y="128" font-size="13" text-anchor="middle">60</text>
+<text class="f-muted" fill="#5c6d66" x="234.3" y="128" font-size="13" text-anchor="middle">80</text>
+<text class="f-muted" fill="#5c6d66" x="331.4" y="128" font-size="13" text-anchor="middle">100</text>
+<circle class="f-accent" fill="#136d5a" cx="101.7" cy="92" r="6"/>
+<circle class="f-accent" fill="#136d5a" cx="170.2" cy="92" r="6"/>
+<circle class="f-accent" fill="#136d5a" cx="318.8" cy="92" r="6"/>
+<text class="f-text" fill="#182f2b" x="101.7" y="72" font-size="13" text-anchor="middle">المرة 1: 52.7</text>
+<text class="f-text" fill="#182f2b" x="170.2" y="50" font-size="13" text-anchor="middle">المرة 2: 66.8</text>
+<text class="f-text" fill="#182f2b" x="318.8" y="72" font-size="13" text-anchor="middle">المرة 3: 97.4</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M170.2 100V146"/>
+<text class="f-text" fill="#182f2b" x="165" y="146" font-size="13" text-anchor="end">الوسيط 66.8</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M196.9 100V166"/>
+<text class="f-text" fill="#182f2b" x="202" y="166" font-size="13" text-anchor="start">المتوسط 72.3</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="13">زمن أول رمز في المرات الثلاث متقارب جدًّا: 12.87 و12.79 و12.80 ثانية</text>
+</svg><figcaption>الشكل 27-1  سرعة الإخراج في ثلاث تشغيلات (عدد الرموز في الثانية). الأسرع والأبطأ بينهما قرابة الضعف؛ أما زمن أول رمز في هذه الدفعة فثابت على نحو لافت. البيانات من تقرير مجتمعي عن RTX 3090 عند المصدر الأصلي.</figcaption></figure>
+<p>لماذا هذا الفرق الكبير؟ في السجل الخام خيوط تدل <span class="ev ev-report">تقرير المصدر الأصلي</span>:</p>
+<ul>
+<li><strong>الإخراج قصير جدًّا.</strong> ولّدت المرات الثلاث 48 و26 و45 رمزًا فقط، وانتهى النموذج من كلامه مبكرًا. ومرحلة التوليد (decode) في كل مرة أقل من ثانية (911 و389 و462 ملّي ثانية). وفي زمن قصير كهذا يتضخم أي تذبذب.</li>
+<li><strong>المحتوى يختلف في كل مرة.</strong> بدايات الإجابات الثلاث مختلفة. وتتسارع Strata بفك الترميز التخميني: تخمّن بضعة رموز ثم تتحقق منها دفعة واحدة، وكلما أصاب التخمين أكثر زادت السرعة. وقد قُبل في المرات الثلاث 31 رمزًا من 38 مسودة، و12 من 21، و33 من 37. وأسوأ تخمين كان في المرة 2 لكن سرعتها جاءت في الوسط، فالمؤثر في السرعة ليس عاملًا واحدًا.</li>
+<li><strong>المدخل أيضًا يتحرك.</strong> اسميًّا كلها «مُطالبة 32K»، والأطوال الفعلية 28,317 و31,630 و31,601 رمزًا. وقد سجل التقرير الطول الفعلي عمدًا لأن «وسم الطول الاسمي يزيغ».</li>
+</ul>
+<p>وخلاصة التقرير نفسه متحفظة: يُشغَّل كل خانة ثلاث مرات ويُبلَّغ بالوسيط، مع إدراج قيمة المرة الأولى؛ ويُعلَّم كل الناتج بأنه «أولي». وهذه هي العادة التي يعلّمها هذا الفصل.</p>
+<p>لنوضح كلمتين أولًا. <dfn>الإنتاجية</dfn> (throughput) كم عملًا يُنجَز في وحدة الزمن، وهنا كم رمزًا يخرج في الثانية، وتُكتب token/s، وكلما زادت كان أفضل. و<dfn>زمن الاستجابة</dfn> (latency) كم ننتظر حتى يكتمل شيء، مثل الزمن من إرسال الطلب إلى رؤية أول حرف، وكلما قلّ كان أفضل. وكثيرًا ما تُخلط الكلمتان، لكنهما تجيبان عن سؤالين مختلفين.</p>
+
+<h2 id="sec-2">27.2 العدد الواحد يجب أن يحمل شروطه</h2>
+<p>من أين جاء «94 token/s» في README؟ أضاف README في v0.1.39 تحت الجدول سطر توضيح: صف Q2_0 استخدم المحرك 0.1.36، وبقية الصفوف 0.1.26. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S01] وفي الوثائق المفصلة قسم 0.1.36 يقول: إخراج Q2_0 عند 4K ارتفع من 89 إلى 93.5 token/s، وقراءة المُطالبة عند 32K من 2,170 إلى 2,653. أما الجدول الرئيسي فمن 0.1.26، والخانتان فيه 93.0 و2,171. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03] وسرعة القراءة المكتوبة في README هي 2,650، توافق 0.1.36 ولا توافق الجدول الرئيسي. فمن العدد «94» وحده لا تعرف من أي إصدار جاء، وعليك أن تقرأ ملاحظات الإصدار. وشروط الجدول الرئيسي مكتوبة في أول الوثيقة، كما في الشكل 27-2.</p>
+<figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="الشكل 27-2: قائمة شروط جدول قياس السرعة في Strata: بطاقة الرسوميات، وCPU والذاكرة، والنظام، وإصدار المحرك، والتكميم، والمدخل، والمخرج، والإعدادات">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="14" font-weight="600" text-anchor="middle">«بطاقة هوية» عدد الأداء</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="380" height="222" rx="10"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="58" font-size="13">بطاقة الرسوميات</text><text class="f-text" fill="#182f2b" x="150" y="58" font-size="13">RTX 5070 (12 GB)</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="84" font-size="13">CPU والذاكرة</text><text class="f-text" fill="#182f2b" x="150" y="84" font-size="13">Ryzen 5 7600، و64 GB DDR5-5200</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="110" font-size="13">النظام</text><text class="f-text" fill="#182f2b" x="150" y="110" font-size="13">Windows</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="136" font-size="13">إصدار المحرك</text><text class="f-text" fill="#182f2b" x="150" y="136" font-size="13">0.1.26 (وبعض الخانات من إصدار أقدم)</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="162" font-size="13">التكميم</text><text class="f-text" fill="#182f2b" x="150" y="162" font-size="13">خمسة أنواع منها Q2_0 وIQ2_XS</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="188" font-size="13">المدخل</text><text class="f-text" fill="#182f2b" x="150" y="188" font-size="13">مُطالبة مساعد برمجة لكل طول</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="214" font-size="13">المخرج</text><text class="f-text" fill="#182f2b" x="150" y="214" font-size="13">توليد 256 رمزًا</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="240" font-size="13">الإعدادات</text><text class="f-text" fill="#182f2b" x="150" y="240" font-size="13">قيم المثبّت الافتراضية، ومسودة MTP مفعّلة</text>
+<text class="f-warn" fill="#9e5d24" x="200" y="280" font-size="13" text-anchor="middle">إذا نقص بند فلا يمكن وضع العدد مع نتائج الآخرين للمقارنة</text>
+</svg><figcaption>الشكل 27-2  شروط الجدول الرئيسي للقياس (المحرك 0.1.26) في وثائق Strata المفصلة. كل بند قد يغيّر النتيجة، فيجب أن يُكتب كل بند. [S03]</figcaption></figure>
+<p>وفي هذه الوثيقة تفاصيل أخرى تستحق التعلم <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03]:</p>
+<ul>
+<li><strong>تعليم خلط الإصدارات.</strong> جسم الجدول من نتائج 0.1.26، لكن في عمود 262K خانات لم تُعَد قياسها، وأُبقيت أرقامها من 0.1.22 أو 0.1.14، وعُلّمت برمز خاص. فالأعداد المختلطة في جدول واحد ليست بالضرورة من تجربة واحدة.</li>
+<li><strong>بيان أن العدد يتغير بالمحتوى.</strong> سرعة الإخراج تتوقف أيضًا على النص نفسه: فكلما أصاب فك الترميز التخميني أكثر زادت السرعة، فالمُطالبة نفسها بإجابة مختلفة قد تختلف سرعتها عدة نقاط مئوية.</li>
+<li><strong>التشغيل ظهرًا لظهر في المقارنة.</strong> قارنت الوثيقة بين 0.1.14 و0.1.12 بتشغيلهما متتاليين على مُطالبة 4K نفسها، فكانت 88.5 و85.7 token/s.</li>
+</ul>
+<p>ولنعد إلى بطاقة 3090 في البداية. يقدّر README أن RTX 3090 «تكتب نحو 100-140 رمزًا في الثانية». [S01] وما قاسه تقرير المجتمع أدنى من هذا، لكن الشروط بعيدة جدًّا: استخدم التقرير آلة افتراضية، وقُيّدت طاقة البطاقتين في جهاز الاختبار يدويًّا عند 280 W، والمُطالبات ولّدها المختبِر بنفسه من الشيفرة، وانتهى عدد من الطلبات مبكرًا. ويصرّح التقرير نفسه بأن كل مقارنة مع المصدر الأصلي «للإشارة فقط» إلى أن يحصل على مُطالبات المصدر الأصلي وطريقة اختباره. <span class="ev ev-report">تقرير المصدر الأصلي</span> والعددان كلاهما سليم، لكن لا يمكن أن يقارَن أحدهما مباشرة بالآخر.</p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذه أول قاعدة في تقييم الأداء في مقرر «معمارية الحاسوب»: اكتب بيئة الاختبار بوضوح، وغيّر متغيرًا واحدًا في كل مرة. ويسميها العلم التجريبي «ضبط المتغيرات». ودرجة قياس بلا شروط مثل كمية فيزيائية بلا وحدة: لا يمكن الاستفادة منها.</p>
+
+<h2 id="sec-3">27.3 المتوسط يجرّه طلب بطيء واحد</h2>
+<p>قِستَ الشيء نفسه عدة مرات، فحصلت على سلسلة أعداد. فأي عدد يمثلها؟ أشهر جواب هو المتوسط، لكن فيه عيبًا كبيرًا. والصندوق التالي يشرحه.</p>
+<aside class="primer" id="c27-statistics">
+<h3>المتوسط والمئين والتباين</h3>
+<p>انظر إلى أزمنة مجموعة من الطلبات: 8 و9 و10 و11 و100 ملّي ثانية. الأربعة الأولى عادية، وربما واجه الأخير برنامجًا آخر ينافسه على الموارد.</p>
+<p><dfn>المتوسط</dfn> هو مجموع الأعداد مقسومًا على عددها: (8 + 9 + 10 + 11 + 100) ÷ 5 = 27.6 ملّي ثانية. ولا يقترب أي من الأزمنة الخمسة من 27.6، فقد جرّه الـ 100. و<dfn>الوسيط</dfn> هو العدد الأوسط بعد الترتيب، وهنا 10 ملّي ثانية. ولو بُدّل الـ 100 بـ 10000 لما تحرك الوسيط. وهذه الصفة «لا يخشى القيم المتطرفة المفردة» تسمى المتانة.</p>
+<p>و<dfn>المئين</dfn> (percentile) يجيب عن «كم تبطؤ معظم الطلبات». معنى p95 أن 95% من الطلبات لا تزيد عنه. وتجربة المستخدم كثيرًا ما يحددها الطرف البطيء: أبطأ طلب واحد من كل 20 هو ما يتذكره المستخدم أكثر. وللمئين p95 عدة اصطلاحات حساب، والكتاب يستخدم أبسطها «أقرب رتبة»: رتّب تصاعديًّا وخذ الرتبة ⌈0.95 × n⌉. وانتبه: إذا كان عدد العينات أقل من 20 فإن p95 هو القيمة العظمى. ومن شغّل 5 مرات فقط وأبلغ بـ p95 فقد أبلغ في الحقيقة بـ«أبطأ مرة».</p>
+<p>و<dfn>التباين</dfn> و<dfn>الانحراف المعياري</dfn> يقيسان مدى تشتت البيانات. الانحراف المعياري للعينة = √( Σ(xᵢ − المتوسط)² ÷ (n − 1) ). والانحراف المعياري للمجموعة أعلاه نحو 40.5 ملّي ثانية، أكبر من القيمة المعتادة نفسها، وهذا ينبهك إلى أن في البيانات قيمة شاذة، وأن المتوسط لا يُوثَق به.</p>
+<p class="further">قراءة إضافية: <a href="https://ar.wikipedia.org/wiki/%D9%88%D8%B3%D9%8A%D8%B7_%28%D8%A5%D8%AD%D8%B5%D8%A7%D8%A1%29" target="_blank" rel="noopener noreferrer">ويكيبيديا: وسيط (إحصاء)</a> · <a href="https://ar.wikipedia.org/wiki/%D9%85%D8%A6%D9%88%D9%86" target="_blank" rel="noopener noreferrer">ويكيبيديا: مئون</a> · <a href="https://ar.wikipedia.org/wiki/%D8%A7%D9%86%D8%AD%D8%B1%D8%A7%D9%81_%D9%85%D8%B9%D9%8A%D8%A7%D8%B1%D9%8A" target="_blank" rel="noopener noreferrer">ويكيبيديا: انحراف معياري</a> · <a href="https://docs.python.org/3/library/statistics.html" target="_blank" rel="noopener noreferrer">وثائق Python: statistics، وفيها خوارزميتا quantiles (بالإنجليزية)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 176" role="img" aria-label="الشكل 27-3: خمسة أزمنة 8 و9 و10 و11 و100 ملّي ثانية. الوسيط 10، والمتوسط 27.6، وp95 يساوي القيمة العظمى 100">
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M20 96H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 92V100M105.7 92V100M191.4 92V100M277.1 92V100M362.9 92V100"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="114" font-size="13" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="105.7" y="114" font-size="13" text-anchor="middle">25</text>
+<text class="f-muted" fill="#5c6d66" x="191.4" y="114" font-size="13" text-anchor="middle">50</text>
+<text class="f-muted" fill="#5c6d66" x="277.1" y="114" font-size="13" text-anchor="middle">75</text>
+<text class="f-muted" fill="#5c6d66" x="362.9" y="114" font-size="13" text-anchor="middle">100 ms</text>
+<circle class="f-accent" fill="#136d5a" cx="47.4" cy="80" r="4.5"/>
+<circle class="f-accent" fill="#136d5a" cx="50.9" cy="70" r="4.5"/>
+<circle class="f-accent" fill="#136d5a" cx="54.3" cy="80" r="4.5"/>
+<circle class="f-accent" fill="#136d5a" cx="57.7" cy="70" r="4.5"/>
+<circle class="f-warn" fill="#9e5d24" cx="362.9" cy="76" r="5.5"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M54.3 46V90M114.6 46V90"/>
+<text class="f-text" fill="#182f2b" x="54.3" y="38" font-size="13" text-anchor="middle">الوسيط 10</text>
+<text class="f-text" fill="#182f2b" x="118" y="38" font-size="13" text-anchor="start">المتوسط 27.6</text>
+<text class="f-text" fill="#182f2b" x="390" y="62" font-size="13" text-anchor="end">p95 = القيمة العظمى 100</text>
+<text class="f-text" fill="#182f2b" x="10" y="146" font-size="13">مرة واحدة بـ 100 ms جرّت المتوسط إلى 27.6، والوسيط بقي 10</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="166" font-size="13">الانحراف المعياري نحو 40.5 ms، أكبر من القيمة المعتادة: في البيانات قيمة شاذة</text>
+</svg><figcaption>الشكل 27-3  خمس عينات، وثلاثة مقاييس إحصائية تحكي ثلاث قصص. أن تُبلغ بالوسيط، ثم تبيّن الطرف البطيء بـ p95 أو بالقيمة العظمى، أصدق كثيرًا من أن تُبلغ بمتوسط وحده.</figcaption></figure>
+<p>ارجع إلى التشغيلات الثلاثة في الشكل 27-1: الوسيط 66.8، والمتوسط 72.3، و«p95» هو الأسرع 97.4 (والعدد هنا كلما كبر كان أفضل، فإن أردنا الطرف البطيء نظرنا إلى القيمة الصغرى 52.7). ثلاثة أعداد، وأي منها وحده ناقص. وطريقة تقرير المصدر الأصلي أن يُبلغ بالوسيط، ثم تُرفق قيمة المرة الأولى والسجل الخام.</p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> في مقرر «الاحتمالات والإحصاء» نقطة انهيار الوسيط 50%: ولو صار نصف البيانات أقل منه أي قيم شئت فلن يهرب الوسيط إلى اللانهاية؛ أما نقطة انهيار المتوسط فصفر، إذ يكفي عدد فاسد واحد ليجرّه. وبيانات الأداء هي أكثر ما تظهر فيه القيم المتطرفة المفردة.</p>
+
+<h2 id="sec-4">27.4 أول مرة تكون دائمًا أبطأ: الإحماء والتكرار</h2>
+<p>في كثير من الأنظمة يكون أول تشغيل أبطأ مما بعده. وفي Strata أشياء كثيرة «تسخن» مع الاستخدام:</p>
+<ul>
+<li><strong>الذاكرة المؤقتة للخبراء.</strong> أي الخبراء يوضع في ذاكرة الفيديو يتعدّل مع المحادثة، ويقترب أكثر من المحتوى الحالي كلما استُخدم. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02]</li>
+<li><strong>متحكم المسودة.</strong> له تقدير أولي «كم رمزًا تصيب المسودة»، ثم يتعلم أثناء الاستخدام في كل جلسة. <span class="ev ev-code">حقيقة من الشيفرة</span>[S09]</li>
+<li><strong>رسم الحساب.</strong> رسم حساب GPU لنافذة التحقق لا يُسجَّل إلا عند أول استخدام. <span class="ev ev-code">حقيقة من الشيفرة</span>[S08]</li>
+<li><strong>الذاكرة المؤقتة لملفات نظام التشغيل.</strong> الملف الذي قُرئ للتو يبقى في الذاكرة، وقراءته الثانية أسرع كثيرًا.</li>
+</ul>
+<p>وبالعكس، هناك أشياء تجعل التشغيلات اللاحقة «أسرع من الواقع». فـ Strata تحتفظ بالمحادثة، وعند المتابعة لا تقرأ إلا الجزء المضاف. [S02] فإذا أرسلتَ المُطالبة نفسها مرارًا عند قياس السرعة لم تستغرق القراءة تقريبًا أي وقت منذ المرة الثانية، فيصير المقيس ليس سرعة «قراءة مُطالبة من 32K». لذلك استخدم تقرير 3090 في كل طلب معرّفًا مختلفًا ولم يعد استخدام المحادثة. <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+<p>وفي تقرير مجتمعي آخر وصفٌ أكمل لطريقة القياس، في الشكل 27-4. قاس على RTX 5090 النسخة المكمَّمة IQ2_XS بالمحرك 0.1.29: أرسل أولًا طلب إحماء قصيرًا جدًّا لا يدخل في النتائج؛ ثم على المحرك المحمَّل نفسه، بترتيب 4K ثم 32K ثم 128K، شغّل كل طول ثلاث مرات متتالية؛ وكل طلب يقرأ المُطالبة كاملة، وعدد الرموز المعاد استخدامها 0؛ وفي كل خانة من الجدول «الوسيط [الصغرى-العظمى]». <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/bench/results/2026-09-30-community-rtx-5090/README.md" target="_blank" rel="noopener noreferrer">تقرير اختبار RTX 5090</a>)</p>
+<figure class="fig"><svg viewBox="0 0 400 238" role="img" aria-label="الشكل 27-4: ترتيب التشغيل في تقرير RTX 5090. إحماء واحد لا يُحسب، ثم ثلاث مرات لكل طول. أول مرة عند 4K أبطأ بوضوح، وقد أبقاها التقرير">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="13">اختبار مجتمعي: RTX 5090، المحرك 0.1.29، IQ2_XS</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="4 3" x="10" y="32" width="56" height="34" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="38" y="54" font-size="13" text-anchor="middle">إحماء</text>
+<rect class="f-warn" fill="#9e5d24" x="72" y="32" width="32" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="88" y="54" font-size="13" text-anchor="middle">1</text>
+<rect class="f-accent" fill="#136d5a" x="107" y="32" width="32" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="123" y="54" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="142" y="32" width="32" height="34" rx="5"/><text class="f-on" fill="#ffffff" x="158" y="54" font-size="13" text-anchor="middle">3</text>
+<rect class="f-soft" fill="#e5f1df" x="177" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="193" y="54" font-size="13" text-anchor="middle">1</text>
+<rect class="f-soft" fill="#e5f1df" x="212" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="228" y="54" font-size="13" text-anchor="middle">2</text>
+<rect class="f-soft" fill="#e5f1df" x="247" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="263" y="54" font-size="13" text-anchor="middle">3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="282" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="298" y="54" font-size="13" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="317" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="333" y="54" font-size="13" text-anchor="middle">2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="352" y="32" width="32" height="34" rx="5"/><text class="f-text" fill="#182f2b" x="368" y="54" font-size="13" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="38" y="84" font-size="13" text-anchor="middle">لا يُحسب</text>
+<text class="f-text" fill="#182f2b" x="123" y="84" font-size="13" text-anchor="middle">4K</text>
+<text class="f-text" fill="#182f2b" x="228" y="84" font-size="13" text-anchor="middle">32K</text>
+<text class="f-text" fill="#182f2b" x="333" y="84" font-size="13" text-anchor="middle">128K</text>
+<text class="f-text" fill="#182f2b" x="20" y="120" font-size="14" font-weight="600">التشغيلات الثلاثة عند 4K</text>
+<text class="f-text" fill="#182f2b" x="20" y="144" font-size="13">زمن أول رمز: 1.183 s ← 0.974 s ← 0.973 s</text>
+<text class="f-text" fill="#182f2b" x="20" y="166" font-size="13">سرعة التوليد: 161.3 ← 184.8 ← 179.4 token/s</text>
+<text class="f-text" fill="#182f2b" x="20" y="188" font-size="13">معدل إصابة ذاكرة الخبراء: 97.8% ← 99.3% ← 98.9%</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="222" font-size="13">أبقى التقرير المرة الأولى الأبطأ، وأبلغ بـ «الوسيط [الصغرى-العظمى]»</text>
+</svg><figcaption>الشكل 27-4  إحماء قصير جدًّا لم «يسخّن» كل شيء: فأول تشغيل رسمي عند 4K ما زال أبطأ. لم يحذفه التقرير، بل تركه يظهر في المدى.</figcaption></figure>
+<p>انتبه إلى طلب الإحماء: مُطالبته 19 رمزًا فقط، ويخرج رمزين. وطلب قصير هكذا لم يستطع إحماء كل شيء، فكان أول تشغيل رسمي عند 4K أبطأ بنحو 0.2 ثانية في زمن أول رمز، وأبطأ بنحو 10% في التوليد. ولم يحذف التقرير هذا التشغيل سرًّا، بل كتب «أُبقي أول تشغيل أبطأ عند 4K ضمن المدى». <span class="ev ev-report">تقرير المصدر الأصلي</span> وهذا أصدق من حذفه، ويترك للقارئ مادة يحكم بها.</p>
+<aside class="primer" id="c27-benchmark-method">
+<h3>الإحماء ومنهج اختبار الأداء</h3>
+<p><dfn>اختبار الأداء المرجعي</dfn> (benchmark) هو تشغيل المهمة نفسها مرارًا في ظروف مضبوطة لقياس أدائها. وحتى تكون النتيجة موثوقة لا بد من بضع مهارات أساسية:</p>
+<p><strong>الإحماء.</strong> قبل بدء القياس الرسمي شغّل بضع مرات، لتستقر الذاكرات المؤقتة ورسم الحساب والذاكرة المؤقتة للملفات، ولا تُحسب هذه المرات في النتيجة. وكم مرة تُحمّى وبأي محتوى يُحدَّد سلفًا ويُكتب في التقرير. وإذا كان ما يهمك هو البدء البارد (مثل أن يفتح المستخدم التطبيق أول مرة) فقِسه وحده، ولا تخلطه بالحالة الساخنة.</p>
+<p><strong>التكرار.</strong> تشغيل واحد عينة واحدة. وبالتكرار وحده ترى حجم التذبذب. ويُحدَّد عدد التكرارات سلفًا، ولا يجوز أن «نكرر حتى نرضى».</p>
+<p><strong>التناوب.</strong> عند مقارنة A وB لا تشغّل A كله ثم B كله، بل A وB وA وB بالتناوب. وإلا نُسب إلى أحد الطرفين كل ما يتغير من حرارة الجهاز وبرودته ودرجة حرارته والمهام الخلفية.</p>
+<p><strong>حفظ البيانات الخام.</strong> أبلغ بالوسيط والمدى، وأرفق السجل الخام لكل تشغيل، بما فيه التشغيلات الفاشلة والشاذة.</p>
+<p>وهناك حالة يجوز فيها الاكتفاء بأسرع تشغيل: عند قياس قطعة شيفرة صغيرة <strong>حتمية</strong>. فوثائق <code>timeit</code> في Python توصي بالنظر إلى القيمة الصغرى، لأن النتائج الأبطأ سببها عادةً تشويش عمليات أخرى، والقيمة الصغرى تعطي الحدّ الأدنى لما يستغرقه الجهاز لتشغيل هذه الشيفرة. لكن سرعة خدمة الاستدلال تتوقف أيضًا على محتوى المدخل، وكم أصابت المسودة، وكم أصابت الذاكرة المؤقتة، وهذه ليست «تشويشًا» بل هي الحالات التي يواجهها المستخدم فعلًا.</p>
+<p class="further">قراءة إضافية: <a href="https://en.wikipedia.org/wiki/Software_performance_testing" target="_blank" rel="noopener noreferrer">ويكيبيديا: Software performance testing (بالإنجليزية)</a> · <a href="https://docs.python.org/3/library/timeit.html" target="_blank" rel="noopener noreferrer">وثائق Python: timeit (بالإنجليزية)</a> · <a href="https://en.wikipedia.org/wiki/Benchmark_(computing)" target="_blank" rel="noopener noreferrer">Wikipedia: Benchmark (computing)</a></p>
+</aside>
+<p>ما الذي يحله كلٌّ من الإحماء والتكرار والتناوب؟ هذه التجربة تتيح لك تصميم خطة قياس بنفسك. وميزتها أنها «تعرف الحقيقة»: فـ B أسرع من A فعلًا بنسبة 5%، وتستطيع أن ترى مباشرة هل قاست خطتك بدقة.</p>
+<div class="viz" data-viz="bench-warmup"><figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="الشكل 27-5: ثلاثة ترتيبات للتشغيل. A ثم B يوقع البدء البارد كله على A؛ والتناوب يوزعه على الطرفين؛ ومع الإحماء يُطرَح البدء البارد">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="13">أول 3 تشغيلات بعد إقلاع الجهاز تكون أبطأ، فعلى من تقع؟</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="12">A ثم B</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="34" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="103" y="52" font-size="14" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="118" y="34" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="52" font-size="14" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="146" y="34" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="159" y="52" font-size="14" text-anchor="middle">A</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="174" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="187" y="52" font-size="14" text-anchor="middle">A</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="215" y="52" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="243" y="52" font-size="14" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="258" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="52" font-size="14" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="299" y="52" font-size="14" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="314" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="327" y="52" font-size="14" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="342" y="34" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="355" y="52" font-size="14" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="10" y="102" font-size="12">تناوب A وB</text>
+<rect class="f-warn" fill="#9e5d24" x="90" y="84" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="103" y="102" font-size="14" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="118" y="84" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="102" font-size="14" text-anchor="middle">B</text>
+<rect class="f-warn" fill="#9e5d24" x="146" y="84" width="26" height="26" rx="4"/><text class="f-on" fill="#ffffff" x="159" y="102" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="174" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="187" y="102" font-size="14" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="215" y="102" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="243" y="102" font-size="14" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="258" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="102" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="299" y="102" font-size="14" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="314" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="327" y="102" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="342" y="84" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="355" y="102" font-size="14" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="12">تناوب + إحماء</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#9e5d24" stroke-dasharray="3 3" x="90" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="103" y="152" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#9e5d24" stroke-dasharray="3 3" x="118" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="131" y="152" font-size="14" text-anchor="middle">B</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#9e5d24" stroke-dasharray="3 3" x="146" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="159" y="152" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="174" y="134" width="26" height="26" rx="4"/><text class="f-muted" fill="#5c6d66" x="187" y="152" font-size="14" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="202" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="215" y="152" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="243" y="152" font-size="14" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="258" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="152" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="286" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="299" y="152" font-size="14" text-anchor="middle">B</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="314" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="327" y="152" font-size="14" text-anchor="middle">A</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="342" y="134" width="26" height="26" rx="4"/><text class="f-text" fill="#182f2b" x="355" y="152" font-size="14" text-anchor="middle">B</text>
+<text class="f-text" fill="#182f2b" x="10" y="196" font-size="13">لون التحذير: تشغيلات لم يسخن فيها الجهاز؛ الإطار المتقطع: إحماء يُطرَح</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="13">في الصف الأول يقع البدء البارد كله على A، فيبدو B أسرع كثيرًا</text>
+</svg><figcaption>الشكل 27-5  ترتيب التشغيل يحدد على من يقع البدء البارد. التناوب يوزعه على الطرفين، ومع الإحماء يُطرَح كله. وفي التجربة أدناه الحقيقة أن B أسرع بنسبة 5%.</figcaption></figure></div>
+
+<h2 id="sec-5">27.5 عرّف الساعة أولًا: TTFT و«كم رمزًا في الثانية»</h2>
+<p>حتى لو سلمت طريقة القياس، فكلمة «السرعة» نفسها قد تُحسب بعدة طرق. بعد أن يرسل المستخدم طلبًا يمر بعدة فترات: الانتظار في الصف، وقراءة المُطالبة، وظهور أول رمز، وظهور الرموز التالية تباعًا، والنهاية. ومن أين تبدأ الساعة وأين تقف يغيّر العدد تمامًا، كما في الشكل 27-6.</p>
+<div class="viz" data-viz="rate-clock"><figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="الشكل 27-6: الخط الزمني لطلب متدفق واحد، وثلاث صيغ للسرعة: من طرف إلى طرف، وبحسب مدة التوليد، وبحسب الفواصل">
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="36" width="70" height="26" rx="4"/>
+<text class="f-text" fill="#182f2b" x="55" y="54" font-size="13" text-anchor="middle">الانتظار</text>
+<rect class="f-soft" fill="#e5f1df" x="90" y="36" width="140" height="26" rx="4"/>
+<text class="f-text" fill="#182f2b" x="160" y="54" font-size="13" text-anchor="middle">قراءة المُطالبة (prefill)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" d="M230 32V66M245 32V66M260 32V66M275 32V66M290 32V66M305 32V66M320 32V66M335 32V66M350 32V66M365 32V66M380 32V66"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="84" font-size="13">إرسال الطلب</text>
+<text class="f-muted" fill="#5c6d66" x="230" y="84" font-size="13" text-anchor="middle">أول رمز</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="84" font-size="13" text-anchor="end">آخر رمز</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M20 92V98H228V92M232 92V98H380V92"/>
+<text class="f-text" fill="#182f2b" x="124" y="114" font-size="13" text-anchor="middle">TTFT (زمن أول رمز)</text>
+<text class="f-text" fill="#182f2b" x="306" y="114" font-size="13" text-anchor="middle">مدة التوليد</text>
+<text class="f-text" fill="#182f2b" x="20" y="146" font-size="13">السرعة ① من طرف إلى طرف = N ÷ المدة الكلية من إرسال الطلب إلى النهاية</text>
+<text class="f-text" fill="#182f2b" x="20" y="168" font-size="13">السرعة ② = N ÷ مدة التوليد</text>
+<text class="f-text" fill="#182f2b" x="20" y="190" font-size="13">السرعة ③ = (N − 1) ÷ مدة التوليد، وعند N = 1 غير معرّفة</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="214" font-size="13">لم يخطئ أي منها، لكنها تجيب عن أسئلة مختلفة؛</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="232" font-size="13">ويجب أن يذكر التقرير أيها استُخدم</text>
+</svg><figcaption>الشكل 27-6  طلب واحد، وخط زمني واحد، وثلاث «سرعات». N عدد رموز الإخراج. وفي النسخة المتحركة تستطيع ضبط الانتظار وطول الإخراج ومعدل قبول المسودة.</figcaption></figure></div>
+<p><dfn>TTFT</dfn> (اختصار time to first token، أي زمن أول رمز) هو الزمن من إرسال الطلب إلى ظهور أول رمز. ويشمل الانتظار في الصف وقراءة المُطالبة، ويحدد «كم ينتظر المستخدم قبل أن يرى حركة». وتعريف تقرير RTX 5090 له دقيق: تبدأ الساعة قبل إرسال طلب HTTP، وتقف عند استلام أول قطعة نص غير فارغة، مع تجاهل رسالة الدور الفارغة ورسائل البقاء حيًّا. <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+<p>وصيغ سرعة الإخراج أكثر. السرعتان ② و③ في الشكل أعلاه تختلفان بـ«ناقص 1» فقط، لكن الفرق ليس صغيرًا عندما يكون الإخراج قصيرًا: إذا كان الإخراج 26 رمزًا فقط فبينهما 26 ÷ 25 − 1 = 4%. <span class="ev ev-est">تقدير تعليمي</span> وإذا كان الإخراج رمزًا واحدًا فالسرعة ③ غير معرّفة أصلًا، وحسابها بالقوة قسمة على 0.</p>
+<p>و«عدّاد السرعة الفوري» له أصوله أيضًا. يقول تعليق في شيفرة خادم Strata إن السرعة الفورية المعروضة في الواجهة هي معدل ضمن نافذة زمنية، لا «المتوسط منذ أول رمز»: فهذا الأخير عند ظهور أول رمز يساوي تقريبًا 1 ÷ الزمن المنقضي، وقد ظهر في واجهة المراقبة بخمس خانات، ثم صار منخفضًا في الثانية التي تليه. والنافذة في الشيفرة ثانيتان، وإذا كانت أقل من 0.25 ثانية حُسبت 0.25 ثانية. <span class="ev ev-code">حقيقة من الشيفرة</span>[S15]</p>
+<p>وعند استخدام عدة مستخدمين معًا يجب أن نميز بين أمرين آخرين. <dfn>الإنتاجية الكلية للنظام</dfn> كم رمزًا يخرج في الثانية من الطلبات كلها مجتمعة؛ و<dfn>سرعة التدفق الواحد</dfn> هي السرعة التي يراها كل مستخدم بنفسه. فإذا كان مجموع خمسة مستخدمين 100 رمز في الثانية فليس لكل منهم 100 في الثانية. وفي الإعداد الافتراضي لا يعالج خادم Strata إلا تسلسلًا واحدًا في المرة، وتُصفّ الطلبات بترتيب الوصول. [S15] فعبارة «خمسة يستخدمون معًا» تعني أن الأربعة الذين بعده ينتظرون في الصف، فيطول TTFT عندهم وتبقى سرعة التوليد كما هي. وقد شرحنا في الفصل 25 كلفة هذا الانتظار. ويمكن في v0.1.39 تشغيل <code>"parallel"</code> في الإعداد ليفك عدة طلبات معًا، فتنعكس النتيجة تمامًا. وقد قاس المصدر الأصلي على RTX 5070: عند وصول 4 طلبات معًا تقدّم أول رمز لآخرها من 11.2 ثانية إلى 1.8 ثانية؛ لكن الإنتاجية الكلية نزلت من 70.7 إلى 63.1 token/s، وسرعة كل تدفق من 79.6 إلى 16.9 token/s. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/BATCHING.md#L125-L144" target="_blank" rel="noopener noreferrer">BATCHING.md</a>) وعندئذ تكون السرعة الفورية <code>tok_s</code> في الخادم مجموع معدلات الطلبات كلها، أي الإنتاجية الكلية للنظام. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/serve/server.py#L1957-L1967" target="_blank" rel="noopener noreferrer">server.py</a>) وسرعة كل خانة تُدرج على حدة في <code>live.slots</code> ضمن <code>/metrics</code>. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/BATCHING.md#L66-L67" target="_blank" rel="noopener noreferrer">BATCHING.md</a>) وأي الإعدادين «أسرع» يتوقف على ما تسأل عنه: TTFT، أم الإنتاجية الكلية، أم سرعة التدفق الواحد.</p>
+
+<h2 id="sec-6">27.6 تطبيق عملي: اكتب قياسًا واحدًا في سجل يمكن مراجعته</h2>
+<p>يرافق الكتاب بروتوكول قياس <code>labs/benchmark_protocol.md</code> وقالب تسجيل <code>labs/benchmark_template.csv</code>. وللقالب 31 عمودًا، من إصدار المستودع ومعاملات البناء ودالة تلخيص ملف النموذج، إلى الانتظار وTTFT ومدة التوليد وذروة VRAM وهل نجحت الجودة، ويُملأ سطر لكل تشغيل. ولم يُملأ في القالب أي قياس حقيقي: فالخانة التي لم تُقَس على عتاد حقيقي يجب أن تبقى فارغة.</p>
+<ol>
+<li><strong>العب أولًا بتجربتي هذا الفصل.</strong> في «تجربة القياس» ابحث عن خطة تقيس 5% بثبات، وسجّل عدد التكرارات وعدد مرات الإحماء وترتيب التشغيل. وفي «ثلاث سرعات» اسحب طول الإخراج إلى 1 وانظر أي الصيغ تنهار.</li>
+<li><strong>ثم افتح المختبر التفاعلي «لماذا ينتظر الطلب القصير دائمًا».</strong> يقارن زمن أول رمز وزمن الاكتمال لكل طلب تحت جدولتين: الأول أولًا (FCFS) والتناوب. لاحظ: الإنتاجية الكلية شبه ثابتة، وتجربة كل شخص تختلف كثيرًا. وهذا سبب وجوب الإبلاغ عن «التدفق الواحد» و«الإنتاجية الكلية» منفصلين.</li>
+<li><strong>وأخيرًا اكتب سجلًّا.</strong> إن كان عندك حاسوب يشغّل Strata فشغّل بحسب البروتوكول مجموعة A/B: غيّر إعدادًا واحدًا في كل مرة، وبدّل A وB بالتناوب، وكرّر بعد الإحماء 5 مرات على الأقل في كل مجموعة، وسجّل البيانات الخام لكل مرة في القالب. وإن لم يكن عندك حاسوب كهذا فتمرّن على تقرير RTX 3090 من المصدر الأصلي: انسخ من JSON الخام أعداد كل تشغيل، وأعد حساب الوسيط بنفسك، وعدّد الأعمدة التي ينقصها التقرير من أعمدة القالب.</li>
+</ol>
+<p>والأزمنة في تجربتي هذا الفصل التفاعليتين افتراضات تعليمية، وليست قياسات من Strata؛ فهما تعرضان طريقة القياس، لا سرعة بطاقة بعينها.</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>عدد الأداء يجب أن يحمل شروطه: العتاد، والنموذج والتكميم، وإصدار المحرك، وطول المدخل والمخرج، وبرودة الذاكرات المؤقتة أو سخونتها، وعدد الطلبات المتزامنة. والأعداد المختلفة الشروط لا تُقارَن مباشرة.</li>
+<li>أحمِ أولًا ثم كرّر، وبدّل A وB بالتناوب؛ وأبلغ بالوسيط والمدى، وأفرد التشغيل الأول، واحتفظ بالبيانات الخام والتشغيلات الفاشلة.</li>
+<li>عرّف الساعة قبل «السرعة»: TTFT والسرعة من طرف إلى طرف وسرعة التوليد تجيب كل منها عن سؤال مختلف؛ والإنتاجية الكلية للنظام لا تساوي سرعة كل مستخدم.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «خذ أسرع تشغيل، فهو الذي يمثل قدرة الجهاز الحقيقية».</strong></p>
+<p>عند قياس قطعة صغيرة حتمية من الشيفرة يكون لأسرع تشغيل معنى فعلًا: فوثائق <code>timeit</code> في Python تقول إن القيمة الصغرى تعطي الحدّ الأدنى لما يستغرقه الجهاز لتشغيل هذه الشيفرة. لكن سرعة خدمة الاستدلال تتوقف أيضًا على ما كُتب هذه المرة، وكم أصابت المسودة، وكم أصابت الذاكرة المؤقتة. والعدد 97.4 الأسرع في الشكل 27-1 هو مجرد أوفر المرات الثلاث حظًّا. أما ما يواجهه المستخدم كل يوم فهو السرعة قرب الوسيط، ويتذكر أبطأ بضع مرات. والإبلاغ بأسرع مرة وحدها انتقاء لما يخدمك من البيانات.</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: وحدة التجربة، والسيناريوهات التمثيلية، والمقارنة المقترنة، وبوابة الجودة</summary>
+<h3>وحدة التجربة مجموعة شروط كاملة</h3>
+<p>سجّل على الأقل: إصدار المستودع (رقم الإيداع)، والملف التنفيذي ومعاملات البناء، ودالة تلخيص ملف النموذج، وطريقة التكميم، وطرازي CPU وGPU، وقنوات الذاكرة وترددها، وإصدار برنامج التشغيل، وطول السياق، وعدد رموز المدخل، وسقف المخرج، ونمط ذاكرة KV المؤقتة، وحجم كتلة prefill، وإعدادات المسودة، وبرودة الذاكرات المؤقتة أو سخونتها، وتعريف التزامن، ومعاملات أخذ العينات والبذرة (seed). وإذا نقص متغير مهم واحد فقد لا تعود مجموعتا الأعداد قابلتين للمقارنة. وفي وثائق Strata المفصلة جدول واحد يخلط خانات من إصدارات محرك مختلفة، وفقرة مستقلة تضيف نتائج النواة الجديدة. [S03] وهذه الوثيقة تصلح للتمرن على «قراءة جداول الأداء»، لكن لا يجوز أن نعدّ كل خاناتها تجربة موحدة واحدة، فضلًا عن أن نعدّها قياسًا للكتاب.</p>
+<h3>حدود الساعة تُعرَّف واحدًا واحدًا</h3>
+<p>TTFT من طرف إلى طرف: من إرسال الطلب إلى أول رمز إخراج. زمن الانتظار في الصف: من دخول الصف إلى الإذن بالتنفيذ. زمن prefill: من بدء معالجة المدخل الجديد إلى جاهزية الحالة التاريخية المطلوبة. زمن التوليد: يُحسب بنقطتي بدء وانتهاء واضحتين. زمن الاكتمال: من إرسال الطلب إلى حالة نهاية بالنجاح أو بالفشل. ويجوز الإبلاغ بمعدلي التوليد <code>N ÷ مدة التوليد</code> و<code>(N − 1) ÷ (زمن آخر رمز − زمن أول رمز)</code> كليهما، لكن يجب كتابة التعريف بوضوح، ولا يجوز أن يتبدل خفية بين نظام وآخر. وعند N = 1 يكون الثاني غير معرّف، ويجب أن يظهر «غير معرّف» لا معدل ضخم.</p>
+<h3>ثلاثة سيناريوهات تمثيلية لمساعد برمجة</h3>
+<p><strong>فهم مستودع بارد</strong>: مُطالبة نظام طويلة، وتعريفات أدوات، وسياق شيفرة، وأول إجابة؛ والمهم prefill البارد وTTFT وذروة الذاكرة. <strong>تعديل تدريجي</strong>: يمكن إعادة استخدام بادئة كبيرة، ولا يُضاف إلا الخطأ وفرق الشيفرة، والمهم هل الذاكرة المؤقتة فعّالة وما سرعة معالجة الذيل. <strong>حلقة الأدوات والتفرع</strong>: توليد قصير، ومخرجات أدوات، واستكمال، وفتح فرع آخر؛ والمهم استعادة الحالة والإلغاء ودلالات البروتوكول. ويمكن أن تؤخذ أطوال المدخل 1K و4K و16K و32K و64K و128K ونافذة شبه ممتلئة مما هو مدعوم فعلًا، مع ترك مساحة واضحة للإخراج. ولا تستخدم «أقصى سياق» كله مُطالبة ثم تطلب توليدًا إضافيًّا. والحدود المشروعة لنموذج وإعداد بعينهما تُتحقَّق من المحرك الحقيقي: فخادم Strata يرفض مباشرة الطلب الذي يتجاوز فيه «المُطالبة مع سقف المخرج» السياق، ويرد بـ 400، ولا يقتطع أبدًا. [S15]</p>
+<h3>التدفق الواحد والتدفقات المتعددة يجيبان عن أسئلة مختلفة</h3>
+<p>اختبار التدفق الواحد يعنى بتجربة كل مستخدم الفورية. واختبار التدفقات المتعددة يجب أن يبلغ أيضًا بعدد التدفقات النشطة، والإنتاجية الكلية، وTTFT لكل تدفق، وp50 / p95 لفاصل الرموز، ونسبة الفشل، والانتظار في الصف، والعدالة. والوصول المتباعد غير الذروة المتزامنة: واختبار التوسع بتعدد التدفقات يجب أن يثبّت عملية الوصول، وتوزيع أطوال الطلبات، وحالة البرودة والسخونة، ويحتفظ بالأختام الزمنية الخام لكل طلب. ومتوسط عدة معدلات محسوبة غالبًا لا يساوي مجموع الرموز مقسومًا على مجموع الزمن.</p>
+<h3>الاقتران والتناوب والمجالات</h3>
+<p>اجعل مقارنات A/B مقترنة ما أمكن: المُطالبة نفسها تُشغَّل مرة على A ومرة على B، ويُقارَن الفرق، ولا تُشغَّل مُطالبات مختلفة ثلاث مرات لكل منهما ثم تُقارَن الوسائط. وقد نبّه تقرير RTX 3090 عند مقارنة نقاط تقسيم طبقات مختلفة إلى أن مُطالبات كل تشغيل مولَّدة مستقلة، فالترتيب «ليس مقارنة مقترنة» ويجب الحذر في قراءة الوسيط. <span class="ev ev-report">تقرير المصدر الأصلي</span> وتوصي وثائق Strata أيضًا عند A/B بإضافة مفاتيح مثل <code>--pcie-frac 0</code> لتعطي المُطالبة نفسها الإجابة نفسها كل مرة، وإلا اختلفت الإجابة فاختلفت السرعة معها. [S03] وإذا قلّت العينات جدًّا صار p95 غير مستقر، فيجب أن تذكر عدد العينات والسجل الخام؛ وإذا أردت مجال ثقة فاستخدم الإقلاع الذاتي (bootstrap) بإعادة أخذ عينات من العينات الخام. وحذف القيم الشاذة يجب أن تكون له قاعدة مكتوبة سلفًا، مع حفظ سبب الحذف. وانتقاء الأسرع ثم الإبلاغ به لا يحمل أي معنى إحصائي قابل للتعميم.</p>
+<h3>مرّر بوابة الجودة أولًا، ثم قارن السرعة</h3>
+<p>فك الترميز التخميني، والتكميم، وصيغة ذاكرة KV المؤقتة، والذاكرة المؤقتة للبادئة، وإرسال CPU / GPU، كلها قد تغيّر مسار التنفيذ. «أسرع بـ 20%» لكن الإجابة نقصت نصفها، أو لم تُحسب الطلبات الفاشلة، فليس تحسينًا ناجحًا. وتبلغ وثائق Strata عند الإبلاغ عن تسريع بمدى قربه من مرجع FP16 (تباعد KL تحت teacher forcing). [S03] وللتسجيل في كل تشغيل استخدم <code>labs/benchmark_template.csv</code>، ومسار A/B وشروط رفض النشر في <code>labs/benchmark_protocol.md</code>. والخانات التي ليس لها بيانات عتاد حقيقية تبقى فارغة، ولم يملأ الكتاب أي قياس مفترض لبطاقة.</p>
+</details>
