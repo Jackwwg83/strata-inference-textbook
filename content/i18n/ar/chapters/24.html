@@ -1,0 +1,266 @@
+<div class="hook"><span class="eyebrow">ربما لاحظت هذا</span>
+<p>في صفحة الدردشة زر «إيقاف». تضغطه فتتجمد الحروف فورًا. لكن هل توقفت بطاقة الرسوميات فعلًا؟</p>
+<p>في شيفرة Strata تعليق صريح جدًّا (رقما المسألتين #430 و#431): كان العميل إذا أغلق اتصاله بقي الطلب يُشغل المحرك حتى تكتمل الإجابة أو تنتهي قراءة المُطالبة (prompt) كلها. فالشاشة متوقفة منذ زمن، وبطاقة الرسوميات ما زالت تعمل لحساب شخص غادر. يتناول هذا الفصل ثلاثة أمور: كيف يولد الطلب وكيف ينتهي؛ وكيف تنتقل كلمة «قف» طبقة بعد طبقة حتى بطاقة الرسوميات؛ ومن له الحق في تشغيل بطاقتك.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> يعبر الطلب أربع طبقات: المتصفح، واتصال HTTP، وعملية الخدمة، وعملية المحرك. و«الإيقاف» إشارة تنتقل طبقة بعد طبقة ويُتأكَّد منها في كل طبقة؛ أما «المصادقة» فتقرر من يستطيع أن يُدخل الطلبات.</p>
+
+<h2 id="sec-1">24.1 ضغطتَ «إيقاف»، فماذا توقف فعلًا</h2>
+<p>بين ضغطتك على الزر وبين أن تكف بطاقة الرسوميات عن الحساب لهذا الطلب عدة طبقات. ومعنى «توقفت» مختلف في كل طبقة، كما في الشكل 24-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 320" role="img" aria-label="الشكل 24-1: يعبر الطلب خمس طبقات، ومعنى «توقفت» مختلف في كل منها. توقف طبقة عليا لا يعني أن التي تحتها توقفت">
+<text class="f-muted" fill="#5c6d66" x="75" y="18" font-size="12" text-anchor="middle">الطبقة</text>
+<text class="f-muted" fill="#5c6d66" x="152" y="18" font-size="12">متى تُعدّ هذه الطبقة «توقفت»</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="28" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="55" font-size="13" font-weight="600" text-anchor="middle">المتصفح</text>
+<text class="f-text" fill="#182f2b" x="152" y="55" font-size="12">لا يعرض حروفًا جديدة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="84" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="111" font-size="13" font-weight="600" text-anchor="middle">اتصال HTTP</text>
+<text class="f-text" fill="#182f2b" x="152" y="111" font-size="12">يُغلق الاتصال ولا يكتب الخادم فيه</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="140" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="167" font-size="13" font-weight="600" text-anchor="middle">عملية الخدمة</text>
+<text class="f-text" fill="#182f2b" x="152" y="167" font-size="12">يُعلَّم الطلب «ملغى»</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="196" width="130" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="75" y="223" font-size="13" font-weight="600" text-anchor="middle">عملية المحرك</text>
+<text class="f-text" fill="#182f2b" x="152" y="223" font-size="12">تصله STOP ويكتب DONE لهذا الطلب</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="252" width="130" height="44" rx="8"/>
+<text class="f-on" fill="#ffffff" x="75" y="279" font-size="13" font-weight="600" text-anchor="middle">GPU</text>
+<text class="f-text" fill="#182f2b" x="152" y="279" font-size="12">يُنهي ما في يده ولا يبدأ جديدًا</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="314" font-size="12" text-anchor="middle">إشارة الإيقاف تنزل من الأعلى؛ وتوقف العليا لا يعني توقف السفلى</text>
+</svg><figcaption>الشكل 24-1  معنى «الإيقاف» يختلف في كل طبقة. تتوقف طبقة المتصفح أولًا، وتتوقف طبقة GPU أخيرًا، ولا بد أن ينقل أحد الإشارة إلى الأسفل في كل طبقة بينهما.</figcaption></figure>
+<p>لنوضح الأمر، نرسم للطلب أولًا <dfn>آلة حالات</dfn>: يكون الطلب في أي لحظة في حالة واحدة، ولا ينقله إلى حالة أخرى إلا أحداث معينة. هذه هي نسخة الكتاب التعليمية:</p>
+<ul>
+<li><strong>الانتظار في الصف</strong>: وصل الطلب لكن المحرك مشغول بغيره. تخدم Strata تسلسلًا واحدًا في كل مرة افتراضيًّا، ومن يأتي بعده ينتظر في صف FIFO (الداخل أولًا يخرج أولًا). [S15] وأضاف الإصدار v0.1.39 خيارًا يُفعَّل يدويًّا هو <code>"parallel": N</code>: يفك المحرك ترميز N محادثة معًا على الأكثر، وما زاد من الطلبات ينتظر خانة فارغة. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S01] ولا يتناول هذا الفصل إلا المسار الافتراضي ذا التسلسل الواحد.</li>
+<li><strong>قراءة المُطالبة</strong>: يقرأ المحرك مُطالبتك كتلة كتلة (مرحلة prefill التي شرحناها في الفصل 1).</li>
+<li><strong>التوليد</strong>: كتابة الإجابة رمزًا بعد رمز.</li>
+<li><strong>اكتمل / أُلغي / فشل</strong>: ثلاث نهايات. يجب أن ينتهي كل طلب إلى واحدة منها ولا يبقى معلقًا.</li>
+<li><strong>قيد الإلغاء</strong>: قيل «قف» لكن المحرك لم يؤكد أنه توقف. وهذه الحالة الوسطى أسهل ما يُهمَل.</li>
+</ul>
+<p>أسماء الحالات هذه تجريد من الكتاب، وليست تعدادًا (enum) في شيفرة المصدر الأصلي. ما تسجله Strata فعلًا هو أن الطلب «في الصف» أو «قيد التوليد»، مع عبارة عن المرحلة مثل «تقرأ المُطالبة» و«تكتب الإجابة». <span class="ev ev-code">حقيقة من الشيفرة</span> وفي المحاكي التالي أُبطئت العملية كلها:</p>
+<div class="viz" data-viz="request-lifecycle"><figure class="fig"><svg viewBox="0 0 400 276" role="img" aria-label="الشكل 24-2: آلة الحالات التعليمية للطلب. الانتظار والقراءة والتوليد والاكتمال هو المسار العادي؛ وقيد الإلغاء حالة وسطى بعد إلغاء القراءة أو التوليد، وبعد التأكيد يصير الطلب ملغى؛ وإذا انقطع المحرك صار فاشلًا">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="16" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="64" y="39" font-size="14" text-anchor="middle">الانتظار</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="152" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="200" y="39" font-size="14" text-anchor="middle">القراءة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="288" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="39" font-size="14" text-anchor="middle">التوليد</text>
+<rect class="f-accent" fill="#136d5a" x="152" y="104" width="96" height="36" rx="8"/><text class="f-on" fill="#ffffff" x="200" y="127" font-size="14" font-weight="600" text-anchor="middle">قيد الإلغاء</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="288" y="104" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="127" font-size="14" text-anchor="middle">اكتمل</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="152" y="192" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="200" y="215" font-size="14" text-anchor="middle">أُلغي</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="288" y="192" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="336" y="215" font-size="14" text-anchor="middle">فشل</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M112 34H150M248 34H286M336 52V102M200 52V102M296 52L240 104M200 140V190M64 52V210H150"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M248 130L300 192"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="248" font-size="12" text-anchor="middle">الخط المتقطع: انقطع المحرك، فتدخل «الكلب الحارس».</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="266" font-size="12" text-anchor="middle">في النسخة التفاعلية تستطيع الضغط على «إلغاء» في أي حالة</text>
+</svg><figcaption>الشكل 24-2  آلة الحالات التعليمية للطلب. إذا أُلغيت القراءة أو التوليد دخل الطلب أولًا «قيد الإلغاء»، ولا يصير «أُلغي» إلا بعد أن يؤكد المحرك توقفه. والنهايات ثلاث فقط: اكتمل، أُلغي، فشل.</figcaption></figure></div>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> مخطط حالات العملية في مقرر «نظم التشغيل» (جاهزة، تعمل، محجوبة، منتهية) يُرسم بالطريقة نفسها. وفائدة رسم آلة الحالات أنك تفحصها بندًا بندًا: إلى أين تذهب كل حالة عند كل حدث؟ وهل توجد حالة لا تصل أبدًا إلى نهاية؟</p>
+
+<h2 id="sec-2">24.2 العمليات والخيوط: من الذي يعمل حقًّا</h2>
+<p>لتعرف إلى من توجّه كلمة «قف»، عليك أن تعرف من الذي يعمل.</p>
+<aside class="primer" id="c24-process-thread">
+<h3>دورة حياة العملية والخيط</h3>
+<p><dfn>العملية</dfn> (process) برنامج قيد التشغيل، يخصص له نظام التشغيل ذاكرة مستقلة، ومعها الملفات المفتوحة والاتصالات الشبكية وغيرها من الموارد. لا ترى عمليتان ذاكرة إحداهما الأخرى افتراضيًّا، ولا تتبادلان الرسائل إلا عبر قنوات مثل <dfn>الأنابيب</dfn> (pipes) والشبكة. وإذا انتهت العملية استردّ نظام التشغيل ذاكرتها وذاكرة الفيديو (VRAM) التي شغلتها.</p>
+<p><dfn>الخيط</dfn> (thread) مسار تنفيذ داخل العملية. وللعملية الواحدة عدة خيوط، تتشارك الذاكرة نفسها، فيسهل تبادل البيانات بينها، لكن يسهل أن يتعثر بعضها ببعض.</p>
+<p>ولكليهما دورة حياة: الإنشاء، ثم التشغيل، ثم الانتظار (مثل انتظار بيانات الشبكة)، ثم الانتهاء. وللانتهاء طريقان: أن <strong>ينتهي بنفسه</strong> أو أن <strong>ينهيه غيره</strong>. وفي أنظمة شبيهة بـ Unix تستطيع عملية أن ترسل إشارة إلى أخرى: SIGTERM معناها «من فضلك اخرج»، وتتيح للطرف الآخر أن يرتب أموره أولًا؛ وSIGKILL معناها «انتهِ حالًا»، ولا تعطي الطرف الآخر أي فرصة للتنظيف.</p>
+<p>وصلة هذا بـ Strata: الخادم والمحرك <strong>عمليتان</strong>، تتبادلان النص سطرًا سطرًا عبر الأنابيب؛ وداخل الخادم عدة خيوط تتقاسم العمل، كما في الشكل 24-3.</p>
+<p class="further">قراءة إضافية: <a href="https://ar.wikipedia.org/wiki/%D8%B9%D9%85%D9%84%D9%8A%D8%A9_%28%D8%AD%D9%88%D8%B3%D8%A8%D8%A9%29" target="_blank" rel="noopener noreferrer">ويكيبيديا: عملية (حوسبة)</a> · <a href="https://en.wikipedia.org/wiki/Thread_%28computing%29" target="_blank" rel="noopener noreferrer">ويكيبيديا: Thread (بالإنجليزية)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-intro.pdf" target="_blank" rel="noopener noreferrer">OSTEP: العملية (بالإنجليزية)</a> · <a href="https://docs.python.org/3/library/subprocess.html" target="_blank" rel="noopener noreferrer">وثائق Python: subprocess (بالإنجليزية)</a> · <a href="https://man7.org/linux/man-pages/man7/signal.7.html" target="_blank" rel="noopener noreferrer">man 7 signal</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="الشكل 24-3: في عملية الخدمة في Strata خيط للطلب وخيط للمراقبة وخيط للقراءة، يتناوبون على المحرك بقفل FIFO؛ والمحرك عملية أخرى، وبينهما أسطر نصية عبر الإدخال والإخراج القياسيين">
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="10" width="380" height="170" rx="10"/>
+<text class="f-text" fill="#182f2b" x="20" y="31" font-size="13" font-weight="600">عملية خدمة Python: serve/server.py</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="76" y="67" font-size="13" font-weight="600" text-anchor="middle">خيط الطلب</text>
+<text class="f-muted" fill="#5c6d66" x="76" y="88" font-size="12" text-anchor="middle">واحد لكل اتصال</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="144" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="67" font-size="13" font-weight="600" text-anchor="middle">خيط المراقبة</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="88" font-size="12" text-anchor="middle">فحص كل 0.5 ثانية</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="268" y="44" width="112" height="56" rx="6"/>
+<text class="f-text" fill="#182f2b" x="324" y="67" font-size="13" font-weight="600" text-anchor="middle">خيط القراءة</text>
+<text class="f-muted" fill="#5c6d66" x="324" y="88" font-size="12" text-anchor="middle">يصفّ مخرجات المحرك</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="116" width="360" height="48" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="145" font-size="13" text-anchor="middle">قفل FIFO: افتراضيًّا طلب واحد فقط يستخدم المحرك في اللحظة</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 180V228M250 228V180"/>
+<path class="f-muted" fill="#5c6d66" d="M100 232l-5-8h10z"/>
+<path class="f-muted" fill="#5c6d66" d="M250 176l-5 8h10z"/>
+<text class="f-muted" fill="#5c6d66" x="108" y="200" font-size="12">stdin: GEN وSTOP وQUIT</text>
+<text class="f-muted" fill="#5c6d66" x="258" y="222" font-size="12">stdout: T وPP وDONE</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="234" width="380" height="56" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="257" font-size="13" font-weight="600" text-anchor="middle">عملية المحرك: strata --serve</text>
+<text class="f-on" fill="#ffffff" x="200" y="278" font-size="12" text-anchor="middle">الأوزان وذاكرة الخبراء المؤقتة وVRAM كلها من شأنه</text>
+</svg><figcaption>الشكل 24-3  الخادم والمحرك عمليتان تتبادلان النص سطرًا سطرًا عبر الأنابيب. وكل خيط في الخادم له شأنه. وفي الإعداد الافتراضي يضمن قفل FIFO أن طلبًا واحدًا فقط يستخدم المحرك في اللحظة.</figcaption></figure>
+<p>يشغّل الخادم <code>strata --serve</code> بالدالة <code>subprocess.Popen</code> في Python، ويوصل إدخاله القياسي وإخراجه القياسي بأنبوبين. <span class="ev ev-code">حقيقة من الشيفرة</span> وبعد أن يحمّل المحرك الأوزان يكتب بضعة أسطر <code>INFO</code>، ثم سطر <code>READY</code> ومعه طول السياق؛ فإذا كان السطر يحمل كلمة <code>stop</code> أيضًا فهذا يعني أن نسخة المحرك تدعم الإيقاف في المنتصف. ولا يعدّ الخادم المحرك «حيًّا» إلا بعد أن يقرأ <code>READY</code>. وبعد ذلك يكتب الخادم أمر <code>GEN</code> في سطر ليقدّم طلبًا، فيردّ المحرك بـ <code>T</code> (رمز واحد) أو <code>PP</code> (تقدم قراءة المُطالبة) أو <code>DONE</code> (انتهى) أو <code>ERR</code> (خطأ).</p>
+<p>وهناك خيط قراءة مخصص يضع كل سطر من مخرجات المحرك في صف. فيستطيع خيط معالجة الطلب أن ينتظر السطر التالي «بمهلة»: وإذا لم يأتِ أرسل نبضة وفحص علم الإلغاء، بدل أن ينتظر بغباء بلا نهاية. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>وقد تنتهي عملية المحرك فجأة. ففي الشيفرة استثناء مخصص هو <code>EngineDied</code>، وفي تعليقه أشهر الأسباب: على Linux قتلها OOM killer عند نفاد الذاكرة. [S15] فينتهي الطلب الحالي بخطأ، وعند وصول الطلب التالي يعيد الخادم تشغيل المحرك بالأمر نفسه. ومنذ v0.1.39، إذا خرجت العملية الجديدة قبل أن تقول <code>READY</code> انتظر الخادم 15 ثانية ثم أعاد المحاولة، حتى 3 مرات على الأكثر: فقد تحتاج ذاكرة الفيديو التي يحتلها محرك مات للتوّ إلى وقت حتى تعود. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>وإغلاق المحرك إغلاقًا عاديًّا له أصوله. يمشي الخادم على ثلاث خطوات، وينتظر في كل خطوة 20 ثانية على الأكثر، كما في الشكل 24-4.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="الشكل 24-4: إغلاق عملية المحرك على ثلاث خطوات: يكتب QUIT لتنتهي بنفسها، فإن لم تنتهِ فـ terminate، فإن لم تنتهِ فـ kill؛ وإذا بقيت بعد الخطوات الثلاث يُبلَّغ عن خطأ">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">إغلاق عملية المحرك: اللين أولًا ثم الشدة</text>
+<rect class="f-soft" fill="#e5f1df" x="8" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="51" y="54" font-size="13" font-weight="600" text-anchor="middle">QUIT</text>
+<text class="f-text" fill="#182f2b" x="51" y="76" font-size="12" text-anchor="middle">يحرّر المحرك</text>
+<text class="f-text" fill="#182f2b" x="51" y="94" font-size="12" text-anchor="middle">ذاكرته بنفسه</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="106" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="149" y="54" font-size="13" font-weight="600" text-anchor="middle">terminate</text>
+<text class="f-text" fill="#182f2b" x="149" y="76" font-size="12" text-anchor="middle">إشارة إنهاء</text>
+<text class="f-text" fill="#182f2b" x="149" y="94" font-size="12" text-anchor="middle">(SIGTERM)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="204" y="32" width="86" height="76" rx="8"/>
+<text class="f-text" fill="#182f2b" x="247" y="54" font-size="13" font-weight="600" text-anchor="middle">kill</text>
+<text class="f-text" fill="#182f2b" x="247" y="76" font-size="12" text-anchor="middle">إنهاء بالقوة</text>
+<text class="f-text" fill="#182f2b" x="247" y="94" font-size="12" text-anchor="middle">بلا فرصة تنظيف</text>
+<rect class="f-warn" fill="#9e5d24" x="302" y="32" width="90" height="76" rx="8"/>
+<text class="f-on" fill="#ffffff" x="347" y="54" font-size="13" font-weight="600" text-anchor="middle">لم تنتهِ بعد</text>
+<text class="f-on" fill="#ffffff" x="347" y="76" font-size="12" text-anchor="middle">يُبلَّغ بالخطأ،</text>
+<text class="f-on" fill="#ffffff" x="347" y="94" font-size="12" text-anchor="middle">ولا يُدَّعى التحرير</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M94 70H104M192 70H202M290 70H300"/>
+<text class="f-muted" fill="#5c6d66" x="51" y="128" font-size="12" text-anchor="middle">انتظار 20 ثانية</text>
+<text class="f-muted" fill="#5c6d66" x="149" y="128" font-size="12" text-anchor="middle">انتظار 20 ثانية</text>
+<text class="f-muted" fill="#5c6d66" x="247" y="128" font-size="12" text-anchor="middle">انتظار 20 ثانية</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">لماذا اللين أولًا: حجز المحرك عشرات GB من الذاكرة،</text>
+<text class="f-text" fill="#182f2b" x="10" y="184" font-size="12">وتحريره لها بنفسه بترتيب أأمن من أن يستردها نظام التشغيل بالقوة.</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">على Windows يوضع المحرك في «كائن مهمة»: فأيًّا كانت طريقة</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">خروج الخادم، ينهي نظام التشغيل المحرك معه.</text>
+</svg><figcaption>الشكل 24-4  ثلاث درجات لإغلاق المحرك، يُمنح لكل درجة 20 ثانية. وإذا فشلت الثلاث يُبلَّغ بصدق أن «المحرك لم ينتهِ بعد»، ولا يُتظاهر بأن VRAM والذاكرة قد عادت.</figcaption></figure>
+<p>يشرح التعليق لماذا الخطوة الأولى هي <code>QUIT</code>: فالمحرك يحرر ذاكرته بنفسه، وفكّ تثبيت عشرات GB من الذاكرة المثبّتة (pinned memory) يحتاج وقتًا. <span class="ev ev-code">حقيقة من الشيفرة</span> فإذا فشلت الخطوات الثلاث رمى الخادم <code>EngineStuck</code>، و<strong>يُبقي</strong> سجل هذه العملية، ولا يدّعي أن ذاكرة الفيديو والذاكرة قد عادت. وعلى Windows يضع الخادم المحرك في كائن مهمة مضبوط على «الإنهاء عند الإغلاق». فحتى لو أغلقت نافذة وحدة التحكم مباشرة انتهى المحرك معها، فلا يصير عملية يتيمة بلا مسؤول. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+
+<h2 id="sec-3">24.3 الإلغاء: تمرير «قف» طبقة بعد طبقة</h2>
+<aside class="primer" id="c24-cancel">
+<h3>الإلغاء: لماذا لا نملك إلا أن نقول «من فضلك توقف»</h3>
+<p>أبسط طريقة للإلغاء أن تقطع الخيط العامل من الخارج. لكن هذا خطير: فقد يكون ممسكًا بقفل، أو في منتصف كتابة بنية بيانات، أو مستعيرًا قطعة من ذاكرة الفيديو. وبعد قطعه لا يحرر أحد القفل، وتبقى البيانات نصفها جديد ونصفها قديم، فيخطئ كل من يأتي بعده.</p>
+<p>لذلك تستخدم معظم الأنظمة الفعلية <dfn>الإلغاء التعاوني</dfn>: يكتفي الخارج برفع <dfn>علم إلغاء</dfn>، ويتفقد العامل العلم عند <dfn>نقاط فحص</dfn> متفق عليها، فإذا رآه رتّب أموره بنفسه ثم خرج. والكائن <code>threading.Event</code> في Python، وأداة <code>context</code> في Go، وأداة <code>CancellationToken</code> في C#، كلها بهذه الفكرة.</p>
+<p>ومنها قاعدتان: الأولى أن الإلغاء لا يتم في لحظة، وأسوأ حالاته الانتظار حتى نقطة الفحص التالية؛ والثانية أنه كلما تباعدت نقاط الفحص بطؤ الإلغاء. فـ«قلتُ قف» و«توقف فعلًا» شيئان مختلفان، وما بينهما هو «قيد الإلغاء» في الشكل 24-2.</p>
+<p class="further">قراءة إضافية: <a href="https://docs.python.org/3/library/threading.html" target="_blank" rel="noopener noreferrer">وثائق Python: threading (كائن Event) (بالإنجليزية)</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/threads-intro.pdf" target="_blank" rel="noopener noreferrer">OSTEP: التزامن والخيوط (بالإنجليزية)</a> · <a href="https://en.wikipedia.org/wiki/Multithreading_%28computer_architecture%29" target="_blank" rel="noopener noreferrer">ويكيبيديا: Multithreading (بالإنجليزية)</a></p>
+</aside>
+<p>الإلغاء في Strata تعاوني. في بداية كل طلب ينشئ الخادم <code>threading.Event</code> يكون علم الإلغاء. وهناك طريقان لرفعه:</p>
+<ul>
+<li><strong>تعذّر الكتابة</strong>: إذا حدث خطأ عند كتابة حدث SSE في الاتصال فهذا يعني أن العميل غادر، فيُرفع العلم فورًا. ويقول التعليق: «العميل غادر: أوقف المحرك». <span class="ev ev-code">حقيقة من الشيفرة</span></li>
+<li><strong>خيط المراقبة</strong>: ولا يكفي خطأ الكتابة وحده. فعند قراءة مُطالبة طويلة لا يكتب الخادم تعليق البقاء حيًّا إلا بعد وقت طويل، وأول كتابة بعد انقطاع الاتصال تنجح عادةً. لذلك يبدأ كل طلب خيط مراقبة يفحص الاتصال كل 0.5 ثانية: فإذا بدا الاتصال «قابلًا للقراءة» ولا يُقرأ منه أي بايت، فالطرف الآخر أغلقه، ويُرفع العلم. <span class="ev ev-code">حقيقة من الشيفرة</span> وهذا هو إصلاح #430 و#431 المذكورتين في البداية.</li>
+</ul>
+<p>وبعد رفع العلم يسري مفعوله عند نقاط الفحص، كما في الشكل 24-5.</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="الشكل 24-5: ست خطوات من انقطاع العميل إلى تحرير FIFO: اكتشاف الانقطاع، رفع علم الإلغاء، كتابة STOP في حلقة التوليد، توقف المحرك عند نقطة فحص، قراءة DONE لهذا الطلب، تحرير FIFO">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="8" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">① ينقطع العميل (ضغطتَ «إيقاف»)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="56" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="79" font-size="13" text-anchor="middle">② خيط المراقبة يكتشف الانقطاع (0.5 ثانية على الأكثر)</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="104" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="127" font-size="13" text-anchor="middle">③ يُرفع علم الإلغاء cancel</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="152" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="175" font-size="13" text-anchor="middle">④ حلقة انتظار المحرك ترى العلم، وتكتب سطر STOP</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="200" width="320" height="36" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="223" font-size="13" text-anchor="middle">⑤ يتوقف المحرك عند نقطة الفحص التالية</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="248" width="320" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="271" font-size="13" text-anchor="middle">⑥ يقرأ DONE لهذا الطلب، ويحرّر FIFO</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V54M200 92V102M200 140V150M200 188V198M200 236V246"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="310" font-size="12" text-anchor="middle">أثناء التوليد: الرمز التالي هو نقطة الفحص، وهذا سريع</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="330" font-size="12" text-anchor="middle">أثناء القراءة: يجب إنهاء الكتلة التي في اليد، وقد يستغرق ذلك أكثر من عشر ثوانٍ</text>
+</svg><figcaption>الشكل 24-5  خطوات الإلغاء الست. الثلاث الأولى لا تستغرق ثانية؛ أما الخطوة ⑤ فتنتظر وصول المحرك إلى نقطة فحص، والمرحلة التي أُلغي فيها الطلب تحدد مدة الانتظار.</figcaption></figure>
+<p>أين نقطة الفحص في الخطوة ⑤؟ أثناء التوليد تُرى العلامة مع كل رمز ينتجه المحرك. وأثناء قراءة المُطالبة يقرأ المحرك كتلة كتلة: فالدالة <code>should_stop</code> في <code>prefill.hpp</code> تفحص مرة واحدة <strong>قبل بدء كل كتلة</strong>، فإن أعادت «صحيح» انتهى مبكرًا برسالة الخطأ «cancelled». <span class="ev ev-code">حقيقة من الشيفرة</span>[S12] وتنص تعليقات الخادم أيضًا على أن STOP المرسلة أثناء قراءة المُطالبة لا تُرى إلا بعد أن تنتهي الكتلة الحالية. وفي الكتلة الواحدة حتى 32768 رمزًا. [S15] ومن هذا حُسب «أسوأ زمن انتظار» في الرسم التفاعلي.</p>
+<p>والخطوة ⑥ لا تقل أهمية. فبعد إرسال STOP يواصل الخادم قراءة مخرجات المحرك حتى يصل إلى <code>DONE</code> <strong>الخاص بهذا الطلب</strong>، ويبقى ممسكًا بقفل FIFO طوال ذلك. ويشرح التعليق السبب: لو تركه مبكرًا لبقي في صف المحرك <code>DONE</code> متخلف من الطلب السابق، فيحسبه الطلب التالي إشارة انتهائه هو. <span class="ev ev-code">حقيقة من الشيفرة</span> وهذه الخطوة أيضًا لها مهلة: فلا ينتظر صدى STOP إلى الأبد، لأن FIFO محجوز طوال الانتظار وكل من خلفه في الصف ينتظر.</p>
+<p>و<code>MockEngine</code> المستخدم في الاختبار يلتزم بالعقد نفسه: يفحص علم الإلغاء قبل أن يُخرج كل رمز. [S15] ولذلك يمكن اختبار منطق الإلغاء على جهاز بلا GPU.</p>
+
+<h2 id="sec-4">24.4 إذا علق المحرك: الكلب الحارس</h2>
+<p>الإلغاء يعتمد على «تعاون» المحرك. فماذا لو تجمد المحرك ولم ينطق بكلمة؟ يحتاج الخادم إلى <dfn>كلب حارس</dfn> (watchdog): إذا مضى وقت بلا أي نشاط حكم بأن شيئًا فسد.</p>
+<p>والصعوبة في «كم يُعدّ طويلًا». عند التوليد يكتب المحرك سطرًا لكل رمز، فالجو صاخب؛ أما عند قراءة مُطالبة طويلة جدًّا فقد يصمت عدة دقائق. وإذا كان الكلب الحارس يحكم حكمًا واحدًا للجميع، فإما أن يقتل محركًا يقرأ بجد، وإما أن ينتظر طويلًا محركًا متجمدًا حقًّا. وطريقة Strata أن تعطي مهلًا مختلفة بحسب المرحلة [S15]:</p>
+<ul>
+<li>المهلة الأساسية 300 ثانية: ما دام الطلب جاريًا، فإذا مضت هذه المدة بلا أي مخرجات من المحرك حُكم بانقطاعه. ويمكن تغييرها في الإعداد، والقيمة 0 تعني الانتظار إلى الأبد.</li>
+<li>أول كتلة في قراءة المُطالبة: فوق 300 ثانية، يُضاف زمن هذه الكتلة على افتراض أن «أبطأ حاسوب يقرأ 50 رمزًا فقط في الثانية».</li>
+<li>بعد قراءة كتلة: يجوز للكتلة التالية أن تستخدم حتى 3 أضعاف الزمن الفعلي للكتلة السابقة، على ألا يقل عن 300 ثانية.</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="الشكل 24-6: مهل الكلب الحارس. أثناء التوليد 300 ثانية؛ وأول كتلة في قراءة المُطالبة نحو 955 ثانية؛ وبعد قراءة كتلة على حاسوب سريع تبقى 300 ثانية؛ وعلى حاسوب بطيء نحو 983 ثانية">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">كم يستطيع المحرك أن يصمت (ثوانٍ، طول الشريط بالنسبة)</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">أثناء التوليد: يُعاد العدّ مع كل رمز</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="50" width="90" height="14"/>
+<text class="f-text" fill="#182f2b" x="106" y="62" font-size="12">300</text>
+<text class="f-text" fill="#182f2b" x="10" y="92" font-size="12">أول كتلة في القراءة: 300 + 32768 ÷ 50</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="98" width="286.6" height="14"/>
+<text class="f-text" fill="#182f2b" x="302" y="110" font-size="12">≈ 955</text>
+<text class="f-text" fill="#182f2b" x="10" y="140" font-size="12">الكتل التالية، حاسوب سريع: max(300, 3 × 15.1)</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="146" width="90" height="14"/>
+<text class="f-text" fill="#182f2b" x="106" y="158" font-size="12">300</text>
+<text class="f-text" fill="#182f2b" x="10" y="188" font-size="12">الكتل التالية، حاسوب بطيء: max(300, 3 × 327.7)</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="194" width="294.9" height="14"/>
+<text class="f-text" fill="#182f2b" x="310" y="206" font-size="12">≈ 983</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">الكتلة 32768 رمزًا؛ السريع يقرأ 2171 في الثانية، والبطيء 100</text>
+</svg><figcaption>الشكل 24-6  تتغير مهلة الكلب الحارس بحسب مرحلة العمل. وعندما يقرأ حاسوب بطيء كتلة كبيرة من المُطالبة تتسع المهلة تلقائيًّا إلى أكثر من عشر دقائق، لئلا يُقتل محرك يعمل. <span class="ev ev-est">تقدير تعليمي</span></figcaption></figure>
+<p>الأرقام في الشكل محسوبة بتعويض ثوابت الشيفرة. <span class="ev ev-est">تقدير تعليمي</span> أول كتلة: 300 + 32768 ÷ 50 ≈ 955 ثانية. والحاسوب السريع بحسب القياس الفعلي عند المصدر الأصلي يقرأ 2171 رمزًا في الثانية، فتستغرق قراءة كتلة من 32768 رمزًا نحو 15.1 ثانية، وثلاثة أضعافها 45.3 ثانية، وهي دون 300 ثانية، فتبقى المهلة 300 ثانية. أما الحاسوب البطيء فيقرأ 100 رمز في الثانية، فتستغرق الكتلة 327.7 ثانية، وثلاثة أضعافها نحو 983 ثانية.</p>
+<p>وماذا بعد انتهاء المهلة؟ يسمي التعليق هذا «اختلال التزامن بين الطرفين»: الخيط الرئيسي في المحرك ينتظر الأمر التالي، والخادم ينتظر نهاية هذا الطلب. فينهي الخادم عملية المحرك، وينتهي الطلب بخطأ، ويُعاد تشغيل المحرك عند وصول الطلب التالي. [S15] وإنهاء العملية وإن كان عنيفًا فله ميزة: أن VRAM والذاكرة تعودان حتمًا مع العملية.</p>
+<p>وفي مستوى أدنى الفكرة نفسها. فللمُتحقِّق <code>Verifier</code> الذي يتحقق من رموز المسودة دالة <code>release_gpu_waits</code>: إذا علقت دفعة من حسابات GPU ولم تنتهِ انتهاءً عاديًّا، أطلقت كل أعلام الانتظار على GPU بالقوة لتفرغ الدفعة. لكن هذا المُتحقِّق <strong>يرفض</strong> بعد ذلك تنفيذ أي نافذة حساب جديدة، لأن الدفعة السابقة انتهت في ظروف لا يُوثَق بها. <span class="ev ev-code">حقيقة من الشيفرة</span>[S08] فالتفريغ بالقوة لا يساوي الاكتمال العادي، ولا يجوز التظاهر بأن شيئًا لم يحدث ومواصلة خدمة الطلب التالي.</p>
+
+<h2 id="sec-5">24.5 من يستطيع استخدام بطاقتك: المصادقة وAPI Key</h2>
+<p>فيما سبق تحدثنا عن «كيف نوقف». وهذا القسم عن «من يستطيع أن يبدأ». فإذا استطاع غيرك أن يرسل إلى Strata ما يشاء من الطلبات، صارت بطاقتك مورِدًا عامًّا.</p>
+<aside class="primer" id="c24-auth">
+<h3>المصادقة وAPI Key</h3>
+<p>تجيب <dfn>المصادقة</dfn> عن «من أنت»، وتجيب <dfn>التفويض</dfn> عن «ماذا تستطيع أن تفعل». وأبسط طرق المصادقة <dfn>API Key</dfn>: سلسلة طويلة من الأحرف العشوائية يتشاركها الخادم والعميل مسبقًا، ويضعها العميل في ترويسة HTTP في كل طلب، والكتابة الشائعة <code>Authorization: Bearer المفتاح</code>. فإذا تطابق المفتاح سمح الخادم، وإن لم يتطابق ردّ بـ 401.</p>
+<p>وAPI Key كمفتاح مشترك: من أخذه فتح الباب، لذلك يجب أن يبقى سرًّا، ولا يُكتب في شيفرة صفحة الويب ولا يُرفع إلى مستودع عام. والأفضل أن يمر عبر HTTPS، وإلا رآه من في الطريق.</p>
+<p>وللمقارنة نفسها أصول. المقارنة العادية بين السلسلتين تعيد النتيجة عند أول حرف مختلف، فكلما طالت البادئة الصحيحة في تخمينك طال زمن المقارنة. فإذا قاس المهاجم الزمن خمّن المفتاح خانة خانة. وهذا النوع من الهجمات التي تستغل «المنتجات الجانبية» كالزمن والطاقة لتسريب المعلومات يسمى <dfn>هجوم القناة الجانبية</dfn>، وهذا النوع منه <dfn>هجوم التوقيت</dfn>. والدفاع: <dfn>المقارنة بزمن ثابت</dfn>، أي أن تُكمل مقارنة السلسلة كلها أيًّا كان موضع أول اختلاف.</p>
+<p class="further">قراءة إضافية: <a href="https://en.wikipedia.org/wiki/API_key" target="_blank" rel="noopener noreferrer">ويكيبيديا: API key (بالإنجليزية)</a> · <a href="https://en.wikipedia.org/wiki/Side-channel_attack" target="_blank" rel="noopener noreferrer">ويكيبيديا: Side-channel attack (بالإنجليزية)</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Authorization" target="_blank" rel="noopener noreferrer">MDN: ترويسة Authorization (بالإنجليزية)</a> · <a href="https://docs.python.org/3/library/hmac.html" target="_blank" rel="noopener noreferrer">وثائق Python: hmac.compare_digest (بالإنجليزية)</a> · <a href="https://www.rfc-editor.org/rfc/rfc6750" target="_blank" rel="noopener noreferrer">RFC 6750: رموز Bearer</a></p>
+</aside>
+<p>خط الدفاع الأول في Strata هو <strong>الاستماع إلى الجهاز المحلي وحده افتراضيًّا</strong>: يستمع الخادم افتراضيًّا إلى <code>127.0.0.1</code>، فلا تستطيع أجهزة أخرى الاتصال به أصلًا. <span class="ev ev-code">حقيقة من الشيفرة</span> وعندئذ يقول لك README إنك تستطيع أن تكتب في التطبيق أي API Key. [S01] وإذا أردت الوصول من هاتف أو حاسوب آخر وجب أن تغيّر الاستماع إلى <code>0.0.0.0</code>، ونص README هو «اضبط مفتاحًا حتمًا». [S01] وإذا غيّرت عنوان الاستماع ولم تضبط مفتاحًا طبع الخادم عند الإقلاع سطر تحذير: لا API Key، فأي أحد في الشبكة يستطيع استخدام هذا النموذج. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>وبعد ضبط المفتاح يجب أن يحمله كل طلب إلى <code>/v1/*</code>: يُكتب <code>Authorization: Bearer …</code>، أو في الترويسة <code>x-api-key</code> (يستخدمها العملاء بأسلوب Anthropic). والمقارنة بـ <code>hmac.compare_digest</code>، ويكتب تعليق الشيفرة «زمن ثابت»؛ وإذا فشلت المقارنة رُدّ بـ 401 من النوع <code>authentication_error</code>. <span class="ev ev-code">حقيقة من الشيفرة</span> وعملية الحكم كلها في الشكل 24-7.</p>
+<figure class="fig"><svg viewBox="0 0 400 310" role="img" aria-label="الشكل 24-7: مسار فحص API Key في Strata: إن لم يُضبط مفتاح سُمح مباشرة؛ وإن ضُبط يُستخرج المفتاح الذي يحمله العميل ويُقارَن بزمن ثابت، فإن تطابق عولج الطلب وإلا رُدّ بـ 401">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="8" width="200" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">يصل طلب إلى /v1/…</text>
+<rect class="f-soft" fill="#e5f1df" x="100" y="62" width="200" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="84" font-size="13" text-anchor="middle">هل ضُبط API Key في الإعداد؟</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="316" y="62" width="76" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="354" y="84" font-size="13" text-anchor="middle">يُسمح</text>
+<text class="f-muted" fill="#5c6d66" x="308" y="56" font-size="12" text-anchor="middle">لم يُضبط</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="122" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="144" font-size="13" text-anchor="middle">يُؤخذ من ترويسة Bearer أو x-api-key</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="114" font-size="12">ضُبط</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="176" width="240" height="34" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="198" font-size="13" text-anchor="middle">مقارنة hmac.compare_digest</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="236" width="160" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="258" font-size="13" text-anchor="middle">تطابق: يُعالَج الطلب</text>
+<rect class="f-warn" fill="#9e5d24" x="220" y="236" width="160" height="34" rx="8"/>
+<text class="f-on" fill="#ffffff" x="300" y="258" font-size="13" text-anchor="middle">لا تطابق: يُردّ بـ 401</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V60M300 79H314M200 96V120M200 156V174M160 210V222H100V234M240 210V222H300V234"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="300" font-size="12" text-anchor="middle">وقبله حاجز آخر: استماع إلى 127.0.0.1 فقط، فلا تتصل أجهزة أخرى</text>
+</svg><figcaption>الشكل 24-7  فحص API Key في Strata. الاستماع إلى الجهاز المحلي وحده افتراضيًّا، فيأمن الأمر بلا مفتاح؛ وإذا فُتح للخارج صار المفتاح القفل الوحيد، ويجب أن تكون المقارنة بزمن ثابت.</figcaption></figure>
+<p>لماذا يجب أن يكون الزمن ثابتًا؟ المحاكي التالي يجعلك تؤدي دور المهاجم:</p>
+<div class="viz" data-viz="key-compare-timing"><figure class="fig"><svg viewBox="0 0 400 226" role="img" aria-label="الشكل 24-8: عند تخمين الخانة الأولى من المفتاح، في المقارنة حرفًا حرفًا يقارن المرشح الصحيح حرفًا إضافيًّا فيكون عموده أعلى بوضوح؛ وفي المقارنة بزمن ثابت يستغرق المرشحون الـ 16 الزمن نفسه تمامًا">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="13" font-weight="600" text-anchor="middle">مقارنة حرفًا حرفًا: تتوقف عند الخطأ</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="13" font-weight="600" text-anchor="middle">مقارنة بزمن ثابت</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="12" text-anchor="middle">المرشح الصحيح يقارن حرفًا إضافيًّا</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="38" font-size="12" text-anchor="middle">أيًّا كان التخمين تُكمل الأحرف الـ 4</text>
+<rect class="f-accent" fill="#136d5a" x="16" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="27" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="38" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="49" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="60" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="71" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="82" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="93" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="104" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="115" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="126" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="137" y="126" width="8" height="24"/><rect class="f-warn" fill="#9e5d24" x="148" y="102" width="8" height="48"/><rect class="f-accent" fill="#136d5a" x="159" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="170" y="126" width="8" height="24"/><rect class="f-accent" fill="#136d5a" x="181" y="126" width="8" height="24"/>
+<rect class="f-accent" fill="#136d5a" x="216" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="227" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="238" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="249" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="260" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="271" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="282" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="293" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="304" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="315" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="326" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="337" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="348" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="359" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="370" y="54" width="8" height="96"/><rect class="f-accent" fill="#136d5a" x="381" y="54" width="8" height="96"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 150H194M210 150H394"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="12" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="152" y="168" font-size="12" text-anchor="middle">c</text>
+<text class="f-muted" fill="#5c6d66" x="185" y="168" font-size="12" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="168" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="385" y="168" font-size="12" text-anchor="middle">f</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="194" font-size="12" text-anchor="middle">المرشحون الـ 16 للخانة 1 (المفتاح الحقيقي يبدأ بـ c)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="214" font-size="12" text-anchor="middle">النسخة التفاعلية: خمّن خانة خانة وانظر كم محاولة تحتاج</text>
+</svg><figcaption>الشكل 24-8  المقارنة حرفًا حرفًا تكتب «كم خانة خمّنتَ صحيحًا» في الزمن، فيحتاج المهاجم إلى 16 محاولة لكل خانة؛ أما المقارنة بزمن ثابت فتجعل كل المرشحين متشابهين تمامًا. <span class="ev ev-est">تقدير تعليمي</span></figcaption></figure></div>
+<p>في الواقع لا يزيد فرق كل مقارنة على بضعة نانوثوانٍ، بينما تذبذب الشبكة بضعة ملّي ثانية، فيحتاج الهجوم الحقيقي إلى أن يقيس التخمين نفسه آلاف المرات بل عشرات الآلاف، ثم يستخرج الفرق بالأساليب الإحصائية. هذا صعب لكنه ليس مستحيلًا. واستخدام <code>hmac.compare_digest</code> سطر شيفرة واحد، فلا مبرر لهذه المجازفة.</p>
+<p>وتحمي Strata من هجوم أخفى: <dfn>إعادة ربط DNS</dfn>. فصفحة خبيثة فتحتها قد توجّه نطاقها مؤقتًا إلى <code>127.0.0.1</code>، ثم تصل إلى خدمة جهازك المحلي بصفتها «موقعها هي». لذلك، إذا لم يُضبط مفتاح، لا يردّ الخادم إلا على الطلبات التي ترويسة <code>Host</code> فيها اسم يعرفه، مثل <code>localhost</code> وعناوين IP؛ وتُرفض أيضًا طلبات <code>POST</code> التي تحمل مصدر صفحة ويب غريبة. وبعد ضبط المفتاح يكون الحكم للمفتاح، لأن صفحات الآخرين لا تحصل على مفتاحك. <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> يوافق هذا القسم عدة مفاهيم أساسية في مقرري «شبكات الحاسوب» و«أمن المعلومات»: الفرق بين المصادقة والتفويض، وأصغر سطح تعرّض (الاستماع إلى عنوان الحلقة المحلية افتراضيًّا)، وهجمات القناة الجانبية. وتُرصّ الإجراءات الأمنية طبقة فوق طبقة، وكل طبقة تحمي مما هو من شأنها فقط.</p>
+
+<h2 id="sec-6">24.6 تطبيق عملي: ألغِ طلبًا بيدك</h2>
+<p>لا توجد في هذا الفصل صفحة مختبر مستقلة، والرسمان التفاعليان هما التجربة. افعل ثلاثة أشياء بهذا الترتيب:</p>
+<ol>
+<li>في محاكي دورة الحياة اضغط «إلغاء» مرة في كل من حالات <strong>الانتظار والقراءة والتوليد</strong>، وسجّل «أسوأ زمن انتظار». في القراءة تنتظر نحو 15.6 ثانية، وفي التوليد نحو 0.51 ثانية فقط. فكّر: لو صمّمتَ أنت فكيف تجعل القراءة تتوقف أسرع؟ وما الثمن؟</li>
+<li>بعد الضغط على «إلغاء» اضغط في حالة «قيد الإلغاء» على «انقطاع المحرك». وانظر كيف يختم الخادم، ولماذا يجب أن يكون انتظار صدى STOP محدودًا بمهلة.</li>
+<li>في محاكي هجوم التوقيت اكسر المفتاح مرة بكل من طريقتي المقارنة، وعُدّ كم محاولة تحتاج في كل منهما.</li>
+</ol>
+<p>إن كنت تكتب Python فاستخدم <code>MockEngine</code> المرفق مع Strata (<code>python -m serve.server --engine mock</code>) لتشغيل خدمة على جهاز بلا GPU، وأرسل طلبًا متدفقًا بـ <code>curl</code>، وأقطعه في المنتصف بـ Ctrl+C، ثم انظر في نافذة الخادم كيف انتهى هذا الطلب. [S15]</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>يعبر الطلب المتصفح واتصال HTTP وعملية الخدمة وعملية المحرك وGPU. ومعنى «توقفت» مختلف في كل طبقة، وتنتقل إشارة الإلغاء طبقة بعد طبقة ويُتأكَّد منها.</li>
+<li>الإلغاء في Strata تعاوني: يفحص خيط المراقبة الاتصال كل 0.5 ثانية ويرفع علم الإلغاء؛ ويتوقف المحرك عند نقطة فحص؛ ولا يحرّر الخادم FIFO حتى يقرأ DONE الخاص بهذا الطلب. وعند قراءة المُطالبة تتباعد نقاط الفحص فيبطؤ الإلغاء.</li>
+<li>تستمع Strata افتراضيًّا إلى الجهاز المحلي وحده. وعند فتحها للخارج يجب ضبط API Key، وتكون المقارنة بزمن ثابت بـ <code>hmac.compare_digest</code> منعًا لهجوم التوقيت.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «إذا أغلقتُ صفحة الويب توقفت بطاقة الرسوميات».</strong></p>
+<p>إغلاق الصفحة يوقف الطبقة العليا فقط. على الخادم أن يكتشف أولًا أن الاتصال انقطع، ثم يُبلغ المحرك، ثم يصل المحرك إلى نقطة الفحص التالية فيتوقف. وقبل إصلاح #430 و#431 في Strata كانت تحدث حالات يغادر فيها العميل منذ وقت طويل والمحرك ما زال يحسب. فيجب التأكد من «التوقف» في كل طبقة على حدة.</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: نقطة التسلسل في الإلغاء، والردود القديمة المتأخرة، وحدود الثقة</summary>
+<h3>من أي لحظة يُعدّ الإلغاء نافذًا</h3>
+<p>يمكن تعريف الإلغاء بأنه: ابتداءً من حدّ مؤكَّد لا يُسلَّم للمستخدم رمز جديد، وتكفّ الموارد المرتبطة في النهاية عن الاستخدام. وهذا الحدّ هو <dfn>نقطة التسلسل</dfn> (linearization point) للإلغاء. فإذا رُفع علم وحده ولم تره حلقة كتل القراءة أو حلقة التوليد بعد، فالإلغاء لم يكتمل.</p>
+<p>بحسب قراءة الكتاب لـ <code>serve/server.py</code>، الطلب الذي ما زال في الصف لا يفحص علم الإلغاء في حلقة انتظار مخرجات المحرك إلا بعد أن يأخذ قفل FIFO ويرسل أمر <code>GEN</code> إلى المحرك: عند وصول أول سطر رمز أو تقدم قراءة، أو عند مرور 10 ثوانٍ كاملة بلا مخرجات. <span class="ev ev-code">حقيقة من الشيفرة</span> ومعنى هذا أن طلبًا انقطع منذ وقت وهو في الصف سيجعل المحرك يبدأ قراءة مُطالبته، ثم يتلقى STOP بعد ذلك. وتمرين موسّع جدير بالعمل: افحص العلم مرة بعد أخذ القفل وقبل إرسال الأمر.</p>
+<h3>مثال: رد قديم يصل متأخرًا بعد انتهاء المهلة</h3>
+<p>انتهت مهلة الطلب A، وبدأ الخادم يعالج الطلب B. فإذا كُتبت نتائج A المتأخرة في صف المخرجات المشترك، فقد يتلقى B رموز A، أو يحسب <code>DONE</code> الخاص بـ A إشارة انتهائه. والحل أن تُضاف إلى المخرجات فحوص ملكية، وألا تُستخدم الحالة القابلة للتغيير نفسها قبل تأكيد انتهاء التنفيذ القديم.</p>
+<p>وهذا ما تفعله Strata: بعد إرسال STOP تقرأ حتى <code>DONE</code> الخاص بهذا الطلب وهي ممسكة بقفل FIFO طوال ذلك؛ وعند حساب الاستخدام لا تعتدّ إلا بـ <code>DONE</code> الواصل أثناء هذا الطلب، وإلا نسب طلب فاشل أو منقطع أرقام فك الترميز لطلب سابق إلى نفسه. <span class="ev ev-code">حقيقة من الشيفرة</span> ولم يدقق الكتاب في كل مسارات نسبة المخرجات في المصدر الأصلي؛ ويمكن في الحصة الدراسية أن يُبنى هذا الخطر بمحرك mock يتأخر عمدًا، ثم يُتحقَّق من الإصلاح.</p>
+<h3>الكلب الحارس يجب أن يفهم مراحل العمل</h3>
+<p>إذا عُدّ «عدم وجود مخرجات نصية الآن» دائمًا تجمدًا قاتلًا فسيُقتل طلب سليم يقرأ مُطالبة طويلة؛ وإذا انتُظر إلى الأبد انسدّ FIFO كله. والتشخيص المعقول يميّز بين: الانتظار في الصف، والحساب الطويل المشروع، وبطء الإدخال والإخراج، وانقطاع العملية الفرعية، واختلال البروتوكول، ويُبلغ عن الحالة وآخر تقدم، لا عن «انتهت المهلة» الغامضة وحدها. وتضبط Strata المهلة بحسب كتل القراءة وتكتب سبب الانقطاع في رسالة الخطأ، وهذا هو المنهج نفسه. [S15]</p>
+<p>وكذلك لا يجوز أن تقاطع «أوامر التحكم الصريحة في النموذج» (التحميل والتفريغ) طلبًا جاريًا أو في الصف: وقد عُرِّف لذلك في الشيفرة <code>ModelBusy</code>. [S15] وتوضح الوثائق الأصلية أن واجهة التحكم ترد حينئذ بـ 409. <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+<h3>الأدوات وعناوين الصور والملفات المحلية كلها حدود ثقة</h3>
+<p>مخرجات النموذج مدخلات غير موثوقة. ومعاملات الأدوات تمر بفحص البنية وفحص الصلاحيات؛ وجلب عنوان URL بعيد يتعلق بالوصول إلى الخارج وحدود الموارد؛ وقراءة مسار محلي تتعلق بصلاحيات الملفات ونطاق المسارات. وإدخال الصور في Strata يدعم ثلاثة مصادر: بيانات base64، وعناوين http(s)، ومسارات ملفات محلية. [S15] أما هل صُدّت SSRF والتسلل عبر المسارات وغيرها فيجب تدقيقه مدخلًا مدخلًا، ولا يجوز الجزم بأمان الكل لمجرد أن موضعًا ما يستخدم مكتبة آمنة.</p>
+<p>ويعرض <code>frontend.py</code> القوالب ببيئة Jinja في صندوق رملي. [S16] هذا اختيار محدد على طبقة القالب، ولا يثبت تلقائيًّا أن تنفيذ الأدوات وجلب العناوين والوصول إلى الملفات آمن. كل نوع من الموارد يحتاج إلى نموذج تهديدات مستقل.</p>
+<h3>قائمة تحقق «اكتمل الإلغاء»</h3>
+<p>اصنع في محرك mock هذه الحالات: إلغاء أثناء القراءة، وانقطاع المخرجات، وإلغاء مكرر، ومحرك لا يستجيب، ونتيجة قديمة تصل متأخرة، وطلب جديد بعد التعافي. وشروط القبول: لا يُسلَّم رمز جديد يراه المستخدم؛ وكل المهام المتعلقة بالمخازن المؤقتة للقراءة والكتابة قد توقفت أو اكتملت؛ ولا يُساء استخدام الصف والحالة من الطلب التالي؛ وتُعرف المخرجات القديمة المتأخرة وتُهمَل؛ وتُحرَّر الموارد مرة واحدة؛ ويتلقى العميل نهاية واضحة «أُلغي» أو «فشل» لا «نجح».</p>
+<p>وتنبيه أخير: هذا الكتاب موقع ثابت، لا يحتوي أي API Key حقيقي للاستدلال، ولا يصل من المتصفح مباشرة إلى خادم نماذجك. وعند ربطه مستقبلًا بمنصة تجارب حقيقية يجب أن تُضاف مصادقة وحصص وعزل مهام ووكيل في جهة الخادم، ولا يجوز أن يُكتب مفتاح في صفحة المقرر.</p>
+</details>

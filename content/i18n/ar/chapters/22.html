@@ -1,0 +1,256 @@
+<div class="hook"><span class="eyebrow">ربما رأيت هذا من قبل</span>
+<p>عندما تنزّل برنامجًا مفتوح المصدر، تجد في صفحة الإصدار صفًّا طويلًا من الملفات: <code>windows-x64</code> و<code>linux-x64</code> و<code>macos-arm64</code>… البرنامج واحد، فلماذا كل هذه النسخ؟</p>
+<p>يبدأ ملف README في Strata بهذه العبارة: بطاقات NVIDIA أو AMD، وعلى Windows أو Linux. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S01] وتقول وثيقة التصميم الأصلية الأمر أصرح من ذلك: على بطاقات NVIDIA (CUDA) وAMD (HIP) يعمل المحرك نفسه، ويُترجَم مرة واحدة لكل منهما. [S02] يجيب هذا الفصل عن سؤالين: كيف تتحول شيفرة مصدرية واحدة إلى برامج تعمل على أجهزة مختلفة؟ وكم يثبت قولنا «إنه يعمل» فعلًا؟</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> كل شريحة تفهم تعليماتها وحدها. تكتب Strata شيفرة مصدرية واحدة، وتبني منها محركين، واحدًا لـ NVIDIA وآخر لـ AMD، بثلاث أدوات: مفاتيح البناء، والترجمة الشرطية، و«جدول تسمية» من CUDA إلى HIP. أما في جهة CPU فيسأل المحرك عند الإقلاع: ما التعليمات التي تعرفها هذه الشريحة؟ ثم يختار نواة AVX-512 أو AVX2. وهذه أربعة مستويات مختلفة من الدليل: أنها تُترجَم، وأن اختباراتها تنجح، وأنها تعمل على بطاقة حقيقية، وأن المشرف تحقق منها.</p>
+
+<h2 id="sec-1">22.1 وصفة واحدة، وثلاثة مطابخ</h2>
+<p>تخيّل أنك كتبت وصفة طعام وسترسلها إلى ثلاثة مطاعم. الأول يطبخ على الغاز، والثاني على الحث الكهربائي، والثالث ليس عنده إلا فرن. عبارة «قلّب ثلاث دقائق» يجب أن يترجمها كل مطعم إلى ما تفعله أجهزته.</p>
+<p>البرامج كذلك. يكتب المبرمج <dfn>الشيفرة المصدرية</dfn>: نصًّا يقرؤه الإنسان. أما الشريحة فتنفّذ <dfn>شيفرة الآلة</dfn>: سلسلة من التعليمات الثنائية. وما التعليمات التي تنفّذها الشريحة، وكيف تُرمَّز كل تعليمة، تحدده <dfn>مجموعة التعليمات</dfn> الخاصة بها. هي أشبه بقائمة الأجهزة الموجودة في هذا المطبخ. وترجمة الشيفرة المصدرية إلى شيفرة آلة لمجموعة تعليمات واحدة هي عمل <dfn>المترجم البرمجي</dfn> (compiler).</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="الشكل 22-1: الشيفرة المصدرية نفسها تمرّ بالمعالج المسبق ثم بالمترجم، فتصبح ثلاثة أنواع من شيفرة الآلة: لمعالج x86 ولبطاقة NVIDIA ولبطاقة AMD">
+<rect class="f-soft" fill="#e5f1df" x="90" y="8" width="220" height="40" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="33" font-size="14" font-weight="600" text-anchor="middle">الشيفرة المصدرية: تُكتب مرة واحدة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="70" y="70" width="260" height="46" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="90" font-size="14" font-weight="600" text-anchor="middle">المعالج المسبق (preprocessor)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="108" font-size="12" text-anchor="middle">#include والماكرو، ثم فرع #if واحد فقط</text>
+<rect class="f-accent" fill="#136d5a" x="70" y="138" width="260" height="46" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="158" font-size="14" font-weight="600" text-anchor="middle">المترجم (compiler)</text>
+<text class="f-on" fill="#ffffff" x="200" y="176" font-size="12" text-anchor="middle">شيفرة آلة لمجموعة تعليمات واحدة</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 48V68M200 116V136M200 184V196H70V210M200 196V210M200 196H330V210"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="212" width="124" height="54" rx="8"/>
+<text class="f-text" fill="#182f2b" x="70" y="234" font-size="13" font-weight="600" text-anchor="middle">x86 CPU</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="254" font-size="12" text-anchor="middle">AVX2 / AVX-512</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="138" y="212" width="124" height="54" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="234" font-size="13" font-weight="600" text-anchor="middle">NVIDIA GPU</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="254" font-size="12" text-anchor="middle">sm_75 … sm_120</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="268" y="212" width="124" height="54" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="234" font-size="13" font-weight="600" text-anchor="middle">AMD GPU</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="254" font-size="12" text-anchor="middle">gfx1012 … gfx1201</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="12" text-anchor="middle">شيفرة مصدرية واحدة، وشيفرة آلة بثلاث «لهجات»</text>
+</svg><figcaption>الشكل 22-1  تُكتب الشيفرة المصدرية مرة واحدة. يعيد المعالج المسبق كتابتها بحسب الهدف، ثم يترجمها المترجم إلى تعليمات الشريحة المستهدفة. وإذا غيّرت الشريحة وجب أن تترجم من جديد.</figcaption></figure>
+<p>الرمزان <code>sm_120</code> و<code>gfx1100</code> في الشكل رقما معمارية بطاقة الرسوميات، وهما أشبه بطراز المطبخ. يشترط سكربت البناء في Strata أن تكون قدرة الحوسبة لبطاقة NVIDIA 7.5 على الأقل، أي سلسلة RTX 20 وما بعدها. وفي جهة AMD لا يقبل إلا قائمة صريحة؛ أي معمارية خارج القائمة يرفضها بخطأ. <span class="ev ev-code">حقيقة من الشيفرة</span> وفتح الإصدار v0.1.39 مسارين تجريبيين آخرين: محرك CUDA 12 للبطاقات القديمة من جيلي Pascal وVolta، وبناء مستقل لـ gfx906. سنتحدث عنهما في القسم 22.3. <span class="ev ev-report">تقرير المصدر الأصلي</span></p>
+<aside class="primer" id="c22-compiler">
+<h3>المترجم ومجموعة التعليمات والترجمة الشرطية</h3>
+<p><dfn>مجموعة التعليمات</dfn> عقد بين العتاد والبرمجيات: تتعهد الشريحة بأنها «تعرف هذه التعليمات»، ولا يملك البرنامج إلا أن يخاطبها بها. وشرائح العائلة الواحدة تضيف تعليمات جديدة جيلًا بعد جيل. فعائلة x86 مثلًا عرفت AVX2 أولًا، ثم أضافت AVX-512 الأعرض. وإذا واجهت شريحة قديمة تعليمة لا تعرفها، أبلغت عن «تعليمة غير مشروعة» وانهار البرنامج.</p>
+<p>يترجم <dfn>المترجم</dfn> الشيفرة المصدرية إلى شيفرة آلة. وترجمة C وC++ على مرحلتين: يعالج <dfn>المعالج المسبق</dfn> النص أولًا، ثم يترجم المترجم نفسه. وللمعالج المسبق ثلاث مهام. الأولى أن يلصق محتوى الملفات المذكورة في <code>#include</code> كما هو. والثانية أن يستبدل <dfn>الماكرو</dfn> المعرّف بـ <code>#define</code> باسمه، كأنه «بحث واستبدال». والثالثة أن يُبقي فرعًا واحدًا بحسب شرط <code>#if</code>، ويحذف بقية الفروع كاملة. وهذه الحيلة الأخيرة تسمى <dfn>الترجمة الشرطية</dfn>.</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="الشكل 22-2: ملف مصدري يحتوي فروع #if؛ عند ترجمته لـ gfx1100 يبقى فرع sudot4 وحده، وعند ترجمته لـ gfx1030 يبقى فرع sdot4 وحده">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">ملف مصدري (نسخة واحدة)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="30" width="184" height="148" rx="8"/>
+<text class="f-text" fill="#182f2b" x="16" y="52" font-size="12">#if defined(__gfx1100__)</text>
+<text class="f-muted" fill="#5c6d66" x="28" y="70" font-size="12">استخدم sudot4</text>
+<text class="f-text" fill="#182f2b" x="16" y="88" font-size="12">#elif defined(__gfx1030__)</text>
+<text class="f-muted" fill="#5c6d66" x="28" y="106" font-size="12">استخدم sdot4</text>
+<text class="f-text" fill="#182f2b" x="16" y="124" font-size="12">#else</text>
+<text class="f-muted" fill="#5c6d66" x="28" y="142" font-size="12">حلقة بايتًا بايتًا</text>
+<text class="f-text" fill="#182f2b" x="16" y="160" font-size="12">#endif</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M192 66H212M192 140H212"/>
+<rect class="f-soft" fill="#e5f1df" x="214" y="34" width="178" height="62" rx="8"/>
+<text class="f-text" fill="#182f2b" x="224" y="56" font-size="12" font-weight="600">الترجمة لـ gfx1100</text>
+<text class="f-text" fill="#182f2b" x="224" y="80" font-size="12">لا يرى المترجم إلا: sudot4</text>
+<rect class="f-soft" fill="#e5f1df" x="214" y="110" width="178" height="62" rx="8"/>
+<text class="f-text" fill="#182f2b" x="224" y="132" font-size="12" font-weight="600">الترجمة لـ gfx1030</text>
+<text class="f-text" fill="#182f2b" x="224" y="156" font-size="12">لا يرى المترجم إلا: sdot4</text>
+<text class="f-text" fill="#182f2b" x="200" y="202" font-size="12" text-anchor="middle">يحذف المعالج المسبق الفروع غير المختارة قبل الترجمة</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="222" font-size="12" text-anchor="middle">فتنتج الشيفرة الواحدة برامج لكل منها مسار واحد فقط</text>
+</svg><figcaption>الشكل 22-2  الترجمة الشرطية: يكتب المبرمج كل الفروع في ملف واحد، وفي كل ترجمة يبقى الفرع المناسب للهدف وحده. ولا يرى المترجم الفروع الأخرى أصلًا.</figcaption></figure>
+<p>وهكذا تكتب Strata «الضرب النقطي بأربعة بايتات» على بطاقات AMD. تستخدم بطاقات RDNA3 وRDNA4 تعليمة sudot4 واحدة. وRDNA2 لا تملكها، فتستخدم sdot4 الأقدم. أما RDNA1 (أي gfx1012) فلا تملك حتى sdot4، فتُستخدم قطعة صغيرة من لغة التجميع، تصل إلى النتيجة نفسها بـ 4 عمليات ضرب وعمليتي جمع لثلاثة أعداد. وفي كل حالة أخرى تعود إلى حلقة تضرب بايتًا ببايت ثم تجمع. تعطي المسارات الأربعة الأعداد الصحيحة نفسها تمامًا، وتختلف سرعتها فقط. <span class="ev ev-code">حقيقة من الشيفرة</span> وسنترجمها بأيدينا في القسم 22.3.</p>
+<p class="further">قراءة إضافية: <a href="https://ar.wikipedia.org/wiki/%D9%85%D8%AA%D8%B1%D8%AC%D9%85_%28%D8%AD%D9%88%D8%B3%D8%A8%D8%A9%29" target="_blank" rel="noopener noreferrer">ويكيبيديا: مترجم (حوسبة)</a> · <a href="https://ar.wikipedia.org/wiki/%D9%85%D8%AC%D9%85%D9%88%D8%B9%D8%A9_%D8%AA%D8%B9%D9%84%D9%8A%D9%85%D8%A7%D8%AA" target="_blank" rel="noopener noreferrer">ويكيبيديا: مجموعة تعليمات</a> · <a href="https://en.wikipedia.org/wiki/C_preprocessor" target="_blank" rel="noopener noreferrer">ويكيبيديا: المعالج المسبق للغة C (بالإنجليزية)</a> · <a href="https://en.cppreference.com/w/cpp/preprocessor/conditional" target="_blank" rel="noopener noreferrer">cppreference: الترجمة الشرطية (بالإنجليزية)</a></p>
+</aside>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> يشرح مقرر «بناء المترجمات» المسار الرئيسي: التحليل المعجمي، فالتحليل النحوي، فتوليد الشيفرة. أما المعالجة المسبقة فتسبق هذا كله، وهي معالجة نصية خالصة لا تفهم القواعد النحوية. لذلك يكون موضع رسالة الخطأ غريبًا في الغالب عند خطأ في استبدال ماكرو: فما يراه المترجم هو الشيفرة بعد الاستبدال.</p>
+
+<h2 id="sec-2">22.2 المعالج CPU: اسأل أولًا عن التعليمات، ثم اختر النواة</h2>
+<p>شرحنا في الفصل 10 أن الخبراء الذين لا تحفظهم بطاقة الرسوميات في ذاكرتها المؤقتة يحسبهم CPU في موضعهم داخل الذاكرة (RAM). وخلاصة الوثيقة الأصلية: تستخدم هذه الحسابات نوى AVX-512 أو AVX2، وتستخدم النماذج بصيغة i-quant نوى ggml. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02] والشيفرة المصدرية أدق من ذلك: فصيغة i-quant تنتقل أيضًا إلى نواة Strata الخاصة متعددة الرموز (token) إذا كانت المجموعة فيها أكثر من رمز. <span class="ev ev-code">حقيقة من الشيفرة</span> و<dfn>النواة</dfn> (kernel) هنا قطعة شيفرة الحساب الأساسية، كُتبت خصيصًا لتعمل بأقصى سرعة.</p>
+<p>تعليمات AVX2 وAVX-512 كلتاهما من نوع <dfn>SIMD</dfn>: تعليمة واحدة تعالج صفًّا من الأعداد دفعة واحدة (سنشرحها في الفصل 13). والفرق في عرض هذا الصف. سجل AVX2 عرضه 256 بتًّا، وسجل AVX-512 عرضه 512 بتًّا. انظر الشكل 22-3.</p>
+<figure class="fig"><svg viewBox="0 0 400 190" role="img" aria-label="الشكل 22-3: سجل AVX2 بعرض 256 بتًّا يتسع لـ 32 عددًا صحيحًا من 8 بتات، وسجل AVX-512 بعرض 512 بتًّا يتسع لـ 64">
+<defs><pattern id="c22-lane" width="4.6875" height="18" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="3.6" height="18"/></pattern></defs>
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">كم عددًا صحيحًا من 8 بتات يتسع له السجل (خلية لكل عدد)</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="12" font-weight="600">AVX2</text>
+<rect fill="url(#c22-lane)" x="90" y="38" width="150" height="18"/>
+<text class="f-text" fill="#182f2b" x="250" y="52" font-size="12">256 بتًّا = 32</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12" font-weight="600">AVX-512</text>
+<rect fill="url(#c22-lane)" x="90" y="84" width="300" height="18"/>
+<text class="f-text" fill="#182f2b" x="90" y="124" font-size="12">512 بتًّا = 64: ضعف العمل في كل تعليمة</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="156" font-size="12">نوى خبراء CPU: AVX-512 إن وُجد، وإلا AVX2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="178" font-size="12">بشرط أن يعرفها CPU ويحفظ نظام التشغيل سجلاتها</text>
+</svg><figcaption>الشكل 22-3  إذا تضاعف عرض السجل تضاعف ما تعالجه التعليمة الواحدة. لكن CPU القديم لا يعرف AVX-512، فيحتاج البرنامج إلى مجموعتين من النوى.</figcaption></figure>
+<p>والمشكلة أن البرنامج لو تُرجم كله بـ AVX-512، فقد يُدخل المترجم تعليمات AVX-512 في أي موضع، وينهار البرنامج على CPU القديم. لذلك لا يضيف سكربت البناء في Strata مفتاح AVX-512 أو AVX2 إلا إلى بضعة ملفات مصدرية للنوى (يُكتب في GCC مثل <code>-mavx512f</code>، وفي MSVC مثل <code>/arch:AVX512</code>). أما الملف المسؤول عن «فحص CPU» فلا يأخذ المفتاح، ولهذا يعمل بأمان على أي CPU من طراز x86-64. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>يعتمد الفحص على <dfn>CPUID</dfn>: تعليمة تجعل CPU «يقدّم نفسه»، فتعيد سلسلة بتات يدل كل بت فيها على ميزة. تتحقق Strata من وجود الميزات الخمس الفرعية لـ AVX-512 (F وBW وVL وVNNI وVBMI)، وتتحقق أيضًا من أن نظام التشغيل يحفظ هذه السجلات الكبيرة عند التبديل بين الخيوط. فإذا نقص شيء واحد عُدّ AVX-512 غير موجود. <span class="ev ev-code">حقيقة من الشيفرة</span> ثم تُختار النواة بهذا الترتيب:</p>
+<div class="viz" data-viz="cpu-dispatch"><figure class="fig"><svg viewBox="0 0 400 384" role="img" aria-label="الشكل 22-4: ترتيب اختيار نواة CPU: بلا AVX2 يرفض المحرك الجاهز الإقلاع؛ وحزمة Q2_0 القياسية تحتاج AVX-512؛ والصيغ الأصلية تجرّب نواة AVX-512 ثم نواة AVX2، وأخيرًا تعود إلى ggml-cpu">
+<rect class="f-soft" fill="#e5f1df" x="60" y="8" width="280" height="36" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" font-weight="600" text-anchor="middle">الإقلاع: اسأل CPU بتعليمة CPUID</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="64" width="250" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="135" y="87" font-size="12" text-anchor="middle">هل يوجد AVX2 (مع FMA وF16C)؟</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="268" y="64" width="124" height="36" rx="8"/>
+<text class="f-warn" fill="#9e5d24" x="330" y="82" font-size="12" text-anchor="middle">لا: المحرك الجاهز</text>
+<text class="f-warn" fill="#9e5d24" x="330" y="96" font-size="12" text-anchor="middle">يرفض الإقلاع</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="120" width="250" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="135" y="143" font-size="12" text-anchor="middle">هل هي حزمة Q2_0 القياسية؟</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="268" y="116" width="124" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="134" font-size="12" text-anchor="middle">نعم: AVX-512 فقط</text>
+<text class="f-warn" fill="#9e5d24" x="330" y="151" font-size="12" text-anchor="middle">وإلا رفض الإقلاع</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="176" width="250" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="135" y="199" font-size="12" text-anchor="middle">AVX-512 كامل وغير معطَّل؟</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="268" y="172" width="124" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="190" font-size="12" text-anchor="middle">نعم: نواة iq512</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="207" font-size="12" text-anchor="middle">مجموعة ≥ 2 رمزين</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="232" width="250" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="135" y="255" font-size="12" text-anchor="middle">نواة AVX2 لهذه الصيغة، وغير معطَّلة؟</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="268" y="228" width="124" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="330" y="246" font-size="12" text-anchor="middle">نعم: نواة iq256</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="263" font-size="12" text-anchor="middle">مجموعة ≥ 2 رمزين</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="292" width="382" height="38" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="316" font-size="13" font-weight="600" text-anchor="middle">لا شيء مما سبق: ضرب نقطي برمز واحد في ggml-cpu</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V62M260 82H266M135 100V118M260 138H266M135 156V174M260 194H266M135 212V230M260 250H266M135 268V290"/>
+<text class="f-muted" fill="#5c6d66" x="142" y="113" font-size="12">نعم</text>
+<text class="f-muted" fill="#5c6d66" x="142" y="169" font-size="12">لا</text>
+<text class="f-muted" fill="#5c6d66" x="142" y="225" font-size="12">لا</text>
+<text class="f-muted" fill="#5c6d66" x="142" y="283" font-size="12">لا</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="352" font-size="12">رسم توضيحي: حُذفت حالة IQ4_XS التي تعود إلى ggml على AVX-512</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="374" font-size="12">المنطق من generate.cpp وnative_expert.cpp</text>
+</svg><figcaption>الشكل 22-4  الملف التنفيذي نفسه يسلك نوى مختلفة على معالجات مختلفة. يجري الاختيار وقت التشغيل، فيكفي إصدار ثنائي واحد للمعالجات الجديدة والقديمة.</figcaption></figure></div>
+<p>هناك تفاصيل تستحق التوقف. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<ul>
+<li><strong>بلا AVX2 لا يقلع المحرك الجاهز.</strong> أقل ما تحتاجه نوى خبراء CPU في Strata هو AVX2 وFMA وF16C، وggml-cpu في النسخة المنشورة مُترجَم بـ AVX2 أيضًا. يذكر المحرك طراز CPU ويقول إنك تحتاج إلى Intel Haswell (عام 2013) أو AMD Zen (عام 2017) أو أحدث. ومنذ v0.1.39 تضيف الرسالة سطرًا آخر: يمكن للمعالج الأقدم أن يجعل setup يبني محركًا تجريبيًّا على جهازك (<code>STRATA_ISA_FLOOR=avx</code> أو <code>none</code>). يُترجَم ggml-cpu في هذا الإصدار بـ AVX أو SSE4.2، ويتولى حساب كل خبراء CPU. <span class="ev ev-code">حقيقة من الشيفرة</span> وتقول وثيقة التثبيت الأصلية إن هذا الإصدار يشغّل نماذج i-quant فقط، وببطء: على Ryzen 5 7600 مع RTX 5070، عند إجبار المحرك على هذا المسار وتثبيت الذاكرة المؤقتة للخبراء على 1500 خانة، انخفض decode من 26 رمزًا في الثانية إلى 11-17 (نسخة AVX) وإلى 3.5-3.8 (نسخة SSE4.2). <span class="ev ev-report">تقرير المصدر الأصلي</span></li>
+<li><strong>حزمة Q2_0 القياسية لها نواة AVX-512 فقط.</strong> تقول وثيقة التثبيت الأصلية إن setup لا يكتب نسخة إضافية من الخبراء بحجم نحو 40 GB لحزمة Q2_0 إلا على CPU الذي يدعم AVX-512، لتستخدمها هذه النواة السريعة. <span class="ev ev-report">تقرير المصدر الأصلي</span> وتشرح تعليقات ملف الترويسة سبب الرفض عند الإقلاع بصراحة: ليعرف صاحب CPU القديم السبب في الثانية 0، لا أن يصطدم بتعليمة غير مشروعة عند الرمز رقم 4000.</li>
+<li><strong>متغيرات البيئة تغيّر المسار أيضًا.</strong> المتغير <code>STRATA_NO_IQ512</code> يجعل CPU الذي يدعم AVX-512 يستخدم نواة AVX2، والمتغير <code>STRATA_NO_IQ256</code> يعطّل نواة AVX2 كذلك فلا يبقى إلا ggml. الجهاز نفسه والبرنامج نفسه، وبتغيير متغير بيئة واحد يتغير مسار الحساب.</li>
+</ul>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذا «إرسال وقت التشغيل» (runtime dispatch)، وفكرته فكرة الدوال الافتراضية في البرمجة كائنية التوجه: موضع الاستدعاء لا يتغير، وأي شيفرة تُنفَّذ يتقرر وقت التشغيل. الفرق أن المعيار هنا ليس نوع الكائن، بل بتات الميزات التي تعيدها CPUID.</p>
+
+<h2 id="sec-3">22.3 المعالج GPU: شيفرة بأسلوب CUDA، ومحركان لـ NVIDIA وAMD</h2>
+<p>في جهة CPU يحمل الملف التنفيذي الواحد مجموعتين من النوى، ويختار منهما وقت التشغيل. أما في جهة GPU فالأمر أبعد: تعليمات بطاقات NVIDIA وAMD مختلفة تمامًا، وحتى منصة البرمجة مختلفة، فلا بد من بناء محرك لكل شركة.</p>
+<aside class="primer" id="c22-cuda-hip">
+<h3>CUDA وHIP</h3>
+<p><dfn>CUDA</dfn> منصة برمجة بطاقات NVIDIA: صياغة موسّعة من C++، ومكتبة دوال وقت التشغيل، والمترجم nvcc. يكتب بها المبرمج دوال تُنفَّذ بالتوازي على GPU، ثم يستخدم دوالًا مثل <code>cudaMalloc</code> و<code>cudaMemcpy</code> لحجز ذاكرة الفيديو (VRAM) ونقل البيانات. وCUDA لا تنتج إلا شيفرة آلة لبطاقات NVIDIA.</p>
+<p><dfn>HIP</dfn> نظيرتها من AMD على منصة ROCm. صُمّمت عمدًا على غرار CUDA: أسماء الدوال في الغالب تبدّل البادئة <code>cuda</code> بالبادئة <code>hip</code> فقط، فـ <code>cudaMalloc</code> يقابلها <code>hipMalloc</code>، والمعنى واحد تقريبًا. لذلك تُترجَم شيفرة CUDA كثيرًا على بطاقات AMD بمجرد «تغيير الأسماء». وتوفر AMD أداة رسمية لتغيير الأسماء تلقائيًّا اسمها HIPIFY.</p>
+<p>وبعد تغيير الأسماء تبقى فروق لا تزول. يجمع GPU مجموعة من الخيوط وينفّذها معًا بالتزامن؛ تسميها NVIDIA warp وتسميها AMD wavefront (ويختصر إلى wave). مجموعة NVIDIA ثابتة: 32 خيطًا. ومجموعة AMD في المعماريات القديمة 64 خيطًا، ويمكن أن تكون 32 في سلسلة RDNA. وأي شيفرة تفترض «32 في المجموعة» تخطئ إذا نُقلت إلى جهاز مجموعته 64. لا يدعم الخلفية HIP في Strata إلا wave32، ويتحقق منها مرة أخرى عند الإقلاع. <span class="ev ev-code">حقيقة من الشيفرة</span> وأضاف الإصدار v0.1.39 بناءً يدويًّا لبطاقة gfx906 ذات wave64: يمر بطبقة توافق أخرى تقابل بين warp من CUDA ونصف wavefront ذي 64 خيطًا، ولا يمكن الجمع بينه وبين الخلفية HIP، فعليك اختيار أحدهما. <span class="ev ev-report">تقرير المصدر الأصلي</span> وسنشرح الخيوط وwarp في الفصل 15.</p>
+<p>وصلة هذا بموضوع الفصل: لم تستخدم Strata أداة تعيد كتابة الشيفرة، بل تُدخل «جدول تسمية» تلقائيًّا في كل ملف مصدري وقت الترجمة. سنرى الآن كيف.</p>
+<p class="further">قراءة إضافية: <a href="https://rocm.docs.amd.com/projects/HIP/en/latest/what_is_hip.html" target="_blank" rel="noopener noreferrer">وثائق ROCm: What is HIP (بالإنجليزية)</a> · <a href="https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_porting_guide.html" target="_blank" rel="noopener noreferrer">وثائق ROCm: نقل CUDA إلى HIP (بالإنجليزية)</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA: دليل برمجة CUDA (بالإنجليزية)</a> · <a href="https://ar.wikipedia.org/wiki/%D9%83%D9%88%D8%AF%D8%A7" target="_blank" rel="noopener noreferrer">ويكيبيديا: كودا</a> · <a href="https://en.wikipedia.org/wiki/ROCm" target="_blank" rel="noopener noreferrer">ويكيبيديا: ROCm (بالإنجليزية)</a></p>
+</aside>
+<p>تُكتب شيفرة GPU في Strata بأسلوب CUDA في ملفات <code>.cu</code>، وفي المجلد <code>src</code> منها 55 ملفًا. وعند تشغيل مفتاح بناء HIP تحدث ثلاثة أشياء: <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<ol>
+<li>يعلّم سكربت البناء كل ملفات <code>.cu</code> بأنها بلغة HIP، ويسلّمها إلى مترجم AMD.</li>
+<li>تضاف إلى معاملات الترجمة <code>-include hip_compat/cuda_runtime.h</code>، فيُفرَض هذا الملف الوسيط في رأس كل ملف مصدري. و<dfn>الطبقة الوسيطة</dfn> (shim) هنا قطعة رقيقة من الشيفرة توضع بين طبقتين لتسوية الفروق بينهما.</li>
+<li>في الطبقة الوسيطة 88 سطرًا من ماكرو على شكل <code>#define cudaMalloc hipMalloc</code>. بعض أسمائها له كتابتان بحسب إصدار HIP أو المنصة، وفي كل ترجمة تبقى كتابة واحدة. وملف وسيط آخر هو <code>cublas_v2.h</code> يتولى أسماء مكتبة المصفوفات: يستخدم 17 سطرًا لـ hipBLAS الجديدة، وللإصدارات القديمة (0.x) 15 سطرًا أخرى تستبدل الأسماء بأسماء rocBLAS الأدنى مستوى. وما إن يعمل المعالج المسبق حتى تصير أسماء CUDA أسماء HIP.</li>
+</ol>
+<p>ويفرض سكربت البناء أيضًا ألا يعمل مفتاحا CUDA وHIP معًا: كل بناء يترجم خلفية واحدة. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>وتغيير الأسماء وحده لا يكفي. فبعض الدوال الداخلية في CUDA لا مقابل جاهزًا لها في HIP على بطاقات RDNA، فتضطر الطبقة الوسيطة إلى تنفيذها بنفسها. مثال ذلك الضرب النقطي بأربعة بايتات <code>__dp4a</code>: تُقسَّم قيمتان من 32 بتًّا كل منهما إلى 4 بايتات بإشارة، ويُضرب كل بايت بنظيره، ثم يُضاف الناتج إلى المراكِم. وتتفرع الطبقة الوسيطة إلى أربعة مسارات بحسب معمارية البطاقة (انظر الصندوق في القسم 22.1). ومثال آخر <code>__shfl_xor_sync</code> الذي يتبادل البيانات داخل warp: تتحقق الطبقة الوسيطة أولًا من «اشتراك المسارات الـ 32 كلها»، فإن لم يكن كذلك أوقفت البرنامج فورًا بدل أن تُسقط هذا المعنى بصمت. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>في المحاكي الآتي تسلّم ثلاثة أسطر من الشيفرة المصدرية إلى بطاقات مستهدفة مختلفة. اضغط <strong>ترجمة</strong> وراقب شريط العملية خطوة بخطوة:</p>
+<div class="viz" data-viz="portable-build"><figure class="fig"><svg viewBox="0 0 400 296" role="img" aria-label="الشكل 22-5: شيفرة واحدة بأسلوب CUDA؛ بناء NVIDIA يبقي الأسماء كما هي ويستخدم dp4a العتادية، وبناء AMD يبدّل cudaMalloc إلى hipMalloc ويبدّل dp4a إلى تعليمة sudot4">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">شيفرة واحدة بأسلوب CUDA</text>
+<rect class="f-soft" fill="#e5f1df" x="40" y="28" width="320" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="56" y="51" font-size="12">cudaMalloc(&amp;buf, bytes);</text>
+<text class="f-text" fill="#182f2b" x="56" y="73" font-size="12">acc = STRATA_DP4A(a, b, acc);</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 86V98H102V108M200 98H298V108"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="110" width="188" height="120" rx="8"/>
+<text class="f-text" fill="#182f2b" x="20" y="134" font-size="13" font-weight="600">NVIDIA: ترجمة nvcc</text>
+<text class="f-text" fill="#182f2b" x="20" y="160" font-size="12">يبقى cudaMalloc كما هو</text>
+<text class="f-text" fill="#182f2b" x="20" y="184" font-size="12">STRATA_DP4A → __dp4a</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="208" font-size="12">تعليمة dp4a العتادية</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="204" y="110" width="188" height="120" rx="8"/>
+<text class="f-text" fill="#182f2b" x="216" y="134" font-size="13" font-weight="600">AMD: ترجمة HIP</text>
+<text class="f-text" fill="#182f2b" x="216" y="160" font-size="12">cudaMalloc → hipMalloc</text>
+<text class="f-text" fill="#182f2b" x="216" y="184" font-size="12">STRATA_DP4A → sudot4</text>
+<text class="f-muted" fill="#5c6d66" x="216" y="208" font-size="12">تعليمة v_dot4 في RDNA3</text>
+<text class="f-text" fill="#182f2b" x="200" y="258" font-size="12" text-anchor="middle">التسمية من 88 سطر #define في hip_compat/cuda_runtime.h</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="282" font-size="12" text-anchor="middle">المثال dp4a يعطي 95 في الجهتين: الأعداد الصحيحة تتطابق بتًّا ببت</text>
+</svg><figcaption>الشكل 22-5  لا يتغير حرف من الشيفرة المصدرية. بناء NVIDIA يستخدم أسماء CUDA مباشرة؛ أما بناء AMD فتبدّل الطبقة الوسيطة فيه الأسماء إلى لغة HIP، وتبدّل الضرب النقطي بتعليمة AMD الخاصة.</figcaption></figure></div>
+<p>يتذكر المحرك المُترجَم لأي المعماريات بُني. وعند الإقلاع يقارن المحرك معمارية البطاقة الفعلية بهذه القائمة، ويشترط wave32. فإن لم تتطابق خرج برسالة خطأ فيها اسم البطاقة والقائمة، بدل أن ينتظر حتى تظهر في منتصف التشغيل عبارة غامضة هي «invalid device function». <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>وفي جهة NVIDIA تُستخدم الترجمة الشرطية نفسها لخدمة البطاقات القديمة. فالتعليمة <code>__dp4a</code> لا توجد إلا من قدرة الحوسبة 6.1. وعند الترجمة لبطاقة قدرتها 6.0 يبدّلها <code>#if</code> بحلقة برمجية مكافئة. وهذا المسار يتطلب تشغيل مفتاح تجريبي يدويًّا هو <code>STRATA_EXPERIMENTAL_SM60</code>، وتشغيل CUDA 12، لأن CUDA 13 لم تعد قادرة على ترجمة هذه البطاقات القديمة. <span class="ev ev-code">حقيقة من الشيفرة</span> ومنذ v0.1.39 نشرت الجهة الأصلية أيضًا محركًا تجريبيًّا مُترجَمًا بـ CUDA 12.9 لبطاقات Pascal وVolta القديمة. لكن المشرفين لا يملكون هذه البطاقات، فلم يتحققوا إلا من أنه يُترجَم وينجح في اختبارات الوحدة، ولم يشغّلوه عليها ولو مرة. <span class="ev ev-report">تقرير المصدر الأصلي</span> ومع ذلك ما زالت رسالة الخطأ في سكربت البناء تقول «غير مدعوم من المصدر الأصلي»: نص التنبيهات كثيرًا ما يتأخر عن الشيفرة. ومثال آخر: عند الترجمة بـ CUDA 12.8 لسلسلة RTX 50 يطلق سكربت البناء تحذيرًا، لأن مستخدمين أبلغوا بأن محركًا بُني هكذا انهار مع المُطالبات (prompt) الطويلة. <span class="ev ev-code">حقيقة من الشيفرة</span> فإصدار المترجم نفسه متغيّر من المتغيرات.</p>
+
+<h2 id="sec-4">22.4 كم يبعد «يُترجَم» عن «مدعوم»</h2>
+<p>افترض أن معمارية بطاقتك في القائمة، وأن المحرك بُني. هل يعني ذلك أنها «مدعومة»؟ يجيب سكربت البناء في Strata بتفصيل كبير. فهو يقسّم معماريات AMD إلى ثلاث فئات، ويعامل CMake كل فئة منها معاملة مختلفة عند الإعداد: <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="الشكل 22-6: أربعة مستويات من الدليل على الدعم: تُترجَم، تنجح الاختبارات، تعمل على بطاقة حقيقية، يتحقق منها المشرف؛ مع مستوى كل معمارية AMD في Strata">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle">مستويات الدليل على «الدعم» (كلما صعدت قوي)</text>
+<rect class="f-accent" fill="#136d5a" x="190" y="40" width="200" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="59" font-size="13" font-weight="600">④ تحقق المشرف</text>
+<text class="f-on" fill="#ffffff" x="200" y="77" font-size="12">gfx1100 وgfx1201</text>
+<rect class="f-soft" fill="#e5f1df" x="130" y="100" width="200" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="140" y="119" font-size="13" font-weight="600">③ تعمل على بطاقة حقيقية</text>
+<text class="f-muted" fill="#5c6d66" x="140" y="137" font-size="12">gfx1101 وgfx1200 (مستخدمون)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="70" y="160" width="200" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="80" y="179" font-size="13" font-weight="600">② اختباراتها الخاصة تنجح</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="197" font-size="12">gfx1102: تنجح ctest</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="220" width="200" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="20" y="239" font-size="13" font-weight="600">① تُترجَم</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="257" font-size="12">4 معماريات غير متحقَّق منها: تحذير</text>
+<text class="f-muted" fill="#5c6d66" x="222" y="247" font-size="12">← المترجم يقبلها فقط</text>
+<text class="f-muted" fill="#5c6d66" x="282" y="187" font-size="12">← لا انهيار ونتيجة صحيحة</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="127" font-size="12">حمل حقيقي ينجح →</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="67" font-size="12">قابل للتكرار وله مسؤول →</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="286" font-size="12" text-anchor="middle">المعماريات خارج القائمة: تُرفَض عند المستوى ①</text>
+</svg><figcaption>الشكل 22-6  «تُترجَم» أدنى مستويات الدليل فقط. يصنّف سكربت البناء في Strata معماريات AMD بحسب قوة الدليل، ويرفض ما كان خارج القائمة.</figcaption></figure>
+<ul>
+<li><strong>تحقق المشرف:</strong> gfx1100 (RX 7900 XT / XTX) وgfx1201 (سلسلة RX 9070 وRadeon AI PRO R9700)، وقد شغّلها المشرف على بطاقات حقيقية.</li>
+<li><strong>تحقق المستخدمين:</strong> gfx1101 وgfx1200، وقد شغّلها أصحاب البطاقات وأبلغوا بالنتيجة. ولا يطبع الإعداد معها إلا سطر تنبيه واحد.</li>
+<li><strong>غير متحقَّق منها:</strong> gfx1012 وgfx1102 وgfx1030 وgfx1031 تُترجَم، ويعطي الإعداد تحذيرًا يطلب من المستخدم أن يبلغ بالنتيجة. نجحت gfx1102 في الاختبارات المرفقة، لكن لم يبلغ أحد بتشغيل كامل لنموذج عليها. وشغّلها جهاز مجتمعي على gfx1030، ولم يتحقق المشرف منها بنفسه. وأُضيفت gfx1012 (RX 5500 XT، من RDNA1) وgfx1031 (RX 6700 XT) في v0.1.39، وشغّل كلًّا منهما مستخدم على بطاقته. <span class="ev ev-report">تقرير المصدر الأصلي</span></li>
+</ul>
+<p>الفخ الثاني هو الأرقام. في الشكل 22-5 الضرب النقطي dp4a عملية على أعداد صحيحة، فتتطابق نتيجة كل مسار بتًّا ببت. أما الأعداد العشرية فمختلفة: إذا تغير ترتيب الجمع، فقد تختلف الخانات الأخيرة (شرحنا تقريب الأعداد العشرية في الفصل 4). وتقول وثيقة AMD في Strata صراحة: لا وعد بأن تعطي الخلفيتان إجابة متطابقة بتًّا ببت. <span class="ev ev-report">تقرير المصدر الأصلي</span> وقد يحدث هذا على الجهاز نفسه. ففي نماذج سلسلة IQ يحسب CPU الرمز الواحد بالضرب النقطي في ggml، ويحسبه ضمن مجموعة بنواة Strata متعددة الرموز، فيختلف التقريب قليلًا؛ وعدد الرموز في المجموعة يعتمد على المسودة. فعند درجة حرارة (temperature) تساوي 0 قد تحصل على إجابة أخرى معقولة بالقدر نفسه للمُطالبة نفسها. ومنذ المحرك 0.1.30 يمكن ضبط <code>STRATA_IQ_MT_MIN=1</code> لإزالة هذا الفرق، وثمنه أن الجهة الأصلية قاست decode لنموذج IQ3_S أبطأ بنسبة 1-3% على Ryzen 7600 (AVX-512). <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03]</p>
+<p>لذلك <strong>إعداد البناء شرط تجريبي</strong>، ويُكتب في التقرير مثل العتاد. في الإيداع (commit) نفسه، يترجم ggml الجزء الخاص بـ CPU لـ«أي CPU يدعم AVX2» أو لـ«CPU هذا الجهاز» بحسب تشغيل <code>STRATA_PORTABLE</code> أو إيقافه؛ ومتغير بيئة واحد يغيّر مسار الحساب. <span class="ev ev-code">حقيقة من الشيفرة</span> ولننظر الآن إلى جدول السرعة في README: نموذج Q2_0 يكتب 94 رمزًا في الثانية على جهاز RTX 5070، و60 رمزًا في الثانية على جهاز RX 9070 XT. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S01] والملاحظة تحت الجدول تذكر ظروف جهاز NVIDIA وحده: قيس Q2_0 بالمحرك 0.1.36 وقيست الصفوف الأخرى بالمحرك 0.1.26، وقيست كتابة الإجابة عند 4K وقراءة المُطالبة عند 32K؛ ولم يُذكر إصدار المحرك لجهاز AMD. وتنبّه ملاحظات إصدار v0.1.39 إلى أن الجدول لم يُعَد قياسه هذه المرة. والمعالجان في الجهازين مختلفان أيضًا: Ryzen 5 7600 يدعم AVX-512، وRyzen 9 3900X (Zen 2) لا يدعم إلا AVX2. تدل هذه الأرقام على أن «الجهازين يعملان»، ولا يصح أن نقارن بها أيهما أسرع، NVIDIA أم AMD.</p>
+<p>كم تركيبة تحتاج إلى تحقق؟ تقدير تقريبي في الشكل 22-7. <span class="ev ev-est">تقدير تعليمي</span></p>
+<figure class="fig"><svg viewBox="0 0 400 172" role="img" aria-label="الشكل 22-7: 10 معماريات GPU ضرب 3 مسارات CPU ضرب نظامي تشغيل ضرب 5 حزم نماذج يساوي 300 تركيبة">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="10" width="76" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="46" y="32" font-size="13" font-weight="600" text-anchor="middle">معمارية GPU</text>
+<text class="f-text" fill="#182f2b" x="46" y="56" font-size="14" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="93" y="44" font-size="14" text-anchor="middle">×</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="102" y="10" width="76" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="140" y="32" font-size="13" font-weight="600" text-anchor="middle">مسار CPU</text>
+<text class="f-text" fill="#182f2b" x="140" y="56" font-size="14" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="187" y="44" font-size="14" text-anchor="middle">×</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="196" y="10" width="76" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="234" y="32" font-size="13" font-weight="600" text-anchor="middle">النظام</text>
+<text class="f-text" fill="#182f2b" x="234" y="56" font-size="14" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="281" y="44" font-size="14" text-anchor="middle">×</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="10" width="76" height="58" rx="8"/>
+<text class="f-text" fill="#182f2b" x="328" y="32" font-size="13" font-weight="600" text-anchor="middle">النماذج</text>
+<text class="f-text" fill="#182f2b" x="328" y="56" font-size="14" text-anchor="middle">5</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="90" width="200" height="40" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="115" font-size="14" font-weight="600" text-anchor="middle">المجموع 300 تركيبة</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 68V88"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="160" font-size="12" text-anchor="middle">وطول السياق وتعدد البطاقات وصيغ KV تضاعفه أكثر</text>
+</svg><figcaption>الشكل 22-7  التقدير التقريبي وحده يعطي 300 تركيبة، ولا يستطيع جهاز واحد أن يضيء إلا خانة واحدة منها. الخانات التي لم تُختبر يجب أن تبقى فارغة، لا أن توضع عليها علامة صح افتراضيًّا.</figcaption></figure>
+<p>المعادلة: 10 معماريات GPU (أربعة أجيال RTX 20/30/40/50 بحسب قائمة سكربت البناء لـ NVIDIA، وست معماريات لـ AMD بُنيت في محرك Windows)، و3 مسارات CPU (AVX-512 وAVX2 وggml)، ونظامان للتشغيل، و5 حزم نماذج في README: 10 × 3 × 2 × 5 = 300. لا أحد يستطيع اختبارها كلها. والحل العملي طبقات: عينات صغيرة من الرياضيات الخالصة تغطي الخوارزمية؛ واختبارات الصيغ تغطي فك التكميم (quantization)؛ ولكل خلفية نواة تمثيلية تُختبر بالمقارنة؛ والاختبار من طرف إلى طرف لا يغطي إلا أهم التركيبات.</p>
+
+<h2 id="sec-5">22.5 تطبيق عملي: سلّم سطر شيفرة إلى خلفيتين</h2>
+<p>لا يوجد في هذا الفصل مختبر تفاعلي مستقل، والمحاكيان هما منصة التجربة. نقترح أن تلعب بهذا الترتيب:</p>
+<ol>
+<li>في «شيفرة واحدة، وخلفيتان» ترجم على التوالي RTX 50 وRX 7900 وRX 6900. قارن الأسطر الثلاثة بعد المعالجة المسبقة: أي الأسماء تغيرت، وفي أي فرع سقط dp4a. ثم انظر هل نتيجة المثال 95 دائمًا.</li>
+<li>اختر «معمارية خارج القائمة»، وتأمل: لماذا يفضّل CMake الرفض في الخطوة الأولى؟</li>
+<li>في «منتقي نواة CPU» ثبّت CPU وحزمة النموذج، وغيّر متغيرات البيئة وعدد الرموز فقط. وعُدّ: كم مسار حساب مختلفًا يمكن أن يسلكه الجهاز نفسه؟</li>
+</ol>
+<p>ومن كان عنده مترجم C فليجرب تجربة صغيرة أخرى: اكتب دالة ضرب نقطي قياسية، ثم اكتب نسخة تجمع كل 8 أعداد في مجموعة. قارن نتيجتي النسختين وزمنهما على المجموعة نفسها من الأعداد العشرية العشوائية. سترى أن الخانات الأخيرة تختلف. تأكد أولًا أن المنطق صحيح، ثم تكلم عن الأداء؛ فالسرعة المقيسة على مصفوفة صغيرة جدًّا لا تمثل نوى SIMD الحقيقية.</p>
+
+<h2 id="sec-6">22.6 الحدود: الرخص والنماذج وهذا الكتاب نفسه</h2>
+<p>«قابلية النقل» لها وجه آخر: من يستطيع أن يأخذ الشيفرة والنموذج والوثائق، وكيف يستخدمها. شيفرة مستودع Strata مرخّصة بترخيص MIT. <span class="ev ev-code">حقيقة من الشيفرة</span>[S19] وفي المستودع أجزاء قليلة لها ترخيص آخر: <code>third_party/ggml</code> من llama.cpp / ggml (MIT)، وخط تطبيق الويب مرخّص برخصة الخطوط المفتوحة SIL. وملفات النماذج ليست في المستودع، ولكل نموذج ترخيصه. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02]</p>
+<p>وهذا الكتاب موقع ثابت: HTML وCSS وJavaScript، ولا يحتوي محرك استدلال، ولا ينزّل أوزان نماذج. ونشره على أي خدمة استضافة يعني نشر مقرر دراسي فقط، لا تشغيل Strata على ذلك الخادم. والرسوم التفاعلية في الكتاب كلها محاكاة تعليمية: تعيد إنتاج منطق القرار في شيفرة Strata، لكنها ليست نوى Strata، ولا تتنبأ بأداء أي جهاز حقيقي.</p>
+<p>وعند الاقتباس من الشيفرة الأصلية يسجّل الكتاب رقم الإيداع المثبّت، ولا يعيد تغليف خطوط المصدر الأصلي ولا نماذجه، ويذكر أنه كتاب مستقل التأليف لم يعتمده المشروع الأصلي ولا الجهات المنتجة للنماذج رسميًّا.</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>الشريحة لا تفهم إلا مجموعة تعليماتها. الشيفرة المصدرية الواحدة تُترجَم مرة لكل هدف، والترجمة الشرطية تُبقي في كل ترجمة الفرع المناسب للهدف وحده.</li>
+<li>على CPU تُرسِل Strata وقت التشغيل: تسأل CPUID أولًا هل يوجد AVX-512 أو AVX2، ثم تختار النواة. وعلى GPU تُرسِل وقت الترجمة: جدول تسمية من CUDA إلى HIP مع بضع دوال داخلية كتبتها بنفسها، تبني محركين، لـ NVIDIA ولـ AMD.</li>
+<li>«تُترجَم» و«تنجح الاختبارات» و«تعمل على بطاقة حقيقية» و«تحقق المشرف» أربعة مستويات مختلفة من الدليل. ونتائج الأعداد العشرية لا يُضمَن تطابقها بتًّا ببت بين الخلفيات، فيجب تسجيل إعداد البناء ومتغيرات البيئة بوصفها شروطًا تجريبية.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «الشيفرة تُترجَم على بطاقتي، إذن بطاقتي مدعومة».</strong></p>
+<p>الترجمة الناجحة لا تعني إلا أن المترجم يعرف هذه الشيفرة. وفي سكربت البناء في Strata مثال مضاد جاهز: gfx1102 تُترجَم، ونجحت في الاختبارات المرفقة، لكن لم يبلغ أحد بتشغيل كامل لنموذج عليها، ولذلك يطلق الإعداد معها تحذير «غير متحقَّق منها». أما الدعم الحقيقي فيحتاج إلى تشغيل نموذج حقيقي على بطاقة حقيقية، وإلى نتائج صحيحة، وإلى من يستطيع تكرار ذلك.</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: تقسيم العمل بين وقت الترجمة ووقت التشغيل، وحدود الطبقة الوسيطة، وبيان الدعم</summary>
+<h3>لماذا يُضاف مفتاح AVX-512 إلى ملف واحد فقط</h3>
+<p>تشرح تعليقات سكربت البناء السبب: ملف مصدري يُترجَم بـ <code>/arch:AVX512</code> يجوز للمترجم أن يستخدم فيه تعليمات AVX-512 في <strong>أي</strong> موضع، حتى في القطعة القياسية التي تظنها «طريق النجاة». فلو وُضع طريق النجاة القياسي في الملف نفسه مع نواة AVX-512 لم يعد طريق نجاة، وانهار على CPU القديم كذلك. لذلك لا تضيف Strata المفتاح إلا إلى ملفات النوى؛ ودالة فحص CPU في ملف لا يأخذ المفتاح، ليكون سؤال «ماذا تعرف؟» آمنًا على أي CPU من طراز x86-64. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>والفحص نفسه يستخدم الترجمة الشرطية: شيفرة CPUID الواحدة، يستخدم فيها مترجم MSVC الدالتين <code>__cpuidex</code> و<code>_xgetbv</code>، ويستخدم GCC/Clang الدالة <code>__cpuid_count</code> وتعليمة <code>xgetbv</code> بالتجميع المضمَّن. والتحقق من السجل XCR0 يؤكد أن نظام التشغيل يحفظ السجلات الكبيرة لـ AVX-512 عند تبديل الخيوط؛ فإن كان CPU يدعمها والنظام لا يحفظها، فلا يجوز استخدامها كذلك. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<h3>حدود الطبقة الوسيطة: الإيقاف أفضل من تغيير المعنى بصمت</h3>
+<p>دالة تبادل warp في CUDA تأخذ معاملًا هو قناع «أي المسارات تشارك». ودالة HIP المقابلة لا تملك هذا المعامل. فعلت الطبقة الوسيطة هذا: النواة الحالية لا تستخدم إلا القناع الكامل، فإذا جاء استدعاء بقناع غير كامل أوقفت البرنامج مباشرة (<code>__builtin_trap</code>)، ولا تتخلى عن القناع وتواصل الحساب. والدالة <code>__nanosleep</code> تُحسب في CUDA بدورات الساعة، وتعليمة النوم في AMD لا تقبل إلا من 0 إلى 15، فاستخدمت الطبقة الوسيطة القيمة الصغرى 1 دائمًا، لأن المراد بها هنا مجرد تلميح «انتظر قليلًا». <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>وللمسارات الأربعة في dp4a مبرراتها. تسمح تعليمة sudot4 في RDNA3/RDNA4 بأن تحدد لكل من المعاملين هل هو بإشارة أم لا، فتعلّم الطبقة الوسيطة الاثنين على أنهما بإشارة، ليتطابق المعنى مع <code>__dp4a</code> في CUDA. أما sdot4 في RDNA2 فهي أصلًا «بإشارة × بإشارة، وتراكم بباقي القسمة على 2³²»، فالمعنى واحد. وفي تجميع RDNA1 يُوسَّع كل بايت بإشارته أولًا ثم يُضرب (<code>v_mul_i32_i24</code>)، ثم يُضاف حاصلا ضرب إلى المراكِم كل مرة بـ <code>v_add3_u32</code>؛ والجمع من 32 بتًّا بلا إشارة هو أصلًا باقي القسمة على 2³². وهذه الكتابة مقتبسة من llama.cpp. وإذا شغّلت مفتاح الترجمة <code>STRATA_GFX1012_PORTABLE_DOT</code> انتقلت gfx1012 إلى الحلقة القابلة للنقل، لتسهّل المقارنة. وتجمع الحلقة القابلة للنقل بعدد صحيح من 32 بتًّا بلا إشارة، ثم تفسّر النتيجة بإشارة، وتكون النتيجة أيضًا باقي القسمة على 2³². وفي ملف اختبار محاكي هذا الفصل تحقق من تجميع RDNA1 والحلقة القابلة للنقل والحلقة البرمجية لبطاقات NVIDIA القديمة واحدًا واحدًا، وتطابقت كلها مع القيمة المرجعية بتًّا ببت حتى عند حدود الفيض.</p>
+<h3>الاسم لا يحدد الصيغة: الإرسال بحسب النوع</h3>
+<p>اسم الموتّر (tensor) نفسه قد يستخدم صيغة تكميم مختلفة في طبقات مختلفة. تسجّل تعليقات <code>layer.cpp</code> درسًا تعلّمته: افترضت الشيفرة المبكرة أن «الاسم يحدد الصيغة»، فمثلًا <code>attn_qkv</code> لا بد أن تكون من نوع K-quant ما. لكن في حزمة النموذج الفعلية فيها 36 طبقة GDN، وللموتّر <code>attn_qkv</code> فيها أربع صيغ: IQ4_XS وQ3_K وQ2_0 وQ4_K. لذلك صارت القاعدة الإرسال بحسب <strong>النوع</strong>: الترميز بـ 2 بت يذهب إلى تنشيطات Q8_0، وبقية صيغ التكميم تذهب إلى Q8_K. وإذا أخطأت كان خطأ ضرب المصفوفة في المتجه 0.6%-1.4%: ينتج متجهًا «يبدو معقولًا»، لا متجهًا فاسدًا ظاهرًا، وهذا أصعب ما يُكتشف. <span class="ev ev-code">حقيقة من الشيفرة</span>[S14]</p>
+<h3>والتبعيات تُثبَّت أيضًا</h3>
+<p>يستخدم خبراء CPU في Strata الضرب النقطي من ggml-cpu، وعند البناء يُجلب ggml من مستودع llama.cpp. ولا يُجلب «أحدث إصدار»، بل رقم إيداع واحد مكتوب في <code>third_party/ggml/VERSION.txt</code>. <span class="ev ev-code">حقيقة من الشيفرة</span> والسبب هو سبب تثبيت هذا الكتاب لرقم إيداع Strata: إذا تغيرت التبعية فقد يتغير مسار الأعداد.</p>
+<h3>أصغر بيان دعم</h3>
+<p>عند كتابة بيان دعم لخلفية جديدة، اكتب على الأقل:</p>
+<ul>
+<li>رقم إيداع الشيفرة المصدرية؛ والمترجم وإصداره؛ وقائمة المعماريات المستهدفة؛ وكل مفاتيح الترجمة؛ وإصدارات المكتبات التابعة؛ ومتغيرات البيئة وقت التشغيل.</li>
+<li>الأجهزة التي اختُبرت، وبرامج التشغيل، وحزم النماذج، وصيغ التكميم، وصيغ KV، ومساري prefill وdecode، ونطاق أطوال السياق.</li>
+<li>الأدلة مفصولة بالمستوى: الترجمة نجحت، والاختبارات المرفقة نجحت، والمقارنة على مستوى الموتّر (الخطأ بالنسبة إلى التنفيذ المرجعي)، والجودة من طرف إلى طرف، والاستقرار، والأداء.</li>
+<li>التركيبات التي لم تُختبر تُدرج صراحة بأنها «لم تُختبر»، ولا تُكتب عبارة «دعم شامل».</li>
+</ul>
+<p>وقد يسلك ملفان ثنائيان من الإيداع نفسه مسارين مختلفين في الشيفرة إذا اختلفت مفاتيح ترجمتهما. ينبغي أن يذكر سجل الإقلاع أي خلفية استُخدمت فعلًا، وأي مسار CPU، وهل حدث رجوع إلى مسار بديل؛ وعندما تقلع Strata على CPU بلا AVX-512 تطبع هل انتقلت إلى AVX2 أو إلى ggml. <span class="ev ev-code">حقيقة من الشيفرة</span> ولا ينبغي أن يخمّن المستخدم ذلك من اسم الملف.</p>
+<h3>ذيل التجهيز المتجه</h3>
+<p>إذا لم يكن طول المتجه من مضاعفات عدد المسارات فإن «الذيل» المتبقي يجب أن يُعالَج بقناع أو بمسار قياسي مستقل. ومن يقرأ بضعة بايتات زيادة توفيرًا للجهد قد يقرأ بيانات الخبير التالي: لا ينهار البرنامج بالضرورة، لكن النتيجة خاطئة. وعند تحميل الخبراء الأصليين تتحقق Strata أولًا من أن حجم الخبير من مضاعفات حجم كتلة الصيغة، وترفض إن لم يكن كذلك. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+</details>

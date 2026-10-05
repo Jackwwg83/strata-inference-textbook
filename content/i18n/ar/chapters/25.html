@@ -1,0 +1,259 @@
+<div class="hook"><span class="eyebrow">تخيّل هذا المشهد</span>
+<p>شغّلتَ Strata على حاسوبك المنزلي، ويريد زملاؤك في السكن استخدامه أيضًا. يفتح خمسة أشخاص صفحة الويب في وقت واحد ويطرحون أسئلتهم. ملف README في Strata صريح في هذا: افتراضيًا يجيب على طلب واحد في كل مرة، ويقف الباقون في الطابور. وإن أردتَ الإجابة عن عدة طلبات معًا، ففعّل الخيار <code>"parallel"</code> في الإعدادات، وعلى بطاقة بذاكرة 12 GB سيجعل هذا كل إجابة أبطأ. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S01] إذن، في الإعداد الافتراضي، كم سينتظر الشخص الخامس؟ وإذا طلب أحدهم مقالًا طويلًا، فهل يجلس الأربعة الباقون بلا عمل؟</p>
+<p>هذا الفصل <strong>درس في التصميم</strong>. افتراضيًا، يخدم Strata الأصلي (upstream) تسلسلًا واحدًا خلف طابور «الداخل أولًا يخرج أولًا». أضاف الإصدار v0.1.39 ميزة «خانات الدفعة» (batch slots) وهي معطّلة افتراضيًا، وتفكّ ما يصل إلى 8 محادثات معًا. سنحسب أولًا «كم ننتظر» بخوارزميات الجدولة ونظرية الأرتال. ثم نرى ما الذي يجب تغييره عند الانتقال من تسلسل واحد إلى عدة تسلسلات. وأخيرًا نقارن ذلك بما فعله المصدر الأصلي.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> من يبدأ أولًا، وكم ينتظر، وهل يمكن الحساب معًا؟ هذه ثلاثة أسئلة مختلفة، تجيب عنها على الترتيب سياسة الجدولة ونظرية الأرتال والمعالجة بالدفعات. وقبل أي تعديل، يجب عزل حالة كل تسلسل عزلًا تامًا.</p>
+
+<h2 id="sec-1">25.1 الوضع الحالي: قفل واحد وطابور واحد</h2>
+<p>يبدأ الملف <code>serve/server.py</code> بتعليق يقول: «تسلسل واحد في كل مرة، خلف طابور FIFO».<span class="ev ev-code">حقيقة من الشيفرة</span>[S15] والتنفيذ بسيط: لدى طبقة الخدمة قفل واحد <code>self.fifo = threading.Lock()</code>. في الإعداد الافتراضي، الطلب الذي يحصل على القفل يستحوذ على المحرك وحده، وتنتظر بقية الطلبات خارج القفل، فيزداد «عدد المنتظرين» في صفحة الحالة. <span class="ev ev-code">حقيقة من الشيفرة</span> لكن التعليق الأول تجاوزته الشيفرة: أُضيف لاحقًا في الملف نفسه الخيار <code>"parallel"</code>. عند تفعيله لا يأخذ الطلب هذا القفل، بل يُسلَّم إلى خانات الدفعة في المحرك. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/serve/server.py#L2263-L2272" target="_blank" rel="noopener noreferrer">server.py</a>) إذا تعارض التعليق مع الشيفرة، فالمرجع هو الشيفرة.</p>
+<p>من جهة أخرى، يستخدم خادم HTTP في Python الصنف <code>ThreadingHTTPServer</code>، أي خيطًا لكل اتصال، فيستطيع الأشخاص الخمسة <strong>الاتصال</strong> في وقت واحد. لكن الاتصال لا يعني أن الطلب يُخدَّم. انظر الشكل 25-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 286" role="img" aria-label="الشكل 25-1: في الإعداد الافتراضي تصل خمسة اتصالات معًا وتنتظر أمام قفل FIFO، والمحرك يخدم تسلسلًا واحدًا في كل مرة. عدد الاتصالات وعدد المنتظرين وعدد التسلسلات النشطة ثلاثة أعداد مختلفة">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="44" y="31" font-size="13" text-anchor="middle">مستخدم 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="88" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="122" y="31" font-size="13" text-anchor="middle">مستخدم 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="166" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">مستخدم 3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="278" y="31" font-size="13" text-anchor="middle">مستخدم 4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="322" y="10" width="68" height="32" rx="6"/><text class="f-text" fill="#182f2b" x="356" y="31" font-size="13" text-anchor="middle">مستخدم 5</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M44 42L150 74M122 42L170 74M200 42V74M278 42L230 74M356 42L250 74"/>
+<rect class="f-soft" fill="#e5f1df" x="70" y="76" width="260" height="40" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="101" font-size="13" text-anchor="middle">قفل FIFO: الأول يدخل والبقية تنتظر</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 116V138"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="140" width="260" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="165" font-size="13" text-anchor="middle">المحرك: يخدم الآن تسلسلًا واحدًا</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="198" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="221" font-size="12">اتصالات HTTP: 5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="198" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="215" y="221" font-size="12">الطلبات المنتظرة: 4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="242" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="265" font-size="12">تسلسلات قيد التوليد: 1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="242" width="185" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="215" y="265" font-size="12">تسلسلات في حساب واحد: 1</text>
+</svg><figcaption>الشكل 25-1  الإعداد الافتراضي في Strata الأصلي: يستطيع الخمسة الاتصال، لكن تسلسل شخص واحد فقط يُولَّد في اللحظة الواحدة. الأعداد الأربعة في الأسفل تُحسب كلٌّ على حدة، وقد تختلف اختلافًا كاملًا.</figcaption></figure>
+<p>في المصدر الأصلي ميزة أخرى تمسّ «تعدد الجلسات»: يمكنك تفعيل «منطقة ركن الجلسات» محدودة السعة، تُبقي في الذاكرة حالة بضع محادثات، فلا تضطر الطلبات المتناوبة إلى قراءة المُطالبة (prompt) من أولها في كل مرة. لكن الوثائق تقول صراحة إنها <strong>لا تنفّذ الطلبات بالتوازي</strong>. <span class="ev ev-report">تقرير المصدر الأصلي</span> وشروط إعادة الاستخدام في الشيفرة التي تدير هذه الجلسات المركونة صارمة أيضًا: الرموز (tokens) متطابقة تمامًا، وهوية الصور متطابقة، ووضع التوجيه متطابق، ولا يُستغنى عن أي شرط من الثلاثة. <span class="ev ev-code">حقيقة من الشيفرة</span>[S10]</p>
+<p>أما الميزة المتوازية فعلًا فقد أُضيفت في v0.1.39 فقط: اكتب <code>"parallel": N</code> في إعدادات النموذج، فيفك المحرك حتى N محادثات في وقت واحد، وأقصى قيمة لـ N هي 8. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/serve/server.py#L1482-L1503" target="_blank" rel="noopener noreferrer">server.py</a>) وهي معطّلة افتراضيًا. ويحذّر README أيضًا: على بطاقة 12 GB تجعل كل إجابة أبطأ. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S01] لذلك يبقى خطّ هذا الفصل <strong>تمرينًا في التصميم</strong>: كيف نقارن سياسات الجدولة، وما الذي يجب عزله عند تعدد التسلسلات، وكيف نحجز الميزانية. وفي نهاية القسمين 25.4 و25.5 نقارن ذلك بتنفيذ المصدر الأصلي.</p>
+
+<h2 id="sec-2">25.2 من يبدأ أولًا: FIFO وSJF والتناوب الدوري</h2>
+<aside class="primer" id="c25-scheduling">
+<h3>خوارزميات الجدولة: FIFO وSJF والتناوب الدوري</h3>
+<p>حين يكون هناك نادل واحد وحشد من الزبائن، يصبح سؤال «من نخدم أولًا» مسألة <dfn>جدولة</dfn>. نظام التشغيل يوزّع المعالج على العمليات، والطابعة ترتّب مهام الطباعة، وخدمة الاستدلال ترتّب الطلبات: كلها المسألة نفسها. وهذه أشهر ثلاث سياسات:</p>
+<ul>
+<li><dfn>FIFO</dfn> (الداخل أولًا يخرج أولًا، ويسمى أيضًا FCFS أي «الأسبق وصولًا يُخدَم أولًا»): بترتيب الوصول، ينتهي الأول ثم يبدأ التالي. بسيطة وعادلة، لكن مهمة طويلة واحدة تحجب كل المهام القصيرة بعدها، ويسمى هذا <dfn>تأثير الموكب</dfn> (convoy effect).</li>
+<li><dfn>SJF</dfn> (الأقصر أولًا): يختار في كل مرة أقصر مهمة. يمكن إثبات أنها تعطي أقل متوسط انتظار حين تصل كل المهام معًا. وثمنها شيئان: يجب معرفة طول كل مهمة مسبقًا؛ وقد تُدفع المهمة الطويلة إلى الخلف باستمرار بسبب تدفق المهام القصيرة، ويسمى هذا <dfn>التجويع</dfn> (starvation).</li>
+<li><dfn>التناوب الدوري</dfn> (round-robin): يعمل كل واحد قطعة صغيرة بدوره، تسمى <dfn>شريحة زمنية</dfn>، ومن لم ينتهِ يعود إلى آخر الطابور. يبدأ الجميع سريعًا، لكن التبديل المتكرر له كلفة، ولا يقلّ متوسط زمن الإنجاز بالضرورة.</li>
+</ul>
+<p>ولا يوجد مقياس واحد للحكم: <strong>زمن الانتظار</strong> (لحظة الانتهاء − لحظة الوصول − طول المهمة نفسها)، و<strong>الاستجابة الأولى</strong> (متى تبدأ الخدمة؛ وفي المحادثة: متى ترى أول رمز)، و<strong>الإنتاجية</strong> (كم تُنجَز في وحدة الزمن). لكل سياسة مكاسب وخسائر في مقاييس مختلفة.</p>
+<p class="further">للاستزادة: <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-sched.pdf" target="_blank" rel="noopener noreferrer">OSTEP: مقدمة في الجدولة (بالإنجليزية)</a> · <a href="https://ar.wikipedia.org/wiki/%D8%AC%D8%AF%D9%88%D9%84%D8%A9_%D8%A7%D9%84%D9%85%D8%B9%D8%A7%D9%84%D8%AC" target="_blank" rel="noopener noreferrer">ويكيبيديا: جدولة المعالج</a> · <a href="https://en.wikipedia.org/wiki/Resource_starvation" target="_blank" rel="noopener noreferrer">Wikipedia: Resource starvation (بالإنجليزية)</a> · <a href="https://ar.wikipedia.org/wiki/%D8%AC%D8%AF%D9%88%D9%84%D8%A9_%D8%B1%D8%A7%D9%88%D9%86%D8%AF_%D8%B1%D9%88%D8%A8%D9%86" target="_blank" rel="noopener noreferrer">ويكيبيديا: جدولة راوند روبن</a></p>
+</aside>
+<p>نبدأ بأصغر مثال: ثلاثة طلبات تصل معًا، وأطوال إجاباتها 8 و3 و5 رموز. نفترض أن توليد رمز واحد يأخذ وحدة زمنية واحدة، وأن التبديل لا يكلّف شيئًا. <span class="ev ev-est">تقدير تعليمي</span></p>
+<div class="viz" data-viz="sched-race"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="الشكل 25-2: ثلاثة طلبات تصل معًا بأطوال 8 و3 و5. مع FIFO يكون وقت أول رمز 1 و9 و12؛ ومع التناوب الدوري بشريحة 1 يكون 1 و2 و3، لكن متوسط الانتظار يرتفع من 6.33 إلى 7">
+<text class="f-text" fill="#182f2b" x="20" y="30" font-size="13" font-weight="600">FIFO: أول رمز عند 1 و9 و12؛ متوسط الانتظار 6.33</text>
+<rect class="f-accent" fill="#136d5a" x="20.0" y="40" width="179.0" height="28"/>
+<text class="f-on" fill="#ffffff" x="110.0" y="59" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="200.0" y="40" width="66.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="233.8" y="59" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="267.5" y="40" width="111.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="323.8" y="59" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<text class="f-text" fill="#182f2b" x="20" y="114" font-size="13" font-weight="600">التناوب (شريحة 1): أول رمز عند 1 و2 و3؛ متوسط الانتظار 7</text>
+<rect class="f-accent" fill="#136d5a" x="20.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="31.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="42.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="53.8" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="65.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="76.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="87.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="98.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="110.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="121.3" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="132.5" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="143.8" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="155.0" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="166.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="177.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="188.8" y="143" font-size="13" font-weight="600" text-anchor="middle">B</text>
+<rect class="f-soft" fill="#e5f1df" x="200.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="211.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="222.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="233.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-soft" fill="#e5f1df" x="245.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="256.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="267.5" y="124" width="21.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="278.8" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<rect class="f-soft" fill="#e5f1df" x="290.0" y="124" width="21.5" height="28"/>
+<text class="f-text" fill="#182f2b" x="301.3" y="143" font-size="13" font-weight="600" text-anchor="middle">C</text>
+<rect class="f-accent" fill="#136d5a" x="312.5" y="124" width="66.5" height="28"/>
+<text class="f-on" fill="#ffffff" x="346.3" y="143" font-size="13" font-weight="600" text-anchor="middle">A</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 168H380"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="186" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="186" font-size="12" text-anchor="middle">8</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="186" font-size="12" text-anchor="middle">16</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="210" font-size="12" text-anchor="middle">الخطان بالطول نفسه: العمل الكلي ثابت، والترتيب وحده يتغير</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="228" font-size="12" text-anchor="middle">النسخة التفاعلية: ثلاث سياسات، وتضبط الشريحة بنفسك</text>
+</svg><figcaption>الشكل 25-2  الطلبات الثلاثة نفسها: يتيح التناوب الدوري لكل واحد أن يرى أول رمز قبل نهاية الوحدة الزمنية الثالثة، لكن متوسط الانتظار يرتفع من 6.33 إلى 7. لا توجد وجبة مجانية بين العدالة والكفاءة. <span class="ev ev-est">تقدير تعليمي</span></figcaption></figure></div>
+<p>احسب FIFO: ينتهي A عند 8، وB عند 11، وC عند 16. أزمنة الانتظار 0 و8 و11، والمتوسط نحو 6.33. أما SJF فيبدأ بـ B (3) ثم C (5) وأخيرًا A (8)، فالانتظار 8 و0 و3 والمتوسط نحو 3.67، وهو الأقل. والتناوب الدوري يعطي كل واحد وحدة واحدة بدوره، فيكون أول رمز عند 1 و2 و3 ويحصل الجميع على استجابة سريعة. لكن الثلاثة يتأخرون كثيرًا قبل الإنجاز، فيكون متوسط الانتظار 7، وهو الأسوأ.</p>
+<p>وإن كان كل تبديل يتطلب حفظ كتلة كبيرة من حالة التسلسل واستعادتها (مثل حالة GDN المتكررة في الفصل 9)، فإن الشريحة الصغيرة جدًا تجعل كلفة التبديل تلتهم وقتًا كبيرًا. العدالة ليست مجانية، فعلينا أن ننظر معًا إلى زمن أول رمز وزمن الإنجاز والإنتاجية (throughput) وحجم الحالة المنقولة.</p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذا هو فصل جدولة المعالج في مقرر «نظم التشغيل»، لكن «العملية» صارت «طلب توليد» و«شريحة زمن المعالج» صارت «خطوة رمز». وهناك فرق جوهري: حين يبدّل نظام التشغيل بين العمليات يحفظ سياقًا صغيرًا كالمسجّلات؛ أما محرك الاستدلال فيبدّل بين تسلسلات خلفها كتل كبيرة من البيانات، هي ذاكرة KV المؤقتة (KV cache) والحالة المتكررة.</p>
+
+<h2 id="sec-3">25.3 مدخل إلى نظرية الأرتال: عند ثمانين بالمئة يبدأ الازدحام</h2>
+<p>الجدولة تقرّر من يبدأ أولًا، لكن هناك سؤال أعمق: ما كثافة وصول الطلبات؟ مهما كانت سياسة الجدولة ذكية، إذا وصل العمل أسرع مما يُنجَز، فسيطول الطابور بلا حدود.</p>
+<aside class="primer" id="c25-queueing">
+<h3>مدخل إلى نظرية الأرتال: قانون ليتل وM/M/1</h3>
+<p><dfn>نظرية الأرتال</dfn> تدرس أنظمة «الوصول والانتظار والخدمة». وتصف النظام بعدة كميات: معدل الوصول λ (كم يصل في وحدة الزمن)، ومعدل الخدمة μ (كم يمكن خدمته في وحدة الزمن)، و<dfn>معدل الاستخدام</dfn> ρ = λ ÷ μ (أي نسبة الوقت التي يكون فيها النادل مشغولًا).</p>
+<p>أنفع نتيجة هي <dfn>قانون ليتل</dfn>: L = λ × W. أي إن متوسط عدد الزبائن في النظام L يساوي معدل الوصول مضروبًا في متوسط زمن مكوث كل زبون W. وهو لا يعتمد تقريبًا على أي افتراض، ويصدق على محل الشاي والطريق السريع وخدمة الاستدلال. مثلًا: إن وصل 3 طلبات في الدقيقة، وبقي كل منها 20 ثانية في المتوسط (أي 1/3 دقيقة)، فمتوسط ما في النظام طلب واحد.</p>
+<p>أبسط نموذج للأرتال اسمه <dfn>M/M/1</dfn>: الوصول عشوائي (الفاصل بين وصولين متتاليين يتبع التوزيع الأسّي)، وزمن الخدمة عشوائي أيضًا، ولا يوجد إلا نادل واحد. متوسط زمن المكوث فيه W = 1 ÷ (μ − λ). وهذه الصيغة تقول شيئًا مخالفًا للحدس: <strong>كلما اقترب معدل الاستخدام من 100%، ارتفع زمن الانتظار ارتفاعًا حادًا</strong>. عند ρ = 50% يكون W ضعف زمن الخدمة، وعند 80% خمسة أمثاله، وعند 95% عشرين مثلًا.</p>
+<p class="further">للاستزادة: <a href="https://ar.wikipedia.org/wiki/%D9%82%D8%A7%D9%86%D9%88%D9%86_%D9%84%D9%8A%D8%AA%D9%84" target="_blank" rel="noopener noreferrer">ويكيبيديا: قانون ليتل</a> · <a href="https://en.wikipedia.org/wiki/M/M/1_queue" target="_blank" rel="noopener noreferrer">Wikipedia: M/M/1 queue (بالإنجليزية)</a> · <a href="https://ar.wikipedia.org/wiki/%D9%86%D8%B8%D8%B1%D9%8A%D8%A9_%D8%A7%D9%84%D8%A3%D8%B1%D8%AA%D8%A7%D9%84" target="_blank" rel="noopener noreferrer">ويكيبيديا: نظرية الأرتال</a></p>
+</aside>
+<p>لنحسب حسابًا على Strata. <span class="ev ev-est">تقدير تعليمي</span> افترض أن متوسط الإجابة 10 ثوانٍ (مثلًا 500 رمز بمعدل 50 رمزًا في الثانية)، فأقصى ما يخدمه Strata في الدقيقة هو μ = 6 طلبات. إذا وصل 3 طلبات في الدقيقة (ρ = 50%) فمتوسط المكوث 1 ÷ (6 − 3) دقيقة = 20 ثانية. وإذا وصل 4.8 (ρ = 80%) فهو 1 ÷ 1.2 دقيقة = 50 ثانية. وإذا وصل 5.7 (ρ = 95%) صار 200 ثانية. لم يزد الطلب حتى الضعف، لكن الانتظار تضاعف عشر مرات.</p>
+<div class="viz" data-viz="queue-load"><figure class="fig"><svg viewBox="0 0 400 258" role="img" aria-label="الشكل 25-3: متوسط زمن المكوث في نموذج M/M/1 بدلالة معدل الاستخدام. 20 ثانية عند 50%، و50 ثانية عند 80%، و200 ثانية عند 95%، ثم ارتفاع حاد عند الاقتراب من 100%">
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M56 20V206H382"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.6" stroke-dasharray="3 4" d="M56 144H382M56 82H382M56 20H382"/>
+<text class="f-muted" fill="#5c6d66" x="50" y="211" font-size="12" text-anchor="end">0</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="148" font-size="12" text-anchor="end">100</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="86" font-size="12" text-anchor="end">200</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="24" font-size="12" text-anchor="end">300</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M56.0 199.8L62.5 199.7L69.0 199.5L75.4 199.4L81.9 199.3L88.4 199.1L94.9 199.0L101.4 198.8L107.8 198.6L114.3 198.4L120.8 198.3L127.3 198.1L133.8 197.8L140.2 197.6L146.7 197.4L153.2 197.1L159.7 196.9L166.2 196.6L172.6 196.3L179.1 196.0L185.6 195.7L192.1 195.3L198.6 194.9L205.0 194.5L211.5 194.1L218.0 193.6L224.5 193.1L231.0 192.5L237.4 191.9L243.9 191.2L250.4 190.5L256.9 189.7L263.4 188.8L269.8 187.8L276.3 186.6L282.8 185.3L289.3 183.9L295.8 182.2L302.2 180.2L308.7 177.8L315.2 175.0L321.7 171.6L328.2 167.2L334.6 161.7L341.1 154.3L347.6 144.0L354.1 128.5L360.6 102.7L367.0 51.0L369.2 20.0"/>
+<circle class="f-warn" fill="#9e5d24" cx="218.0" cy="193.6" r="5"/>
+<circle class="f-warn" fill="#9e5d24" cx="315.2" cy="175.0" r="5"/>
+<circle class="f-warn" fill="#9e5d24" cx="363.8" cy="82.0" r="5"/>
+<text class="f-text" fill="#182f2b" x="218" y="180" font-size="12" text-anchor="middle">50%: 20 ثانية</text>
+<text class="f-text" fill="#182f2b" x="300" y="160" font-size="12" text-anchor="end">80%: 50 ثانية</text>
+<text class="f-text" fill="#182f2b" x="354" y="80" font-size="12" text-anchor="end">95%: 200 ثانية</text>
+<text class="f-muted" fill="#5c6d66" x="218" y="226" font-size="12" text-anchor="middle">50%</text>
+<text class="f-muted" fill="#5c6d66" x="315" y="226" font-size="12" text-anchor="middle">80%</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="226" font-size="12" text-anchor="middle">100%</text>
+<text class="f-muted" fill="#5c6d66" x="62" y="16" font-size="12">متوسط المكوث (ثانية)</text>
+<text class="f-muted" fill="#5c6d66" x="219" y="246" font-size="12" text-anchor="middle">معدل الاستخدام ρ (متوسط الإجابة 10 ثوانٍ)</text>
+</svg><figcaption>الشكل 25-3  يرتفع زمن الانتظار ارتفاعًا حادًا مع معدل الاستخدام. قبل 80% يبدو المنحنى هادئًا، وبعد 90% يكاد يصير عموديًا. لذلك يجب أن تترك الخدمة هامشًا، ولا تُخطَّط على أساس «مشغولة تمامًا». <span class="ev ev-est">تقدير تعليمي</span></figcaption></figure></div>
+<p>نموذج M/M/1 تقريب خشن: أطوال إجابات النماذج الكبيرة لا تتبع التوزيع الأسّي، وزمن قراءة المُطالبة يختلف كثيرًا عن زمن التوليد. لكن نتيجته النوعية متينة جدًا: <strong>كلما اقتربنا من الحمل الكامل خرج الانتظار عن السيطرة</strong>. وفي الأنظمة الحقيقية يعني هذا أحد أمور ثلاثة: إضافة أجهزة، أو تحديد الحمل (إذا طال الطابور جدًا قل للمستخدم «حاول لاحقًا»)، أو رفع μ، وهذا ما يفعله القسم التالي: المعالجة بالدفعات.</p>
+
+<h2 id="sec-4">25.4 التجميع المستمر: ندع عدة تسلسلات تتقدم معًا</h2>
+<p>افترضنا في القسمين السابقين أن المحرك يخدم تسلسلًا واحدًا في كل مرة. وإحدى طرق رفع μ أن تتقدم عدة تسلسلات <strong>في حساب واحد</strong>.</p>
+<aside class="primer" id="c25-continuous-batching">
+<h3>التجميع المستمر</h3>
+<p>عند توليد رمز، يقرأ المحرك الأوزان المعنية من ذاكرة الفيديو (VRAM). مع تسلسل واحد، تُقرأ الأوزان مرة واحدة لتنتج رمزًا واحدًا؛ ومع 8 تسلسلات معًا، تُقرأ مرة واحدة لتنتج 8 رموز. هذا هو مكسب <dfn>المعالجة بالدفعات</dfn>: يتحول ضرب مصفوفة في متجه إلى ضرب مصفوفة في مصفوفة، فتُقرأ الأوزان مرة وتُستخدم مرات (التفصيل في الفصل 16).</p>
+<p>أما <dfn>التجميع الثابت</dfn> الساذج فيجمع عدة تسلسلات في دفعة، تبدأ معًا وتنتهي معًا. المشكلة أن أطوال الإجابات متفاوتة: القصيرة تنتهي مبكرًا، ويبقى مكانها فارغًا حتى تنتهي أطول إجابة، ثم تبدأ الدفعة التالية.</p>
+<p><dfn>التجميع المستمر</dfn> (ويسمى أيضًا الجدولة على مستوى التكرار) يصغّر وحدة الجدولة من «دفعة طلبات» إلى «خطوة توليد واحدة»: بعد كل رمز يفحص النظام هل انتهى أي تسلسل، فإن انتهى جاء تسلسل منتظر فورًا إلى مكانه. طُرحت هذه الفكرة بصورة منهجية مبكرًا في نظام Orca، ثم اعتمدتها أطر الاستدلال مثل vLLM على نطاق واسع، مع إدارة ذاكرة KV المؤقتة بالصفحات (الفصل 17).</p>
+<p class="further">للاستزادة: <a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener noreferrer">ورقة vLLM / PagedAttention (arXiv)</a> · <a href="https://en.wikipedia.org/wiki/Batch_processing" target="_blank" rel="noopener noreferrer">Wikipedia: Batch processing (بالإنجليزية)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 316" role="img" aria-label="الشكل 25-4: ثلاث خانات وست تسلسلات. التجميع الثابت ينتظر أطول تسلسل في الدفعة قبل بدء الدفعة التالية، فينتهي في 11 خطوة مع 10 وحدات خانة خاملة؛ والتجميع المستمر يملأ أي فراغ فورًا، فينتهي في 9 خطوات مع 4 خاملة">
+<text class="f-text" fill="#182f2b" x="10" y="22" font-size="13" font-weight="600">التجميع الثابت: تبدأ الدفعة معًا وتنتهي معًا</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="51" font-size="12">خانة 1</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="79" font-size="12">خانة 2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="107" font-size="12">خانة 3</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="13" font-weight="600">التجميع المستمر: أي فراغ يُملأ فورًا</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="181" font-size="12">خانة 1</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="209" font-size="12">خانة 2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="237" font-size="12">خانة 3</text>
+<rect class="f-accent" fill="#136d5a" x="50.0" y="34" width="83.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="92.5" y="51" font-size="13" font-weight="600" text-anchor="middle">P</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="135.0" y="34" width="83.5" height="24" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="220.0" y="34" width="55.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="248.3" y="51" font-size="13" font-weight="600" text-anchor="middle">S</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="276.7" y="34" width="83.5" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="50.0" y="62" width="168.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="135.0" y="79" font-size="13" font-weight="600" text-anchor="middle">Q</text>
+<rect class="f-warn" fill="#9e5d24" x="220.0" y="62" width="140.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="290.8" y="79" font-size="13" font-weight="600" text-anchor="middle">T</text>
+<rect class="f-soft" fill="#e5f1df" x="50.0" y="90" width="111.8" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="106.7" y="107" font-size="13" font-weight="600" text-anchor="middle">R</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="163.3" y="90" width="55.2" height="24" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" x="220.0" y="90" width="83.5" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="262.5" y="107" font-size="13" font-weight="600" text-anchor="middle">U</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="305.0" y="90" width="55.2" height="24" rx="3"/>
+<rect class="f-accent" fill="#136d5a" x="50.0" y="164" width="83.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="92.5" y="181" font-size="13" font-weight="600" text-anchor="middle">P</text>
+<rect class="f-accent" fill="#136d5a" x="135.0" y="164" width="55.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="163.3" y="181" font-size="13" font-weight="600" text-anchor="middle">S</text>
+<rect class="f-soft" fill="#e5f1df" x="191.7" y="164" width="83.5" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="234.2" y="181" font-size="13" font-weight="600" text-anchor="middle">U</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="276.7" y="164" width="26.8" height="24" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="50.0" y="192" width="168.5" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="135.0" y="209" font-size="13" font-weight="600" text-anchor="middle">Q</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-dasharray="3 3" x="220.0" y="192" width="83.5" height="24" rx="3"/>
+<rect class="f-soft" fill="#e5f1df" x="50.0" y="220" width="111.8" height="24" rx="3"/>
+<text class="f-text" fill="#182f2b" x="106.7" y="237" font-size="13" font-weight="600" text-anchor="middle">R</text>
+<rect class="f-warn" fill="#9e5d24" x="163.3" y="220" width="140.2" height="24" rx="3"/>
+<text class="f-on" fill="#ffffff" x="234.2" y="237" font-size="13" font-weight="600" text-anchor="middle">T</text>
+<text class="f-muted" fill="#5c6d66" x="50.0" y="266" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="106.7" y="266" font-size="12" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="163.3" y="266" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="220.0" y="266" font-size="12" text-anchor="middle">6</text>
+<text class="f-muted" fill="#5c6d66" x="276.7" y="266" font-size="12" text-anchor="middle">8</text>
+<text class="f-muted" fill="#5c6d66" x="333.3" y="266" font-size="12" text-anchor="middle">10</text>
+<text class="f-muted" fill="#5c6d66" x="390.0" y="266" font-size="12" text-anchor="middle">12</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="12" text-anchor="middle">المربعات المتقطعة هي خانات خاملة</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="308" font-size="12" text-anchor="middle">ثابت: 11 خطوة و10 خاملة؛ مستمر: 9 خطوات و4 خاملة</text>
+</svg><figcaption>الشكل 25-4  الخانات الثلاث نفسها وست تسلسلات متفاوتة الطول. يفحص التجميع المستمر وجود فراغ في كل خطوة، فنادرًا ما تبقى خانة بلا عمل، وينتهي العمل كله أبكر. <span class="ev ev-est">تقدير تعليمي</span></figcaption></figure>
+<p>في نموذج MoE مثل Strata، للمعالجة بالدفعات ميزة خاصة. كل تسلسل يختار في كل طبقة 10 خبراء (الفصل 10)، والخبراء الذين تختارهم التسلسلات المختلفة يختلفون غالبًا. كلما زاد عدد التسلسلات في الدفعة، كبر <strong>اتحاد</strong> الخبراء الذين تستدعيهم هذه الطبقة. انظر الشكل 25-5. <span class="ev ev-est">تقدير تعليمي</span></p>
+<figure class="fig"><svg viewBox="0 0 400 244" role="img" aria-label="الشكل 25-5: كل تسلسل يختار 10 خبراء في كل طبقة. إذا اختارت التسلسلات باستقلال وانتظام، فتسلسل واحد يستدعي 10، و4 تسلسلات نحو 39، و16 تسلسلًا نحو 139، و32 تسلسلًا نحو 240">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">خبراء مستدعون في طبقة واحدة (من أصل 512)</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">تسلسل واحد</text><text class="f-text" fill="#182f2b" x="390" y="44" font-size="12" text-anchor="end">10 (2%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="50" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="50" width="7.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">4 تسلسلات (40 كحد أقصى)</text><text class="f-text" fill="#182f2b" x="390" y="88" font-size="12" text-anchor="end">نحو 38.8 (8%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="94" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="94" width="28.8" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="132" font-size="12">16 تسلسلًا (160 كحد أقصى)</text><text class="f-text" fill="#182f2b" x="390" y="132" font-size="12" text-anchor="end">نحو 138.6 (27%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="138" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="138" width="102.9" height="16"/>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="12">32 تسلسلًا (320 كحد أقصى)</text><text class="f-text" fill="#182f2b" x="390" y="176" font-size="12" text-anchor="end">نحو 239.6 (47%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="182" width="380" height="16"/><rect class="f-accent" fill="#136d5a" x="10" y="182" width="177.8" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="220" font-size="12">نفترض أن كل تسلسل يختار 10 خبراء باستقلال وانتظام</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="238" font-size="12">العدد المتوقع = 512 × (1 − (1 − 10/512)^B)، وB هو عدد التسلسلات</text>
+</svg><figcaption>الشكل 25-5  كلما كبرت الدفعة زاد عدد الخبراء الذين يُوقَظون في طبقة واحدة. وفي Strata، حيث يكون معظم الخبراء في الذاكرة (RAM) ويحسبهم المعالج CPU، يضيع جزء مما توفّره المعالجة بالدفعات من «قراءة الأوزان مرة واحدة» في قراءة المزيد من الخبراء. <span class="ev ev-est">تقدير تعليمي</span></figcaption></figure>
+<p>يفترض هذا التقدير أن الخبراء يُختارون بانتظام. أما التوجيه الحقيقي ففيه خبراء ساخنون وباردون، فيكون الاتحاد أصغر. لكن الاتجاه مؤكد: في بنية «الخبراء يسكنون الذاكرة (RAM) والمعالج CPU يحسب من لم يُصَب»، لا يمكن نقل مكاسب المعالجة بالدفعات من تجربة النماذج الكثيفة كما هي، بل يجب القياس.</p>
+<p>وقد قدّمت خانات الدفعة في v0.1.39 من المصدر الأصلي قياسًا فعليًا. على بطاقة RTX 5070 (12 GB) مع Q2_0، حين تُفكّ 4 محادثات معًا، يحسب المعالج CPU في كل طبقة 24 خبيرًا، مقابل نحو 8 عند التسلسل الواحد. فنافذة دفعة واحدة تأخذ وقتًا قريبًا من وقت حساب 4 رموز واحدًا بعد الآخر. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/BATCHING.md#L142-L148" target="_blank" rel="noopener noreferrer">BATCHING.md</a>) النسبة 24 إلى 8 ثلاثة أضعاف، وهي أقل من 3.9 ضعف الذي يعطيه افتراض الانتظام في الشكل 25-5، وهذا بالضبط أثر «الساخن والبارد». <span class="ev ev-est">تقدير تعليمي</span> والنتيجة: حين تصل 4 طلبات معًا، يتقدّم أول رمز للطلب الأخير من 11.2 ثانية إلى 1.8 ثانية، لكن سرعة الفك الكلية تنخفض من 70.7 إلى 63.1 token/s. على هذه البطاقة، ما تشتريه المعالجة بالدفعات هو زمن الانتظار، لا السرعة. وفي المقابل، في نشر بطبقات مقسّمة على 4 بطاقات بذاكرة 16 GB، تتسع ذاكرة كل بطاقة لمعظم الخبراء، فتعطي 8 طلبات معًا 360 token/s في المجموع، بينما يعطي الطلب الواحد 120 token/s. وهذه الأعداد قاسها صاحب الطلب PR #559. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/BATCHING.md#L150-L164" target="_blank" rel="noopener noreferrer">BATCHING.md</a>) لذلك لا يوصي مثبّت المصدر الأصلي بتفعيلها إلا حين تتسع ذاكرة الفيديو لمعظم الخبراء. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/BATCHING.md#L48-L53" target="_blank" rel="noopener noreferrer">BATCHING.md</a>)</p>
+
+<h2 id="sec-5">25.5 الانتقال إلى عدة تسلسلات: اعزل الحالة أولًا، ثم فكّر في السرعة</h2>
+<p>افترض أنك قررت أن تبدأ العمل، لتجعل Strata يخدم تسلسلين معًا. الخطوة الأولى ليست كتابة المجدوِل، بل حصر الأشياء: ما المشترك، وما الخاص بكل تسلسل؟</p>
+<p>تقدّم شيفرة المصدر الأصلي نقطة دخول ممتازة للقراءة. في <code>session.hpp</code> يوجد <code>SessionState</code>، وتعليقه يقول: «كل ما يحتاجه تسلسل واحد عدا الأوزان»: حالة كل طبقة، والمساحة المؤقتة لحساب الكتل، ومنطقة التبادل بين مجموعتي خبراء GPU وCPU. <span class="ev ev-code">حقيقة من الشيفرة</span>[S13] أي إن لكل تسلسل نسخة من <code>SessionState</code> في تصميم المصدر الأصلي.</p>
+<p>والأهم هاتان الجملتان في التعليق. طبقات GDN الـ36 <strong>تشترك في مجموعة واحدة</strong> من المساحة المؤقتة، أما <strong>حالتها</strong> فنسخة لكل طبقة؛ وطبقات QSA الـ12 تشترك أيضًا في مجموعة واحدة من المساحة المؤقتة، والسبب مكتوب بين قوسين: «لا تعمل أبدًا في وقت واحد». <span class="ev ev-code">حقيقة من الشيفرة</span>[S13] في ظل تسلسل واحد وتنفيذ طبقة بعد طبقة، هذا الاشتراك صحيح تمامًا، ويوفّر ذاكرة الفيديو أيضًا. لكن حين يعمل تسلسلان في وقت واحد، يسقط الشرط «لا تعمل في وقت واحد»: يكتب الطرفان في المساحة المؤقتة المشتركة معًا، فتتداخل بيانات التسلسلين.</p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذا أشهر فخ في البرمجة المتزامنة: الشيفرة صحيحة أصلًا لأن هناك افتراضًا ضمنيًا بأن «المنفّذ واحد فقط». عند التحول إلى عدة خيوط، عليك أن تستخرج كل افتراض من هذا النوع واحدًا واحدًا، وأن تعيد إثبات الاستبعاد المتبادل أو تجعل لكل منفّذ نسخته. أما وضع قفل عام واحد من الخارج والاكتفاء به فلا يكفي.</p>
+<p>الأمر الثاني ميزانية ذاكرة الفيديو. يخصص المصدر الأصلي عند تهيئة الجلسة كل حالات الطبقات دفعة واحدة على أساس أقصى سياق. والتعليق يشرح السبب: يشترط أن يكون مسار توليد كل رمز <strong>بلا أي تخصيص ذاكرة</strong>. فاستدعاء <code>cudaMalloc</code> عابر قد ينجح في كل الاختبارات الأخرى لكنه يفشل في هذا الشرط. <span class="ev ev-code">حقيقة من الشيفرة</span>[S13] ومع تعدد التسلسلات، يعني المبدأ نفسه: قبل قبول تسلسل جديد يجب أن تُحجز مسبقًا كل مساحة حالته. يحسب الشكل 25-6 هذا الحساب بأعداد تعليمية.</p>
+<figure class="fig"><svg viewBox="0 0 400 222" role="img" aria-label="الشكل 25-6: ميزانية تعليمية. تسلسل واحد يحتاج 26 GiB؛ وخمسة تسلسلات تتشارك الأوزان تحتاج 34 GiB؛ ونسخ كل شيء خمس مرات يحتاج 130 GiB">
+<text class="f-text" fill="#182f2b" x="10" y="22" font-size="12" font-weight="600">تسلسل واحد</text><text class="f-text" fill="#182f2b" x="390" y="22" font-size="12" font-weight="600" text-anchor="end">20 + 2 + 2 + 2 = 26 GiB</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="30" width="55.4" height="18"/><rect class="f-warn" fill="#9e5d24" x="65.4" y="30" width="5.5" height="18"/><rect class="f-soft" fill="#e5f1df" x="70.9" y="30" width="5.5" height="18"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="76.4" y="30" width="5.5" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="78" font-size="12" font-weight="600">5 تسلسلات بأوزان مشتركة</text><text class="f-text" fill="#182f2b" x="390" y="78" font-size="12" font-weight="600" text-anchor="end">20 + 5 × 2 + 2 + 2 = 34 GiB</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="86" width="55.4" height="18"/><rect class="f-warn" fill="#9e5d24" x="65.4" y="86" width="27.7" height="18"/><rect class="f-soft" fill="#e5f1df" x="93.1" y="86" width="5.5" height="18"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="98.6" y="86" width="5.5" height="18"/>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="12" font-weight="600">5 تسلسلات بنسخ كامل</text><text class="f-text" fill="#182f2b" x="390" y="134" font-size="12" font-weight="600" text-anchor="end">5 × 26 = 130 GiB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="142" width="360" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="26" y="193" font-size="12">أوزان وذاكرة مؤقتة مشتركة</text>
+<rect class="f-warn" fill="#9e5d24" x="200" y="182" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="216" y="193" font-size="12">حالة كل تسلسل</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="202" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="26" y="213" font-size="12">مساحة مؤقتة</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="202" width="12" height="12"/><text class="f-muted" fill="#5c6d66" x="216" y="213" font-size="12">هامش محجوز</text>
+</svg><figcaption>الشكل 25-6  الأوزان تحتاج نسخة واحدة، والحالة وحدها تحتاج نسخة لكل تسلسل. فخمسة تسلسلات لا تحتاج خمسة أضعاف الذاكرة، ولا يمكن أن تساوي تسلسلًا واحدًا. أطوال الأشرطة بالنسبة، والأعداد افتراضات تعليمية. <span class="ev ev-est">تقدير تعليمي</span></figcaption></figure>
+<p>هذه الأعداد افتراضات تعليمية: الأوزان والذاكرة المؤقتة المشتركة 20 GiB، وحالة كل تسلسل 2 GiB، والمساحة المؤقتة 2 GiB، والهامش المحجوز 2 GiB. <span class="ev ev-est">تقدير تعليمي</span> خمسة تسلسلات نشطة تحتاج <span dir="ltr">20 + 5 × 2 + 2 + 2 = 34 GiB</span>. وانتبه إلى أمرين: تختلف حالة كل تسلسل باختلاف طول السياق؛ وإذا كانت التسلسلات الخمسة تُحسب فعلًا في وقت واحد، فيجب أيضًا حساب المساحة المؤقتة على عدد التزامن، ولا يجوز أن تبقى نسخة واحدة مشتركة.</p>
+<p>ومن هنا مبدأ <dfn>التحكم في القبول</dfn> (admission control): قبل أن نَعِد تسلسلًا بأنه «نشط»، نحجز له كامل ميزانيته حجزًا ذرّيًا؛ فإن لم تكفِ الميزانية جعلناه ينتظر أو رفضناه صراحة. لا يصح أن نقبل كل الطلبات أولًا ثم نأمل ألا يخطئ مخصِّص الذاكرة.</p>
+<p>ويمكن مقارنة خانات الدفعة في v0.1.39 من المصدر الأصلي بقائمة هذا القسم. لم يجعل المصدر الأصلي كل تسلسل يعمل وحده، بل وضع S تسلسلات في نافذة تحقق واحدة، لكل منها صف، وتتقدم كلها معًا طبقة بعد طبقة. والصف s لا يقرأ ولا يكتب إلا حالة الخانة s: حالة GDN المتكررة، وK/V وindexer لـQSA، وتاريخ PLE. وهذه الحالة موضوعة في جلسة مستقلة تُقتطع بالطريقة نفسها التي تُقتطع بها جلسة المتحقق. <span class="ev ev-code">حقيقة من الشيفرة</span>[S08] والميزانية تُحسب قبل القبول أيضًا. جلسة كل خانة تشغل 0.56 GiB من ذاكرة الفيديو عند سياق 32K وذاكرة KV بـ8 بتات، وتُخصم من الذاكرة المؤقتة للخبراء. عند الإقلاع يفتح المحرك عدد الخانات الذي تتسع له ذاكرة الفيديو، حتى 8 كحد أقصى؛ وإن لم تتسع لخانتين رجع إلى طلب واحد في كل مرة. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/BATCHING.md#L35-L46" target="_blank" rel="noopener noreferrer">BATCHING.md</a>) والقيود مكتوبة بوضوح أيضًا: لا تحمل طلبات الخانات مسودة MTP، وتخرج كل نافذة رمزًا واحدًا فقط؛ وعقوبة التكرار لا تعمل داخل نافذة الدفعة. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/BATCHING.md#L114-L123" target="_blank" rel="noopener noreferrer">BATCHING.md</a>)</p>
+
+<h2 id="sec-6">25.6 تطبيق عملي: لماذا ينتظر الطلب القصير طويلًا</h2>
+<p>افتح المختبر التفاعلي لهذا الفصل «لماذا ينتظر الطلب القصير دائمًا». يقارن بين FIFO والتناوب الدوري في زمن أول رمز وزمن الإنجاز وكلفة التبديل. تكون كل الطلبات جاهزة عند اللحظة 0، ورمز واحد يُحسب في 1 ميلي ثانية، ولا يحاكي المعالجة بالدفعات على بطاقة حقيقية ولا قراءة المُطالبة. جرّب بهذا الترتيب:</p>
+<ol>
+<li>استخدم الطلبات الافتراضية، وقارن زمن أول رمز بين FIFO والتناوب الدوري: يجعل التناوب الدوري الطلبات القصيرة تبدأ أبكر.</li>
+<li>ارفع كلفة التبديل: يطول الزمن الكلي في التناوب الدوري، فيصبح ثمن العدالة مرئيًا.</li>
+<li>كبّر الشريحة الزمنية حتى تصير نتيجة التناوب الدوري مطابقة تمامًا لنتيجة FIFO.</li>
+</ol>
+<p>ثم ارجع إلى الشكلين التفاعليين في هذا الفصل: في مقارنة الجدولة جرّب «الطلبات القصيرة تصل تباعًا» وانظر كيف يجوّع SJF الطلب الطويل؛ وفي منحنى الأرتال ارفع معدل الاستخدام إلى 95% وكرّر المحاكاة عدة مرات. الأعداد في المختبر للنقاش حول مفاضلات الجدولة فقط، ولا تصلح درجة قياس لأي نظام حقيقي.</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>في الإعداد الافتراضي يخدم Strata الأصلي تسلسلًا واحدًا في كل مرة، وتنتظر بقية الطلبات أمام قفل FIFO؛ وأضاف v0.1.39 خانات دفعة معطّلة افتراضيًا. سياسة الجدولة والتحكم في القبول هما تمرين التصميم في هذا الفصل. عدد الاتصالات وعدد المنتظرين وعدد التسلسلات النشطة تُحسب كلٌّ على حدة.</li>
+<li>FIFO بسيطة لكن الطلب الطويل يحجبها، وSJF تعطي أقل متوسط انتظار لكنها تجوّع الطلب الطويل، والتناوب الدوري يتيح للجميع رؤية أول رمز أبكر لكن بكلفة التبديل. وكلما اقترب معدل الاستخدام من 100% ارتفع الانتظار ارتفاعًا حادًا.</li>
+<li>عند الانتقال إلى عدة تسلسلات، استخرج أولًا كل افتراضات «المنفّذ الواحد» الضمنية، مثل المساحة المؤقتة المشتركة؛ ثم احسب الميزانية بقاعدة «الأوزان نسخة واحدة، والحالة نسخة لكل تسلسل»، واحجزها حجزًا ذرّيًا قبل قبول تسلسل جديد.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «خادم HTTP في Strata متعدد الخيوط، إذن يستطيع خدمة عدة مستخدمين في وقت واحد».</strong></p>
+<p>تعدد الخيوط يتيح لعدة أشخاص <strong>الاتصال</strong> في وقت واحد فقط. في الإعداد الافتراضي، أمام المحرك الذي يعمل فعلًا قفل FIFO، فلا يُولَّد في اللحظة الواحدة إلا تسلسل واحد. تزامن الاتصالات وتزامن الخيوط وتزامن التسلسلات ثلاثة مستويات مختلفة، ولا يجوز أن نستنتج من رؤية <code>ThreadingHTTPServer</code> أن المحرك يدعم التجميع المستمر. ما إذا كان المحرك يحسب معًا يتوقف على إعدادات المحرك نفسه، مثل <code>"parallel"</code> في v0.1.39، لا على طبقة HTTP.</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: الأعداد الأربعة، وتفاصيل الميزانية، وكلفة التبديل، واختبار التزامن</summary>
+<h3>افصل الوضع الحالي عن التصميم</h3>
+<p>ما زال التعليق في أول ملف الخدمة المثبّت في المصدر الأصلي يقول: تسلسل واحد في كل مرة خلف FIFO. [S15] هذا صحيح في الإعداد الافتراضي؛ وعند تفعيل <code>"parallel"</code> لا يعود صحيحًا، فالتعليق لم يلحق بالشيفرة. وتنفيذ المصدر الأصلي للتزامن مكتوب في <a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/BATCHING.md" target="_blank" rel="noopener noreferrer">docs/BATCHING.md</a>، وهذا الفصل لا يستشهد منه إلا بالتصميم وبقياسات المصدر الأصلي، ولم يعد الكتاب قياسها. <span class="ev ev-report">تقرير المصدر الأصلي</span> وقد ذكر مُطلِق هذا الكتاب أنه عدّل فرعًا من Strata يدعم التزامن، لكن شيفرة ذلك الفرع ليست ضمن نطاق هذه المراجعة. ما يقدمه الفصل هو <strong>تصميم التوسع لعدة مستخدمين وطريقة اختباره</strong>، ولا يدّعي أنه دقّق ذلك الفرع أو نفّذه.</p>
+<p>يجب عدّ أربعة أعداد كلًّا على حدة: عدد اتصالات HTTP المتزامنة، وعدد الطلبات المنتظرة، وعدد التسلسلات التي تُولَّد الآن، وعدد التسلسلات المعالجة في حساب نواة واحد. وقد تختلف اختلافًا كاملًا. وفتح المزيد من الخيوط لا يحل تلقائيًا مشكلة عزل ذاكرة KV المؤقتة وحالة GDN وحالة PLE والأعداد العشوائية والمخازن المؤقتة.</p>
+<h3>سجّل كل حالة قابلة للتغيير وحدد مالكها</h3>
+<p>الأوزان للقراءة فقط، ومحتوى الذاكرة المؤقتة للقراءة فقط، ويمكن اشتراكهما مع تزامن مناسب. أما تاريخ رموز كل تسلسل، وخريطة صفحات KV، وحالة GDN، وحالة PLE، ومعاملات أخذ العينات، وعدّاد الأعداد العشوائية، وعلَم الإلغاء، فيجب أن يكون لكل منها مالك واضح. و<code>SessionState</code> في المصدر الأصلي مدخل جيد لقراءة «حالة التسلسل عدا الأوزان» [S13]؛ وانتبه إلى أن تاريخ PLE ونافذة رموزه توصفان في التعليق صراحة بأنهما «حالة تسلسل».</p>
+<p>وهل المساحة المؤقتة المشتركة آمنة؟ هذا يتوقف على قدرة الجدولة على ضمان الاستبعاد المتبادل. المساحة المؤقتة التي افتُرض أن «طبقاتها لا تعمل أبدًا معًا» تُبطل صحة الشيفرة فورًا إذا استعملتها جلستان في وقت واحد. عند التحول إلى التزامن، اسرد كل افتراضات التسلسل الواحد، ولا تكتفِ بالبحث عن قفل عام.</p>
+<h3>تفاصيل الميزانية</h3>
+<p>الرقم 34 GiB في المتن نقطة بداية فقط. إن احتاجت التسلسلات الخمسة كلٌّ مساحتها المؤقتة المستقلة، فيجب حساب الـ2 GiB على عدد التزامن الفعلي؛ وتختلف أحجام حالات التسلسلات باختلاف أطوال السياق. ويجب أن يحجز التحكم في القبول الميزانية حجزًا ذرّيًا قبل أن نَعِد بتسلسل نشط. أما منطقة ركن الجلسات (ميزة اختيارية في المصدر الأصلي) فتشغل ذاكرة المضيف، ويجب إدخالها في الميزانية على حدة. <span class="ev ev-report">تقرير المصدر الأصلي</span> وخانات الدفعة في المصدر الأصلي كذلك: عند تفعيل بث KV، تشغل ذاكرة KV المؤقتة الكاملة لكل خانة ذاكرة مثبّتة (pinned memory)، وهي 1.6 GB عند سياق 128K. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/BATCHING.md#L41-L43" target="_blank" rel="noopener noreferrer">BATCHING.md</a>)</p>
+<h3>الكلفة الحقيقية للتناوب الدوري</h3>
+<p>المحاكاة التعليمية تفترض أن التبديل لا يأخذ وقتًا، أو يأخذ مقدارًا ثابتًا. أما في محرك حقيقي، فإذا اقتضى تبديل التسلسل إخراج ذاكرة KV المؤقتة والحالة المتكررة لتسلسل من ذاكرة الفيديو ثم إدخال تسلسل آخر، فإن الشريحة الصغيرة جدًا تجعل كلفة النقل تطغى على الحساب. لذلك يجب أن يجمع تقييم «العدالة» بين زمن أول رمز وزمن الإنجاز والإنتاجية وحجم الحالة المنقولة. وفي SJF مشكلة واقعية أخرى: طول الإجابة غير معروف قبل انتهاء توليدها، فلا يمكن إلا تقديره. ولمنع التجويع، من الشائع إعطاء الطلب أولوية أعلى كلما طال انتظاره، ويسمى هذا <dfn>التقادم</dfn> (aging).</p>
+<h3>مسألة: الخانة الأخيرة وطلبان يصلان معًا</h3>
+<p>تأكيد القبول: طلب واحد بالضبط يحصل على ميزانية صالحة ويصير نشطًا، والآخر ينتظر أو يُرفض صراحة؛ لا يجوز الحجز مرتين، ولا أن يُنشأ جلستان بسبب إعادة محاولة العميل. وعند الإنجاز أو الإلغاء تُحرَّر الميزانية مرة واحدة بالضبط؛ ولا يجوز لطلب قديم أن يواصل الكتابة في حالة الخانة الجديدة.</p>
+<h3>اختبار التزامن يجب أن يصيب خطر «اختلاط الحالات»</h3>
+<p>صمّم طلبين ثابتين A وB مختلفين في اللغة أو المهمة. شغّل كلًّا منهما وحده أولًا وسجّل المخرجات المرجعية، ثم شغّلهما بالتناوب أو بالتوازي. وغطِّ هذه الحالات: يُلغى A ويواصل B؛ يقرأ A مُطالبة طويلة مدة طويلة بينما يولّد B؛ البادئة نفسها مع صور مختلفة؛ استئناف الجلسة؛ وتنافس طلبين على الخانة الأخيرة حين تكفي الميزانية لواحدة فقط.</p>
+<p>وهذا هو منطق اختبار القبول الذي وضعه المصدر الأصلي لخانات الدفعة: تُشغَّل المحادثات نفسها كلٌّ وحدها أولًا، ثم تُوضع في الخانات وتُشغَّل معًا، وتُقارن رمزًا برمز. وهو يغطي حالات مثل مُطالبة طويلة تُقرأ بينما تولّد محادثتان أخريان، ومُطالبة طويلة تفسح الطريق لمُطالبة قصيرة ثم تستأنف، والجولة التالية التي تتابع من الخانة. ولكي تتطابق المقارنة بتًّا ببت، يجب أيضًا تعطيل بضعة خيارات تقريب تتغير مع النافذة، مثل ضبط <code>STRATA_IQ_MT_MIN=1</code> وإضافة <code>--pcie-frac 0</code>. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/BATCHING.md#L86-L103" target="_blank" rel="noopener noreferrer">BATCHING.md</a>)</p>
+<p>الحد الأدنى للنجاح: عزل الحالة صحيح، ولا التزام يتجاوز الميزانية، ولا إنهاء مكررًا، ولا مخرجات طلب قديم تتسرب، ولا تجويع لطلب طويل. نظام ارتفعت إنتاجيته الكلية لكنه يخلط السياق أحيانًا ليس خدمة استدلال متزامنة مقبولة.</p>
+<h3>حدود الدليل في المحاكي</h3>
+<p>الشكلان التفاعليان والمختبر التفاعلي في هذا الفصل محاكاة تعليمية منفصلة: زمن كل رمز ثابت، ولا يوجد فيها قراءة مُطالبة حقيقية، ولا التحقق من المسودة، ولا إصابات البادئة، ولا نوى GPU، ولا تنافس على الذاكرة المؤقتة. لا تصلح إلا للنقاش حول مفاضلات الجدولة، ولا يجوز استخدام المضاعفات الظاهرة في الأشكال للدعاية لأداء أي نظام حقيقي.</p>
+</details>

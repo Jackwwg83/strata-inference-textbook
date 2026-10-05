@@ -1,0 +1,244 @@
+<div class="hook"><span class="eyebrow">ربما لاحظت هذا</span>
+<p>في صفحة الدردشة تظهر الإجابة حرفًا بعد حرف. لكن إن تجاوزت الصفحة واستدعيت واجهة Strata المحلية من سطر الأوامر، رأيت مشهدًا آخر: أسطرًا متتالية <code>data: {…}</code> يفصل بين كل سطرين سطر فارغ، وآخرها <code>data: [DONE]</code>.</p>
+<p>تسمى هذه الأسطر <dfn>SSE</dfn> (اختصار Server-Sent Events، أي الأحداث المُرسَلة من الخادم). تخرج من الخادم سلسلة من <strong>البايتات</strong>، وقبل أن تصل إليك تقطّعها الشبكة إلى كتل متفاوتة الأحجام كيفما اتفق. قد ينقسم الحرف الصيني الواحد نصفين، وقد لا تكتمل الرسالة الواحدة إلا بعد وصولها على دفعتين. يشرح هذا الفصل كيف نعيد جمع هذه الكتل المتناثرة في جملة كاملة بلا رموز مشوّهة.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> بين الرمز (token) الذي يخرجه النموذج والحرف الذي تراه على الشاشة ثلاثة أبواب: البايتات تتجمع حروفًا (UTF-8)، والحروف تُقطَّع أحداثًا (السطر الفارغ في SSE)، والأحداث تُحلَّل إلى بنية (JSON). وأمام كل باب يجب أن تجمع ما وصلك كاملًا أولًا ثم تعالجه.</p>
+
+<h2 id="sec-1">23.1 بين النموذج وتطبيقك طبقة خدمة</h2>
+<p>محرك الاستدلال لا يعرف إلا أرقام الرموز: تعطيه سلسلة أرقام فيخرج لك أرقامًا جديدة واحدًا بعد آخر. لكن تطبيقك يتكلم لغة أخرى: يرسل رسالة دردشة بصيغة JSON، وينتظر نصًّا يصله قطعة قطعة. والذي يترجم بينهما هو <dfn>طبقة الخدمة</dfn>. الشكل 23-1 يبيّن طبقة الخدمة في Strata.</p>
+<figure class="fig"><svg viewBox="0 0 400 400" role="img" aria-label="الشكل 23-1: طبقة الخدمة في Strata ثلاث طبقات: خادم HTTP، والواجهة النصية، وحدّ المحرك؛ وفي أسفلها فقط عملية المحرك الدائمة">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="8" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="14" font-weight="600" text-anchor="middle">تطبيقك</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="48" font-size="12" text-anchor="middle">صفحة دردشة، مساعد برمجة، OpenAI SDK…</text>
+<rect class="f-soft" fill="#e5f1df" x="50" y="84" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="106" font-size="14" font-weight="600" text-anchor="middle">خادم HTTP: serve/server.py</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="124" font-size="12" text-anchor="middle">يتعرف المسار، ويفحص API Key، ويصفّ الطلبات، ويكتب SSE</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="160" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="182" font-size="14" font-weight="600" text-anchor="middle">الواجهة النصية: serve/frontend.py</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="200" font-size="12" text-anchor="middle">قالب الدردشة · وفصل المخرجات إلى تفكير ونص وأداة</text>
+<rect class="f-accent" fill="#136d5a" x="50" y="236" width="300" height="50" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="258" font-size="14" font-weight="600" text-anchor="middle">حدّ المحرك: Engine.generate</text>
+<text class="f-on" fill="#ffffff" x="200" y="276" font-size="12" text-anchor="middle">تدخل أرقام الرموز، وتخرج واحدًا بعد آخر</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="50" y="312" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="334" font-size="14" font-weight="600" text-anchor="middle">عملية strata --serve الدائمة</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="352" font-size="12" text-anchor="middle">الأوزان تُحمَّل مرة واحدة · أسطر نصية عبر stdin/stdout</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 58V82M200 134V158M200 210V234M200 286V310"/>
+<text class="f-muted" fill="#5c6d66" x="208" y="75" font-size="12">HTTP + JSON</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="151" font-size="12">قائمة الرسائل</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="227" font-size="12">أرقام الرموز</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="303" font-size="12">سطر لكل أمر أو نتيجة</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="388" font-size="12" text-anchor="middle">الطبقات الثلاث العليا تعالج النص فقط؛ والسفلى وحدها تستخدم GPU</text>
+</svg><figcaption>الشكل 23-1  طبقة الخدمة في Strata. خادم HTTP والواجهة النصية يعالجان النص فقط، فيمكن اختبارهما بلا GPU؛ أما الحساب الحقيقي فيجري في العملية الدائمة في الأسفل.</figcaption></figure>
+<p>يحدد بداية <code>serve/server.py</code> مهمته: أن يوفّر فوق «أي محرك يحوّل أرقام الرموز إلى رموز» واجهتين، بأسلوب OpenAI وبأسلوب Anthropic. ومن نقاط النهاية: <code>POST /v1/chat/completions</code> (بأسلوب OpenAI، وتدعم الاستجابة المتدفقة وغير المتدفقة)، و<code>POST /v1/messages</code> (بأسلوب Anthropic)، و<code>GET /v1/models</code>، و<code>GET /health</code> وغيرها. <span class="ev ev-code">حقيقة من الشيفرة</span>[S15] وأضاف الإصدار v0.1.39 واجهة Responses من OpenAI، وهي <code>POST /v1/responses</code>، لتستخدمها أداة Codex CLI. وهي بلا حالة: لا يحفظ الخادم الإجابات، ويرسل العميل المحادثة كلها في كل مرة. وقائمة نقاط النهاية في رأس الملف لم تذكرها بعد: التعليق متأخر عن الشيفرة. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>والعقد بينها وبين المحرك دالة واحدة: <code>Engine.generate(prompt_ids, max_new, sampling, cancel)</code>، وتعيد مكرِّرًا (iterator) ينتج أرقام الرموز واحدًا بعد آخر. أما <code>StrataEngine</code> الحقيقي فيُبقي عملية <code>strata --serve</code> دائمة ويحاورها عبر الإدخال والإخراج القياسيين؛ وأما <code>MockEngine</code> فيُخرج الرموز وفق سيناريو مكتوب، ليمكن اختبار كل مسار من مسارات الواجهة على جهاز بلا GPU. [S15]</p>
+<p>وأول جملة في رأس <code>serve/frontend.py</code> هي: «كل شيء هنا نص: لا نموذج ولا GPU». يقوم بثلاثة أعمال: يوحّد صيغتي الطلب في OpenAI وAnthropic في قائمة الرسائل التي يحتاجها قالب الدردشة؛ ويُنتج المُطالبة (prompt) من قالب Jinja المرفق مع النموذج، وقد تطابقت نتائجه مع Hugging Face في 10 أمثلة؛ ويقسّم المخرجات المتدفقة تدريجيًّا إلى تفكير ونص وطلبات أدوات، <strong>ولا يرسل أبدًا نصف وسم</strong>. <span class="ev ev-code">حقيقة من الشيفرة</span>[S16]</p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذه نسخة مصغّرة من فكرة الطبقات في مقرر «شبكات الحاسوب»: كل طبقة لا تتعامل إلا مع التي فوقها والتي تحتها، وما دام العقد محددًا فيمكن استبدال ما بداخلها بحرية. وقدرة <code>MockEngine</code> على أن يحل محل المحرك الحقيقي سببها أن الحدّ دالة واحدة هي <code>generate</code>.</p>
+
+<h2 id="sec-2">23.2 لماذا تُرسَل الإجابة وهي تُكتب</h2>
+<p>طلب الويب العادي سؤال وجواب: يرسل المتصفح طلبًا، فيجهّز الخادم الإجابة <strong>كلها</strong>، ثم يردّها دفعة واحدة. وهذا يعني مع النماذج الكبيرة انتظار عشرات الثواني قبل أن ترى أول حرف. أما <dfn>الاستجابة المتدفقة</dfn> فتفعل غير ذلك: تقسّم الإجابة نفسها إلى قطع صغيرة، وكلما كُتبت قطعة أُرسلت. يقارن الشكل 23-2 بين الطريقتين.</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="الشكل 23-2: الاستجابة العادية تنتظر حتى تُكتب الإجابة كلها ثم تُرسَل؛ والاستجابة المتدفقة ترسل كل قطعة فور كتابتها، فيظهر أول حرف أبكر بكثير">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">استجابة عادية: تكتمل الإجابة ثم تُرسَل دفعة واحدة</text>
+<text class="f-muted" fill="#5c6d66" x="175" y="42" font-size="12" text-anchor="middle">انتظار… (النموذج يولّد)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 60H390"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="44" width="8" height="16"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="32" y="48" width="286" height="8"/>
+<rect class="f-accent" fill="#136d5a" x="322" y="44" width="66" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="78" font-size="12" text-anchor="middle">الطلب</text>
+<text class="f-muted" fill="#5c6d66" x="355" y="78" font-size="12" text-anchor="middle">الإجابة كاملة</text>
+<text class="f-text" fill="#182f2b" x="10" y="120" font-size="13" font-weight="600">استجابة متدفقة (SSE): تُرسَل كل قطعة فور كتابتها</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 160H390"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="144" width="8" height="16"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="92" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="114" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="136" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="158" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="180" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="202" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="224" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="246" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="268" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="290" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="312" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="334" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="356" y="144" width="12" height="16"/><rect class="f-accent" fill="#136d5a" x="378" y="144" width="12" height="16"/>
+<text class="f-muted" fill="#5c6d66" x="24" y="178" font-size="12" text-anchor="middle">الطلب</text>
+<text class="f-muted" fill="#5c6d66" x="84" y="178" font-size="12" text-anchor="middle">أول حرف</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="178" font-size="12" text-anchor="middle">آخر حرف</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">رسم توضيحي بلا مقياس. المدة الكلية متقاربة، والفرق في متى يظهر أول حرف.</text>
+</svg><figcaption>الشكل 23-2  التدفق لا يجعل النموذج أسرع في الحساب، لكنه يريك أول حرف أبكر. وفي إجابة من مئات الرموز يكون الفرق في التجربة كبيرًا.</figcaption></figure>
+<aside class="primer" id="c23-http-sse">
+<h3>HTTP والبث المتدفق (SSE)</h3>
+<p><dfn>HTTP</dfn> هو قواعد الحوار بين المتصفح والخادم. وللحوار نصفان: يرسل العميل <strong>طلبًا</strong> (أي مسار يريد وأي بيانات معه)، ويردّ الخادم <strong>باستجابة</strong> (رمز حالة؛ مثل 200 للنجاح، و400 إذا كان الطلب فيه مشكلة، و401 إذا لم تنجح المصادقة؛ ثم بعض الترويسات والمحتوى). والترويسة <code>Content-Type</code> تخبر الطرف الآخر بصيغة المحتوى.</p>
+<p>في الاستجابة العادية يُكتب المحتوى دفعة واحدة. أما <dfn>SSE</dfn> فيضبط <code>Content-Type</code> للاستجابة على <code>text/event-stream</code>، ثم يبقي الاتصال مفتوحًا، وكلما خطر للخادم شيء كتب قطعة، وتسمى كل قطعة <dfn>حدثًا</dfn>. والصيغة بسيطة جدًّا:</p>
+<ul>
+<li>يتألف كل حدث من عدة أسطر، والسطر الذي يبدأ بـ <code>data:</code> يحمل البيانات؛</li>
+<li>و<strong>السطر الفارغ</strong> يعني أن هذا الحدث انتهى؛</li>
+<li>والسطر الذي يبدأ بنقطتين رأسيتين تعليق، يتجاهله العميل مباشرة؛</li>
+<li>وسطر <code>event:</code> الاختياري يعطي الحدث اسمًا.</li>
+</ul>
+<p>مثال: يكتب الخادم <code>data: <span lang="zh">你好</span></code> ثم نهاية سطر ثم سطرًا فارغًا، فيتلقى العميل حدثًا محتواه «<span lang="zh">你好</span>» (أي «مرحبًا» بالصينية). وتشترط المواصفة أيضًا: أن يُرمَّز تدفق الأحداث بـ UTF-8؛ وأن تكون نهاية السطر LF أو CR أو CRLF؛ وأن تُوصَل أسطر <code>data</code> المتعددة في الحدث الواحد بنهايات أسطر؛ وإذا انقطع التدفق في منتصف حدث فيُهمَل هذا الحدث الناقص ولا يُعامَل على أنه كامل. [R05]</p>
+<p>وصلة هذا بـ Strata: إذا أضفت <code>"stream": true</code> إلى <code>/v1/chat/completions</code> عادت الإجابة بصيغة SSE؛ وإن لم تضفها انتظر الخادم حتى ينتهي التوليد ثم أرسل JSON واحدًا دفعة واحدة.</p>
+<p class="further">قراءة إضافية: <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Overview" target="_blank" rel="noopener noreferrer">MDN: نظرة عامة على HTTP (بالإنجليزية)</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events" target="_blank" rel="noopener noreferrer">MDN: استخدام الأحداث المُرسَلة من الخادم (بالإنجليزية)</a> · <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html" target="_blank" rel="noopener noreferrer">معيار HTML: Server-sent events</a> · <a href="https://ar.wikipedia.org/wiki/%D8%A8%D8%B1%D9%88%D8%AA%D9%88%D9%83%D9%88%D9%84_%D9%86%D9%82%D9%84_%D8%A7%D9%84%D9%86%D8%B5%D9%88%D8%B5_%D8%A7%D9%84%D8%AA%D8%B1%D8%A7%D8%A8%D8%B7%D9%8A%D8%A9" target="_blank" rel="noopener noreferrer">ويكيبيديا: بروتوكول نقل النصوص الترابطية</a></p>
+</aside>
+<p>شيفرة Strata التي تكتب SSE قصيرة. تردّ أولًا برمز الحالة 200، وتكتب في الترويسات <code>Content-Type: text/event-stream</code> و<code>Cache-Control: no-cache</code>، ثم تضيف <code>X-Accel-Buffering: no</code> لتطلب من وكيل عكسي مثل nginx ألا يحتفظ بالبيانات، بل يمرّر كل حدث فور وصوله. <span class="ev ev-code">حقيقة من الشيفرة</span> وبعد ذلك تُكتب كل قطعة من الإجابة على شكل <code>data: </code> ثم JSON ثم سطر فارغ؛ وعند الانتهاء كله تُكتب <code>data: [DONE]</code>. ويفكّك الشكل 23-3 هذه السلسلة من البايتات.</p>
+<figure class="fig"><svg viewBox="0 0 400 312" role="img" aria-label="الشكل 23-3: تدفق بايتات SSE الذي تكتبه Strata: كل حدث هو data ثم JSON ثم سطر فارغ، وتعليق البقاء حيًّا الذي يبدأ بنقطتين يتجاهله العميل، وينتهي التدفق بـ data: [DONE]">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">↵ تعني نهاية سطر؛ وإذا جاء ↵↵ معًا فهو «السطر الفارغ»</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="44" font-size="12" font-family="monospace">data: {…"delta":{"role":"assistant",…}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="68" font-size="12">الحدث 1: يعلن فقط «المساعد بدأ الكلام»، ولا نص فيه بعد</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="82" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="100" font-size="12" font-family="monospace" lang="zh">data: {…"delta":{"content":"你好"}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="124" font-size="12">الحدث = data: + JSON + سطر فارغ</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="138" width="380" height="26" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="18" y="156" font-size="12" font-family="monospace">: keep-alive↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="180" font-size="12">ما يبدأ بنقطتين تعليق: يتجاهله العميل، ويثبت فقط أن الاتصال حي</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="194" width="380" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="18" y="212" font-size="12" font-family="monospace" lang="zh">data: {…"delta":{"content":"，世界"}…}↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="236" font-size="12">قطعة نص أخرى. ويوضع التفكير في الحقل reasoning_content</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="250" width="380" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="18" y="268" font-size="12" font-family="monospace">data: [DONE]↵↵</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="294" font-size="12">إشارة النهاية: من أعراف واجهة OpenAI، وليست من مواصفة SSE نفسها</text>
+</svg><figcaption>الشكل 23-3  مقطع من تدفق بايتات SSE تكتبه Strata (حقول JSON مثل id وmodel محذوفة وموضعها «…»). يعرف العميل متى يكتمل الحدث من السطر الفارغ.</figcaption></figure>
+<p>انتبه إلى السطر <code>: keep-alive</code> في الوسط. عند قراءة مُطالبة طويلة جدًّا قد لا يُخرج المحرك رمزًا واحدًا لعدة دقائق. وخلال ذلك تُنتج Strata «نبضة» كل 10 ثوانٍ، وتكتبها طبقة HTTP تعليقًا في SSE. <span class="ev ev-code">حقيقة من الشيفرة</span> يتجاهل العميل التعليقات، لكنه يرى بايتات تصل فلا يظن أن الاتصال انقطع؛ والخادم أيضًا قد يكتشف أثناء الكتابة أن الطرف الآخر قد غادر (سنشرح ذلك في الفصل 24). وفي واجهة Responses من v0.1.39 خطوة إضافية: أداة Codex CLI لا تعدّ «ما زال يعمل» إلا الأحداث الحقيقية، ولا تنظر إلى التعليقات؛ لذلك عند قراءة مُطالبة طويلة يرسل الخادم كل 15 ثانية حدثًا إضافيًّا هو <code>response.in_progress</code>. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+
+<h2 id="sec-3">23.3 حرف صيني واحد، وثلاثة بايتات</h2>
+<p>الشبكة لا تعرف إلا البايتات، ولا تعرف الحروف. خذ حدثًا مبسطًا <code>data: {"delta":"你好"}</code>؛ مع السطر الفارغ في آخره يصير على الخط 26 بايتًا، منها 3 بايتات للحرف «<span lang="zh">你</span>» و3 للحرف «<span lang="zh">好</span>». هنا تبدأ المشكلة: حجم «الكتلة» التي يسلّمها اتصال TCP إلى البرنامج في كل مرة تحدده الشبكة ونظام التشغيل، ولا علاقة له بحدود الحروف. فقد يقع بايت واحد من بايتات الحرف الثلاثة في هذه الكتلة، والاثنان الباقيان في الكتلة التالية.</p>
+<aside class="primer" id="c23-utf8">
+<h3>UTF-8: كم بايتًا يشغل الحرف</h3>
+<p>لكل حرف في الحاسوب رقم يسمى <dfn>نقطة الترميز</dfn> (code point)، مثلًا الحرف «<span lang="zh">中</span>» هو U+4E2D. و<dfn>UTF-8</dfn> قواعد لكتابة نقطة الترميز في صورة بايتات: الحروف الشائعة كالحروف الإنجليزية تشغل بايتًا واحدًا، وتطابق ASCII القديم تمامًا؛ ومعظم الحروف الصينية تشغل 3 بايتات؛ والرموز التعبيرية (emoji) تشغل 4.</p>
+<p>وبراعته أن كل بايت «يحمل هويته معه»، كما في الشكل 23-4. عدد الآحاد في أول البايت الأول هو عدد البايتات التي يشغلها الحرف؛ وكل البايتات التالية تبدأ بـ <code>10</code> وتسمى <dfn>البايتات المتممة</dfn>. فإذا قرأ المفكّك <code>E4</code> (بالثنائي 1110 0100) عرف أن بعده بايتين متممين. فإن انتهت الكتلة عندئذ، فالصواب أن <strong>يحتجز E4 أولًا</strong>، وينتظر الكتلة التالية ليكمل.</p>
+<p>الدالة <code>codecs.getincrementaldecoder</code> في Python، والصنف <code>TextDecoder</code> في المتصفح (مع <code>stream: true</code>)، كلاهما <dfn>مفكّك تزايدي</dfn> من هذا النوع. وبالعكس، إذا فُكّت كل كتلة وحدها، صار نصف الحرف رمز الاستبدال �، ولا يمكن بعدها أن يعود.</p>
+<p class="further">قراءة إضافية: <a href="https://ar.wikipedia.org/wiki/%D8%B5%D9%8A%D8%BA%D8%A9_%D8%A7%D9%84%D8%AA%D8%AD%D9%88%D9%8A%D9%84_%D8%A7%D9%84%D9%85%D9%88%D8%AD%D8%AF-8" target="_blank" rel="noopener noreferrer">ويكيبيديا: صيغة التحويل الموحد-8 (UTF-8)</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/API/TextDecoder" target="_blank" rel="noopener noreferrer">MDN: TextDecoder (بالإنجليزية)</a> · <a href="https://docs.python.org/3/library/codecs.html" target="_blank" rel="noopener noreferrer">وثائق Python: codecs (بالإنجليزية)</a> · <a href="https://www.rfc-editor.org/rfc/rfc3629" target="_blank" rel="noopener noreferrer">RFC 3629: UTF-8</a></p>
+<figure class="fig"><svg viewBox="0 0 400 254" role="img" aria-label="الشكل 23-4: نقطة الترميز U+4E2D للحرف الصيني تنقسم إلى ثلاثة بايتات E4 B8 AD، وتدل البتات الأولى في كل بايت على موضعه داخل الحرف">
+<text class="f-text" fill="#182f2b" x="200" y="20" font-size="13" font-weight="600" text-anchor="middle"><tspan lang="zh">中</tspan> = U+4E2D = 0100 111000 101101 (16 bit)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="36" width="110" height="40" rx="6"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="36" width="110" height="40" rx="6"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="270" y="36" width="110" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="75" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">1110</tspan> 0100</text>
+<text class="f-text" fill="#182f2b" x="200" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">10</tspan>111000</text>
+<text class="f-text" fill="#182f2b" x="325" y="61" font-size="14" font-family="monospace" text-anchor="middle"><tspan class="f-warn" fill="#9e5d24">10</tspan>101101</text>
+<text class="f-text" fill="#182f2b" x="75" y="96" font-size="13" font-weight="600" text-anchor="middle">E4</text>
+<text class="f-text" fill="#182f2b" x="200" y="96" font-size="13" font-weight="600" text-anchor="middle">B8</text>
+<text class="f-text" fill="#182f2b" x="325" y="96" font-size="13" font-weight="600" text-anchor="middle">AD</text>
+<text class="f-muted" fill="#5c6d66" x="75" y="114" font-size="12" text-anchor="middle">البايت الأول: 3 بايتات</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="114" font-size="12" text-anchor="middle">بايت متمم</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="114" font-size="12" text-anchor="middle">بايت متمم</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="128" width="380" height="96" rx="6"/>
+<text class="f-text" fill="#182f2b" x="20" y="148" font-size="12" font-family="monospace">0xxxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="148" font-size="12">بايت واحد: إنجليزي وأرقام</text>
+<text class="f-text" fill="#182f2b" x="20" y="170" font-size="12" font-family="monospace">110xxxxx 10xxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="170" font-size="12">بايتان: مثل é</text>
+<text class="f-text" fill="#182f2b" x="20" y="192" font-size="12" font-family="monospace">1110xxxx 10xxxxxx 10xxxxxx</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="192" font-size="12">3 بايتات: معظم الحروف الصينية</text>
+<text class="f-text" fill="#182f2b" x="20" y="214" font-size="12" font-family="monospace">11110xxx 10xxxxxx ×3</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="214" font-size="12">4 بايتات: مثل emoji</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="244" font-size="12" text-anchor="middle">البتات المميزة تحدد الهوية، وباقي البتات تُرتَّب لتكوّن نقطة الترميز</text>
+</svg><figcaption>الشكل 23-4  يقسم UTF-8 الحرف «<span lang="zh">中</span>» إلى ثلاثة بايتات E4 B8 AD. من البايت الأول وحده تعرف كم بايتًا يشغل الحرف، فيستطيع المفكّك أن يحكم هل نهاية هذه الكتلة نصف حرف.</figcaption></figure>
+</aside>
+<p>وStrata نفسها تعالج هذه المشكلة، بل في موضع أبكر: فرمز النموذج الواحد ليس بالضرورة حرفًا كاملًا. ففي <code>serve/server.py</code> يرسل <code>Detokenizer</code> بايتات كل رمز إلى مفكّك UTF-8 تزايدي؛ يُرسَل الحرف الكامل فورًا، ويُحتجَز نصف الحرف الذي يمتد عبر الرموز حتى تكمله الرموز التالية. <span class="ev ev-code">حقيقة من الشيفرة</span> وفي تعليقات الشيفرة حساب أيضًا: الطريقة القديمة كانت تعيد فك ترميز أرقام <strong>كل</strong> ما وُلّد مع كل رمز جديد، فإذا بلغت الإجابة 8K رمز زاد كل رمز 2 ملّي ثانية، وعند 16K زاد 4 ملّي ثانية؛ أما الفك التزايدي فكلفته لكل رمز ثابتة.</p>
+<p>وبعد أن يكتب الخادم البايتات، على العميل أن يحل المشكلة نفسها مرة أخرى، وبطبقة زائدة: فالأحداث أيضًا قد تُقطَّع. في المقطِّع أدناه تُقطَّع سلسلة SSE من 126 بايتًا عشوائيًّا، ويستقبلها عميلان في وقت واحد:</p>
+<div class="viz" data-viz="sse-chunk-split"><figure class="fig"><svg viewBox="0 0 400 248" role="img" aria-label="الشكل 23-5: بايتات الحرف الصيني الأول في «مرحبًا» الثلاثة تُقطَّع بين كتلتين. العميل المتهاون يفك كل كتلة وحدها فيحصل على رموز مشوهة؛ والعميل الصحيح يحتجز E4 أولًا، وبعد اكتمال البايتات يفك الحرف">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">الحرف <tspan lang="zh">你</tspan> مقطوع بين كتلتين</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="70" y="34" width="38" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="89" y="54" font-size="13" text-anchor="middle">"</text>
+<rect class="f-warn" fill="#9e5d24" x="112" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="54" font-size="13" text-anchor="middle">E4</text>
+<rect class="f-accent" fill="#136d5a" x="168" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="187" y="54" font-size="13" text-anchor="middle">BD</text>
+<rect class="f-accent" fill="#136d5a" x="210" y="34" width="38" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="229" y="54" font-size="13" text-anchor="middle">A0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="252" y="34" width="38" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="271" y="54" font-size="13" text-anchor="middle">…</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="3 3" d="M159 28V72"/>
+<text class="f-muted" fill="#5c6d66" x="110" y="86" font-size="12" text-anchor="middle">نهاية الكتلة 3</text>
+<text class="f-muted" fill="#5c6d66" x="229" y="86" font-size="12" text-anchor="middle">بداية الكتلة 4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="6" y="100" width="194" height="112" rx="8"/>
+<text class="f-text" fill="#182f2b" x="14" y="122" font-size="13" font-weight="600">العميل المتهاون</text>
+<text class="f-text" fill="#182f2b" x="14" y="146" font-size="12">الكتلة 3 وحدها: E4 → �</text>
+<text class="f-text" fill="#182f2b" x="14" y="168" font-size="12">الكتلة 4 وحدها: BD A0 → ��</text>
+<text class="f-warn" fill="#9e5d24" x="14" y="194" font-size="12"><tspan lang="zh">你</tspan> ضاع إلى الأبد</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="100" width="185" height="112" rx="8"/>
+<text class="f-text" fill="#182f2b" x="215" y="122" font-size="13" font-weight="600">العميل الصحيح</text>
+<text class="f-text" fill="#182f2b" x="215" y="146" font-size="12">الكتلة 3: يحتجز E4 أولًا</text>
+<text class="f-text" fill="#182f2b" x="215" y="168" font-size="12">الكتلة 4: E4 BD A0 → <tspan lang="zh">你</tspan></text>
+<text class="f-text" fill="#182f2b" x="215" y="194" font-size="12">ينتظر السطر الفارغ، ثم يحلل JSON</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="236" font-size="12" text-anchor="middle">النسخة التفاعلية: بزر «خطوة» تستقبل 126 بايتًا كتلة كتلة وتقارن العميلين</text>
+</svg><figcaption>الشكل 23-5  حدود الكتل لا تراعي حدود الحروف. إذا فُكّت كل كتلة وحدها صار نصف الحرف رموزًا مشوهة ولا يمكن إرجاعه؛ أما الفك التزايدي فيحتجز البايتات الناقصة، ولا يُخرج الحرف إلا بعد اكتمالها.</figcaption></figure></div>
+<p>إذا لعبت بضع مرات وجدت أن العميل المتهاون لا يفقد الحروف فحسب، بل يرمي الحدث المقطوع على أنه بيانات سيئة. وخطؤه مختلف في كل مرة، وهذا النوع من العلل الذي يظهر حينًا ويغيب حينًا هو أصعب ما يُتتبَّع.</p>
+
+<h2 id="sec-4">23.4 JSON: داخل الحدث بنية</h2>
+<p>مهمة SSE أن تقطّع الأحداث فقط، وما في داخل الحدث لا شأن لها به. وStrata تضع بعد <code>data:</code> قطعة JSON.</p>
+<aside class="primer" id="c23-json">
+<h3>JSON: صيغة بيانات يقرؤها الإنسان والبرنامج</h3>
+<p>يعبّر <dfn>JSON</dfn> عن البيانات المنظمة بقواعد قليلة: الأقواس المعقوفة <code>{}</code> مجموعة «اسم: قيمة»، والأقواس المربعة <code>[]</code> قائمة، والقيمة قد تكون سلسلة نصية أو عددًا أو <code>true</code>/<code>false</code> أو <code>null</code>، أو بنية متداخلة أخرى. مثلًا <code>{"delta":{"content":"你好"}}</code> معناها: قيمة content داخل delta هي «<span lang="zh">你好</span>».</p>
+<p>وفي تحليل JSON شرط صارم: <strong>يجب أن يكون النص كاملًا</strong>. إذا نقص قوس إغلاق أو نصف علامة اقتباس أبلغ المحلِّل عن خطأ. ولهذا بالذات نقطّع الأحداث الكاملة بالسطر الفارغ أولًا ثم نحلل.</p>
+<p>وفي سلسلة JSON النصية طريقتان لكتابة الحرف غير ASCII: أن تكتب بايتات UTF-8 مباشرة، أو أن تكتبه بتهريب مثل <code>\u4e2d</code>. معنى الطريقتين واحد، وعدد البايتات مختلف. انظر الشكل 23-6.</p>
+<p class="further">قراءة إضافية: <a href="https://ar.wikipedia.org/wiki/JSON" target="_blank" rel="noopener noreferrer">ويكيبيديا: JSON</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON" target="_blank" rel="noopener noreferrer">MDN: JSON (بالإنجليزية)</a> · <a href="https://docs.python.org/3/library/json.html" target="_blank" rel="noopener noreferrer">وثائق Python: json، وفيها ensure_ascii (بالإنجليزية)</a> · <a href="https://www.rfc-editor.org/rfc/rfc8259" target="_blank" rel="noopener noreferrer">RFC 8259</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="الشكل 23-6: كلمة صينية من حرفين تُكتب بـ UTF-8 مباشرة في 18 بايتًا، وبتهريب \u في 24 بايتًا؛ ومئة حرف صيني تصير 300 و600 بايت">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">طريقتان لكتابة قطعة JSON نفسها</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="32" width="380" height="28" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="51" font-size="12" font-family="monospace" lang="zh">{"delta":"中文"}</text>
+<text class="f-text" fill="#182f2b" x="380" y="51" font-size="12" text-anchor="end">18 بايت</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="68" width="380" height="28" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="87" font-size="12" font-family="monospace">{"delta":"\u4e2d\u6587"}</text>
+<text class="f-text" fill="#182f2b" x="380" y="87" font-size="12" text-anchor="end">24 بايت</text>
+<text class="f-text" fill="#182f2b" x="10" y="124" font-size="12" font-weight="600">إجابة من 100 حرف صيني، لجزء النص وحده:</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="134" width="125" height="16"/>
+<text class="f-text" fill="#182f2b" x="143" y="147" font-size="12">UTF-8 مباشرة: 300 بايت</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="160" width="250" height="16"/>
+<text class="f-text" fill="#182f2b" x="268" y="173" font-size="12">بالتهريب: 600 بايت</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="202" font-size="12">لكل حرف صيني: 3 بايتات في UTF-8، و6 أحرف ASCII في تهريب \u</text>
+</svg><figcaption>الشكل 23-6  تكتب أحداث التدفق في Strata بـ <code>ensure_ascii=False</code>، أي UTF-8 مباشرة، فعدد بايتات الصينية نصف ما يكون بالتهريب؛ والثمن أن بايتات الحرف قد تقطعها الشبكة، فعلى العميل أن يفك تزايديًّا.</figcaption></figure>
+<p>تستدعي Strata عند كتابة أحداث التدفق <code>json.dumps(c, ensure_ascii=False)</code>، فتُكتب الصينية بـ UTF-8 كما هي. <span class="ev ev-code">حقيقة من الشيفرة</span> ولو تحولنا إلى التهريب لصارت على الخط بايتات ASCII فقط، فلا يوجد «نصف حرف صيني»؛ لكن عدد بايتات الصينية يتضاعف، ومواصفة SSE تشترط أصلًا الفك بـ UTF-8، ومشكلة تقطيع الأحداث تبقى قائمة. فالاتجاه الصحيح أن يفك العميل تزايديًّا بجدّ، لا أن يتحايل بالتهريب.</p>
+<p>إذا ربطنا الأبواب الثلاثة فلا يجوز أن يختل ترتيبها:</p>
+<ol>
+<li><strong>بايتات ← حرف</strong>: فك UTF-8 تزايدي، يحتجز البايتات الناقصة؛</li>
+<li><strong>حروف ← حدث</strong>: تتجمع في مخزن مؤقت (buffer)، ولا يُقتطع حدث كامل إلا عند السطر الفارغ، وتُرمى التعليقات؛</li>
+<li><strong>حدث ← بنية</strong>: يُحلَّل <code>data</code> الكامل بـ JSON ويُستخرج النص.</li>
+</ol>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذه فكرة خط الأنابيب «تدفق الحروف ← التحليل المعجمي ← التحليل النحوي» في مقرر «بناء المترجمات»: كل طبقة لا تعمل إلا بعد أن تعطيها التي قبلها <strong>وحدة كاملة</strong>، بينما لا يضمن TCP إلا ترتيب البايتات، ولا يضمن اكتمال أي وحدة أعلى.</p>
+
+<h2 id="sec-5">23.5 مخرجات النموذج أيضًا: اجمعها كاملة ثم أرسلها</h2>
+<p>المشكلة نفسها تظهر مرة أخرى داخل الخادم. هذا النموذج «يفكّر» أولًا ثم يجيب: ويكتب التفكير بين <code>&lt;think&gt;</code> و<code>&lt;/think&gt;</code>؛ وإذا أراد استدعاء أداة كتب وسومًا مثل <code>&lt;tool_call&gt;&lt;function=الاسم&gt;&lt;parameter=المعامل&gt;القيمة&lt;/parameter&gt;…</code>. هذه الوسوم موجّهة للبرنامج، ولا ينبغي أن تظهر على شاشتك.</p>
+<p>والمشكلة أن الوسوم أيضًا قد تُقطَّع: في هذه الخطوة يخرج <code>&lt;/th</code>، وفي التالية يخرج <code>ink&gt;</code>. و<code>OutputParser</code> في <code>frontend.py</code> مخصص لهذا: الوسم المقطوع يُحتجَز، وإذا اكتمل عولج؛ فلا يرى العميل أبدًا وسمًا ناقصًا مثل <code>&lt;tool_</code> أو <code>&lt;/thi</code>. <span class="ev ev-code">حقيقة من الشيفرة</span>[S16]</p>
+<div class="viz" data-viz="think-tag-holdback"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="الشكل 23-7: قطعتان من مخرجات النموذج تقسمان وسم نهاية التفكير نصفين. يحتجز المحلِّل النصف الأول، وبعد وصول القطعة التالية يتعرف الوسم الكامل ثم يضع النص الذي بعده في النص الأساسي">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">قطعتان متتاليتان من مخرجات النموذج</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="180" height="30" rx="5"/>
+<text class="f-text" fill="#182f2b" x="20" y="46" font-size="13" >سأفكر.<tspan class="f-warn" fill="#9e5d24">&lt;/th</tspan></text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="26" width="180" height="30" rx="5"/>
+<text class="f-text" fill="#182f2b" x="220" y="46" font-size="13"><tspan class="f-warn" fill="#9e5d24">ink&gt;</tspan>حسنًا،</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 60V78"/>
+<rect class="f-soft" fill="#e5f1df" x="70" y="80" width="260" height="30" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="100" font-size="13" font-weight="600" text-anchor="middle">المحلِّل: يحتجز الذيل الذي قد يكون بداية وسم</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 110V126"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="128" width="120" height="58" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="70" y="148" font-size="12" text-anchor="middle">التفكير</text>
+<text class="f-text" fill="#182f2b" x="70" y="172" font-size="13" text-anchor="middle">سأفكر.</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="128" width="120" height="58" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="148" font-size="12" text-anchor="middle">محتجز بانتظار القطعة التالية</text>
+<text class="f-warn" fill="#9e5d24" x="200" y="172" font-size="13" text-anchor="middle">&lt;/th</text>
+<rect class="f-accent" fill="#136d5a" x="270" y="128" width="120" height="58" rx="6"/>
+<text class="f-on" fill="#ffffff" x="330" y="148" font-size="12" text-anchor="middle">النص الأساسي</text>
+<text class="f-on" fill="#ffffff" x="330" y="172" font-size="13" text-anchor="middle">حسنًا،</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="210" font-size="12" text-anchor="middle">القطعتان معًا تكوّنان &lt;/think&gt; كاملًا: انتهى التفكير، وما بعده للنص الأساسي</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="228" font-size="12" text-anchor="middle">النسخة التفاعلية: ترسل 6 قطع واحدة واحدة لترى كيف يُفصل التفكير والنص والأداة</text>
+</svg><figcaption>الشكل 23-7  لا يحتجز المحلِّل إلا الأحرف القليلة التي «قد تكون بداية وسم»، ويرسل باقي النص فورًا كالمعتاد. فلا يتسرب وسم ناقص، ولا يتباطأ العرض.</figcaption></figure></div>
+<p>و<code>OutputParser</code> الحقيقي يفعل أمرين زائدين على هذا المكوّن. الأول أنه يُبلغ عن تقدم استدعاء الأداة وهو يُكتب: ما إن يظهر اسم الأداة حتى يرسل حدث بداية، ويُبلَّغ عن المعاملات قطعة قطعة، لئلا يظل العميل ينتظر دقائق بلا حركة والنموذج يكتب ملفًا كبيرًا. <span class="ev ev-code">حقيقة من الشيفرة</span> والثاني أن نهايات الأسطر قبل الوسوم وبعدها تُعالَج بعناية، ليتطابق الناتج المتدفق مع الناتج المرسل دفعة واحدة تمامًا.</p>
+<p>واستدعاء الأدوات يمسّ الأمان أيضًا. فكتابة النموذج اسم دالة لا تعني أن النظام يسمح بتنفيذها: مخرجات النموذج <strong>مدخلات غير موثوقة</strong>، ويجب فحص المعاملات والصلاحيات قبل التنفيذ. ولا تقدّم Strata أدوات MCP إلا للطلبات التي تطلبها صراحة (وفيها <code>"strata_mcp": true</code>)، أما بقية العملاء فيرون الواجهة كما كانت تمامًا. [S15] وسنكمل في الفصل 24 الحديث عن «من يملك صلاحية أن يجعل النموذج يفعل ماذا».</p>
+
+<h2 id="sec-6">23.6 تطبيق عملي: قطّع التدفق نفسه بأي حجم</h2>
+<p>افتح مختبر هذا الفصل التفاعلي «تقطيع البايتات لا يساوي الأحداث». يقطّع تدفق SSE فيه كلام صيني إلى كتل ثابتة الحجم من 1 إلى 32 بايتًا، ثم يعيد بناءه بالأبواب الثلاثة الصحيحة. جرّب ثلاثة أشياء بالترتيب:</p>
+<ol>
+<li>جرّب من بايت واحد حتى 32 بايتًا: في كل طريقة تقطيع يجب أن يكون النص المُعاد بناؤه هو نفسه تمامًا. وإذا اختلف في طريقة واحدة فالمحلِّل فيه علّة.</li>
+<li>شغّل نهاية السطر CRLF: تسمح SSE بثلاثة أنواع من نهايات الأسطر، ويجب أن يعرفها المحلِّل كلها.</li>
+<li>انتبه إلى المخزن «غير المكتمل»: إذا انقطع التدفق في منتصف حدث فيجب أن يُحتفَظ بهذا النصف أو يُبلَّغ بخطأ، ولا يُتظاهر بأنه كامل.</li>
+</ol>
+<p>ثم ارجع إلى الرسمين التفاعليين في هذا الفصل، وشغّل كلًّا منهما مرة بتقطيع 1 بايت ومرة بـ 64 بايتًا. سترى بوضوح أكبر: كلما صغرت الكتلة ظهر خطأ الطريقة المتهاونة أبين، وكلما كبرت اختبأ الخطأ أعمق.</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>تترجم طبقة الخدمة في Strata طلب JSON من التطبيق إلى أرقام رموز، ثم تعيد الرموز التي يخرجها المحرك نصًّا، وترسله في صورة تدفق أحداث SSE. وبينها وبين المحرك واجهة واحدة هي <code>Engine.generate</code>.</li>
+<li>من البايتات إلى النص ثلاثة أبواب: فك UTF-8 تزايديًّا، وتقطيع الأحداث بالسطر الفارغ، وتحليل JSON كاملًا. وحدود كتل الشبكة لا علاقة لها بهذه الحدود الثلاثة، فيجب أن تجمع ما وصلك كاملًا قبل كل باب.</li>
+<li>الوسوم في مخرجات النموذج تُقطَّع أيضًا. ويحتجز <code>OutputParser</code> في Strata الذيل الذي قد يكون بداية وسم، ولا يرسل نصف وسم أبدًا؛ واستدعاء الأداة الكامل لا يُعتدّ به إلا بعد اكتمال كتابته.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «عدّ أحداث SSE يخبرك بعدد الرموز التي ولّدها النموذج».</strong></p>
+<p>لا علاقة ثابتة بين العددين. أول حدث في Strata يعلن فقط «المساعد بدأ الكلام» ولا يحوي أي رمز؛ وعند قراءة مُطالبة طويلة تُدرَج تعليقات البقاء حيًّا؛ وإذا جاء الرمز بنصف حرف صيني فليس في هذه الخطوة نص يُرسَل؛ وإذا احتُجز وسم فقد لا يُرسَل شيء مؤقتًا. وبالعكس قد يأتي النص في حدث واحد من عدة رموز. وإذا أردت عدد الرموز فانظر إلى الحقل <code>usage</code> في آخر الاستجابة، ولا تعدّ الأحداث.</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: الشروط الصارمة للحدود الثلاثة، ونطاق «التوافق»، وطريقة التحقق</summary>
+<h3>الحدود الثلاثة كما تنص المواصفة</h3>
+<p>يمكن تلخيص ما تطلبه مواصفة SSE من المحلِّل في عدة نقاط [R05]: يُفَكّ تدفق الأحداث بـ UTF-8؛ ونهاية السطر قد تكون CRLF أو LF وحدها أو CR وحدها؛ والسطر الفارغ يطلق إرسال حدث واحد؛ وأسطر <code>data</code> المتعددة في الحدث الواحد تُوصَل بـ LF؛ والسطر الذي يبدأ بنقطتين تعليق؛ وعند نهاية التدفق يُهمَل الحدث الناقص الذي لم ينتهِ بسطر فارغ.</p>
+<p>ومن هذا يخرج ترتيب التنفيذ: <strong>فك البايتات تزايديًّا ← تجميع النص وتقطيعه إلى إطارات عند حدود الأحداث ← تحليل حمولة data</strong>. ومن استدعى <code>JSON.parse</code> مع كل كتلة وقع في فخّين معًا: قطع الحروف وقطع الأحداث. ولا ينفّذ مختبر الكتاب التفاعلي إلا مجموعة جزئية هي data فقط، مع LF وCRLF؛ ولم ينفّذ إعادة الاتصال التلقائي في EventSource ولا الحقلين <code>id</code> و<code>retry</code>، فلا يصلح أن يُعدّ عميل SSE كاملًا.</p>
+<h3>مثال: حرف صيني في ثلاث كتل</h3>
+<p>بايتات الحرف «<span lang="zh">中</span>» الثلاثة E4 B8 AD وزعتها الشبكة على ثلاث كتل. إذا فُكّت كل كتلة وحدها على أنها نص كامل حصلت على ثلاثة رموز استبدال. أما المفكّك التزايدي فإذا قرأ E4 عرف أنه ينقصه بايتان فاحتجزه؛ وإذا قرأ B8 عرف أنه ينقصه بايت؛ ولا يُخرج «<span lang="zh">中</span>» إلا عند قراءة AD. وكذلك قد يُقطَّع السطران الفارغان بعد <code>data: {"delta":"中"}</code> في أي موضع: عند النقطتين الرأسيتين أو علامة الاقتباس أو بين السطرين. ولا علاقة ثابتة بين عدد كتل الشبكة وعدد الرموز.</p>
+<h3>«متوافق مع OpenAI» يعني مجموعة جزئية من الواجهة</h3>
+<p>يجب فهم «التوافق» بحسب نقاط النهاية والحقول والدلالات المنفّذة فعلًا، ولا يكفي أن يشبه المسار <code>/v1/...</code> لنحكم أن كل شيء متوافق. لا يصف الكتاب إلا نقاط النهاية والحدود المدرجة في رأس <code>serve/server.py</code> [S15]، ولم يدقق في كل حقول البروتوكول واحدًا واحدًا. و<code>/v1/responses</code> المضافة في v0.1.39 ليست في تلك القائمة. وكل حدث في تدفقها يحمل سطر <code>event:</code> باسمه، يبدأ بـ <code>response.created</code> وينتهي بـ <code>response.completed</code> (أو incomplete أو failed). ولم يدقق الكتاب فيها أيضًا. <span class="ev ev-report">تقرير المصدر الأصلي</span>وبعض التفاصيل التي يمكن التأكد منها بقراءة الشيفرة: delta في الحدث الأول هو <code>{"role":"assistant","content":""}</code>؛ ويوضع التفكير في الحقل <code>reasoning_content</code>؛ والانتهاء بسبب الإلغاء يُبلَّغ للعميل على أنه <code>stop</code>.</p>
+<h3>ماذا لو بدأ التدفق ثم ظهر الخطأ</h3>
+<p>رمز حالة HTTP في ترويسة الاستجابة، وإذا أُرسلت الترويسة فلا يمكن تغييرها. لذلك تضع Strata الأخطاء التي يمكن كشفها مبكرًا قبل بدء التدفق: فإذا زاد طول المُطالبة مع أقصى طول للإخراج على السياق ردّت مباشرة بـ 400 ورفضت، ولا تقتطع شيئًا سرًّا. [S15] وإذا أبلغ المحرك عن خطأ بعد بدء التدفق (مثل أن تنتهي عملية المحرك فجأة) فرمز الحالة صار 200 فعلًا، فتكتب Strata في التدفق حدثًا فيه حقل <code>error</code> ثم تكتب <code>data: [DONE]</code> ختامًا عاديًّا؛ أما الواجهة بأسلوب Anthropic فتكتب حدث <code>event: error</code>. <span class="ev ev-code">حقيقة من الشيفرة</span> فعلى العميل أن يفحص محتوى الأحداث، ولا يكتفي برمز الحالة.</p>
+<h3>صندوق القوالب الرملي يحمي طبقة القالب وحدها</h3>
+<p>يستخدم <code>frontend.py</code> بيئة Jinja المسماة <code>ImmutableSandboxedEnvironment</code> لعرض قالب الدردشة. [S16] وهذه حماية محددة على طبقة القالب: تقيّد ما تستطيع شيفرة القالب فعله؛ ولا تثبت تلقائيًّا أن تنفيذ الأدوات وجلب عناوين الصور وقراءة الملفات المحلية آمنة أيضًا. كل نوع من الوصول إلى الموارد يحتاج إلى نموذج تهديدات مستقل. ولدى Strata فحص آخر لأدوات MCP: لا يستطيع جعل النموذج يستخدم هذه الأدوات إلا صفحة Strata نفسها (أو مصدر وُثِّق صراحة في الإعداد)، وبإرسال بصيغة JSON، لأن الأدوات تعمل بصلاحياتك على هذا الحاسوب. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<h3>طريقة التحقق وحدود الدليل</h3>
+<p>للتحقق من تحليل SSE: قطّع حدثي JSON فيهما كلام صيني بأحجام من 1 إلى 32 بايتًا، واشترط أن يكون الناتج المُعاد بناؤه متطابقًا في كل طريقة تقطيع؛ وأضف اختبارات لـ CRLF وأسطر data المتعددة وحدث ناقص في الآخر؛ ويجب أن يبقى الحدث الناقص غير مكتمل أو يُبلَّغ بخطأ، ولا يُزيَّف نجاحه.</p>
+<p>ويستطيع <code>MockEngine</code> أن يتحقق من الاستجابة المتدفقة وغير المتدفقة، والإلغاء، ومعاملات الأدوات، وحدث الختام عند الخطأ؛ لكنه لا يثبت جودة استدلال GPU ولا الأداء الحقيقي. [S15] وهذه ميزة الاختبار المتدرج، وهي أيضًا حدّ الدليل فيه.</p>
+</details>
