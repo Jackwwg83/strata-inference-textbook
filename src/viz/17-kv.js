@@ -65,7 +65,7 @@
     },
     en: {
       code: 'KV_BUDGET', title: 'KV budget calculator', tag: 'Teaching estimate · main KV and GDN state only',
-      intro: 'Pick a context length, a KV format and how many conversations to keep, and watch the bytes change. Strata\'s server runs only <b>one</b> conversation at a time; the others can "park" their state in RAM. Notice how far apart the same byte count is when written in <b>GB</b> and in <b>GiB</b>.',
+      intro: 'Pick a context length, a KV format and how many conversations to keep, and watch the bytes change. By default, Strata\'s server runs only <b>one</b> conversation at a time (the optional parallel slots are not counted here); the others can "park" their state in RAM. Notice how far apart the same byte count is when written in <b>GB</b> and in <b>GiB</b>.',
       lgVkv: 'KV in VRAM', lgGdn: 'GDN recurrent state (fixed size)', lgRkv: 'Master copy of KV in RAM (streaming)', lgPark: 'Other conversations parked in RAM',
       stageLabel: 'Usage bars for VRAM and RAM', vram: 'VRAM', ram: 'RAM',
       ctxLabel: 'Context length', sesLabel: 'Conversations to keep',
@@ -118,7 +118,7 @@
     },
     ko: {
       code: 'KV_BUDGET', title: 'KV 예산 계산기', tag: '교육용 추정 · 주 KV와 GDN 상태만 계산',
-      intro: '컨텍스트 길이, KV 형식, 보존할 대화 수를 골라서 바이트 수가 어떻게 변하는지 보세요. Strata의 서버는 한 번에 대화를 <b>하나</b>만 실행하고, 나머지 대화는 상태를 RAM에 "파킹"해 둘 수 있어요. 같은 바이트 수를 <b>GB</b>와 <b>GiB</b>로 쓸 때 얼마나 다른지 살펴보세요.',
+      intro: '컨텍스트 길이, KV 형식, 보존할 대화 수를 골라서 바이트 수가 어떻게 변하는지 보세요. Strata의 서버는 기본적으로 한 번에 대화를 <b>하나</b>만 실행해요(선택 사항인 parallel 슬롯은 여기서 계산하지 않아요). 나머지 대화는 상태를 RAM에 "파킹"해 둘 수 있어요. 같은 바이트 수를 <b>GB</b>와 <b>GiB</b>로 쓸 때 얼마나 다른지 살펴보세요.',
       lgVkv: 'VRAM 속 KV', lgGdn: 'GDN 재귀 상태(고정 크기)', lgRkv: 'RAM 속 KV 기준 사본(스트리밍)', lgPark: 'RAM에 파킹한 다른 대화',
       stageLabel: 'VRAM과 RAM 사용량 막대', vram: 'VRAM', ram: 'RAM',
       ctxLabel: '컨텍스트 길이', sesLabel: '보존할 대화 수',
@@ -171,7 +171,7 @@
     },
     ja: {
       code: 'KV_BUDGET', title: 'KV 予算計算機', tag: '教育用の試算 · メイン KV と GDN 状態のみ',
-      intro: 'コンテキスト長、KV の形式、残しておく会話の数を選んで、バイト数の変化を見ましょう。Strata のサーバーは同時に<b>1 つ</b>の会話しか実行しません。ほかの会話は、状態を RAM に「駐車」できます。同じバイト数を <b>GB</b> と <b>GiB</b> で書くと、どれだけ差が出るかにも注目してください。',
+      intro: 'コンテキスト長、KV の形式、残しておく会話の数を選んで、バイト数の変化を見ましょう。Strata のサーバーは既定では同時に<b>1 つ</b>の会話しか実行しません（オプションの parallel スロットはここでは数えません）。ほかの会話は、状態を RAM に「駐車」できます。同じバイト数を <b>GB</b> と <b>GiB</b> で書くと、どれだけ差が出るかにも注目してください。',
       lgVkv: 'VRAM 上の KV', lgGdn: 'GDN の再帰状態（固定サイズ）', lgRkv: 'RAM 上の KV の正本（ストリーミング）', lgPark: 'RAM に駐車した他の会話',
       stageLabel: 'VRAM と RAM の使用量バー', vram: 'VRAM', ram: 'RAM',
       ctxLabel: 'コンテキスト長', sesLabel: '残す会話の数',
@@ -224,7 +224,7 @@
     },
     es: {
       code: 'KV_BUDGET', title: 'Calculadora de presupuesto de KV', tag: 'Estimación didáctica · solo la KV principal y el estado GDN',
-      intro: 'Elige una longitud de contexto, un formato de KV y cuántas conversaciones conservar, y mira cómo cambian los bytes. El servidor de Strata ejecuta solo <b>una</b> conversación a la vez; las demás pueden «aparcar» su estado en la RAM. Fíjate en lo distinto que sale el mismo número de bytes escrito en <b>GB</b> y en <b>GiB</b>.',
+      intro: 'Elige una longitud de contexto, un formato de KV y cuántas conversaciones conservar, y mira cómo cambian los bytes. El servidor de Strata ejecuta por defecto solo <b>una</b> conversación a la vez (los slots paralelos opcionales no se cuentan aquí); las demás pueden «aparcar» su estado en la RAM. Fíjate en lo distinto que sale el mismo número de bytes escrito en <b>GB</b> y en <b>GiB</b>.',
       lgVkv: 'KV en la VRAM', lgGdn: 'Estado recurrente GDN (tamaño fijo)', lgRkv: 'Copia maestra de la KV en la RAM (streaming)', lgPark: 'Otras conversaciones aparcadas en la RAM',
       stageLabel: 'Barras de uso de la VRAM y la RAM', vram: 'VRAM', ram: 'RAM',
       ctxLabel: 'Longitud del contexto', sesLabel: 'Conversaciones a conservar',

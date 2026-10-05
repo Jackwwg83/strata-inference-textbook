@@ -107,10 +107,10 @@
       sFlagK: 'Switches used in this configure', sTierK: 'How CMake treats this architecture',
       branch: {
         'cuda-hw': 'hardware __dp4a instruction', 'cuda-sw': 'software loop strata_dp4a', 'hip-sudot4': 'v_dot4_i32_iu8 (sudot4)',
-        'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-loop': 'portable byte-by-byte loop',
+        'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-sdwa': 'RDNA1 SDWA assembly (v_mul_i32_i24 + v_add3_u32)', 'hip-loop': 'portable byte-by-byte loop',
       },
       tier: {
-        ok: 'normal build', experimental: 'experimental build: not supported upstream', validated: 'verified on real cards by the maintainer', community: 'verified on real cards by users',
+        ok: 'normal build', experimental: 'experimental build: the maintainer has no such card and only checked that it compiles', validated: 'verified on real cards by the maintainer', community: 'verified on real cards by users',
         unvalidated: 'compiles, but warns: not yet verified on a real card', refused: 'error: configure refused',
       },
       try: [
@@ -120,7 +120,7 @@
       ],
       l0ok: (flags) => `<span class="c">[cmake]</span> ${flags}: architecture is on the list, continue`,
       l0warn: (arch) => `<span class="y">[cmake] warning</span>: ${arch} compiles, but nobody has verified it on a real card yet; please report your results`,
-      l0exp: '<span class="y">[cmake]</span> STRATA_EXPERIMENTAL_SM60 is on: old cards below 7.5 only get a community experimental build',
+      l0exp: '<span class="y">[cmake]</span> STRATA_EXPERIMENTAL_SM60 is on: old cards below 7.5 only get an experimental build (since v0.1.39, setup also prepares a separate CUDA 12 engine for them)',
       l0no: (arch) => `<span class="m">[cmake] FATAL_ERROR</span>: ${arch} is not on the supported list; configure stops here and nothing is compiled`,
       l1cuda: '<span class="c">[include]</span> a CUDA build uses NVIDIA\'s own headers directly; no shim needed',
       l1hip: '<span class="c">[include]</span> compiler flag <code>-include hip_compat/cuda_runtime.h</code>: this "renaming table" is pushed onto the top of every source file',
@@ -133,7 +133,7 @@
       l5hip: (arch) => `<span class="c">[run]</span> startup check: the card's architecture must be ${arch} and a thread group must be 32 wide (wave32), or it exits with an error`,
       done: (v) => `<span class="y">Done</span>: same source, a different set of machine code. Worked dp4a = ${v}`,
       vOk: (name, v) => `① Not a line of source changed; the preprocessor swapped the names for the target platform's terms and kept just one branch for dp4a: "${name}".<br>② The worked result is <b>${v}</b>. dp4a is integer math, so every branch is bit-identical.<br>③ Floating point is not so easy: the upstream docs say plainly that the CUDA and HIP backends are not promised to give bit-identical answers.`,
-      vNo: '① CMake refused at the very first step: this architecture is not on the list.<br>② Refusing beats "build it and see": a binary nobody has verified may run, compute wrong answers, and report no error at all.',
+      vNo: '① CMake refused at the very first step: this architecture is not on the list.<br>② Refusing beats "build it and see": a binary nobody has verified may run, compute wrong answers, and report no error at all.<br>③ gfx906 is wave64, and the HIP backend accepts only wave32. Since v0.1.39 it has a separate experimental build that you switch on by hand (STRATA_HIP_GFX906). It uses a different compatibility layer and does not go through this list.',
 
       cCode: 'CPU_DISPATCH', cTitle: 'CPU kernel selector', cTag: 'Code fact · logic reproduced',
       cIntro: 'Experts the GPU misses are computed by the CPU itself. Which kernel set to use is decided at <b>run time</b>: the engine first asks the CPU "which instructions do you know?" and then chooses. Change the conditions below and see how far the decision chain goes.',
@@ -151,11 +151,11 @@
         iq512: 'iq512: AVX-512 multi-token kernel', iq256: 'iq256: AVX2 multi-token kernel', ggml: 'ggml-cpu single-token dot product',
       },
       pathF: {
-        'refuse-avx2': 'every CPU expert kernel needs at least AVX2, FMA and F16C', 'refuse-avx512': 'the standard Q2_0 pack\'s CPU kernel exists only in an AVX-512 version',
+        'refuse-avx2': 'every CPU expert kernel in the prebuilt engine needs at least AVX2, FMA and F16C', 'refuse-avx512': 'the standard Q2_0 pack\'s CPU kernel exists only in an AVX-512 version',
         'strata-vnni': 'uses the AVX-512 VNNI and VBMI instruction groups', iq512: 'weights are decoded once and shared by the group of tokens', iq256: 'the same idea with 256-bit registers',
         ggml: 'each token decodes the weights on its own',
       },
-      c1: (ok) => ok ? '<span class="c">[1]</span> CPUID says: AVX2 supported (with FMA, F16C)' : '<span class="m">[1]</span> CPUID says: no AVX2. The engine reports the CPU model, says it needs a Haswell (2013), Zen (2017) or newer CPU, and exits',
+      c1: (ok) => ok ? '<span class="c">[1]</span> CPUID says: AVX2 supported (with FMA, F16C)' : '<span class="m">[1]</span> CPUID says: no AVX2. The prebuilt engine reports the CPU model, says it needs a Haswell (2013), Zen (2017) or newer CPU, and exits',
       c2: (p) => `<span class="c">[2]</span> Model pack: ${p}`,
       c3: (ok, env) => ok ? `<span class="c">[3]</span> CPUID says: AVX-512 F, BW, VL, VNNI and VBMI are all present, and the OS saves these registers${env ? '; but an environment variable says not to use the AVX-512 kernel' : ''}` : '<span class="c">[3]</span> CPUID says: no complete AVX-512',
       c3q2: (ok) => ok ? '<span class="c">[3]</span> The standard Q2_0 pack needs AVX-512: this CPU has it, go ahead' : '<span class="m">[3]</span> The standard Q2_0 pack\'s CPU kernel exists only for AVX-512: it errors out at startup, instead of hitting an illegal instruction a few thousand tokens in',
@@ -163,7 +163,7 @@
       c5: (name) => `<span class="y">[5] Chosen</span>: <span class="w">${name}</span>`,
       c5iq4: '<span class="y">Note</span>: IQ4_XS has only an AVX2 multi-token kernel. AVX-512 CPUs do not borrow it, because the rounding would change, so they fall back to ggml-cpu',
       cVerdict: {
-        'refuse-avx2': 'This CPU is too old to run any expert kernel. The engine explains why at second 0 and exits.',
+        'refuse-avx2': 'This CPU is too old: none of the prebuilt engine\'s expert kernels can run. The engine explains why at second 0 and exits. Since v0.1.39, setup can build an experimental engine on this machine (STRATA_ISA_FLOOR), and the experts then go through ggml-cpu: it runs, but very slowly.',
         'refuse-avx512': 'The standard Q2_0 pack has only an AVX-512 kernel. Without AVX-512 it refuses at startup; switch to a native-format pack to run on an AVX2 CPU.',
         'strata-vnni': 'The standard Q2_0 pack uses the AVX-512 kernel Strata wrote itself.',
         iq512: 'Same program; this CPU takes the widest, 512-bit route: weights are decoded once and shared by the whole group of tokens.',
@@ -192,10 +192,10 @@
       sFlagK: 'Interruptores de esta configuración', sTierK: 'Cómo trata CMake esta arquitectura',
       branch: {
         'cuda-hw': 'instrucción __dp4a de hardware', 'cuda-sw': 'bucle de software strata_dp4a', 'hip-sudot4': 'v_dot4_i32_iu8 (sudot4)',
-        'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-loop': 'bucle portable byte a byte',
+        'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-sdwa': 'ensamblador SDWA de RDNA1 (v_mul_i32_i24 + v_add3_u32)', 'hip-loop': 'bucle portable byte a byte',
       },
       tier: {
-        ok: 'compilación normal', experimental: 'compilación experimental: upstream no la respalda', validated: 'verificada en tarjetas reales por el mantenedor', community: 'verificada en tarjetas reales por usuarios',
+        ok: 'compilación normal', experimental: 'compilación experimental: el mantenedor no tiene esa tarjeta y solo comprobó que compila', validated: 'verificada en tarjetas reales por el mantenedor', community: 'verificada en tarjetas reales por usuarios',
         unvalidated: 'compila, pero avisa: aún sin verificar en una tarjeta real', refused: 'error: se rechaza la configuración',
       },
       try: [
@@ -205,7 +205,7 @@
       ],
       l0ok: (flags) => `<span class="c">[cmake]</span> ${flags}: la arquitectura está en la lista, se continúa`,
       l0warn: (arch) => `<span class="y">[cmake] advertencia</span>: ${arch} compila, pero nadie lo ha verificado aún en una tarjeta real; por favor, reporta tus resultados`,
-      l0exp: '<span class="y">[cmake]</span> STRATA_EXPERIMENTAL_SM60 está activo: las tarjetas viejas por debajo de 7.5 solo reciben una compilación experimental de la comunidad',
+      l0exp: '<span class="y">[cmake]</span> STRATA_EXPERIMENTAL_SM60 está activo: las tarjetas viejas por debajo de 7.5 solo reciben una compilación experimental (desde v0.1.39, setup prepara además un motor CUDA 12 aparte para ellas)',
       l0no: (arch) => `<span class="m">[cmake] FATAL_ERROR</span>: ${arch} no está en la lista de soporte; la configuración se detiene aquí y no se compila nada`,
       l1cuda: '<span class="c">[include]</span> una compilación CUDA usa directamente las cabeceras de NVIDIA; no hace falta shim',
       l1hip: '<span class="c">[include]</span> opción del compilador <code>-include hip_compat/cuda_runtime.h</code>: esta «tabla de cambio de nombres» se mete al principio de cada archivo fuente',
@@ -218,7 +218,7 @@
       l5hip: (arch) => `<span class="c">[run]</span> comprobación al arrancar: la arquitectura de la tarjeta debe ser ${arch} y un grupo de hilos debe tener 32 (wave32); si no, sale con un error`,
       done: (v) => `<span class="y">Listo</span>: el mismo código fuente, otro juego de código máquina. dp4a del ejemplo = ${v}`,
       vOk: (name, v) => `① No cambió ni una línea del código fuente. El preprocesador cambió los nombres por los de la plataforma de destino y conservó una sola rama para dp4a: «${name}».<br>② El resultado del ejemplo es <b>${v}</b>. dp4a es aritmética entera, así que todas las ramas son idénticas bit a bit.<br>③ Con el punto flotante no es tan fácil: la documentación upstream dice sin rodeos que no promete que los backends CUDA y HIP den respuestas idénticas bit a bit.`,
-      vNo: '① CMake se negó en el primer paso: esta arquitectura no está en la lista.<br>② Negarse es mejor que «compilar y ver»: un binario que nadie ha verificado puede correr, calcular mal y no dar ningún error.',
+      vNo: '① CMake se negó en el primer paso: esta arquitectura no está en la lista.<br>② Negarse es mejor que «compilar y ver»: un binario que nadie ha verificado puede correr, calcular mal y no dar ningún error.<br>③ gfx906 es wave64, y el backend HIP solo admite wave32. Desde v0.1.39 tiene una compilación experimental aparte que se activa a mano (STRATA_HIP_GFX906). Usa otra capa de compatibilidad y no pasa por esta lista.',
 
       cCode: 'CPU_DISPATCH', cTitle: 'Selector de kernel de CPU', cTag: 'Hecho de código · lógica reproducida',
       cIntro: 'Los expertos que la GPU no tiene los calcula la propia CPU. Qué juego de kernels se usa se decide en <b>tiempo de ejecución</b>: el motor pregunta primero a la CPU «¿qué instrucciones conoces?» y luego elige. Cambia las condiciones de abajo y mira hasta dónde llega la cadena de decisión.',
@@ -236,11 +236,11 @@
         iq512: 'iq512: kernel multi-token AVX-512', iq256: 'iq256: kernel multi-token AVX2', ggml: 'producto punto de 1 token de ggml-cpu',
       },
       pathF: {
-        'refuse-avx2': 'todo kernel de expertos en CPU necesita como mínimo AVX2, FMA y F16C', 'refuse-avx512': 'el kernel de CPU del paquete Q2_0 estándar solo existe en versión AVX-512',
+        'refuse-avx2': 'todo kernel de expertos en CPU del motor precompilado necesita como mínimo AVX2, FMA y F16C', 'refuse-avx512': 'el kernel de CPU del paquete Q2_0 estándar solo existe en versión AVX-512',
         'strata-vnni': 'usa los grupos de instrucciones VNNI y VBMI de AVX-512', iq512: 'los pesos se decodifican una vez y los comparte el grupo de tokens', iq256: 'la misma idea con registros de 256 bits',
         ggml: 'cada token decodifica los pesos por su cuenta',
       },
-      c1: (ok) => ok ? '<span class="c">[1]</span> CPUID dice: AVX2 disponible (con FMA y F16C)' : '<span class="m">[1]</span> CPUID dice: no hay AVX2. El motor informa del modelo de CPU, dice que necesita una CPU Haswell (2013), Zen (2017) o posterior, y sale',
+      c1: (ok) => ok ? '<span class="c">[1]</span> CPUID dice: AVX2 disponible (con FMA y F16C)' : '<span class="m">[1]</span> CPUID dice: no hay AVX2. El motor precompilado informa del modelo de CPU, dice que necesita una CPU Haswell (2013), Zen (2017) o posterior, y sale',
       c2: (p) => `<span class="c">[2]</span> Paquete de modelo: ${p}`,
       c3: (ok, env) => ok ? `<span class="c">[3]</span> CPUID dice: AVX-512 F, BW, VL, VNNI y VBMI están todos, y el SO guarda esos registros${env ? '; pero una variable de entorno indica que no se use el kernel AVX-512' : ''}` : '<span class="c">[3]</span> CPUID dice: no hay AVX-512 completo',
       c3q2: (ok) => ok ? '<span class="c">[3]</span> El paquete Q2_0 estándar necesita AVX-512: esta CPU lo tiene, adelante' : '<span class="m">[3]</span> El kernel de CPU del paquete Q2_0 estándar solo existe para AVX-512: da error al arrancar, en lugar de toparse con una instrucción ilegal varios miles de tokens después',
@@ -248,7 +248,7 @@
       c5: (name) => `<span class="y">[5] Elegido</span>: <span class="w">${name}</span>`,
       c5iq4: '<span class="y">Nota</span>: IQ4_XS solo tiene un kernel multi-token AVX2. Las CPU con AVX-512 no lo toman prestado, porque cambiaría el redondeo, y vuelven a ggml-cpu',
       cVerdict: {
-        'refuse-avx2': 'Esta CPU es demasiado vieja para correr cualquier kernel de expertos. El motor explica el motivo en el segundo 0 y sale.',
+        'refuse-avx2': 'Esta CPU es demasiado vieja: ningún kernel de expertos del motor precompilado puede correr. El motor explica el motivo en el segundo 0 y sale. Desde v0.1.39, setup puede compilar en esta máquina un motor experimental (STRATA_ISA_FLOOR), y los expertos pasan entonces por ggml-cpu: funciona, pero muy lento.',
         'refuse-avx512': 'El paquete Q2_0 estándar solo tiene un kernel AVX-512. Sin AVX-512 se niega a arrancar; cambia a un paquete de formato nativo para correr en una CPU con AVX2.',
         'strata-vnni': 'El paquete Q2_0 estándar usa el kernel AVX-512 que escribió el propio Strata.',
         iq512: 'El mismo programa; esta CPU toma la ruta más ancha, de 512 bits: los pesos se decodifican una vez y los comparte todo el grupo de tokens.',
@@ -277,10 +277,10 @@
       sFlagK: '이번 설정에 쓴 스위치', sTierK: '이 아키텍처에 대한 CMake의 태도',
       branch: {
         'cuda-hw': '하드웨어 __dp4a 명령', 'cuda-sw': '소프트웨어 루프 strata_dp4a', 'hip-sudot4': 'v_dot4_i32_iu8 (sudot4)',
-        'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-loop': '이식 가능한 바이트 단위 루프',
+        'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-sdwa': 'RDNA1의 SDWA 어셈블리 (v_mul_i32_i24 + v_add3_u32)', 'hip-loop': '이식 가능한 바이트 단위 루프',
       },
       tier: {
-        ok: '일반 빌드', experimental: '실험 빌드: 업스트림은 지원하지 않음', validated: '메인테이너가 실제 카드에서 검증함', community: '사용자가 실제 카드에서 검증함',
+        ok: '일반 빌드', experimental: '실험 빌드: 메인테이너에게 이런 카드가 없어 컴파일만 확인함', validated: '메인테이너가 실제 카드에서 검증함', community: '사용자가 실제 카드에서 검증함',
         unvalidated: '컴파일은 되지만 경고를 냄: 아직 실제 카드에서 검증하지 않음', refused: '오류: 설정을 거부함',
       },
       try: [
@@ -290,7 +290,7 @@
       ],
       l0ok: (flags) => `<span class="c">[cmake]</span> ${flags}: 아키텍처가 목록에 있어요. 계속해요`,
       l0warn: (arch) => `<span class="y">[cmake] 경고</span>: 아키텍처 ${arch}. 컴파일은 되지만 아직 아무도 실제 카드에서 검증하지 않았어요. 결과를 알려 주세요`,
-      l0exp: '<span class="y">[cmake]</span> STRATA_EXPERIMENTAL_SM60을 켰어요. 7.5 미만의 구형 카드는 커뮤니티 실험 빌드만 받아요',
+      l0exp: '<span class="y">[cmake]</span> STRATA_EXPERIMENTAL_SM60을 켰어요. 7.5 미만의 구형 카드는 실험 빌드만 받아요(v0.1.39부터 setup이 이런 카드용 CUDA 12 엔진을 따로 준비해요)',
       l0no: (arch) => `<span class="m">[cmake] FATAL_ERROR</span>: 아키텍처 ${arch}. 지원 목록에 없어요. 설정이 여기서 멈추고 아무것도 컴파일하지 않아요`,
       l1cuda: '<span class="c">[include]</span> CUDA 빌드는 NVIDIA 자체 헤더를 그대로 써요. shim은 필요 없어요',
       l1hip: '<span class="c">[include]</span> 컴파일러 인자 <code>-include hip_compat/cuda_runtime.h</code>: 모든 소스 파일 맨 앞에 이 「이름 변환표」가 끼어들어요',
@@ -303,7 +303,7 @@
       l5hip: (arch) => `<span class="c">[run]</span> 시작 시 점검: 카드 아키텍처가 목록(${arch})에 있어야 하고, 스레드 묶음이 32개(wave32)여야 해요. 아니면 오류를 내고 종료해요`,
       done: (v) => `<span class="y">완료</span>: 같은 소스에 다른 기계어. 예제 dp4a = ${v}`,
       vOk: (name, v) => `① 소스는 한 줄도 바뀌지 않았어요. 전처리기가 이름을 대상 플랫폼의 말로 바꾸고, dp4a에는 「${name}」 분기 하나만 남겼어요.<br>② 예제 결과는 <b>${v}</b>예요. dp4a는 정수 연산이라 어느 분기든 비트까지 같아요.<br>③ 부동소수점은 이렇게 간단하지 않아요. 업스트림 문서는 CUDA와 HIP 두 백엔드의 답이 비트까지 같다고 약속하지 않는다고 분명히 밝혀요.`,
-      vNo: '① CMake가 첫 단계에서 거부했어요. 이 아키텍처는 목록에 없어요.<br>② 「일단 빌드해 보기」보다 거부가 나아요. 아무도 검증하지 않은 바이너리는 돌아가면서 틀린 답을 내고도 아무 오류를 알리지 않을 수 있어요.',
+      vNo: '① CMake가 첫 단계에서 거부했어요. 이 아키텍처는 목록에 없어요.<br>② 「일단 빌드해 보기」보다 거부가 나아요. 아무도 검증하지 않은 바이너리는 돌아가면서 틀린 답을 내고도 아무 오류를 알리지 않을 수 있어요.<br>③ gfx906은 wave64이고, HIP 백엔드는 wave32만 받아요. v0.1.39부터 직접 켜는 별도의 실험 빌드(STRATA_HIP_GFX906)가 있어요. 다른 호환 계층을 쓰고, 이 목록을 거치지 않아요.',
 
       cCode: 'CPU_DISPATCH', cTitle: 'CPU 커널 선택기', cTag: '코드 사실 · 로직 재현',
       cIntro: 'GPU가 못 맞힌 전문가는 CPU가 직접 계산해요. 어떤 커널을 쓸지는 <b>실행 시점</b>에 정해요. 엔진이 먼저 CPU에게 「어떤 명령을 아니?」 하고 물은 뒤 고르거든요. 아래 조건을 바꿔서 판단 체인이 어디까지 가는지 보세요.',
@@ -321,11 +321,11 @@
         iq512: 'iq512: AVX-512 다중 토큰 커널', iq256: 'iq256: AVX2 다중 토큰 커널', ggml: 'ggml-cpu의 단일 토큰 내적',
       },
       pathF: {
-        'refuse-avx2': 'CPU 전문가 커널은 모두 최소한 AVX2, FMA, F16C가 필요해요', 'refuse-avx512': '표준 Q2_0 팩의 CPU 커널은 AVX-512 버전뿐이에요',
+        'refuse-avx2': '미리 빌드된 엔진의 CPU 전문가 커널은 모두 최소한 AVX2, FMA, F16C가 필요해요', 'refuse-avx512': '표준 Q2_0 팩의 CPU 커널은 AVX-512 버전뿐이에요',
         'strata-vnni': 'AVX-512의 VNNI와 VBMI 명령군을 써요', iq512: '가중치를 한 번 디코딩해서 이 묶음의 토큰이 함께 써요', iq256: '같은 방식을 256비트 레지스터로 옮겼어요',
         ggml: '토큰마다 가중치를 따로 디코딩해요',
       },
-      c1: (ok) => ok ? '<span class="c">[1]</span> CPUID 응답: AVX2 지원 (FMA, F16C 포함)' : '<span class="m">[1]</span> CPUID 응답: AVX2 없음. 엔진이 CPU 모델명을 알려 주고, Haswell(2013), Zen(2017) 또는 더 새로운 CPU가 필요하다고 안내한 뒤 종료해요',
+      c1: (ok) => ok ? '<span class="c">[1]</span> CPUID 응답: AVX2 지원 (FMA, F16C 포함)' : '<span class="m">[1]</span> CPUID 응답: AVX2 없음. 미리 빌드된 엔진이 CPU 모델명을 알려 주고, Haswell(2013), Zen(2017) 또는 더 새로운 CPU가 필요하다고 안내한 뒤 종료해요',
       c2: (p) => `<span class="c">[2]</span> 모델 팩: ${p}`,
       c3: (ok, env) => ok ? `<span class="c">[3]</span> CPUID 응답: AVX-512의 F, BW, VL, VNNI, VBMI가 모두 있고, 운영체제도 이 레지스터를 저장해요${env ? '. 하지만 환경 변수가 AVX-512 커널을 쓰지 말라고 해요' : ''}` : '<span class="c">[3]</span> CPUID 응답: 완전한 AVX-512 없음',
       c3q2: (ok) => ok ? '<span class="c">[3]</span> 표준 Q2_0 팩에는 AVX-512가 필요해요. 이 CPU에는 있으니 통과해요' : '<span class="m">[3]</span> 표준 Q2_0 팩의 CPU 커널은 AVX-512 버전뿐이에요. 수천 번째 토큰에서 잘못된 명령을 만나는 대신, 시작할 때 바로 오류를 내고 종료해요',
@@ -333,7 +333,7 @@
       c5: (name) => `<span class="y">[5] 선택</span>: <span class="w">${name}</span>`,
       c5iq4: '<span class="y">참고</span>: IQ4_XS는 AVX2 다중 토큰 커널만 있어요. AVX-512 CPU도 이 커널을 빌려 쓰지 않아요. 반올림 방식이 달라지기 때문이에요. 그래서 ggml-cpu로 돌아가요',
       cVerdict: {
-        'refuse-avx2': '이 CPU는 너무 오래돼서 어떤 전문가 커널도 돌릴 수 없어요. 엔진은 0초 시점에 이유를 밝히고 종료해요.',
+        'refuse-avx2': '이 CPU는 너무 오래돼서 미리 빌드된 엔진의 전문가 커널을 하나도 돌릴 수 없어요. 엔진은 0초 시점에 이유를 밝히고 종료해요. v0.1.39부터 setup이 이 컴퓨터에서 실험 엔진(STRATA_ISA_FLOOR)을 직접 빌드할 수 있고, 이때 전문가는 ggml-cpu로 돌아요. 돌아가지만 아주 느려요.',
         'refuse-avx512': '표준 Q2_0 팩에는 AVX-512 커널뿐이에요. AVX-512가 없으면 시작할 때 거부해요. AVX2 CPU에서 돌리려면 네이티브 형식 팩으로 바꿔야 해요.',
         'strata-vnni': '표준 Q2_0 팩은 Strata가 직접 쓴 AVX-512 커널을 써요.',
         iq512: '같은 프로그램인데, 이 CPU는 가장 넓은 512비트 길로 가요. 가중치를 한 번 디코딩해서 묶음 전체가 함께 써요.',
@@ -362,10 +362,10 @@
       sFlagK: 'この設定で使うスイッチ', sTierK: 'このアーキテクチャへの CMake の態度',
       branch: {
         'cuda-hw': 'ハードウェアの __dp4a 命令', 'cuda-sw': 'ソフトウェアのループ strata_dp4a', 'hip-sudot4': 'v_dot4_i32_iu8（sudot4）',
-        'hip-sdot4': 'v_dot4_i32_i8（sdot4）', 'hip-loop': 'ポータブルなバイトごとのループ',
+        'hip-sdot4': 'v_dot4_i32_i8（sdot4）', 'hip-sdwa': 'RDNA1 の SDWA アセンブリ（v_mul_i32_i24 + v_add3_u32）', 'hip-loop': 'ポータブルなバイトごとのループ',
       },
       tier: {
-        ok: '通常のビルド', experimental: '実験ビルド：上流はサポートしない', validated: 'メンテナが実機で検証済み', community: 'ユーザーが実機で検証済み',
+        ok: '通常のビルド', experimental: '実験ビルド：メンテナはこの種のカードを持っておらず、コンパイルできることだけ確認', validated: 'メンテナが実機で検証済み', community: 'ユーザーが実機で検証済み',
         unvalidated: 'コンパイルできるが警告あり：実機ではまだ未検証', refused: 'エラーで設定を拒否',
       },
       try: [
@@ -375,7 +375,7 @@
       ],
       l0ok: (flags) => `<span class="c">[cmake]</span> ${flags}：アーキテクチャはリストにあります。続行`,
       l0warn: (arch) => `<span class="y">[cmake] 警告</span>：${arch} はコンパイルできますが、実機ではまだ誰も検証していません。結果を報告してください`,
-      l0exp: '<span class="y">[cmake]</span> STRATA_EXPERIMENTAL_SM60 が有効です：7.5 未満の旧世代カードは、コミュニティの実験ビルドだけになります',
+      l0exp: '<span class="y">[cmake]</span> STRATA_EXPERIMENTAL_SM60 が有効です：7.5 未満の旧世代カードは、実験ビルドだけになります（v0.1.39 以降、setup はこの種のカード向けに CUDA 12 のエンジンを別に用意します）',
       l0no: (arch) => `<span class="m">[cmake] FATAL_ERROR</span>：${arch} はサポートリストにありません。設定はここで終わり、何もコンパイルしません`,
       l1cuda: '<span class="c">[include]</span> CUDA ビルドは NVIDIA 自身のヘッダをそのまま使うので、シムは不要です',
       l1hip: '<span class="c">[include]</span> コンパイラオプション <code>-include hip_compat/cuda_runtime.h</code>：すべてのソースファイルの先頭に、この「置き換え表」が差し込まれます',
@@ -388,7 +388,7 @@
       l5hip: (arch) => `<span class="c">[run]</span> 起動時チェック：カードのアーキテクチャは ${arch} で、スレッドの束は 32 個（wave32）でなければなりません。違えばエラーで終了します`,
       done: (v) => `<span class="y">完了</span>：同じソースから、別の機械語ができました。例題の dp4a = ${v}`,
       vOk: (name, v) => `① ソースは 1 行も変えていません。プリプロセッサが名前をターゲットのプラットフォームの言い方に置き換え、dp4a には「${name}」の分岐だけを残しました。<br>② 例題の結果は <b>${v}</b> です。dp4a は整数演算なので、どの分岐でも 1 ビットまで同じです。<br>③ 浮動小数点演算はこう簡単にはいきません。上流のドキュメントは、CUDA と HIP の 2 つのバックエンドが 1 ビットまで同じ答えを出すとは約束しない、とはっきり書いています。`,
-      vNo: '① CMake は第 1 段階で断りました。このアーキテクチャはリストにありません。<br>② 「作ってから考える」より、断るほうがよいのです。誰も検証していないバイナリは、動いても計算を間違え、しかもエラーを 1 つも出さないかもしれません。',
+      vNo: '① CMake は第 1 段階で断りました。このアーキテクチャはリストにありません。<br>② 「作ってから考える」より、断るほうがよいのです。誰も検証していないバイナリは、動いても計算を間違え、しかもエラーを 1 つも出さないかもしれません。<br>③ gfx906 は wave64 で、HIP バックエンドは wave32 しか受け付けません。v0.1.39 以降は、手動で有効にする別の実験ビルド（STRATA_HIP_GFX906）があります。別の互換レイヤーを使い、このリストは通りません。',
 
       cCode: 'CPU_DISPATCH', cTitle: 'CPU カーネル選択器', cTag: 'コード上の事実 · ロジックを再現',
       cIntro: 'GPU にキャッシュされていないエキスパートは、CPU 自身が計算します。どのカーネルを使うかは<b>実行時</b>に決まります。エンジンがまず CPU に「どの命令が使える？」と聞いてから選ぶのです。下の条件を変えて、判断の連なりがどこまで進むか見てみましょう。',
@@ -406,11 +406,11 @@
         iq512: 'iq512：AVX-512 マルチトークンカーネル', iq256: 'iq256：AVX2 マルチトークンカーネル', ggml: 'ggml-cpu の 1 トークン内積',
       },
       pathF: {
-        'refuse-avx2': 'CPU エキスパートのカーネルは、最低でも AVX2、FMA、F16C が必要です', 'refuse-avx512': '標準 Q2_0 パッケージの CPU カーネルは AVX-512 版しかありません',
+        'refuse-avx2': 'ビルド済みエンジンの CPU エキスパートカーネルは、最低でも AVX2、FMA、F16C が必要です', 'refuse-avx512': '標準 Q2_0 パッケージの CPU カーネルは AVX-512 版しかありません',
         'strata-vnni': 'AVX-512 の VNNI と VBMI の 2 つの命令群を使います', iq512: '重みを 1 回だけデコードし、このグループのトークンで共有します', iq256: '同じ考え方で、256 ビットのレジスタを使います',
         ggml: 'トークンごとに、それぞれ重みをデコードし直します',
       },
-      c1: (ok) => ok ? '<span class="c">[1]</span> CPUID の答え：AVX2 に対応しています（FMA、F16C を含む）' : '<span class="m">[1]</span> CPUID の答え：AVX2 がありません。エンジンは CPU の型番を表示し、Haswell（2013 年）、Zen（2017 年）、またはそれ以降の CPU が必要だと伝えて、終了します',
+      c1: (ok) => ok ? '<span class="c">[1]</span> CPUID の答え：AVX2 に対応しています（FMA、F16C を含む）' : '<span class="m">[1]</span> CPUID の答え：AVX2 がありません。ビルド済みエンジンは CPU の型番を表示し、Haswell（2013 年）、Zen（2017 年）、またはそれ以降の CPU が必要だと伝えて、終了します',
       c2: (p) => `<span class="c">[2]</span> モデルパッケージ：${p}`,
       c3: (ok, env) => ok ? `<span class="c">[3]</span> CPUID の答え：AVX-512 の F、BW、VL、VNNI、VBMI がすべてあり、OS もこのレジスタを保存します${env ? '。ただし環境変数が AVX-512 カーネルを使わないよう指示しています' : ''}` : '<span class="c">[3]</span> CPUID の答え：完全な AVX-512 はありません',
       c3q2: (ok) => ok ? '<span class="c">[3]</span> 標準 Q2_0 パッケージには AVX-512 が必要です。この CPU にはあるので、通過します' : '<span class="m">[3]</span> 標準 Q2_0 パッケージの CPU カーネルは AVX-512 版しかありません。起動時にエラーで終了します。数千トークン目で不正命令にぶつかるよりずっとましです',
@@ -418,7 +418,7 @@
       c5: (name) => `<span class="y">[5] 選択</span>：<span class="w">${name}</span>`,
       c5iq4: '<span class="y">注意</span>：IQ4_XS には AVX2 版のマルチトークンカーネルしかありません。AVX-512 の CPU はそれを借りません。丸め方が変わってしまうので、ggml-cpu に戻ります',
       cVerdict: {
-        'refuse-avx2': 'この CPU は古すぎて、どのエキスパートカーネルも動かせません。エンジンは 0 秒目に理由を説明して終了します。',
+        'refuse-avx2': 'この CPU は古すぎて、ビルド済みエンジンのエキスパートカーネルは 1 つも動かせません。エンジンは 0 秒目に理由を説明して終了します。v0.1.39 以降、setup はこのマシン上で実験版エンジン（STRATA_ISA_FLOOR）をビルドでき、エキスパートは ggml-cpu で動きます。動きますが、とても遅いです。',
         'refuse-avx512': '標準 Q2_0 パッケージには AVX-512 カーネルしかありません。AVX-512 がなければ起動時に拒否します。AVX2 の CPU で動かすには、ネイティブ形式のパッケージに替えます。',
         'strata-vnni': '標準 Q2_0 パッケージは、Strata が自前で書いた AVX-512 カーネルを使います。',
         iq512: '同じプログラムで、この CPU はいちばん幅の広い 512 ビットの道を通ります。重みは 1 回だけデコードし、グループ全体のトークンで共有します。',

@@ -59,7 +59,7 @@
     },
     en: {
       code: 'SCHED_RACE', title: 'Three schedulers, one set of requests', tag: 'Teaching estimate · 1 tick = time to generate 1 token',
-      intro: 'One engine can serve only one request at a time. The same set of requests, ordered by arrival time, goes to three scheduling policies: <b>FIFO</b> in order of arrival, <b>SJF</b> picks the shortest first, and <b>round-robin</b> gives everyone one time slice in turn. Press <b>Compare</b> and watch the three timelines grow tick by tick.',
+      intro: 'Assume the engine serves only one request at a time, as in Strata\'s default setup. The same set of requests, ordered by arrival time, goes to three scheduling policies: <b>FIFO</b> in order of arrival, <b>SJF</b> picks the shortest first, and <b>round-robin</b> gives everyone one time slice in turn. Press <b>Compare</b> and watch the three timelines grow tick by tick.',
       lgArrive: j => `${j.id}: arrives at tick ${j.arrive}, needs ${j.len} ticks`,
       steps: ['FIFO first come, first served', 'SJF shortest job first', 'Round-robin', 'Compare'],
       lanes: { fifo: 'FIFO first come, first served', sjf: 'SJF shortest job first (no preemption)', rr: q => `Round-robin (slice ${q} ticks)` },
@@ -108,7 +108,7 @@
     },
     es: {
       code: 'SCHED_RACE', title: 'Tres planificadores, el mismo conjunto de solicitudes', tag: 'Estimación didáctica · 1 casilla = tiempo de generar 1 token',
-      intro: 'Un motor solo puede atender una solicitud a la vez. El mismo conjunto de solicitudes, ordenado por hora de llegada, pasa a tres políticas de planificación: <b>FIFO</b>, por orden de llegada; <b>SJF</b>, que elige primero la más corta; y <b>round-robin</b>, que da a cada una una porción de tiempo por turnos. Pulsa <b>Comparar</b> y mira cómo crecen las tres líneas de tiempo casilla a casilla.',
+      intro: 'Supón que el motor atiende una sola solicitud a la vez, como en la configuración por defecto de Strata. El mismo conjunto de solicitudes, ordenado por hora de llegada, pasa a tres políticas de planificación: <b>FIFO</b>, por orden de llegada; <b>SJF</b>, que elige primero la más corta; y <b>round-robin</b>, que da a cada una una porción de tiempo por turnos. Pulsa <b>Comparar</b> y mira cómo crecen las tres líneas de tiempo casilla a casilla.',
       lgArrive: j => `${j.id}: llega en la casilla ${j.arrive}, necesita ${j.len} casillas`,
       steps: ['FIFO por llegada', 'SJF, el más corto', 'Round-robin', 'Comparar'],
       lanes: { fifo: 'FIFO: por orden de llegada', sjf: 'SJF: más corto primero (sin expropiar)', rr: q => `Round-robin (porción de ${q} casillas)` },
@@ -157,7 +157,7 @@
     },
     ko: {
       code: 'SCHED_RACE', title: '세 가지 스케줄링, 같은 요청 묶음', tag: '교육용 추정 · 1칸 = 토큰 1개를 생성하는 시간',
-      intro: '엔진 한 대는 한 번에 요청 하나만 처리할 수 있어요. 같은 요청 묶음을 도착 시간순으로 세워 놓고 세 가지 스케줄링 전략에 맡겨 볼게요. <b>FIFO</b>는 도착한 순서대로, <b>SJF</b>는 가장 짧은 것부터, <b>라운드 로빈</b>은 한 사람씩 돌아가며 타임 슬라이스 하나씩 처리해요. <b>비교 시작</b>을 눌러 세 타임라인이 한 칸씩 자라는 모습을 보세요.',
+      intro: '엔진이 한 번에 요청 하나만 처리한다고 가정해 볼게요. Strata의 기본 설정과 같아요. 같은 요청 묶음을 도착 시간순으로 세워 놓고 세 가지 스케줄링 전략에 맡겨 볼게요. <b>FIFO</b>는 도착한 순서대로, <b>SJF</b>는 가장 짧은 것부터, <b>라운드 로빈</b>은 한 사람씩 돌아가며 타임 슬라이스 하나씩 처리해요. <b>비교 시작</b>을 눌러 세 타임라인이 한 칸씩 자라는 모습을 보세요.',
       lgArrive: j => `${j.id}: ${j.arrive}칸에 도착, ${j.len}칸 필요`,
       steps: ['FIFO 선착순', 'SJF 짧은 작업 우선', '라운드 로빈', '비교'],
       lanes: { fifo: 'FIFO 선착순', sjf: 'SJF 짧은 작업 우선(비선점)', rr: q => `라운드 로빈(타임 슬라이스 ${q}칸)` },
@@ -206,7 +206,7 @@
     },
     ja: {
       code: 'SCHED_RACE', title: '3 つのスケジューリング、同じリクエストの組', tag: '教育用の試算 · 1 マス = 1 トークンを生成する時間',
-      intro: '1 台のエンジンは、一度に 1 つのリクエストしか処理できません。到着時刻の順に並べた同じリクエストの組を、3 つのスケジューリング方針に渡します。<b>FIFO</b> は到着順、<b>SJF</b> はいちばん短いものから先、<b>ラウンドロビン</b>は全員が 1 タイムスライスずつ順番にやります。<b>比較を開始</b>を押して、3 本のタイムラインが 1 マスずつ伸びていくのを見てください。',
+      intro: 'エンジンは一度に 1 つのリクエストしか処理しないものとします。Strata の既定の構成と同じです。到着時刻の順に並べた同じリクエストの組を、3 つのスケジューリング方針に渡します。<b>FIFO</b> は到着順、<b>SJF</b> はいちばん短いものから先、<b>ラウンドロビン</b>は全員が 1 タイムスライスずつ順番にやります。<b>比較を開始</b>を押して、3 本のタイムラインが 1 マスずつ伸びていくのを見てください。',
       lgArrive: j => `${j.id}：${j.arrive} マス目に到着、${j.len} マス必要`,
       steps: ['FIFO 先着順', 'SJF 最短ジョブ優先', 'ラウンドロビン', '比較'],
       lanes: { fifo: 'FIFO 先着順', sjf: 'SJF 最短ジョブ優先（非割り込み）', rr: q => `ラウンドロビン（スライス ${q} マス）` },
