@@ -1,0 +1,2347 @@
+[
+ {
+  "term": "token",
+  "key": "token",
+  "en": "token",
+  "meaning": "模型读写文字的最小单位，可能是一个字、半个词或一个标点，模型只认它的编号。",
+  "chapter": "01",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "分词器",
+  "key": "tokenizer",
+  "en": "tokenizer",
+  "meaning": "把文字切成 token 再换成整数编号的程序，每个模型都自带一套。",
+  "chapter": "01",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "采样",
+  "key": "sampling",
+  "en": "sampling",
+  "meaning": "按模型给出的概率，从候选 token 里挑出一个作为下一个输出。",
+  "chapter": "01",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "自回归",
+  "key": "autoregressive",
+  "en": "autoregressive",
+  "meaning": "每一步都把已生成的内容当作输入再生成下一个，所以回答只能一个 token 接一个地出。",
+  "chapter": "01",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "prefill",
+  "key": "prefill",
+  "en": "prefill",
+  "meaning": "读题阶段：把整段提问一次读进模型，已知的 token 可以一起算，所以快。",
+  "chapter": "01",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "decode",
+  "key": "decode",
+  "en": "decode",
+  "meaning": "写答案阶段：每个新 token 都依赖上一个，只能一个一个地生成。",
+  "chapter": "01",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "存储层次结构",
+  "key": "memory-hierarchy",
+  "en": "memory hierarchy",
+  "meaning": "把快而小、慢而大的存储叠成多层，最常用的数据放在最快的一层。",
+  "chapter": "01",
+  "anchor": "c01-memory-hierarchy"
+ },
+ {
+  "term": "带宽",
+  "key": "bandwidth",
+  "en": "bandwidth",
+  "meaning": "每秒能搬多少字节，推理每出一个 token 都要读大量参数，所以最看重它。",
+  "chapter": "01",
+  "anchor": "c01-memory-hierarchy"
+ },
+ {
+  "term": "延迟",
+  "key": "latency",
+  "en": "latency",
+  "meaning": "从发出请求到拿到结果要等的时间，数据再少也要付这笔等待。",
+  "chapter": "01",
+  "anchor": "c01-memory-hierarchy",
+  "auto": false
+ },
+ {
+  "term": "字节级 BPE",
+  "key": "byte-level-bpe",
+  "en": "byte-level BPE",
+  "meaning": "一种分词方法：从单个字节出发，把常挨在一起的片段反复合并成 token。",
+  "chapter": "02",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "聊天模板",
+  "key": "chat-template",
+  "en": "chat template",
+  "meaning": "给对话加上角色标记、系统提示等固定格式的规则，模型读到的是套好模板的全文。",
+  "chapter": "02",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "链式法则",
+  "key": "chain-rule",
+  "en": "chain rule of probability",
+  "meaning": "一串事件的联合概率等于各步条件概率的连乘，整句话的概率就这样算出。",
+  "chapter": "02",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "条件概率",
+  "key": "conditional-probability",
+  "en": "conditional probability",
+  "meaning": "已知 B 发生时 A 发生的概率，写作 P(A | B)，模型每步给出的正是这种概率。",
+  "chapter": "02",
+  "anchor": "c02-chain-rule"
+ },
+ {
+  "term": "分数",
+  "key": "logits",
+  "en": "logits",
+  "meaning": "模型最后一层给每个候选 token 打的原始分，可正可负，经过 softmax 才变成概率。",
+  "chapter": "02",
+  "anchor": "sec-3",
+  "auto": false
+ },
+ {
+  "term": "logits",
+  "key": "logits",
+  "en": "logits",
+  "meaning": "模型最后一层给每个候选 token 打的原始分，可正可负，经过 softmax 才变成概率。",
+  "chapter": "02",
+  "anchor": "sec-3",
+  "auto": false
+ },
+ {
+  "term": "softmax",
+  "key": "softmax",
+  "en": "softmax",
+  "meaning": "把一串分数变成全为正、总和为 1 的概率，先减去最大值可以防止溢出。",
+  "chapter": "02",
+  "anchor": "sec-3"
+ },
+ {
+  "term": "温度",
+  "key": "temperature",
+  "en": "temperature",
+  "meaning": "采样前把分数除以的数 T，小于 1 让回答更保守，大于 1 让回答更发散。",
+  "chapter": "02",
+  "anchor": "sec-3",
+  "auto": false
+ },
+ {
+  "term": "浮点数",
+  "key": "floating-point",
+  "en": "floating-point number",
+  "meaning": "计算机存小数的方式，分符号、指数、尾数三段，位数有限，所以范围和精度都有限。",
+  "chapter": "02",
+  "anchor": "c02-softmax-overflow"
+ },
+ {
+  "term": "上溢",
+  "key": "float-overflow",
+  "en": "floating-point overflow",
+  "meaning": "浮点计算结果超过能表示的最大值，变成无穷大。",
+  "chapter": "02",
+  "anchor": "c02-softmax-overflow"
+ },
+ {
+  "term": "NaN",
+  "key": "nan",
+  "en": "NaN (Not a Number)",
+  "meaning": "浮点里表示“不是一个数”的特殊值，如 ∞ ÷ ∞，一旦出现会污染后续结果。",
+  "chapter": "02",
+  "anchor": "c02-softmax-overflow"
+ },
+ {
+  "term": "数值稳定",
+  "key": "numerical-stability",
+  "en": "numerical stability",
+  "meaning": "数学上等价、但在有限精度下不会溢出或严重失真的算法写法。",
+  "chapter": "02",
+  "anchor": "c02-softmax-overflow"
+ },
+ {
+  "term": "逆变换采样",
+  "key": "inverse-transform-sampling",
+  "en": "inverse transform sampling",
+  "meaning": "先算累计概率，再找第一个超过随机数 u 的位置，以此按概率挑出一个 token。",
+  "chapter": "02",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "贪心",
+  "key": "greedy",
+  "en": "greedy decoding",
+  "meaning": "不掷骰子，每步都选概率最高的 token，所以输出完全确定。",
+  "chapter": "02",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "伪随机数",
+  "key": "pseudorandom-number",
+  "en": "pseudorandom number",
+  "meaning": "由公式算出、看上去毫无规律的数列，给定种子就能完全重现。",
+  "chapter": "02",
+  "anchor": "c02-prng"
+ },
+ {
+  "term": "种子",
+  "key": "seed",
+  "en": "random seed",
+  "meaning": "伪随机数公式的起点，种子相同数列就相同，可以用来重放现场。",
+  "chapter": "02",
+  "anchor": "c02-prng",
+  "auto": false
+ },
+ {
+  "term": "向量",
+  "key": "vector",
+  "en": "vector",
+  "meaning": "排成一列的一串数，模型里每个 token 在层与层之间都表示成向量。",
+  "chapter": "03",
+  "anchor": "sec-1",
+  "auto": false
+ },
+ {
+  "term": "矩阵",
+  "key": "matrix",
+  "en": "matrix",
+  "meaning": "有行有列的一张数表，模型的权重大多以矩阵形式存放。",
+  "chapter": "03",
+  "anchor": "sec-1",
+  "auto": false
+ },
+ {
+  "term": "张量",
+  "key": "tensor",
+  "en": "tensor",
+  "meaning": "带坐标的一堆数，向量和矩阵都是张量，描述它既要形状也要步长。",
+  "chapter": "03",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "形状",
+  "key": "shape",
+  "en": "shape",
+  "meaning": "张量每个轴各有多长，比如 2 × 3 的矩阵有 2 行 3 列。",
+  "chapter": "03",
+  "anchor": "sec-1",
+  "auto": false
+ },
+ {
+  "term": "点积",
+  "key": "dot-product",
+  "en": "dot product",
+  "meaning": "两串等长的数逐个相乘再相加得到一个数，是矩阵乘法的基本步骤。",
+  "chapter": "03",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "矩阵乘向量",
+  "key": "gemv",
+  "en": "matrix-vector multiplication (GEMV)",
+  "meaning": "矩阵每一行都和同一个向量做点积，一次只算一个 token 时权重读一遍只用一次。",
+  "chapter": "03",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "GEMV",
+  "key": "gemv",
+  "en": "matrix-vector multiplication (GEMV)",
+  "meaning": "矩阵每一行都和同一个向量做点积，一次只算一个 token 时权重读一遍只用一次。",
+  "chapter": "03",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "矩阵乘矩阵",
+  "key": "gemm",
+  "en": "matrix-matrix multiplication (GEMM)",
+  "meaning": "把多个输入向量并排后和权重相乘，权重读一遍就能给多个 token 共用。",
+  "chapter": "03",
+  "anchor": "c03-dot-matmul"
+ },
+ {
+  "term": "地址",
+  "key": "address",
+  "en": "memory address",
+  "meaning": "内存里每个格子的编号，程序按地址读写数据。",
+  "chapter": "03",
+  "anchor": "sec-3",
+  "auto": false
+ },
+ {
+  "term": "行主序",
+  "key": "row-major",
+  "en": "row-major order",
+  "meaning": "把表格一行接一行存进内存的布局，同一行的数地址相邻。",
+  "chapter": "03",
+  "anchor": "c03-memory-layout"
+ },
+ {
+  "term": "列主序",
+  "key": "column-major",
+  "en": "column-major order",
+  "meaning": "把表格一列接一列存进内存的布局，同一列的数地址相邻。",
+  "chapter": "03",
+  "anchor": "c03-memory-layout"
+ },
+ {
+  "term": "步长",
+  "key": "stride",
+  "en": "stride",
+  "meaning": "某个坐标加 1 时地址要跨多少个元素或字节，和形状一起决定数据在内存里的位置。",
+  "chapter": "03",
+  "anchor": "c03-memory-layout",
+  "auto": false
+ },
+ {
+  "term": "合并访存",
+  "key": "coalesced-access",
+  "en": "memory coalescing",
+  "meaning": "GPU 一组线程读相邻地址时，硬件把请求合成少数几次大读取，比跳着读快得多。",
+  "chapter": "03",
+  "anchor": "sec-5"
+ },
+ {
+  "term": "符号位",
+  "key": "sign-bit",
+  "en": "sign bit",
+  "meaning": "浮点数里表示这个数是正还是负的那一位。",
+  "chapter": "04",
+  "anchor": "c04-float"
+ },
+ {
+  "term": "指数位",
+  "key": "exponent-bits",
+  "en": "exponent bits",
+  "meaning": "浮点数里记录 2 的几次方的那几位，决定能表示的数值范围。",
+  "chapter": "04",
+  "anchor": "c04-float"
+ },
+ {
+  "term": "尾数位",
+  "key": "mantissa-bits",
+  "en": "mantissa (significand) bits",
+  "meaning": "浮点数里记录有效数字的那几位，位数越多精度越高。",
+  "chapter": "04",
+  "anchor": "c04-float"
+ },
+ {
+  "term": "缩放系数",
+  "key": "scale",
+  "en": "scale factor",
+  "meaning": "量化时一整块数共用的刻度间距，编码乘以它就还原出近似值。",
+  "chapter": "04",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "编码",
+  "key": "quant-code",
+  "en": "quantized code",
+  "meaning": "量化后每个数记下的那个整数，表示它约等于几倍缩放系数。",
+  "chapter": "04",
+  "anchor": "sec-2",
+  "auto": false
+ },
+ {
+  "term": "对称均匀量化",
+  "key": "symmetric-uniform-quantization",
+  "en": "symmetric uniform quantization",
+  "meaning": "以块内最大绝对值定刻度、正负对称等距分档的最简单量化方法。",
+  "chapter": "04",
+  "anchor": "c04-quant"
+ },
+ {
+  "term": "量化误差",
+  "key": "quantization-error",
+  "en": "quantization error",
+  "meaning": "量化后还原出的值和原数之间的差，刻度越粗误差越大。",
+  "chapter": "04",
+  "anchor": "c04-quant"
+ },
+ {
+  "term": "均方误差",
+  "key": "mse",
+  "en": "mean squared error (MSE)",
+  "meaning": "把每个误差平方后取平均，用来概括一块数的整体误差。",
+  "chapter": "04",
+  "anchor": "c04-quant"
+ },
+ {
+  "term": "离群值",
+  "key": "outlier",
+  "en": "outlier",
+  "meaning": "远大于同组其他数的个别值，会撑大量化刻度，让其余小数丢失精度。",
+  "chapter": "04",
+  "anchor": "sec-3"
+ },
+ {
+  "term": "算术强度",
+  "key": "arithmetic-intensity",
+  "en": "arithmetic intensity",
+  "meaning": "每搬 1 字节数据能做几次运算，它决定程序受带宽还是受算力限制。",
+  "chapter": "05",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "roofline 模型",
+  "key": "roofline",
+  "en": "roofline model",
+  "meaning": "用带宽和算力两块“天花板”画出一段计算最快能跑多快的图。",
+  "chapter": "05",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "算力",
+  "key": "compute-throughput",
+  "en": "peak compute (FLOPS)",
+  "meaning": "硬件每秒能做多少次浮点运算，单位是 FLOPS。",
+  "chapter": "05",
+  "anchor": "c05-roofline"
+ },
+ {
+  "term": "拐点",
+  "key": "ridge-point",
+  "en": "ridge point",
+  "meaning": "roofline 图上两块天花板的交点，算术强度低于它就受带宽限制，高于它就受算力限制。",
+  "chapter": "05",
+  "anchor": "c05-roofline"
+ },
+ {
+  "term": "关键路径",
+  "key": "critical-path",
+  "en": "critical path",
+  "meaning": "依赖图里从头到尾最长的那条链，总时间至少等于它，只有缩短它才能变快。",
+  "chapter": "05",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "Amdahl 定律",
+  "key": "amdahl",
+  "en": "Amdahl's law",
+  "meaning": "整体加速受未被优化部分的占比限制，局部再快，总加速也有上限。",
+  "chapter": "05",
+  "anchor": "c05-amdahl"
+ },
+ {
+  "term": "首字延迟",
+  "key": "ttft",
+  "en": "time to first token (TTFT)",
+  "meaning": "从发出请求到看到第一个 token 的时间，包括排队、读题和第一步生成。",
+  "chapter": "05",
+  "anchor": "sec-6"
+ },
+ {
+  "term": "输出速度",
+  "key": "output-speed",
+  "en": "output speed (tokens/s)",
+  "meaning": "生成的 token 数除以生成所用的时间，不是最终字数除以总时间。",
+  "chapter": "05",
+  "anchor": "sec-6"
+ },
+ {
+  "term": "总吞吐量",
+  "key": "system-throughput",
+  "en": "aggregate throughput",
+  "meaning": "多人同时使用时，所有请求加起来每秒输出多少 token。",
+  "chapter": "05",
+  "anchor": "sec-6"
+ },
+ {
+  "term": "GGUF",
+  "key": "gguf",
+  "en": "GGUF",
+  "meaning": "llama.cpp 生态常用的模型文件格式，先放元数据和张量目录，再放数据。",
+  "chapter": "06",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "元数据",
+  "key": "metadata",
+  "en": "metadata",
+  "meaning": "关于数据的数据，比如模型是什么架构、有几层。",
+  "chapter": "06",
+  "anchor": "sec-1",
+  "auto": false
+ },
+ {
+  "term": "张量目录",
+  "key": "tensor-directory",
+  "en": "tensor info table",
+  "meaning": "GGUF 里登记每个张量名字、形状、数据类型和起始位置的目录。",
+  "chapter": "06",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "文件",
+  "key": "file",
+  "en": "file",
+  "meaning": "硬盘上一串有名字的字节，数据必须先进内存才能计算。",
+  "chapter": "06",
+  "anchor": "c06-mmap-page-cache",
+  "auto": false
+ },
+ {
+  "term": "页",
+  "key": "page",
+  "en": "page",
+  "meaning": "把内存或数据切成等大的块来管理时，每一块叫一页，操作系统常用 4 KiB 一页。",
+  "chapter": "06",
+  "anchor": "c06-mmap-page-cache"
+ },
+ {
+  "term": "内存映射",
+  "key": "mmap",
+  "en": "memory mapping (mmap)",
+  "meaning": "把文件挂到程序的地址上，用到哪一页才从硬盘读哪一页，映射成功不等于已读入。",
+  "chapter": "06",
+  "anchor": "c06-mmap-page-cache"
+ },
+ {
+  "term": "缺页",
+  "key": "page-fault",
+  "en": "page fault",
+  "meaning": "程序访问的页还不在内存里，操作系统先暂停程序，把这页读进来再让它继续。",
+  "chapter": "06",
+  "anchor": "c06-mmap-page-cache"
+ },
+ {
+  "term": "页缓存",
+  "key": "page-cache",
+  "en": "page cache",
+  "meaning": "操作系统把读过的文件页留在内存里，下次访问就不用再读硬盘。",
+  "chapter": "06",
+  "anchor": "c06-mmap-page-cache"
+ },
+ {
+  "term": "锁页",
+  "key": "pinned-memory",
+  "en": "page locking (pinned memory)",
+  "meaning": "告诉操作系统这些内存页不许挪走或换出，显卡才能用 DMA 安全地直接读取。",
+  "chapter": "06",
+  "anchor": "sec-3"
+ },
+ {
+  "term": "无符号整数",
+  "key": "unsigned-integer",
+  "en": "unsigned integer",
+  "meaning": "只能表示零和正数的整数类型，位数固定，超过上限就会绕回。",
+  "chapter": "06",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "溢出",
+  "key": "integer-overflow",
+  "en": "integer overflow",
+  "meaning": "整数运算结果超过位数能表示的上限，悄悄绕回成很小的数，可能骗过边界检查。",
+  "chapter": "06",
+  "anchor": "sec-4",
+  "auto": false
+ },
+ {
+  "term": "校验和",
+  "key": "checksum",
+  "en": "checksum",
+  "meaning": "用一个很短的数概括一大块数据，两边一比就知道数据有没有变。",
+  "chapter": "06",
+  "anchor": "c06-checksum-hash"
+ },
+ {
+  "term": "CRC",
+  "key": "crc",
+  "en": "cyclic redundancy check (CRC)",
+  "meaning": "循环冗余校验，一种对字节顺序敏感的校验算法，常用来发现传输和存储中的错误。",
+  "chapter": "06",
+  "anchor": "c06-checksum-hash"
+ },
+ {
+  "term": "密码学哈希",
+  "key": "cryptographic-hash",
+  "en": "cryptographic hash",
+  "meaning": "如 SHA-256，把数据变成定长摘要，既能查出意外损坏，也能发现故意替换。",
+  "chapter": "06",
+  "anchor": "c06-checksum-hash"
+ },
+ {
+  "term": "雪崩效应",
+  "key": "avalanche-effect",
+  "en": "avalanche effect",
+  "meaning": "输入只改一个比特，哈希摘要就有大约一半的位跟着变。",
+  "chapter": "06",
+  "anchor": "c06-checksum-hash"
+ },
+ {
+  "term": "RAII",
+  "key": "raii",
+  "en": "RAII",
+  "meaning": "C++ 惯用法：对象析构时自动释放资源，但管不住仍在后台使用资源的异步操作。",
+  "chapter": "06",
+  "anchor": "sec-6"
+ },
+ {
+  "term": "隐藏向量",
+  "key": "hidden-state",
+  "en": "hidden state vector",
+  "meaning": "一个 token 在层与层之间传递的那串数，每层读入它，再写出同样长的一串。",
+  "chapter": "07",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "激活函数",
+  "key": "activation-function",
+  "en": "activation function",
+  "meaning": "矩阵乘法之后逐个作用在每个数上的非线性函数，让多层网络能学出复杂规律。",
+  "chapter": "07",
+  "anchor": "c07-layer-activation"
+ },
+ {
+  "term": "ReLU",
+  "key": "relu",
+  "en": "ReLU",
+  "meaning": "最简单的激活函数：负数变成 0，正数保持不变。",
+  "chapter": "07",
+  "anchor": "c07-layer-activation"
+ },
+ {
+  "term": "sigmoid",
+  "key": "sigmoid",
+  "en": "sigmoid",
+  "meaning": "把任意数压到 0 到 1 之间的函数，常用作控制开合程度的“门”。",
+  "chapter": "07",
+  "anchor": "c07-layer-activation"
+ },
+ {
+  "term": "SiLU",
+  "key": "silu",
+  "en": "SiLU",
+  "meaning": "激活函数 z × sigmoid(z)，像平滑版的 ReLU，负数区域会微微下沉。",
+  "chapter": "07",
+  "anchor": "c07-layer-activation"
+ },
+ {
+  "term": "QSA",
+  "key": "qsa",
+  "en": "QSA (Strata sparse attention)",
+  "meaning": "Strata 模型里的注意力层，先用索引器挑出前文中相关的位置，只在这些位置上做注意力。",
+  "chapter": "07",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "GDN",
+  "key": "gdn",
+  "en": "Gated DeltaNet (GDN)",
+  "meaning": "Strata 模型多数层的回看方式，把前文压进一块固定大小的状态，每来一个 token 擦写一次。",
+  "chapter": "07",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "归一化",
+  "key": "normalization",
+  "en": "normalization",
+  "meaning": "把向量除以它的“大小”，让下一层收到的数值尺度保持稳定。",
+  "chapter": "07",
+  "anchor": "c07-normalization"
+ },
+ {
+  "term": "L2 范数",
+  "key": "l2-norm",
+  "en": "L2 norm",
+  "meaning": "向量各分量的平方和再开根号，也就是它的几何长度。",
+  "chapter": "07",
+  "anchor": "c07-normalization"
+ },
+ {
+  "term": "均方根",
+  "key": "rms",
+  "en": "root mean square (RMS)",
+  "meaning": "各分量平方的平均再开根号，RMS 归一化后每个分量的平均大小是 1。",
+  "chapter": "07",
+  "anchor": "c07-normalization"
+ },
+ {
+  "term": "RMSNorm",
+  "key": "rmsnorm",
+  "en": "RMSNorm",
+  "meaning": "按均方根做归一化再乘一组学出的系数，结果和 L2 归一化相差 √d 倍。",
+  "chapter": "07",
+  "anchor": "c07-normalization"
+ },
+ {
+  "term": "残差连接",
+  "key": "residual",
+  "en": "residual connection",
+  "meaning": "每层只算一个修正加回输入，即 x′ = x + f(x)，让信息能几乎原样穿过很多层。",
+  "chapter": "07",
+  "anchor": "c07-residual"
+ },
+ {
+  "term": "注意力",
+  "key": "attention",
+  "en": "attention",
+  "meaning": "让当前 token 给前文每个位置打分，再按相关程度混合前文信息的机制。",
+  "chapter": "08",
+  "anchor": "c08-attention"
+ },
+ {
+  "term": "查询",
+  "key": "attention-query",
+  "en": "query (q)",
+  "meaning": "注意力里代表当前位置“我在找什么”的向量，用它和每个键打分。",
+  "chapter": "08",
+  "anchor": "sec-1",
+  "auto": false
+ },
+ {
+  "term": "键",
+  "key": "attention-key",
+  "en": "key (k)",
+  "meaning": "注意力里每个前文位置的“标签”向量，和查询比对，决定这个位置被看多少。",
+  "chapter": "08",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "值",
+  "key": "attention-value",
+  "en": "value (v)",
+  "meaning": "注意力里每个前文位置“能提供什么内容”的向量，按权重混合成输出。",
+  "chapter": "08",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "多头注意力",
+  "key": "multi-head-attention",
+  "en": "multi-head attention",
+  "meaning": "同时开很多组查询、键、值，每个“头”各找各关心的信息，最后合并起来。",
+  "chapter": "08",
+  "anchor": "c08-attention"
+ },
+ {
+  "term": "旋转位置编码",
+  "key": "rope",
+  "en": "rotary position embedding (RoPE)",
+  "meaning": "按 token 所在位置把查询和键旋转一下，让模型分辨先后顺序，值不旋转。",
+  "chapter": "08",
+  "anchor": "c08-attention"
+ },
+ {
+  "term": "因果掩码",
+  "key": "causal-mask",
+  "en": "causal mask",
+  "meaning": "注意力里遮住未来位置的规则，每个 token 只能看自己和前面的，读题时也一样。",
+  "chapter": "08",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "时间复杂度",
+  "key": "time-complexity",
+  "en": "time complexity",
+  "meaning": "输入变大时工作量怎样增长，用来估算一个算法有多慢。",
+  "chapter": "08",
+  "anchor": "c08-complexity"
+ },
+ {
+  "term": "大 O 记号",
+  "key": "big-o",
+  "en": "big O notation",
+  "meaning": "只看工作量随输入增长的“形状”、忽略常数的写法，如 O(n²)。",
+  "chapter": "08",
+  "anchor": "c08-complexity"
+ },
+ {
+  "term": "KV 缓存",
+  "key": "kv-cache",
+  "en": "KV cache",
+  "meaning": "把前文每个位置在注意力层算出的键和值存起来免得重算，对话越长占得越多。",
+  "chapter": "08",
+  "anchor": "sec-3"
+ },
+ {
+  "term": "分组查询注意力",
+  "key": "gqa",
+  "en": "grouped-query attention (GQA)",
+  "meaning": "让多个查询头共用同一组键和值，用来缩小 KV 缓存。",
+  "chapter": "08",
+  "anchor": "sec-3"
+ },
+ {
+  "term": "索引器",
+  "key": "indexer",
+  "en": "indexer",
+  "meaning": "QSA 里一个便宜的打分器，给前文所有位置打分，挑出少数位置做真正的注意力。",
+  "chapter": "08",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "状态",
+  "key": "state",
+  "en": "state",
+  "meaning": "系统记着的东西，每一步按“旧状态加新输入”更新成新状态。",
+  "chapter": "09",
+  "anchor": "c09-rnn-state",
+  "auto": false
+ },
+ {
+  "term": "有限状态机",
+  "key": "state-machine",
+  "en": "finite-state machine",
+  "meaning": "任何时刻都处于有限个状态之一，只有特定事件才能让它切换到另一个状态的模型。",
+  "chapter": "09",
+  "anchor": "c09-rnn-state"
+ },
+ {
+  "term": "循环神经网络",
+  "key": "rnn",
+  "en": "recurrent neural network (RNN)",
+  "meaning": "用可训练的网络按“旧状态加新输入”逐步更新一个固定大小状态的模型。",
+  "chapter": "09",
+  "anchor": "c09-rnn-state"
+ },
+ {
+  "term": "外积",
+  "key": "outer-product",
+  "en": "outer product",
+  "meaning": "把两个向量变成一张表，第 i 行第 j 列等于 kᵢ × vⱼ。",
+  "chapter": "09",
+  "anchor": "c09-outer-product"
+ },
+ {
+  "term": "秩",
+  "key": "rank",
+  "en": "matrix rank",
+  "meaning": "矩阵里真正互相独立的方向有几个，外积得到的表秩为 1。",
+  "chapter": "09",
+  "anchor": "c09-outer-product"
+ },
+ {
+  "term": "秩一更新",
+  "key": "rank-one-update",
+  "en": "rank-one update",
+  "meaning": "把一个外积加到矩阵上，GDN 用它把一对键和值写进状态。",
+  "chapter": "09",
+  "anchor": "c09-outer-product"
+ },
+ {
+  "term": "Delta 规则",
+  "key": "delta-rule",
+  "en": "delta rule",
+  "meaning": "写入前先读出旧值，只写“目标减旧值”的差额，避免新旧值叠在一起。",
+  "chapter": "09",
+  "anchor": "sec-3"
+ },
+ {
+  "term": "MoE",
+  "key": "moe",
+  "en": "Mixture of Experts (MoE)",
+  "meaning": "混合专家模型：每层有很多专家，每个 token 只叫醒少数几个，所以参数多而每步计算少。",
+  "chapter": "10",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "专家",
+  "key": "expert",
+  "en": "expert",
+  "meaning": "MoE 里负责一种计算变换的一组参数，擅长什么由训练自动形成。",
+  "chapter": "10",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "共享专家",
+  "key": "shared-expert",
+  "en": "shared expert",
+  "meaning": "每层里每个 token 都会用到的那个专家，不经过路由器挑选。",
+  "chapter": "10",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "路由器",
+  "key": "router",
+  "en": "router",
+  "meaning": "MoE 每层里给所有专家打分、挑出最高的几个并决定各自权重的部分。",
+  "chapter": "10",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "top-k 选择",
+  "key": "top-k",
+  "en": "top-k selection",
+  "meaning": "从一组分数里选出最高的 k 个，分数很接近时结果可能因微小误差而变。",
+  "chapter": "10",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "条件计算",
+  "key": "conditional-computation",
+  "en": "conditional computation",
+  "meaning": "哪些参数参与计算由当前输入决定，没被选中的部分这一步完全不算。",
+  "chapter": "10",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "最小堆",
+  "key": "min-heap",
+  "en": "min-heap",
+  "meaning": "堆顶总是最小值的数据结构，用只装 k 个数的最小堆能高效找出前 k 名。",
+  "chapter": "10",
+  "anchor": "c10-top-k"
+ },
+ {
+  "term": "快速选择",
+  "key": "quickselect",
+  "en": "quickselect",
+  "meaning": "借用快速排序的分区思路找出第 k 大的数，平均只要线性时间。",
+  "chapter": "10",
+  "anchor": "c10-top-k"
+ },
+ {
+  "term": "量化",
+  "key": "quantization",
+  "en": "quantization",
+  "meaning": "用位数很少的整数加共用的刻度来近似原来的数，省空间但会带来误差。",
+  "chapter": "04",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "n-gram",
+  "key": "n-gram",
+  "en": "n-gram",
+  "meaning": "连续出现的 n 个 token，比如最近 2 个叫二元组，最近 3 个叫三元组。",
+  "chapter": "11",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "n-gram 语言模型",
+  "key": "n-gram-lm",
+  "en": "n-gram language model",
+  "meaning": "只看前 n−1 个词来猜第 n 个词的朴素语言模型。",
+  "chapter": "11",
+  "anchor": "c11-ngram"
+ },
+ {
+  "term": "哈希",
+  "key": "hash-function",
+  "en": "hash function",
+  "meaning": "把任意输入搅成一个看似杂乱、但每次都相同的数的规则，常用来决定数据放在哪。",
+  "chapter": "11",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "混合值",
+  "key": "mixed-hash",
+  "en": "mixed hash value",
+  "meaning": "Strata 的 n-gram 哈希里，各 token 编号乘上常数再异或得到的中间数。",
+  "chapter": "11",
+  "anchor": "sec-2",
+  "auto": false
+ },
+ {
+  "term": "撞车",
+  "key": "hash-collision",
+  "en": "hash collision",
+  "meaning": "两个不同的键被哈希到同一个位置，格子比键少时必然会发生。",
+  "chapter": "11",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "哈希函数",
+  "key": "hash-function",
+  "en": "hash function",
+  "meaning": "把任意输入搅成一个看似杂乱、但每次都相同的数的规则，常用来决定数据放在哪。",
+  "chapter": "11",
+  "anchor": "c11-hash"
+ },
+ {
+  "term": "哈希表",
+  "key": "hash-table",
+  "en": "hash table",
+  "meaning": "按哈希函数算出的格子号存取数据的结构，查找通常很快。",
+  "chapter": "11",
+  "anchor": "c11-hash"
+ },
+ {
+  "term": "桶",
+  "key": "bucket",
+  "en": "bucket",
+  "meaning": "哈希表里的一个格子，哈希后落到同一号的键都进同一个桶。",
+  "chapter": "11",
+  "anchor": "c11-hash"
+ },
+ {
+  "term": "哈希冲突",
+  "key": "hash-collision",
+  "en": "hash collision",
+  "meaning": "两个不同的键被哈希到同一个位置，格子比键少时必然会发生。",
+  "chapter": "11",
+  "anchor": "c11-hash"
+ },
+ {
+  "term": "行缓存",
+  "key": "row-cache",
+  "en": "row cache",
+  "meaning": "Strata 在内存里缓存最近读过的 n-gram 表行，免得反复从硬盘读。",
+  "chapter": "11",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "8 路组相联",
+  "key": "8-way-set-associative",
+  "en": "8-way set associative",
+  "meaning": "缓存分成很多组、每组 8 格，一条数据只能放在自己那一组的 8 格之一。",
+  "chapter": "11",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "替换指针",
+  "key": "replacement-pointer",
+  "en": "round-robin replacement pointer",
+  "meaning": "每组一个轮转计数器，没命中时换掉它指的那格，再往后挪一格。",
+  "chapter": "11",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "直接映射",
+  "key": "direct-mapped",
+  "en": "direct-mapped cache",
+  "meaning": "每条数据只能放进一个固定格子的缓存结构，查得最快但常用数据容易互相挤掉。",
+  "chapter": "11",
+  "anchor": "c11-set-assoc"
+ },
+ {
+  "term": "全相联",
+  "key": "fully-associative",
+  "en": "fully associative cache",
+  "meaning": "数据可以放进任意格子的缓存结构，最灵活，但每次查找都要比对全部格子。",
+  "chapter": "11",
+  "anchor": "c11-set-assoc"
+ },
+ {
+  "term": "组相联",
+  "key": "set-associative",
+  "en": "set-associative cache",
+  "meaning": "先按规则分到一组、组内几格随便放的缓存结构，是直接映射和全相联的折中。",
+  "chapter": "11",
+  "anchor": "c11-set-assoc"
+ },
+ {
+  "term": "命中率",
+  "key": "hit-rate",
+  "en": "hit rate",
+  "meaning": "要用的东西已经在缓存里的比例，报这个数时要说清分母是什么。",
+  "chapter": "12",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "工作集",
+  "key": "working-set",
+  "en": "working set",
+  "meaning": "最近一段时间真正用到的数据集合，缓存装得下它，命中率才会高。",
+  "chapter": "12",
+  "anchor": "c12-hit-rate"
+ },
+ {
+  "term": "颠簸",
+  "key": "thrashing",
+  "en": "thrashing",
+  "meaning": "缓存装不下工作集，数据刚换进来又被挤出去，来回反复搬运。",
+  "chapter": "12",
+  "anchor": "c12-hit-rate"
+ },
+ {
+  "term": "专家档案",
+  "key": "expert-profile",
+  "en": "expert profile",
+  "meaning": "Strata 事先统计每个专家被选中的频率排成名单，开局按名单把热门专家放进显存。",
+  "chapter": "12",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "替换策略",
+  "key": "replacement-policy",
+  "en": "replacement policy",
+  "meaning": "缓存满了以后，决定把哪个旧数据请出去的规则。",
+  "chapter": "12",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "OPT",
+  "key": "opt",
+  "en": "optimal replacement (OPT)",
+  "meaning": "理论最优的替换策略：换出下一次被用到最晚的那个，需要预知未来，只能当参照。",
+  "chapter": "12",
+  "anchor": "c12-cache-replacement"
+ },
+ {
+  "term": "FIFO",
+  "key": "fifo",
+  "en": "first in, first out (FIFO)",
+  "meaning": "先进先出：最早进来的最先离开，可以用作缓存替换规则，也可以用作排队顺序。",
+  "chapter": "12",
+  "anchor": "c12-cache-replacement"
+ },
+ {
+  "term": "LRU",
+  "key": "lru",
+  "en": "least recently used (LRU)",
+  "meaning": "最近最少使用：缓存满时换出最久没被用过的那个。",
+  "chapter": "12",
+  "anchor": "c12-cache-replacement"
+ },
+ {
+  "term": "LFU",
+  "key": "lfu",
+  "en": "least frequently used (LFU)",
+  "meaning": "最不经常使用：换出累计使用次数最少的那个，但跟不上热点的变化。",
+  "chapter": "12",
+  "anchor": "c12-cache-replacement"
+ },
+ {
+  "term": "CLOCK",
+  "key": "clock",
+  "en": "CLOCK (second chance)",
+  "meaning": "指针绕圈扫，最近用过的先放过一次，没用过的才换掉，用很小的开销近似 LRU。",
+  "chapter": "12",
+  "anchor": "c12-cache-replacement"
+ },
+ {
+  "term": "衰减",
+  "key": "decay",
+  "en": "count decay",
+  "meaning": "让计数随时间按比例变小，旧热门慢慢褪色，新热门才有机会上位。",
+  "chapter": "12",
+  "anchor": "c12-cache-replacement",
+  "auto": false
+ },
+ {
+  "term": "驻留表",
+  "key": "residency-table",
+  "en": "residency table",
+  "meaning": "Strata 专家缓存里记录每个专家在哪个显存槽位或不在显存的表，GPU 只按它读。",
+  "chapter": "12",
+  "anchor": "sec-5"
+ },
+ {
+  "term": "异步",
+  "key": "asynchronous",
+  "en": "asynchronous",
+  "meaning": "函数把事情提交出去就立刻返回，事情在后台做，返回不等于做完。",
+  "chapter": "12",
+  "anchor": "sec-5",
+  "auto": false
+ },
+ {
+  "term": "CPU",
+  "key": "cpu",
+  "en": "central processing unit (CPU)",
+  "meaning": "中央处理器，核心不多但每个都很聪明，擅长控制流复杂的程序。",
+  "chapter": "13",
+  "anchor": "c13-cpu-gpu",
+  "auto": false
+ },
+ {
+  "term": "SIMD",
+  "key": "simd",
+  "en": "single instruction, multiple data (SIMD)",
+  "meaning": "单指令多数据：一条指令同时对一排数做同一种运算，CPU 靠它一次算多个数。",
+  "chapter": "13",
+  "anchor": "c13-cpu-gpu"
+ },
+ {
+  "term": "GPU",
+  "key": "gpu",
+  "en": "graphics processing unit (GPU)",
+  "meaning": "图形处理器，有大量简单计算单元和高带宽显存，擅长同时做很多份同样的计算。",
+  "chapter": "13",
+  "anchor": "c13-cpu-gpu",
+  "auto": false
+ },
+ {
+  "term": "SIMT",
+  "key": "simt",
+  "en": "single instruction, multiple threads (SIMT)",
+  "meaning": "单指令多线程：GPU 让一组线程同时执行同一条指令，各自处理自己的数据。",
+  "chapter": "13",
+  "anchor": "c13-cpu-gpu"
+ },
+ {
+  "term": "专家池",
+  "key": "expert-pool",
+  "en": "CPU expert thread pool",
+  "meaning": "Strata 在 CPU 上为未命中的专家开的一组工作线程，按物理核心分配，同时计算。",
+  "chapter": "13",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "数据依赖",
+  "key": "data-dependency",
+  "en": "data dependency",
+  "meaning": "后一个计算要用前一个的结果，两者只能先后做，不能并行。",
+  "chapter": "13",
+  "anchor": "c13-dependence"
+ },
+ {
+  "term": "虚拟地址",
+  "key": "virtual-address",
+  "en": "virtual address",
+  "meaning": "程序里看到的地址，要经操作系统和 CPU 翻译成物理地址才真正去读内存。",
+  "chapter": "14",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "物理地址",
+  "key": "physical-address",
+  "en": "physical address",
+  "meaning": "内存条上的真实位置，DMA 这类设备只认这种地址。",
+  "chapter": "14",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "页框",
+  "key": "page-frame",
+  "en": "page frame",
+  "meaning": "物理内存按页大小切出的一个格子，用来装下一个虚拟页。",
+  "chapter": "14",
+  "anchor": "c14-virtual-memory",
+  "auto": false
+ },
+ {
+  "term": "页表",
+  "key": "page-table",
+  "en": "page table",
+  "meaning": "记录每个逻辑页实际放在哪个物理位置的表，操作系统和 Strata 的 KV 缓存都用它。",
+  "chapter": "14",
+  "anchor": "c14-virtual-memory"
+ },
+ {
+  "term": "换出",
+  "key": "swap-out",
+  "en": "swap out",
+  "meaning": "内存紧张时，操作系统把不常用的页写到硬盘，腾出物理内存。",
+  "chapter": "14",
+  "anchor": "c14-virtual-memory"
+ },
+ {
+  "term": "TLB",
+  "key": "tlb",
+  "en": "translation lookaside buffer (TLB)",
+  "meaning": "CPU 里缓存地址翻译结果的小部件，页太多装不下时访问就会变慢。",
+  "chapter": "14",
+  "anchor": "c14-virtual-memory"
+ },
+ {
+  "term": "拷贝引擎",
+  "key": "copy-engine",
+  "en": "copy engine",
+  "meaning": "显卡上专门搬数据的部件，搬运可以和计算同时进行。",
+  "chapter": "14",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "DMA",
+  "key": "dma",
+  "en": "direct memory access (DMA)",
+  "meaning": "直接内存访问：设备不经 CPU 自己读写内存，只认物理地址。",
+  "chapter": "14",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "同步",
+  "key": "synchronous",
+  "en": "synchronous call",
+  "meaning": "调用方一直等到事情做完函数才返回。",
+  "chapter": "14",
+  "anchor": "c14-async",
+  "auto": false
+ },
+ {
+  "term": "完成信号",
+  "key": "completion-signal",
+  "en": "completion signal",
+  "meaning": "表明后台工作确实做完的明确通知，异步调用的结果要等到它才能用。",
+  "chapter": "14",
+  "anchor": "c14-async"
+ },
+ {
+  "term": "流",
+  "key": "cuda-stream",
+  "en": "CUDA stream",
+  "meaning": "CUDA 里的一条工作队列，同一条流上的工作按提交顺序执行，跨流要靠事件同步。",
+  "chapter": "14",
+  "anchor": "c14-async"
+ },
+ {
+  "term": "事件",
+  "key": "event",
+  "en": "event",
+  "meaning": "标记某件事已发生的信号，CUDA 里用来确认先前工作已完成，SSE 里指一段推送消息。",
+  "chapter": "14",
+  "anchor": "c14-async",
+  "auto": false
+ },
+ {
+  "term": "双缓冲",
+  "key": "double-buffering",
+  "en": "double buffering",
+  "meaning": "准备两块缓冲区，一块在计算时另一块同时搬下一份，把搬运藏到计算后面。",
+  "chapter": "14",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "kernel",
+  "key": "kernel",
+  "en": "kernel",
+  "meaning": "专门做一段核心计算的小程序，在 GPU 上由 CPU 发起、交给大量线程同时执行。",
+  "chapter": "15",
+  "anchor": "sec-1",
+  "auto": false
+ },
+ {
+  "term": "线程",
+  "key": "thread",
+  "en": "thread",
+  "meaning": "程序里一条独立的执行路线，同一进程的线程共享内存，GPU 一次能开成千上万个。",
+  "chapter": "15",
+  "anchor": "sec-1",
+  "auto": false
+ },
+ {
+  "term": "线程块",
+  "key": "thread-block",
+  "en": "thread block",
+  "meaning": "GPU 上一组在同一个计算单元运行、可以共享一小块高速存储的线程。",
+  "chapter": "15",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "warp",
+  "key": "warp",
+  "en": "warp",
+  "meaning": "NVIDIA GPU 上 32 个线程组成的一组，它们同时执行同一条指令。",
+  "chapter": "15",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "合并访问",
+  "key": "coalesced-access",
+  "en": "memory coalescing",
+  "meaning": "GPU 一组线程读相邻地址时，硬件把请求合成少数几次大读取，比跳着读快得多。",
+  "chapter": "15",
+  "anchor": "c15-gpu-model"
+ },
+ {
+  "term": "启动开销",
+  "key": "launch-overhead",
+  "en": "kernel launch overhead",
+  "meaning": "CPU 准备并提交一个 kernel 的固定成本，kernel 很小时它会成为主要耗时。",
+  "chapter": "15",
+  "anchor": "sec-3"
+ },
+ {
+  "term": "算子融合",
+  "key": "kernel-fusion",
+  "en": "kernel fusion",
+  "meaning": "把几个小运算合进一个 kernel，减少启动次数和中间结果的读写。",
+  "chapter": "15",
+  "anchor": "c15-launch-fusion"
+ },
+ {
+  "term": "CUDA Graph",
+  "key": "cuda-graph",
+  "en": "CUDA Graph",
+  "meaning": "先录下一整串 GPU 操作，之后一次提交整串重放，省掉逐个启动的开销。",
+  "chapter": "15",
+  "anchor": "c15-launch-fusion"
+ },
+ {
+  "term": "step 缓冲",
+  "key": "step-buffer",
+  "en": "step buffer",
+  "meaning": "Strata 把每步都变的位置等参数放进一小块显存，录好的图不改参数也能读到新值。",
+  "chapter": "15",
+  "anchor": "sec-5"
+ },
+ {
+  "term": "矩阵向量乘",
+  "key": "gemv",
+  "en": "matrix-vector multiplication (GEMV)",
+  "meaning": "矩阵每一行都和同一个向量做点积，一次只算一个 token 时权重读一遍只用一次。",
+  "chapter": "16",
+  "anchor": "c16-batching"
+ },
+ {
+  "term": "矩阵矩阵乘",
+  "key": "gemm",
+  "en": "matrix-matrix multiplication (GEMM)",
+  "meaning": "把多个输入向量并排后和权重相乘，权重读一遍就能给多个 token 共用。",
+  "chapter": "16",
+  "anchor": "c16-batching"
+ },
+ {
+  "term": "块",
+  "key": "chunk",
+  "en": "chunk",
+  "meaning": "长提示词被切成的一段，每块走完全部层再读下一块，块的大小影响速度和显存。",
+  "chapter": "16",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "流水线",
+  "key": "pipelining",
+  "en": "pipelining",
+  "meaning": "把工作拆成前后相连的工序，由不同部件同时处理不同的件，总时间由最慢的工序决定。",
+  "chapter": "16",
+  "anchor": "c16-pipeline"
+ },
+ {
+  "term": "K",
+  "key": "attention-key",
+  "en": "key (k)",
+  "meaning": "注意力里每个前文位置的“标签”向量，和查询比对，决定这个位置被看多少。",
+  "chapter": "17",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "V",
+  "key": "attention-value",
+  "en": "value (v)",
+  "meaning": "注意力里每个前文位置“能提供什么内容”的向量，按权重混合成输出。",
+  "chapter": "17",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "分页",
+  "key": "paging",
+  "en": "paging",
+  "meaning": "把逻辑上连续的数据切成等大的页，用页表记录每页实际放在哪里。",
+  "chapter": "17",
+  "anchor": "c17-paging"
+ },
+ {
+  "term": "投机解码",
+  "key": "speculative-decoding",
+  "en": "speculative decoding",
+  "meaning": "先便宜地猜出几个 token，再让大模型一次批量验证，猜对的直接收下。",
+  "chapter": "18",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "草稿",
+  "key": "draft",
+  "en": "draft tokens",
+  "meaning": "投机解码里便宜方法猜出的候选 token，要经目标模型验证才算数。",
+  "chapter": "18",
+  "anchor": "sec-1",
+  "auto": false
+ },
+ {
+  "term": "目标模型",
+  "key": "target-model",
+  "en": "target model",
+  "meaning": "投机解码里负责拍板的大模型，最终输出以它的判断为准。",
+  "chapter": "18",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "分支预测器",
+  "key": "branch-predictor",
+  "en": "branch predictor",
+  "meaning": "CPU 里根据历史猜测分支走向的部件，让流水线不必停下来等条件算完。",
+  "chapter": "18",
+  "anchor": "c18-speculation"
+ },
+ {
+  "term": "推测执行",
+  "key": "speculative-execution",
+  "en": "speculative execution",
+  "meaning": "CPU 沿猜测的方向先执行，结果暂不生效，猜对再提交，猜错就丢弃。",
+  "chapter": "18",
+  "anchor": "c18-speculation"
+ },
+ {
+  "term": "事务",
+  "key": "transaction",
+  "en": "transaction",
+  "meaning": "把多步修改包成一个整体，要么全部生效，要么像什么都没发生过。",
+  "chapter": "18",
+  "anchor": "c18-transaction",
+  "auto": false
+ },
+ {
+  "term": "提交",
+  "key": "commit",
+  "en": "commit",
+  "meaning": "让临时修改正式生效、对外可见，Strata 只提交验证窗口里通过比对的前缀。",
+  "chapter": "18",
+  "anchor": "c18-transaction",
+  "auto": false
+ },
+ {
+  "term": "回滚",
+  "key": "rollback",
+  "en": "rollback",
+  "meaning": "丢掉临时修改，回到事务开始之前的状态。",
+  "chapter": "18",
+  "anchor": "c18-transaction",
+  "auto": false
+ },
+ {
+  "term": "MTP 层",
+  "key": "mtp",
+  "en": "multi-token prediction (MTP) layer",
+  "meaning": "模型自带的多 token 预测层，在 Strata 里负责猜草稿，草稿仍要大模型验证。",
+  "chapter": "19",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "验证窗口",
+  "key": "verify-window",
+  "en": "verification window",
+  "meaning": "上一个确定的 token 加上几个草稿排成的一排，大模型一次算完来逐个比对。",
+  "chapter": "19",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "期望值",
+  "key": "expected-value",
+  "en": "expected value",
+  "meaning": "按概率加权的平均结果，这里指平均每轮能拿到几个 token。",
+  "chapter": "19",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "条件接受率",
+  "key": "conditional-acceptance",
+  "en": "conditional acceptance rate",
+  "meaning": "在先前草稿都被接受的条件下，本位置被接受的概率。",
+  "chapter": "19",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "几何级数",
+  "key": "geometric-series",
+  "en": "geometric series",
+  "meaning": "每一项都是前一项乘同一个数的和，所以多猜草稿的收益越来越小。",
+  "chapter": "19",
+  "anchor": "c19-expected-value"
+ },
+ {
+  "term": "指数移动平均",
+  "key": "ema",
+  "en": "exponential moving average (EMA)",
+  "meaning": "每来一个新数据就把估计值往它挪一小步，越旧的数据权重越小，只需存一个数。",
+  "chapter": "19",
+  "anchor": "c19-ema"
+ },
+ {
+  "term": "删失",
+  "key": "censoring",
+  "en": "censoring",
+  "meaning": "统计里结果没被观测到的情况，没比对过的草稿不能记成失败。",
+  "chapter": "19",
+  "anchor": "c19-ema"
+ },
+ {
+  "term": "提示词查找",
+  "key": "prompt-lookup",
+  "en": "prompt lookup",
+  "meaning": "在上下文里找到和正在写的内容重复的一段，把它后面的 token 拿来当草稿。",
+  "chapter": "19",
+  "anchor": "sec-5"
+ },
+ {
+  "term": "前缀",
+  "key": "prefix",
+  "en": "prefix",
+  "meaning": "和上一次请求开头完全相同的那部分 token。",
+  "chapter": "20",
+  "anchor": "sec-1",
+  "auto": false
+ },
+ {
+  "term": "前缀复用",
+  "key": "prefix-reuse",
+  "en": "prefix reuse (prompt cache)",
+  "meaning": "已读过的前缀不再重读，直接从断点接着读，长对话因此不会越聊越慢。",
+  "chapter": "20",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "steering",
+  "key": "steering",
+  "en": "steering (control vector)",
+  "meaning": "Strata 可选的控制向量功能，开启后会改动模型许多层的中间结果。",
+  "chapter": "20",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "快照",
+  "key": "snapshot",
+  "en": "snapshot",
+  "meaning": "把某一时刻的全部状态存下来，以后可以回到那一刻，像游戏存档。",
+  "chapter": "20",
+  "anchor": "sec-3"
+ },
+ {
+  "term": "链",
+  "key": "checkpoint-chain",
+  "en": "checkpoint chain",
+  "meaning": "Strata 会话里的检查点按长度排成一串，每一个都是下一个的前缀。",
+  "chapter": "20",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "写时复制",
+  "key": "copy-on-write",
+  "en": "copy-on-write (COW)",
+  "meaning": "多方先共用同一份数据，谁要改哪一块才复制哪一块。",
+  "chapter": "20",
+  "anchor": "c20-copy-on-write"
+ },
+ {
+  "term": "引用计数",
+  "key": "reference-count",
+  "en": "reference counting",
+  "meaning": "记录一块数据当前有几个使用者，降到 0 才能释放。",
+  "chapter": "20",
+  "anchor": "c20-copy-on-write"
+ },
+ {
+  "term": "层切分",
+  "key": "layer-split",
+  "en": "layer split",
+  "meaning": "把模型的层按顺序切成几段，每张显卡负责连续的一段，只在段与段之间交接数据。",
+  "chapter": "21",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "阶段",
+  "key": "pipeline-stage",
+  "en": "pipeline stage",
+  "meaning": "层切分里一张卡负责的那一段连续的层。",
+  "chapter": "21",
+  "anchor": "sec-1",
+  "auto": false
+ },
+ {
+  "term": "流水线并行",
+  "key": "pipeline-parallelism",
+  "en": "pipeline parallelism",
+  "meaning": "按层把模型分段放到多张卡上，数据走完上一段再进入下一段。",
+  "chapter": "21",
+  "anchor": "c21-parallelism"
+ },
+ {
+  "term": "张量并行",
+  "key": "tensor-parallelism",
+  "en": "tensor parallelism",
+  "meaning": "把同一层的大矩阵拆到多张卡上同时算，每层都要合并结果，通信频繁。",
+  "chapter": "21",
+  "anchor": "c21-parallelism"
+ },
+ {
+  "term": "数据并行",
+  "key": "data-parallelism",
+  "en": "data parallelism",
+  "meaning": "每张卡放一整份模型，各自处理不同的请求，几乎不用跨卡沟通。",
+  "chapter": "21",
+  "anchor": "c21-parallelism"
+ },
+ {
+  "term": "气泡",
+  "key": "pipeline-bubble",
+  "en": "pipeline bubble",
+  "meaning": "流水线开头和结尾，有工位没活可干、只能空等的时间。",
+  "chapter": "21",
+  "anchor": "sec-3"
+ },
+ {
+  "term": "PCIe",
+  "key": "pcie",
+  "en": "PCI Express (PCIe)",
+  "meaning": "主板上连接 CPU、显卡等设备的串行总线，带宽远低于显存。",
+  "chapter": "21",
+  "anchor": "c21-interconnect"
+ },
+ {
+  "term": "通道",
+  "key": "pcie-lane",
+  "en": "PCIe lane",
+  "meaning": "PCIe 里并排的一条数据线路，像公路的一条车道，×16 就是 16 条。",
+  "chapter": "21",
+  "anchor": "c21-interconnect",
+  "auto": false
+ },
+ {
+  "term": "NVLink",
+  "key": "nvlink",
+  "en": "NVLink",
+  "meaning": "英伟达显卡之间的专用高速连接，带宽比 PCIe 高得多，家用双卡通常没有。",
+  "chapter": "21",
+  "anchor": "c21-interconnect"
+ },
+ {
+  "term": "源代码",
+  "key": "source-code",
+  "en": "source code",
+  "meaning": "程序员写的、人能读懂的程序文字。",
+  "chapter": "22",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "机器码",
+  "key": "machine-code",
+  "en": "machine code",
+  "meaning": "芯片真正执行的二进制指令，不同芯片的机器码互不通用。",
+  "chapter": "22",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "指令集",
+  "key": "isa",
+  "en": "instruction set architecture (ISA)",
+  "meaning": "规定芯片能执行哪些指令、每条怎样编码，比如 x86-64 及其 AVX2 扩展。",
+  "chapter": "22",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "编译器",
+  "key": "compiler",
+  "en": "compiler",
+  "meaning": "把源代码翻译成某种指令集机器码的程序，换一种芯片就要重新编译。",
+  "chapter": "22",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "预处理器",
+  "key": "preprocessor",
+  "en": "C preprocessor",
+  "meaning": "C/C++ 编译前做文字加工的一步：贴入头文件、替换宏、按条件删掉分支。",
+  "chapter": "22",
+  "anchor": "c22-compiler"
+ },
+ {
+  "term": "宏",
+  "key": "macro",
+  "en": "macro",
+  "meaning": "用 #define 定义的名字，预处理时会被原样替换成对应的文字。",
+  "chapter": "22",
+  "anchor": "c22-compiler"
+ },
+ {
+  "term": "条件编译",
+  "key": "conditional-compilation",
+  "en": "conditional compilation",
+  "meaning": "用 #if 按目标只保留一个分支，其余代码编译器根本看不到。",
+  "chapter": "22",
+  "anchor": "c22-compiler"
+ },
+ {
+  "term": "内核",
+  "key": "kernel",
+  "en": "kernel",
+  "meaning": "专门做一段核心计算的小程序，在 GPU 上由 CPU 发起、交给大量线程同时执行。",
+  "chapter": "22",
+  "anchor": "sec-2",
+  "auto": false
+ },
+ {
+  "term": "CPUID",
+  "key": "cpuid",
+  "en": "CPUID instruction",
+  "meaning": "让 CPU 报告自己支持哪些功能的指令，程序据此在运行时挑合适的内核。",
+  "chapter": "22",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "CUDA",
+  "key": "cuda",
+  "en": "CUDA",
+  "meaning": "NVIDIA 的 GPU 编程平台，包含 C++ 扩展、运行时库和编译器，只能用于 NVIDIA 显卡。",
+  "chapter": "22",
+  "anchor": "c22-cuda-hip"
+ },
+ {
+  "term": "HIP",
+  "key": "hip",
+  "en": "HIP (ROCm)",
+  "meaning": "AMD 仿照 CUDA 设计的 GPU 编程接口，函数名大多只把 cuda 换成 hip。",
+  "chapter": "22",
+  "anchor": "c22-cuda-hip"
+ },
+ {
+  "term": "垫片",
+  "key": "shim",
+  "en": "shim",
+  "meaning": "夹在两层之间抹平差异的一薄层代码，Strata 用它把 CUDA 的名字换成 HIP 的名字。",
+  "chapter": "22",
+  "anchor": "c22-cuda-hip"
+ },
+ {
+  "term": "SSE",
+  "key": "sse",
+  "en": "Server-Sent Events (SSE)",
+  "meaning": "服务器推送事件：连接一直不关，服务器写好一段就送一段，每段以空行结束。",
+  "chapter": "23",
+  "anchor": "c23-http-sse"
+ },
+ {
+  "term": "服务层",
+  "key": "serving-layer",
+  "en": "serving layer",
+  "meaning": "引擎和应用之间的翻译层，把聊天消息变成 token，再把生成的 token 变回文字。",
+  "chapter": "23",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "流式响应",
+  "key": "streaming-response",
+  "en": "streaming response",
+  "meaning": "把一个回答拆成很多小段，写好一段送一段，让用户更早看到第一个字。",
+  "chapter": "23",
+  "anchor": "sec-2"
+ },
+ {
+  "term": "HTTP",
+  "key": "http",
+  "en": "HTTP",
+  "meaning": "浏览器和服务器对话的协议：客户端发请求，服务器回状态码、头部和正文。",
+  "chapter": "23",
+  "anchor": "c23-http-sse"
+ },
+ {
+  "term": "码点",
+  "key": "code-point",
+  "en": "Unicode code point",
+  "meaning": "每个字符在 Unicode 里的编号，比如“中”是 U+4E2D。",
+  "chapter": "23",
+  "anchor": "c23-utf8"
+ },
+ {
+  "term": "UTF-8",
+  "key": "utf-8",
+  "en": "UTF-8",
+  "meaning": "把字符编号写成 1 到 4 个字节的规则，汉字多占 3 个字节，可能被网络切成两半。",
+  "chapter": "23",
+  "anchor": "c23-utf8"
+ },
+ {
+  "term": "续字节",
+  "key": "continuation-byte",
+  "en": "continuation byte",
+  "meaning": "UTF-8 里一个字符首字节之后、以二进制 10 开头的那些字节。",
+  "chapter": "23",
+  "anchor": "c23-utf8"
+ },
+ {
+  "term": "增量解码器",
+  "key": "incremental-decoder",
+  "en": "incremental decoder",
+  "meaning": "能把结尾不完整的字节先扣住、等下一块到了再拼的解码器，避免出现乱码。",
+  "chapter": "23",
+  "anchor": "c23-utf8"
+ },
+ {
+  "term": "JSON",
+  "key": "json",
+  "en": "JSON",
+  "meaning": "用花括号和方括号表示结构化数据的文本格式，文本必须完整才能解析。",
+  "chapter": "23",
+  "anchor": "c23-json"
+ },
+ {
+  "term": "状态机",
+  "key": "state-machine",
+  "en": "finite-state machine",
+  "meaning": "任何时刻都处于有限个状态之一，只有特定事件才能让它切换到另一个状态的模型。",
+  "chapter": "24",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "进程",
+  "key": "process",
+  "en": "process",
+  "meaning": "一个正在运行的程序，有自己独立的内存和资源，结束时由操作系统回收。",
+  "chapter": "24",
+  "anchor": "c24-process-thread",
+  "auto": false
+ },
+ {
+  "term": "管道",
+  "key": "pipe",
+  "en": "pipe",
+  "meaning": "操作系统提供的进程间通信通道，一端写入，另一端读出。",
+  "chapter": "24",
+  "anchor": "c24-process-thread"
+ },
+ {
+  "term": "协作式取消",
+  "key": "cooperative-cancellation",
+  "en": "cooperative cancellation",
+  "meaning": "外部只设取消标志，干活的一方在检查点看到后自己收拾干净再退出。",
+  "chapter": "24",
+  "anchor": "c24-cancel"
+ },
+ {
+  "term": "取消标志",
+  "key": "cancel-flag",
+  "en": "cancellation flag",
+  "meaning": "表示“请停下”的共享标记，由干活的一方在约好的地方查看。",
+  "chapter": "24",
+  "anchor": "c24-cancel"
+ },
+ {
+  "term": "检查点",
+  "key": "cancellation-point",
+  "en": "cancellation point",
+  "meaning": "干活的一方约好查看取消标志的位置，取消最快也要等运行到下一个检查点。",
+  "chapter": "24",
+  "anchor": "c24-cancel",
+  "auto": false
+ },
+ {
+  "term": "看门狗",
+  "key": "watchdog",
+  "en": "watchdog",
+  "meaning": "定时检查某个部件有没有动静，太久没反应就判定它出了问题。",
+  "chapter": "24",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "认证",
+  "key": "authentication",
+  "en": "authentication",
+  "meaning": "确认“你是谁”，比如核对请求里带的 API Key 对不对。",
+  "chapter": "24",
+  "anchor": "c24-auth",
+  "auto": false
+ },
+ {
+  "term": "授权",
+  "key": "authorization",
+  "en": "authorization",
+  "meaning": "确认“你能做什么”，在认证之后决定允许哪些操作。",
+  "chapter": "24",
+  "anchor": "c24-auth",
+  "auto": false
+ },
+ {
+  "term": "API Key",
+  "key": "api-key",
+  "en": "API key",
+  "meaning": "服务器和客户端事先共享的一串长随机字符，请求带上它才能用服务，必须保密。",
+  "chapter": "24",
+  "anchor": "c24-auth"
+ },
+ {
+  "term": "旁路攻击",
+  "key": "side-channel-attack",
+  "en": "side-channel attack",
+  "meaning": "利用耗时、功耗这类“副产品”来窃取信息的攻击。",
+  "chapter": "24",
+  "anchor": "c24-auth"
+ },
+ {
+  "term": "计时攻击",
+  "key": "timing-attack",
+  "en": "timing attack",
+  "meaning": "通过测量比较操作的耗时，一位一位猜出密钥的旁路攻击。",
+  "chapter": "24",
+  "anchor": "c24-auth"
+ },
+ {
+  "term": "恒定时间比较",
+  "key": "constant-time-compare",
+  "en": "constant-time comparison",
+  "meaning": "不管从哪一位开始不同，都把整串比完再返回，让耗时不泄露信息。",
+  "chapter": "24",
+  "anchor": "c24-auth"
+ },
+ {
+  "term": "DNS 重新绑定",
+  "key": "dns-rebinding",
+  "en": "DNS rebinding",
+  "meaning": "恶意网页把自己的域名临时指向 127.0.0.1，借此访问你本机服务的攻击。",
+  "chapter": "24",
+  "anchor": "c24-auth"
+ },
+ {
+  "term": "线性化点",
+  "key": "linearization-point",
+  "en": "linearization point",
+  "meaning": "一个操作被视为瞬间生效的那一刻，取消要从这个边界起才算真正生效。",
+  "chapter": "24",
+  "anchor": "sec-6"
+ },
+ {
+  "term": "调度",
+  "key": "scheduling",
+  "en": "scheduling",
+  "meaning": "多个任务争用同一资源时，决定先服务谁、每次服务多久。",
+  "chapter": "25",
+  "anchor": "c25-scheduling",
+  "auto": false
+ },
+ {
+  "term": "护航效应",
+  "key": "convoy-effect",
+  "en": "convoy effect",
+  "meaning": "先来先服务时，一个长任务挡住后面所有短任务的现象。",
+  "chapter": "25",
+  "anchor": "c25-scheduling"
+ },
+ {
+  "term": "SJF",
+  "key": "sjf",
+  "en": "shortest job first (SJF)",
+  "meaning": "短作业优先：每次先做最短的任务，平均等待最短，但要事先知道任务长度。",
+  "chapter": "25",
+  "anchor": "c25-scheduling"
+ },
+ {
+  "term": "饥饿",
+  "key": "starvation",
+  "en": "starvation",
+  "meaning": "某个任务一直被别的任务插队，迟迟得不到服务。",
+  "chapter": "25",
+  "anchor": "c25-scheduling"
+ },
+ {
+  "term": "轮转",
+  "key": "round-robin",
+  "en": "round-robin",
+  "meaning": "每个任务轮流做一个时间片，没做完就回到队尾重新排。",
+  "chapter": "25",
+  "anchor": "c25-scheduling",
+  "auto": false
+ },
+ {
+  "term": "时间片",
+  "key": "time-slice",
+  "en": "time slice",
+  "meaning": "轮转调度里每个任务一次能连续执行的一小段时间。",
+  "chapter": "25",
+  "anchor": "c25-scheduling"
+ },
+ {
+  "term": "排队论",
+  "key": "queueing-theory",
+  "en": "queueing theory",
+  "meaning": "研究“到达、排队、服务”这类系统的数学，用来估算等待时间和队伍长度。",
+  "chapter": "25",
+  "anchor": "c25-queueing"
+ },
+ {
+  "term": "利用率",
+  "key": "utilization",
+  "en": "utilization",
+  "meaning": "服务方忙碌时间所占的比例，越接近 100%，等待时间涨得越快。",
+  "chapter": "25",
+  "anchor": "c25-queueing",
+  "auto": false
+ },
+ {
+  "term": "利特尔法则",
+  "key": "littles-law",
+  "en": "Little's law",
+  "meaning": "系统里的平均人数等于到达率乘以每人平均停留时间，几乎不依赖任何假设。",
+  "chapter": "25",
+  "anchor": "c25-queueing"
+ },
+ {
+  "term": "M/M/1",
+  "key": "mm1",
+  "en": "M/M/1 queue",
+  "meaning": "到达和服务时间都随机、只有一个服务员的最简单排队模型。",
+  "chapter": "25",
+  "anchor": "c25-queueing"
+ },
+ {
+  "term": "批处理",
+  "key": "batching",
+  "en": "batching",
+  "meaning": "把多条序列放在一起算，权重读一遍就能给多个 token 共用。",
+  "chapter": "25",
+  "anchor": "c25-continuous-batching",
+  "auto": false
+ },
+ {
+  "term": "静态批处理",
+  "key": "static-batching",
+  "en": "static batching",
+  "meaning": "几条序列凑成一批同时开始、同时结束，短的写完了也要等最长的那条。",
+  "chapter": "25",
+  "anchor": "c25-continuous-batching"
+ },
+ {
+  "term": "连续批处理",
+  "key": "continuous-batching",
+  "en": "continuous batching",
+  "meaning": "每生成一步就检查有没有序列写完，一有空位就让排队的新序列补上。",
+  "chapter": "25",
+  "anchor": "c25-continuous-batching"
+ },
+ {
+  "term": "准入控制",
+  "key": "admission-control",
+  "en": "admission control",
+  "meaning": "接纳一条序列之前先一次性预留它需要的全部资源，不够就让它排队或拒绝。",
+  "chapter": "25",
+  "anchor": "sec-5"
+ },
+ {
+  "term": "老化",
+  "key": "aging",
+  "en": "aging",
+  "meaning": "让等得越久的请求优先级越高，用来防止饥饿。",
+  "chapter": "25",
+  "anchor": "sec-6",
+  "auto": false
+ },
+ {
+  "term": "参照答案",
+  "key": "test-oracle",
+  "en": "test oracle",
+  "meaning": "能告诉你正确结果应该是什么的独立来源，没有它，测试只能检查程序没崩。",
+  "chapter": "26",
+  "anchor": "sec-1",
+  "auto": false
+ },
+ {
+  "term": "单元测试",
+  "key": "unit-test",
+  "en": "unit test",
+  "meaning": "只测一个函数或一个类的测试，小而快，出错时能精确指出问题所在。",
+  "chapter": "26",
+  "anchor": "c26-test-levels"
+ },
+ {
+  "term": "集成测试",
+  "key": "integration-test",
+  "en": "integration test",
+  "meaning": "把几个模块接在一起，检查它们之间的接口约定是否被双方遵守。",
+  "chapter": "26",
+  "anchor": "c26-test-levels"
+ },
+ {
+  "term": "系统测试",
+  "key": "system-test",
+  "en": "system test (end-to-end test)",
+  "meaning": "从用户入口进去看最终结果的测试，也叫端到端测试。",
+  "chapter": "26",
+  "anchor": "c26-test-levels"
+ },
+ {
+  "term": "回归测试",
+  "key": "regression-test",
+  "en": "regression test",
+  "meaning": "每修一个 bug 就留下一个能重现它的测试，防止它以后再回来。",
+  "chapter": "26",
+  "anchor": "c26-test-levels"
+ },
+ {
+  "term": "测试替身",
+  "key": "test-double",
+  "en": "test double",
+  "meaning": "用假的、行为可控的对象代替真实但昂贵的部件，比如没有 GPU 时用的假引擎。",
+  "chapter": "26",
+  "anchor": "c26-test-levels"
+ },
+ {
+  "term": "ULP",
+  "key": "ulp",
+  "en": "unit in the last place (ULP)",
+  "meaning": "浮点数最后一位上的一个单位，换个计算顺序结果常差一两个 ULP。",
+  "chapter": "26",
+  "anchor": "sec-3"
+ },
+ {
+  "term": "容差",
+  "key": "tolerance",
+  "en": "tolerance",
+  "meaning": "比较两个浮点数时允许的误差范围，差得足够小就算相等。",
+  "chapter": "26",
+  "anchor": "sec-3",
+  "auto": false
+ },
+ {
+  "term": "相对容差",
+  "key": "relative-tolerance",
+  "en": "relative tolerance",
+  "meaning": "按数本身的大小打折扣的容差，比如允许相差万分之一。",
+  "chapter": "26",
+  "anchor": "sec-3"
+ },
+ {
+  "term": "绝对容差",
+  "key": "absolute-tolerance",
+  "en": "absolute tolerance",
+  "meaning": "一个固定的误差门槛，比如差 10⁻⁶ 以内都算相等，能照顾接近 0 的数。",
+  "chapter": "26",
+  "anchor": "sec-3"
+ },
+ {
+  "term": "teacher forcing",
+  "key": "teacher-forcing",
+  "en": "teacher forcing",
+  "meaning": "不让引擎自由续写，而是给各方喂同一份标准文本，在每个位置比较预测。",
+  "chapter": "26",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "困惑度",
+  "key": "perplexity",
+  "en": "perplexity",
+  "meaning": "衡量模型对一段真实文字有多“意外”的指标，越低说明预测得越准。",
+  "chapter": "26",
+  "anchor": "sec-4"
+ },
+ {
+  "term": "变异测试",
+  "key": "mutation-testing",
+  "en": "mutation testing",
+  "meaning": "故意往代码里放 bug，看测试能不能抓住，用来检验测试本身靠不靠谱。",
+  "chapter": "26",
+  "anchor": "sec-5"
+ },
+ {
+  "term": "差分测试",
+  "key": "differential-testing",
+  "en": "differential testing",
+  "meaning": "把同一批输入分别喂给被测实现和独立的参照实现，比较两边的输出。",
+  "chapter": "26",
+  "anchor": "sec-5"
+ },
+ {
+  "term": "变形测试",
+  "key": "metamorphic-testing",
+  "en": "metamorphic testing",
+  "meaning": "不知道正确答案时，检查“输入这样变，输出应该怎样变”的规律是否成立。",
+  "chapter": "26",
+  "anchor": "c26-differential-testing"
+ },
+ {
+  "term": "吞吐",
+  "key": "throughput",
+  "en": "throughput",
+  "meaning": "单位时间完成多少工作，这里指每秒输出多少个 token，越大越好。",
+  "chapter": "27",
+  "anchor": "sec-1",
+  "auto": false
+ },
+ {
+  "term": "均值",
+  "key": "mean",
+  "en": "mean",
+  "meaning": "全部数加起来再除以个数，容易被个别极端值拖偏。",
+  "chapter": "27",
+  "anchor": "c27-statistics",
+  "auto": false
+ },
+ {
+  "term": "中位数",
+  "key": "median",
+  "en": "median",
+  "meaning": "排好序后正中间的那个数，不怕个别极端值。",
+  "chapter": "27",
+  "anchor": "c27-statistics",
+  "auto": false
+ },
+ {
+  "term": "分位数",
+  "key": "quantile",
+  "en": "quantile (percentile)",
+  "meaning": "表示有多大比例的数据不超过它，比如 p95 是 95% 的请求都不比它慢。",
+  "chapter": "27",
+  "anchor": "c27-statistics"
+ },
+ {
+  "term": "方差",
+  "key": "variance",
+  "en": "variance",
+  "meaning": "衡量数据离均值有多分散的量，开根号就是标准差。",
+  "chapter": "27",
+  "anchor": "c27-statistics"
+ },
+ {
+  "term": "标准差",
+  "key": "standard-deviation",
+  "en": "standard deviation",
+  "meaning": "方差的平方根，和数据同一单位，数值越大说明数据越分散。",
+  "chapter": "27",
+  "anchor": "c27-statistics"
+ },
+ {
+  "term": "基准测试",
+  "key": "benchmark",
+  "en": "benchmark",
+  "meaning": "在受控条件下反复运行同一任务来测量性能，要预热、重复并写明条件。",
+  "chapter": "27",
+  "anchor": "c27-benchmark-method"
+ },
+ {
+  "term": "TTFT",
+  "key": "ttft",
+  "en": "time to first token (TTFT)",
+  "meaning": "从发出请求到看到第一个 token 的时间，包括排队、读题和第一步生成。",
+  "chapter": "27",
+  "anchor": "sec-5"
+ },
+ {
+  "term": "系统总吞吐",
+  "key": "system-throughput",
+  "en": "aggregate throughput",
+  "meaning": "多人同时使用时，所有请求加起来每秒输出多少 token。",
+  "chapter": "27",
+  "anchor": "sec-5"
+ },
+ {
+  "term": "单流速度",
+  "key": "per-stream-speed",
+  "en": "per-stream speed",
+  "meaning": "单个用户自己看到的输出速度，和所有人合计的总吞吐不是一回事。",
+  "chapter": "27",
+  "anchor": "sec-5"
+ },
+ {
+  "term": "纵切",
+  "key": "vertical-slice",
+  "en": "vertical slice",
+  "meaning": "一个功能从入口贯穿到出口，每层只做必需的一点，但整条链路真实可运行。",
+  "chapter": "28",
+  "anchor": "sec-1"
+ },
+ {
+  "term": "系统设计",
+  "key": "system-design",
+  "en": "system design",
+  "meaning": "在给定约束下把部件组织成满足需求的整体，几乎总要在多个目标之间取舍。",
+  "chapter": "28",
+  "anchor": "c28-system-design"
+ },
+ {
+  "term": "取舍",
+  "key": "trade-off",
+  "en": "trade-off",
+  "meaning": "为得到一种好处而付出另一种代价，比如用显存换速度。",
+  "chapter": "28",
+  "anchor": "c28-system-design",
+  "auto": false
+ },
+ {
+  "term": "技术债",
+  "key": "technical-debt",
+  "en": "technical debt",
+  "meaning": "为了求快留下的、越积越多、迟早要还的工程代价。",
+  "chapter": "28",
+  "anchor": "c28-system-design"
+ }
+]
