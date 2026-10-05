@@ -27,7 +27,7 @@
 </svg><figcaption>Figure 24-1　"Stop" means something different at each layer. The browser layer stops first and the GPU layer stops last, and at every layer in between someone has to pass the signal on.</figcaption></figure>
 <p>To make this precise, first draw a <dfn>state machine</dfn> for the request: at any moment the request is in exactly one state, and only certain events can move it to another. Here is this book's teaching version:</p>
 <ul>
-<li><strong>Queued</strong>: the request has arrived, but the engine is serving someone else. Strata serves one sequence at a time, and later arrivals wait in a FIFO (first in, first out) queue. [S15]</li>
+<li><strong>Queued</strong>: the request has arrived, but the engine is serving someone else. By default, Strata serves one sequence at a time, and later arrivals wait in a FIFO (first in, first out) queue. [S15] v0.1.39 added a <code>"parallel": N</code> that you must turn on by hand: up to N conversations decode together in the engine, and extra requests wait for a free slot. <span class="ev ev-report">Upstream report</span>[S01] This chapter covers only the default single-sequence path.</li>
 <li><strong>Prefill</strong>: the engine reads your prompt chunk by chunk (the prefill, "reading the prompt", from Chapter 1).</li>
 <li><strong>Decode</strong>: it writes the answer one token at a time (decode, "writing the answer").</li>
 <li><strong>Done / Cancelled / Failed</strong>: three end states. Every request must end in one of them; none may be left hanging.</li>
@@ -75,7 +75,7 @@
 <text class="f-muted" fill="#5c6d66" x="324" y="79" font-size="12" text-anchor="middle">queues engine</text>
 <text class="f-muted" fill="#5c6d66" x="324" y="94" font-size="12" text-anchor="middle">output</text>
 <rect class="f-soft" fill="#e5f1df" x="20" y="116" width="360" height="48" rx="6"/>
-<text class="f-text" fill="#182f2b" x="200" y="145" font-size="13" text-anchor="middle">FIFO lock: one request at a time</text>
+<text class="f-text" fill="#182f2b" x="200" y="145" font-size="13" text-anchor="middle">FIFO lock: one request at a time by default</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 180V228M250 228V180"/>
 <path class="f-muted" fill="#5c6d66" d="M100 232l-5-8h10z"/>
 <path class="f-muted" fill="#5c6d66" d="M250 176l-5 8h10z"/>
@@ -84,10 +84,10 @@
 <rect class="f-accent" fill="#136d5a" x="10" y="234" width="380" height="56" rx="10"/>
 <text class="f-on" fill="#ffffff" x="200" y="257" font-size="13" font-weight="600" text-anchor="middle">Engine process: strata --serve</text>
 <text class="f-on" fill="#ffffff" x="200" y="278" font-size="12" text-anchor="middle">It owns the weights, expert cache and VRAM</text>
-</svg><figcaption>Figure 24-3　The server and the engine are two processes that pass text line by line through pipes. Each thread in the server has its own job, and the FIFO lock makes sure only one request uses the engine at a time.</figcaption></figure>
+</svg><figcaption>Figure 24-3　The server and the engine are two processes that pass text line by line through pipes. Each thread in the server has its own job. In the default setup, the FIFO lock makes sure only one request uses the engine at a time.</figcaption></figure>
 <p>The server starts <code>strata --serve</code> with Python's <code>subprocess.Popen</code> and connects both its standard input and its standard output to pipes. <span class="ev ev-code">Code fact</span> Once the engine has loaded its weights, it first writes a few <code>INFO</code> lines, then a <code>READY</code> line with the context length; if that line also carries <code>stop</code>, this engine version supports stopping midway. Only when the server reads <code>READY</code> does it treat the engine as "alive". After that, the server writes a <code>GEN</code> line to submit a request, and the engine answers with <code>T</code> (one token), <code>PP</code> (prefill progress), <code>DONE</code> (finished) or <code>ERR</code> (error).</p>
 <p>A dedicated reader thread puts every line of engine output into a queue. That way, the thread handling a request can wait for the next line "with a timeout": if nothing comes, it can send a heartbeat and check the cancel flag first, instead of waiting blindly forever. <span class="ev ev-code">Code fact</span></p>
-<p>The engine process can also die unexpectedly. The code has a dedicated <code>EngineDied</code> exception, and its comment names the most common cause: on Linux, being killed by the OOM killer when memory runs out. [S15] When that happens, the current request ends with an error, and when the next request arrives, the server restarts the engine with the same command.</p>
+<p>The engine process can also die unexpectedly. The code has a dedicated <code>EngineDied</code> exception, and its comment names the most common cause: on Linux, being killed by the OOM killer when memory runs out. [S15] When that happens, the current request ends with an error, and when the next request arrives, the server restarts the engine with the same command. Since v0.1.39, if the new process exits before it says <code>READY</code>, the server waits 15 seconds and tries again, up to 3 times: the VRAM of the engine that just died may take a while to come back. <span class="ev ev-code">Code fact</span></p>
 <p>Shutting the engine down normally also takes care. The server goes in three steps, waiting at most 20 seconds at each; see Figure 24-4.</p>
 <figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="Figure 24-4: shutting down the engine process takes three steps: first write QUIT so it exits on its own, then terminate, then kill; if it is still alive after all three, report an error">
 <text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">Shutting down the engine: ask nicely first</text>
