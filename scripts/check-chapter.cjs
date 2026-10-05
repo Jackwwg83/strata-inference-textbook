@@ -23,7 +23,7 @@ const need = (ok, msg) => { if (!ok) problems.push(msg); };
 if (lang !== 'zh') {
   const zh = fs.readFileSync(path.join(root, 'content/chapters', id + '.html'), 'utf8');
   const list = (h, re) => [...h.matchAll(re)].map(m => m[1]).join(',');
-  for (const [what, re] of [['widgets', /data-viz="([^"]+)"/g], ['primers', /<aside class="primer" id="([^"]+)"/g], ['h2 ids', /<h2 id="([^"]+)"/g], ['source refs', /\[((?:S|R)\d{2})\]/g], ['evidence tags', /class="ev ([a-z-]+)"/g], ['svg count', /(<svg\b)/g], ['ids', /\bid="(c\d{2}-[^"]+)"/g]]) {
+  for (const [what, re] of [['widgets', /data-viz="([^"]+)"/g], ['primers', /<aside class="primer" id="([^"]+)"/g], ['h2 ids', /<h2 id="([^"]+)"/g], ['source refs', /\[((?:S|R)\d{2})\]/g], ['evidence tags', /class="ev ([a-z-]+)"/g], ['svg count', /(<svg\b)/g], ['ids', /\bid="(c\d{2}-[^"]+)"/g], ['\\u escapes', /(\\u[0-9a-fA-F]{4})/g]]) {
     const a = list(zh, re), b = list(html, re);
     need(a === b, `${what} differ from the Chinese master: zh=[${a.slice(0, 120)}] ${lang}=[${b.slice(0, 120)}]`);
   }
