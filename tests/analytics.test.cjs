@@ -221,3 +221,27 @@ test('an existing events table gains the site column', async () => {
   assert.equal(r.status, 204);
   assert.deepEqual((await db.query('select site from events order by id')).map(x => x.site), [null, 'en']);
 });
+
+test('events record which domain the reader used', async () => {
+  assert.equal(a.hostOf('strata.matra.space'), 'strata.matra.space');
+  assert.equal(a.hostOf('Strata.Matra.Space:443'), 'strata.matra.space');
+  assert.equal(a.hostOf(''), null);
+  assert.equal(a.hostOf('bad host/<script>'), null);
+  assert.equal(a.hostOf('a'.repeat(120) + '.com'), null);
+  const db = await freshDb();
+  const send = (host, ip) => a.handleCollect(collectReq(JSON.stringify({ type: 'pageview', route: 'home' }), { host, 'x-forwarded-for': ip }), { db, salt: SALT, now: NOW });
+  await send('strata.matra.space', '1.1.1.1');
+  await send('strata.matra.space', '2.2.2.2');
+  await send('strata-inference-textbook.vercel.app', '3.3.3.3');
+  assert.deepEqual((await db.query('select host from events order by id')).map(r => r.host), ['strata.matra.space', 'strata.matra.space', 'strata-inference-textbook.vercel.app']);
+  const s = (await a.handleStats({ method: 'GET', headers: { authorization: 'Bearer ' + TOKEN }, query: { days: '7' } }, { db, token: TOKEN, now: NOW })).body;
+  assert.deepEqual(s.hosts, [{ host: 'strata.matra.space', visitors: 2, pageviews: 2 }, { host: 'strata-inference-textbook.vercel.app', visitors: 1, pageviews: 1 }]);
+});
+
+test('older rows without a domain are counted as unknown', async () => {
+  const db = await freshDb();
+  await a.ensureSchema(db);
+  await db.query(`INSERT INTO events (ts,type,route,visitor,device,browser) VALUES ($1,'pageview','home','v','desktop','Chrome')`, [NOW.toISOString()]);
+  const s = (await a.handleStats({ method: 'GET', headers: { authorization: 'Bearer ' + TOKEN }, query: { days: '7' } }, { db, token: TOKEN, now: NOW })).body;
+  assert.deepEqual(s.hosts, [{ host: null, visitors: 1, pageviews: 1 }]);
+});
