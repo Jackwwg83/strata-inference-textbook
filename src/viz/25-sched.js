@@ -1,5 +1,6 @@
 /* Chapter 25 widgets: FIFO / SJF / round-robin on the same arrivals, and the M/M/1 waiting-time curve.
-   A design exercise, not an upstream feature: upstream Strata serves one sequence at a time behind a FIFO.
+   A design exercise: by default upstream Strata serves one sequence at a time behind a FIFO; v0.1.39 (6f32ec0)
+   adds opt-in batch slots ("parallel": N, docs/BATCHING.md). No widget here models those slots.
    All visible text lives in the T tables below, keyed by language (zh is the master). */
 (function (root) {
   'use strict';
@@ -9,7 +10,7 @@
   const T = Viz.t({
     zh: {
       code: 'SCHED_RACE', title: '三种调度，同一批请求', tag: '教学推演 · 1 格 = 生成 1 个 token 的时间',
-      intro: '一台引擎一次只能服务一个请求。同一批请求按到达时间排好，分别交给三种调度策略：<b>FIFO</b> 按到达顺序，<b>SJF</b> 挑最短的先做，<b>轮转</b>每人轮流做一个时间片。按 <b>开始比较</b>，看三条时间线怎样一格格长出来。',
+      intro: '假设引擎一次只服务一个请求，就像 Strata 的默认配置。同一批请求按到达时间排好，分别交给三种调度策略：<b>FIFO</b> 按到达顺序，<b>SJF</b> 挑最短的先做，<b>轮转</b>每人轮流做一个时间片。按 <b>开始比较</b>，看三条时间线怎样一格格长出来。',
       lgArrive: j => `${j.id}：第 ${j.arrive} 格到，要 ${j.len} 格`,
       steps: ['FIFO 先来先服务', 'SJF 短作业优先', '轮转', '比较'],
       lanes: { fifo: 'FIFO 先来先服务', sjf: 'SJF 短作业优先（不抢占）', rr: q => `轮转（时间片 ${q} 格）` },

@@ -99,3 +99,12 @@ test('expected distinct experts per layer for a batch, and the memory budget', (
   assert.equal(m.budget(5), 34);
   assert.equal(m.budget(1), 26);
 });
+
+test('the scheduler widget calls one request at a time the default, not the only mode (Strata v0.1.39)', () => {
+  require('../src/viz/core.js');
+  require('../src/viz/25-sched.js');
+  const t = globalThis.Viz.tables.find(x => x.zh && x.zh.code === 'SCHED_RACE');
+  assert.ok(t, 'the SCHED_RACE table is registered');
+  assert.match(t.zh.intro, /默认/);
+  assert.doesNotMatch(t.zh.intro, /只能服务一个请求/);
+});
