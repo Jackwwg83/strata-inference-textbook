@@ -245,3 +245,37 @@ test('older rows without a domain are counted as unknown', async () => {
   const s = (await a.handleStats({ method: 'GET', headers: { authorization: 'Bearer ' + TOKEN }, query: { days: '7' } }, { db, token: TOKEN, now: NOW })).body;
   assert.deepEqual(s.hosts, [{ host: null, visitors: 1, pageviews: 1 }]);
 });
+
+test('read events carry active seconds and scroll depth for a chapter', () => {
+  assert.deepEqual(a.sanitizeEvent({ type: 'read', route: 'chapter/05', detail: '125:75' }),
+    { type: 'read', route: 'chapter/05', chapter: '05', lab: null, detail: '125:75', ref: null, lang: null, site: 'zh' });
+  assert.equal(a.sanitizeEvent({ type: 'read', route: 'home', detail: '125:75' }), null);
+  assert.equal(a.sanitizeEvent({ type: 'read', route: 'chapter/05', detail: '125:60' }), null);
+  assert.equal(a.sanitizeEvent({ type: 'read', route: 'chapter/05', detail: '99999:100' }), null);
+  assert.equal(a.sanitizeEvent({ type: 'read', route: 'chapter/05', detail: '7201:100' }), null);
+  assert.equal(a.sanitizeEvent({ type: 'read', route: 'chapter/05', detail: '7200:100' }).detail, '7200:100');
+  assert.equal(a.sanitizeEvent({ type: 'read', route: 'chapter/05', detail: '5:0' }).detail, '5:0');
+});
+
+test('lab guesses record the choice and whether it was right', () => {
+  assert.equal(a.sanitizeEvent({ type: 'lab_guess', route: 'lab/cache', detail: '1:correct' }).lab, 'cache');
+  assert.equal(a.sanitizeEvent({ type: 'lab_guess', route: 'chapter/05', detail: '1:correct' }), null);
+  assert.equal(a.sanitizeEvent({ type: 'lab_guess', route: 'lab/cache', detail: '3:correct' }), null);
+});
+
+test('stats report reading time, depth and lab guesses', async () => {
+  const db = await freshDb();
+  const send = (body, ip) => a.handleCollect(collectReq(JSON.stringify(body), { 'x-forwarded-for': ip }), { db, salt: SALT, now: NOW });
+  // Visitor 1 reads chapter 05 twice (60 s then 120 s, reaching 50 then 100); visitor 2 reads 30 s to 25; visitor 3 reads 300 s to 75.
+  await send({ type: 'read', route: 'chapter/05', detail: '60:50' }, '1.1.1.1');
+  await send({ type: 'read', route: 'chapter/05', detail: '120:100' }, '1.1.1.1');
+  await send({ type: 'read', route: 'chapter/05', detail: '30:25' }, '2.2.2.2');
+  await send({ type: 'read', route: 'chapter/05', detail: '300:75' }, '3.3.3.3');
+  await send({ type: 'lab_guess', route: 'lab/cache', detail: '1:correct' }, '1.1.1.1');
+  await send({ type: 'lab_guess', route: 'lab/cache', detail: '0:incorrect' }, '2.2.2.2');
+  await send({ type: 'lab_guess', route: 'lab/cache', detail: '0:incorrect' }, '3.3.3.3');
+  const s = (await a.handleStats({ method: 'GET', headers: { authorization: 'Bearer ' + TOKEN }, query: { days: '7' } }, { db, token: TOKEN, now: NOW })).body;
+  // Per-visitor totals are 180, 30 and 300 s: median 180. Max depth per visitor: 100, 25, 75.
+  assert.deepEqual(s.reading, [{ chapter: '05', readers: 3, median_seconds: 180, half: 2, finished: 1 }]);
+  assert.deepEqual(s.guesses, [{ lab: 'cache', answers: 3, correct: 1, c0: 2, c1: 1, c2: 0, right: 1 }]);
+});
