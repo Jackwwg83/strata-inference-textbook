@@ -78,3 +78,25 @@ test('widget string tables keep the Chinese keys and arities in every language',
     }
   }
 });
+
+test('published translations carry every lab experiment with the same structure', () => {
+  const fs = require('node:fs'), path = require('node:path');
+  const root = path.join(__dirname, '..');
+  const master = JSON.parse(fs.readFileSync(path.join(root, 'content/labs.json'), 'utf8')).filter(l => l.experiment);
+  const cfg = JSON.parse(fs.readFileSync(path.join(root, 'content/i18n/languages.json'), 'utf8'));
+  for (const [lang, c] of Object.entries(cfg)) {
+    if (!c.published) continue;
+    const tr = new Map(JSON.parse(fs.readFileSync(path.join(root, `content/i18n/${lang}/labs.json`), 'utf8')).map(l => [l.id, l]));
+    for (const l of master) {
+      const e = tr.get(l.id) && tr.get(l.id).experiment;
+      assert.ok(e, `${lang} lab ${l.id} has no experiment`);
+      assert.equal(e.correct, l.experiment.correct, `${lang} lab ${l.id} correct index`);
+      assert.equal(e.widget, l.experiment.widget, `${lang} lab ${l.id} widget`);
+      assert.equal(e.choices.length, 3, `${lang} lab ${l.id} choices`);
+      assert.equal(e.steps.length, l.experiment.steps.length, `${lang} lab ${l.id} steps`);
+      for (const k of ['question', 'answer', 'extra']) if (l.experiment[k]) assert.ok(typeof e[k] === 'string' && e[k].length > 3, `${lang} lab ${l.id} ${k}`);
+      // The sse lab quotes its Chinese sample text (你好，世界！) on purpose, like the wireDeltas widget key.
+      if (l.id !== 'sse' && lang !== 'ja') assert.ok(!/[\u4e00-\u9fff]/.test(JSON.stringify(e)), `${lang} lab ${l.id} contains Chinese`);
+    }
+  }
+});

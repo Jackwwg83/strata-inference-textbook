@@ -149,3 +149,21 @@ test('every interactive figure in the chapters has a registered widget and a sta
  }
  for(const name of globalThis.Viz.names())assert.ok(used.has(name),'widget '+name+' is registered but no chapter uses it');
 });
+
+test('a lab experiment asks one question, lets the reader guess, and runs a real widget',()=>{
+  require(path.join(root,'src/viz/core.js'));
+  const vizDir=path.join(root,'src/viz');
+  for(const f of fs.readdirSync(vizDir).filter(f=>f.endsWith('.js')&&f!=='core.js').sort((a,b)=>(a.endsWith('.math.js')?0:1)-(b.endsWith('.math.js')?0:1)||a.localeCompare(b)))require(path.join(vizDir,f));
+  const withExp=labs.filter(l=>l.experiment);
+  assert.ok(withExp.length>=1,'at least one lab uses the experiment format');
+  for(const l of withExp){
+    const e=l.experiment;
+    assert.ok(typeof e.question==='string'&&e.question.length>5,l.id+' question');
+    assert.ok(Array.isArray(e.choices)&&e.choices.length===3,l.id+' needs 3 choices');
+    assert.ok(Number.isInteger(e.correct)&&e.correct>=0&&e.correct<3,l.id+' correct index');
+    assert.ok(Array.isArray(e.steps)&&e.steps.length>=2&&e.steps.length<=4,l.id+' needs 2-4 steps');
+    assert.ok(globalThis.Viz.has(e.widget),l.id+' widget not registered: '+e.widget);
+    assert.ok(typeof e.answer==='string'&&e.answer.length>20,l.id+' answer');
+    if(e.extra!==undefined)assert.ok(typeof e.extra==='string'&&e.extra.length>4,l.id+' extra section title');
+  }
+});
