@@ -6,6 +6,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { isolateNumbers } = require('./rtl.cjs');
 const I18N = require('../src/i18n.js');
 const root = path.resolve(__dirname, '..');
 const read = p => fs.readFileSync(path.join(root, p), 'utf8');
@@ -51,6 +52,7 @@ function loadBook(lang) {
     const own = lang === 'zh' ? `content/chapters/${c.id}.html` : `content/i18n/${lang}/chapters/${c.id}.html`;
     if (!exists(own)) missing.push(`chapters/${c.id}.html`);
     c.html = read(exists(own) ? own : `content/chapters/${c.id}.html`);
+    if (RTL.has(lang)) c.html = isolateNumbers(c.html);
     c.plain = plain(c.html);
   }
   Book.teacher = lang === 'zh' ? read('content/teacher.html') : '';
