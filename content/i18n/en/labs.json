@@ -5,7 +5,24 @@
     "category": "Systems intro",
     "description": "Step through the boundaries between message, state, execution and output.",
     "assumptions": "The path is a teaching sketch; a real engine has loops, branches and several modes.",
-    "task": "Write down the input and output of every step, then propose one failure case for one of the arrows."
+    "task": "Write down the input and output of every step, then propose one failure case for one of the arrows.",
+    "experiment": {
+      "question": "The longer the prompt, what happens to the wait for the first word of the answer?",
+      "choices": [
+        "Faster: the engine is already warm",
+        "Slower: it must read the whole prompt first",
+        "About the same: reading is quick and can be ignored"
+      ],
+      "correct": 1,
+      "steps": [
+        "First pick a guess above.",
+        "Drag “Prompt length” from 4K to 128K. Watch the seconds under “Wait for the first word” on the right.",
+        "Then drag “Answer length”. See whether “Wait for the first word” changes or “Finish the answer” changes."
+      ],
+      "widget": "first-token-wait",
+      "answer": "Slower. The engine must read the whole prompt before it can write the first word. A 4K prompt waits about 3 seconds. A 128K prompt waits almost 1 minute. The speed of writing the answer hardly depends on prompt length, because each round produces only one token. Different factors decide the two times. Chapter 1, section 1.2 and chapter 16 explain this in detail.",
+      "extra": "Extra: the six stages of one token (click a cell to see each step)"
+    }
   },
   {
     "id": "sampling",
@@ -13,7 +30,24 @@
     "category": "Probability and numerics",
     "description": "Tune the temperature and the random number; see how the distribution differs from the draw.",
     "assumptions": "Uses only three scores; does not simulate the full top-k / top-p / penalty chain.",
-    "task": "Fix u and change the temperature, then fix the temperature and change u. Explain which one changes the distribution."
+    "task": "Fix u and change the temperature, then fix the temperature and change u. Explain which one changes the distribution.",
+    "experiment": {
+      "question": "Raise the temperature from 1 to 2. What happens to “cat”, the word with the highest probability?",
+      "choices": [
+        "Another word overtakes it, and it is no longer first",
+        "Its probability drops, but it is still first",
+        "No change: temperature only affects the dice roll"
+      ],
+      "correct": 1,
+      "steps": [
+        "First pick a guess above.",
+        "Drag “Temperature T” from 1.0 to 2.0. Watch “Probability of \"cat\"” on the right, then the order of the five probability bars on the left.",
+        "Then drag “Temperature T” to 0.2 and see what “Probability of \"cat\"” becomes."
+      ],
+      "widget": "softmax-temperature",
+      "answer": "Its probability drops, but it is still first. At temperature 1.0, “cat” has 62.4%. At temperature 2.0, it drops to 41.7%, and the runner-up “dog” has only 25.3%. At temperature 0.2, “cat” rises to 99.3%. Temperature divides every score by the same number. It only widens or narrows the gaps. It never changes which word is higher. Chapter 2, section 2.3 explains this in detail.",
+      "extra": "Extra: fix the three scores at [2, 1, 0] and tune the temperature and the random number u separately"
+    }
   },
   {
     "id": "matrix",
@@ -21,7 +55,24 @@
     "category": "Linear algebra",
     "description": "Change the input and see each row's dot product and the output shape.",
     "assumptions": "A teaching GEMV on a fixed 2×3 matrix; it does not measure hardware speed.",
-    "task": "Predict the result on paper first, then change one input element and see which outputs change."
+    "task": "Predict the result on paper first, then change one input element and see which outputs change.",
+    "experiment": {
+      "question": "Compute 8 inputs at once instead of 1. What happens to the number of multiply-adds and to the weights that must be read?",
+      "choices": [
+        "Both grow 8 times: every input reads the weights again",
+        "Multiply-adds grow 8 times, and the weights stay the same 6",
+        "Neither changes: the matrix has not changed"
+      ],
+      "correct": 1,
+      "steps": [
+        "First pick a guess above.",
+        "Drag “Inputs computed at once (b)” from 1 to 8. Watch “Multiply-adds” on the right.",
+        "Then see what “Uses per weight read” becomes."
+      ],
+      "widget": "matvec-steps",
+      "answer": "Multiply-adds grow 8 times, and the weights stay the same 6. With b = 1, there are 6 multiply-adds, and each weight is used 1 time. With b = 8, there are 48 multiply-adds, and each weight read is used 8 times. W has only 2 × 3 = 6 numbers. Read them once, and they serve all 8 inputs in turn. b = 1 is called GEMV, and b > 1 is called GEMM. Chapter 3, section 3.2 explains this in detail.",
+      "extra": "Extra: drag the three numbers of x and see each row's products and sum"
+    }
   },
   {
     "id": "quant",
@@ -29,7 +80,25 @@
     "category": "Probability and numerics",
     "description": "Watch outliers, bit width, scale and MSE interact.",
     "assumptions": "Symmetric uniform quantization; not the IQ family or a real KV format.",
-    "task": "Record the error at 2, 4 and 8 bits, then add an outlier and compare the cost of a shared scale."
+    "task": "Record the error at 2, 4 and 8 bits, then add an outlier and compare the cost of a shared scale.",
+    "experiment": {
+      "question": "16 weights share one scale s. Mix in one outlier of −2.8. What happens to the error of the whole block?",
+      "choices": [
+        "Almost no change: only the outlier itself has a large error",
+        "It grows dozens of times: s is stretched, and small weights round to 0",
+        "It shrinks: the range is wider, so the steps are finer"
+      ],
+      "correct": 1,
+      "steps": [
+        "First pick a guess above.",
+        "Keep “Bits b” = 4 and “Group size” = 16. Note the “Mean squared error (MSE)” on the right.",
+        "Tick “Add an outlier (−2.8)”. Watch “Mean squared error (MSE)” and “Scale s of group 1”.",
+        "Then drag “Group size” from 16 to 4. Watch the MSE and “Real bits per weight”."
+      ],
+      "widget": "quant-block",
+      "answer": "It grows dozens of times. Without the outlier, s = 0.0671 and MSE = 3.97e-4. With −2.8 added, s = 0.400 and MSE = 9.69e-3, about 24 times higher. Under the bars, 7 small weights have code 0. With groups of 4, the MSE drops to 2.88e-3. But each weight grows from 5 bits to 8 bits, because each group must store an extra 16-bit s. Chapter 4, section 4.3 explains this in detail.",
+      "extra": "Extra: a quantization table for 4 numbers; tune the bit width and the outlier multiple yourself"
+    }
   },
   {
     "id": "roofline",
@@ -37,7 +106,25 @@
     "category": "Computer architecture",
     "description": "Compute the theoretical lower bound and the Amdahl overall speedup together.",
     "assumptions": "Bandwidth and compute are input assumptions; the fixed overhead cannot be hidden; this does not predict a real GPU.",
-    "task": "Double the speed of one stage and see why the end-to-end gain does not double."
+    "task": "Double the speed of one stage and see why the end-to-end gain does not double.",
+    "experiment": {
+      "question": "Writing an answer computes only 1 token at a time. How much of the GPU's 50 TFLOPS of compute can it use?",
+      "choices": [
+        "Almost all: the GPU is always computing",
+        "About half",
+        "Less than 2%: most of the time it waits for data"
+      ],
+      "correct": 2,
+      "steps": [
+        "First pick a guess above.",
+        "Keep FP16 and “tokens per batch (b)” = 1. Read “achievable throughput” and “bottleneck” on the right.",
+        "Drag “tokens per batch (b)” from 1 to 128, then read the same two items.",
+        "Drag b back to 1, click “Q2_0” above, and read “achievable throughput” again."
+      ],
+      "widget": "roofline-lab",
+      "answer": "Less than 2%. With b = 1 and FP16, the arithmetic intensity I = 1. Only 0.672 TFLOPS can be used, about 1.3% of the limit, and the bottleneck is bandwidth. With b = 128, I = 128. That is past the ridge point (about 74), so the full 50 TFLOPS can be used. With Q2_0 and the same b = 1, I is about 7.11, and 4.78 TFLOPS can be used. Speed depends on how many operations you do per byte you read. Chapter 5, section 5.2 explains this in detail.",
+      "extra": "Extra: set the workload, bandwidth and compute yourself; work out the time lower bound and the overall speedup"
+    }
   },
   {
     "id": "gdn",
@@ -45,7 +132,24 @@
     "category": "Model and state",
     "description": "A one-dimensional GDN; compare the correct and the wrong update order.",
     "assumptions": "One scalar state only; no real multiple heads, projections, convolution or normalization.",
-    "task": "Set α=0, β=0 or k=0 and check each boundary property one by one."
+    "task": "Set α=0, β=0 or k=0 and check each boundary property one by one.",
+    "experiment": {
+      "question": "Take the same parameters. Is the new state the same for “write, then decay” and for “decay, then write”?",
+      "choices": [
+        "The same: only the order differs",
+        "Different: the wrong order also discounts what was just written",
+        "Different: the wrong order gives NaN or an error"
+      ],
+      "correct": 1,
+      "steps": [
+        "First pick a guess above.",
+        "Click “Textbook example”, then press “▶▶ Finish”. Look at “Difference between them” on the right.",
+        "Drag “Decay α” from 0.5 to 1, press “▶▶ Finish” again, and look at “Difference between them”."
+      ],
+      "widget": "gdn-order",
+      "answer": "Different. In the textbook example (α = 0.5), decay then write gives 1.5, and write then decay gives 1.125. The difference is -0.375. The wrong order also multiplies the 0.25 just written by α, so it forgets half of it right after noting it. With α = 1, both orders give 2.25, and the difference is 0. So the error shows only when α ≠ 1. Both results are normal finite numbers, and there is no error. Chapter 9, section 9.4 explains this in detail.",
+      "extra": "Extra: a term-by-term table for the one-dimensional GDN; set S, α, β, k and v yourself"
+    }
   },
   {
     "id": "cache",
@@ -53,7 +157,24 @@
     "category": "Computer architecture",
     "description": "Compare LRU, LFU, FIFO and 8-way rotation on the same trace.",
     "assumptions": "Not the upstream adaptive expert policy; sets are picked by integer modulo, not the upstream mix.",
-    "task": "With 16 slots and 9 odd keys in the same set, compare fully associative LRU with 8-way rotation."
+    "task": "With 16 slots and 9 odd keys in the same set, compare fully associative LRU with 8-way rotation.",
+    "experiment": {
+      "question": "The cache has 16 slots, split into 2 sets of 8 ways by “row mod 2”. 9 odd row numbers are accessed in turn, 4 times each. What is the hit rate, roughly?",
+      "choices": [
+        "About the same as free placement: 16 slots hold 9 rows",
+        "About half: each of the 2 sets gets half",
+        "0%: all 9 rows crowd into the 8 slots of one set"
+      ],
+      "correct": 2,
+      "steps": [
+        "First pick a guess above.",
+        "Click “Conflict: 9 odd rows take turns” and press “▶▶ Run to end”. Read “Set associative + rotation (Strata's way)” and “Fully associative LRU (comparison)” on the right.",
+        "Then click “Hot spot: a few rows repeat” and press “▶▶ Run to end”. Compare the two hit rates."
+      ],
+      "widget": "row-cache",
+      "answer": "0%. All 9 odd rows fall into set 1, and this set has only 8 slots. Each new row evicts the row that is needed next. Set associative + rotation hits 0%. A fully associative LRU with the same 16 slots hits 75%. With hot-spot access, both methods reach 77%. Enough total capacity does not mean enough room in every set. This is called a conflict miss. Chapter 11, section 11.4 explains this in detail.",
+      "extra": "Extra: enter your own access sequence and compare LRU, LFU, FIFO and eight-way rotation"
+    }
   },
   {
     "id": "hetero",
@@ -61,7 +182,25 @@
     "category": "Computer architecture",
     "description": "Change the split ratio and find the ideal balance between the two branches.",
     "assumptions": "The two branches are assumed independent and their effective rates are inputs; real DRAM contention is ignored.",
-    "task": "Halve the effective rate of the PCIe branch and explain why an even split no longer works."
+    "task": "Halve the effective rate of the PCIe branch and explain why an even split no longer works.",
+    "experiment": {
+      "question": "With a hit rate of 65%, the experts that missed can run on the CPU, or go over PCIe to run on the GPU. How should you split them to make this layer fastest?",
+      "choices": [
+        "All to the CPU: skip the PCIe transfer",
+        "All to the GPU: the GPU is much faster than the CPU",
+        "Split between both, so both finish at the same time"
+      ],
+      "correct": 2,
+      "steps": [
+        "First pick a guess above.",
+        "Keep “Hit rate h” = 65%. Drag “PCIe share f” to 0% and read “Time for this layer” on the right.",
+        "Drag “PCIe share f” to 100% and read “Time for this layer” again.",
+        "Press “Set best share” and read “Time for this layer” and “CPU branch / GPU branch”."
+      ],
+      "widget": "layer-timeline",
+      "answer": "Split between both. At f = 0%, this layer takes 0.421 ms, and the CPU branch is the critical path. At f = 100%, it takes 0.400 ms, and the GPU branch is the critical path again. Press “Set best share”: f becomes 50%, and the layer takes only 0.362 ms. The CPU and GPU branches take 0.060 and 0.062 ms, so they finish almost together. When both sides run at the same time, the slower side sets the time of the layer. Chapter 13, sections 13.3 and 13.6 explain this in detail.",
+      "extra": "Extra: change the effective speed of the two branches and plot the split ratio against the time"
+    }
   },
   {
     "id": "prefill",
@@ -69,7 +208,24 @@
     "category": "Model and state",
     "description": "Pick a feasible chunk under an explicit teaching cost curve.",
     "assumptions": "The reuse curve and per-token scratch are made-up parameters; this is not an allocator simulation.",
-    "task": "Find the fastest chunk first, then rule out the ones over budget, and compare the best feasible with the absolute best."
+    "task": "Find the fastest chunk first, then rule out the ones over budget, and compare the best feasible with the absolute best.",
+    "experiment": {
+      "question": "While reading the prompt, raise the tokens per chunk from 1 to 8,192. What happens to the prompt-reading speed?",
+      "choices": [
+        "It always rises in proportion: bigger chunks are always better",
+        "It rises fast, then flattens at about 2,048",
+        "No change: the total number of tokens to compute is the same"
+      ],
+      "correct": 1,
+      "steps": [
+        "First pick a guess above.",
+        "Keep “Prompt length N” = 32,768. Drag “Tokens per chunk C” to 1 and read “Prefill speed” on the right.",
+        "Drag C to 1,024, 2,048 and 8,192 in turn. Each time, read “Prefill speed” and “Time per chunk”."
+      ],
+      "widget": "prefill-chunk",
+      "answer": "It rises fast, then flattens at about 2,048. With C = 1, the speed is only 2 token/s. At 1,024 it is 1,683 token/s. At 2,048 it is 2,462 token/s. At 8,192 it is 2,490 token/s, close to the limit 1 ÷ u = 2,500. Every chunk spends 600 ms moving the weights once. When C × u catches up with these 600 ms (C is about 1,500), the computing hides the move. A bigger chunk then only uses more VRAM. Chapter 16, section 16.4 explains this in detail.",
+      "extra": "Extra: add a scratch VRAM budget and find the fastest chunk that fits"
+    }
   },
   {
     "id": "kv",
@@ -77,7 +233,24 @@
     "category": "Model and state",
     "description": "Use the fixed geometry to compute the main KV, the resident window and the main GDN state.",
     "assumptions": "The quantization metadata ratio is a made-up estimate; full engine overhead is not counted, and the lab does not imply every format combination is supported.",
-    "task": "Change 32K to 128K, then make it five active sequences, and check the bytes and GiB."
+    "task": "Change 32K to 128K, then make it five active sequences, and check the bytes and GiB.",
+    "experiment": {
+      "question": "A conversation's context grows from 32K to 128K (4 times). How big does its KV cache become?",
+      "choices": [
+        "About the same: the old history gets compressed",
+        "4 times: each token takes a fixed number of bytes",
+        "16 times: attention compute is n²"
+      ],
+      "correct": 1,
+      "steps": [
+        "First pick a guess above.",
+        "Keep FP16. Drag “Context length” from 32,768 token to 131,072 token. Watch “KV of one conversation” on the right.",
+        "Press “KV streaming: off” to turn streaming on. Watch “VRAM total (the running conversation)” and “RAM total”."
+      ],
+      "widget": "kv-budget",
+      "answer": "4 times. With FP16, the KV of each token is a fixed 24,576 bytes. One conversation is 0.75 GiB at 32K and 3.00 GiB at 128K. n² describes the compute of attention. KV stores one copy per position, so it grows only linearly with length. With streaming on, the VRAM total drops from 3.11 GiB to 0.86 GiB. The RAM holds the full 3.00 GiB history. The history is not lost. It only moved. Chapter 17, sections 17.2, 17.3 and 17.5 explain this in detail.",
+      "extra": "Extra: a KV budget with several sequences, a resident window and metadata overhead"
+    }
   },
   {
     "id": "spec",
@@ -85,7 +258,25 @@
     "category": "Speculation and reuse",
     "description": "Compare the expected tokens, time and net gain for k=0…5.",
     "assumptions": "One conditional acceptance rate p for every position; the cost is a linear teaching formula, not the full upstream CostModel.",
-    "task": "Set p=0 and p=1, then raise the draft cost, and confirm the controller can fall back to no draft."
+    "task": "Set p=0 and p=1, then raise the draft cost, and confirm the controller can fall back to no draft.",
+    "experiment": {
+      "question": "The draft acceptance rate p falls from 0.86 to 0.5. What happens to the most profitable number of drafts?",
+      "choices": [
+        "No change: acceptance rate only affects how many guesses are right",
+        "It grows: guess more, and more will always hit",
+        "It shrinks: the later drafts are almost wasted guesses"
+      ],
+      "correct": 2,
+      "steps": [
+        "First pick a guess above.",
+        "Leave the other two sliders alone. Read “Strata's rule would pick” and “Speed” on the right.",
+        "Drag “Acceptance rate p” from 0.86 to 0.50 and read the same two items.",
+        "Then drag “Acceptance rate p” to 0.40 and look at “Strata's rule would pick”."
+      ],
+      "widget": "draft-window",
+      "answer": "It shrinks. At p = 0.86, the rule picks k = 3, with a speed of 72.8 token/s, which is 1.49 times the speed without guessing. At p = 0.50, it picks k = 1, with 54.0 token/s. At p = 0.40, it picks k = 0, no guessing, with 48.8 token/s, because k = 1 is less than 5% faster than no guessing. The k-th draft adds only p^k tokens on average, while a wider window costs more. Chapter 19, section 19.3 explains this in detail.",
+      "extra": "Extra: a table of gains for k = 0…5 under the linear cost model"
+    }
   },
   {
     "id": "commit",
@@ -93,7 +284,24 @@
     "category": "Speculation and reuse",
     "description": "Shows why the candidate state and the committed state differ.",
     "assumptions": "Toy recurrence s←0.5s+t; does not simulate Verifier row 0 or the target token offset.",
-    "task": "Make the second draft get rejected, and point out which wrong state is left behind if you roll back only the counter."
+    "task": "Make the second draft get rejected, and point out which wrong state is left behind if you roll back only the counter.",
+    "experiment": {
+      "question": "You guess 3 drafts. The 2nd is wrong, and the 3rd happens to match the real text. How many rows does this round commit (n_keep)?",
+      "choices": [
+        "1 row: one guess is wrong, so the whole round is void",
+        "2 rows: keep only the prefix before the wrong guess",
+        "3 rows: drop only the wrong one"
+      ],
+      "correct": 1,
+      "steps": [
+        "First pick a guess above.",
+        "Keep “Draft length k” = 3 and press “▶▶ Finish this round”. In round 1, all 3 drafts are right, and “n_keep committed this round” on the right is 4.",
+        "Press “▶▶ Finish this round” again to run round 2 (the 2nd draft is wrong). Read “n_keep committed this round” and “Tokens output”."
+      ],
+      "widget": "spec-verify",
+      "answer": "2 rows. In round 2, only the 1st draft is accepted, so n_keep = 1 + 1 = 2. “Tokens output” goes from 4 to 6. The extra tokens are the accepted draft and the token the target model picks itself at the wrong guess. The 3rd draft matches the real text, but it was guessed after the wrong word. Its premise does not hold, so it must be dropped. The KV it wrote tentatively is also marked to be overwritten. Chapter 18, section 18.2 explains this in detail.",
+      "extra": "Extra: what wrong state is left if you only roll back the counter (toy recurrence)"
+    }
   },
   {
     "id": "sse",
@@ -101,7 +309,24 @@
     "category": "Serving and scheduling",
     "description": "Cut a Chinese text stream into pieces of any length and rebuild the events incrementally.",
     "assumptions": "A data-only JSON SSE subset that handles LF/CRLF for this example; no full EventSource reconnection.",
-    "task": "Try every chunk size from 1 byte to 32 bytes; the output must stay the same two Chinese characters."
+    "task": "Try every chunk size from 1 byte to 32 bytes; the output must stay the same two Chinese characters.",
+    "experiment": {
+      "question": "The answer is “你好，世界！”, 6 characters. The network sends at most 7 bytes per chunk, and a careless client decodes each chunk on its own. How many characters are right on screen?",
+      "choices": [
+        "All 6: the bytes all arrive in the end",
+        "About 5: only the split character is wrong",
+        "None: the chunks always cut through a character or an event"
+      ],
+      "correct": 2,
+      "steps": [
+        "First pick a guess above.",
+        "Keep “Max bytes per chunk” = 7 and press “▶▶ Receive all”. Read “Characters the careless client lost” on the right, then look at the text of the two clients below.",
+        "Drag “Max bytes per chunk” to 64 and press “▶▶ Receive all” again. Read “Characters the careless client lost”."
+      ],
+      "widget": "sse-chunk-split",
+      "answer": "None. With at most 7 bytes per chunk, 126 bytes are cut into 34 chunks, and the careless client loses 6 characters. At 64 bytes, there are only 5 chunks, and it still loses 4 characters and shows only “，！”. The correct client shows “你好，世界！” both times. One Chinese character takes 3 bytes, and one event has twenty-some bytes. Chunk boundaries have nothing to do with character or event boundaries. So you must collect the bytes first, then decode, then split into frames. Chapter 23, section 23.3 explains this in detail.",
+      "extra": "Extra: fix the chunk size, switch LF / CRLF, and see the raw events and the hex chunks"
+    }
   },
   {
     "id": "scheduler",
@@ -109,6 +334,23 @@
     "category": "Serving and scheduling",
     "description": "Compare FCFS and round-robin on first-token time, completion time and switching cost.",
     "assumptions": "All requests are ready at t=0, 1 token = 1 ms, no real GPU batching or prefill.",
-    "task": "Raise the switching cost and watch the trade-off between better fairness and total throughput."
+    "task": "Raise the switching cost and watch the trade-off between better fairness and total throughput.",
+    "experiment": {
+      "question": "Long request A arrives first, and short requests B, C and D follow right behind. Raise the round-robin time slice from 2 ticks to 8. What happens to the round-robin average wait?",
+      "choices": [
+        "It gets shorter: there are fewer switches",
+        "It gets longer, the same as FIFO",
+        "No change: the total work is the same"
+      ],
+      "correct": 1,
+      "steps": [
+        "First pick a guess above.",
+        "Choose “Long request first” and keep “Round-robin time slice (ticks)” = 2. Press “▶ Compare” and read “FIFO average wait” and “Round-robin average wait” on the right.",
+        "Drag “Round-robin time slice (ticks)” to 8, press “▶ Compare” again, and read the same two items."
+      ],
+      "widget": "sched-race",
+      "answer": "It gets longer, the same as FIFO. With a 2-tick slice, the round-robin average wait is 4.25 ticks, and FIFO is 6.25 ticks. With an 8-tick slice, round-robin is also 6.25 ticks, and the switches drop from 6 to 3. 8 ticks is enough for A to finish in one go, so B, C and D are blocked behind A again, and round-robin degrades into first come, first served. This example does not count switch cost, so fewer switches save no time. Chapter 25, section 25.2 explains this in detail.",
+      "extra": "Extra: enter your own request lengths and add a switch cost"
+    }
   }
 ]
