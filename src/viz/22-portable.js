@@ -22,10 +22,10 @@
       sFlagK: '这次配置用的开关', sTierK: 'CMake 对这个架构的态度',
       branch: {
         'cuda-hw': '硬件 __dp4a 指令', 'cuda-sw': '软件循环 strata_dp4a', 'hip-sudot4': 'v_dot4_i32_iu8（sudot4）',
-        'hip-sdot4': 'v_dot4_i32_i8（sdot4）', 'hip-loop': '可移植的逐字节循环',
+        'hip-sdot4': 'v_dot4_i32_i8（sdot4）', 'hip-sdwa': 'RDNA1 的 SDWA 汇编（v_mul_i32_i24 + v_add3_u32）', 'hip-loop': '可移植的逐字节循环',
       },
       tier: {
-        ok: '正常构建', experimental: '实验构建：上游不支持', validated: '维护者在真卡上验证过', community: '用户在真卡上验证过',
+        ok: '正常构建', experimental: '实验构建：维护者没有这类卡，只验证了能编译', validated: '维护者在真卡上验证过', community: '用户在真卡上验证过',
         unvalidated: '能编译，但给出警告：还没在真卡上验证', refused: '直接报错，拒绝配置',
       },
       try: [
@@ -35,7 +35,7 @@
       ],
       l0ok: (flags) => `<span class="c">[cmake]</span> ${flags}：架构在名单里，继续`,
       l0warn: (arch) => `<span class="y">[cmake] 警告</span>：${arch} 能编译，但还没有人在真卡上验证过，请回报结果`,
-      l0exp: '<span class="y">[cmake]</span> 打开了 STRATA_EXPERIMENTAL_SM60：低于 7.5 的老卡只走社区实验构建',
+      l0exp: '<span class="y">[cmake]</span> 打开了 STRATA_EXPERIMENTAL_SM60：低于 7.5 的老卡只走实验构建（v0.1.39 起 setup 另备一个 CUDA 12 引擎给这类卡）',
       l0no: (arch) => `<span class="m">[cmake] FATAL_ERROR</span>：${arch} 不在支持名单里，配置到此为止，什么也不编译`,
       l1cuda: '<span class="c">[include]</span> CUDA 构建直接用 NVIDIA 自己的头文件，不需要垫片',
       l1hip: '<span class="c">[include]</span> 编译器参数 <code>-include hip_compat/cuda_runtime.h</code>：每个源文件开头都被塞进这份“改名表”',
@@ -48,7 +48,7 @@
       l5hip: (arch) => `<span class="c">[run]</span> 启动检查：显卡架构必须是 ${arch}，而且一组线程必须是 32 个（wave32），否则直接报错退出`,
       done: (v) => `<span class="y">完成</span>：同一份源码，换了一套机器码。例题 dp4a = ${v}`,
       vOk: (name, v) => `① 源码一行没改，预处理器把名字换成了目标平台的说法，并为 dp4a 留下了“${name}”这一个分支。<br>② 例题结果是 <b>${v}</b>。dp4a 是整数运算，每条分支都逐位相同。<br>③ 浮点运算就没这么省心：上游文档明说，不承诺 CUDA 和 HIP 两个后端的回答逐位相同。`,
-      vNo: '① CMake 在第一步就拒绝了：这个架构不在名单里。<br>② 拒绝比“编出来再说”更好：一个没人验证过的二进制，可能跑起来算错，却不报任何错。',
+      vNo: '① CMake 在第一步就拒绝了：这个架构不在名单里。<br>② 拒绝比“编出来再说”更好：一个没人验证过的二进制，可能跑起来算错，却不报任何错。<br>③ gfx906 是 wave64，HIP 后端只收 wave32。v0.1.39 起它另有一个手动打开的实验构建（STRATA_HIP_GFX906），走另一套兼容层，不经过这份名单。',
 
       cCode: 'CPU_DISPATCH', cTitle: 'CPU 内核选择器', cTag: '代码事实 · 逻辑复刻',
       cIntro: 'CPU 没命中的专家，由 CPU 自己算。用哪套内核，引擎在<b>运行时</b>先问 CPU“你会哪些指令”，再决定。改下面的条件，看判断链走到哪一步。',
@@ -66,11 +66,11 @@
         iq512: 'iq512：AVX-512 多 token 内核', iq256: 'iq256：AVX2 多 token 内核', ggml: 'ggml-cpu 的单 token 点积',
       },
       pathF: {
-        'refuse-avx2': '每个 CPU 专家内核最低都要 AVX2、FMA、F16C', 'refuse-avx512': '标准 Q2_0 包的 CPU 内核只有 AVX-512 版本',
+        'refuse-avx2': '现成引擎的 CPU 专家内核最低都要 AVX2、FMA、F16C', 'refuse-avx512': '标准 Q2_0 包的 CPU 内核只有 AVX-512 版本',
         'strata-vnni': '用到 AVX-512 的 VNNI 和 VBMI 两组指令', iq512: '权重解码一次，这组 token 共用', iq256: '同样的思路，换成 256 位寄存器',
         ggml: '每个 token 各自解码一遍权重',
       },
-      c1: (ok) => ok ? '<span class="c">[1]</span> CPUID 说：支持 AVX2（含 FMA、F16C）' : '<span class="m">[1]</span> CPUID 说：没有 AVX2。引擎报出 CPU 型号，提示需要 Haswell（2013）、Zen（2017）或更新的 CPU，退出',
+      c1: (ok) => ok ? '<span class="c">[1]</span> CPUID 说：支持 AVX2（含 FMA、F16C）' : '<span class="m">[1]</span> CPUID 说：没有 AVX2。现成的引擎报出 CPU 型号，提示需要 Haswell（2013）、Zen（2017）或更新的 CPU，退出',
       c2: (p) => `<span class="c">[2]</span> 模型包：${p}`,
       c3: (ok, env) => ok ? `<span class="c">[3]</span> CPUID 说：AVX-512 的 F、BW、VL、VNNI、VBMI 都有，操作系统也会保存这组寄存器${env ? '；但环境变量要求不用 AVX-512 内核' : ''}` : '<span class="c">[3]</span> CPUID 说：没有完整的 AVX-512',
       c3q2: (ok) => ok ? '<span class="c">[3]</span> 标准 Q2_0 包需要 AVX-512：这台 CPU 有，放行' : '<span class="m">[3]</span> 标准 Q2_0 包的 CPU 内核只有 AVX-512 版本：在启动时就报错退出，而不是算到第几千个 token 时撞上非法指令',
@@ -78,7 +78,7 @@
       c5: (name) => `<span class="y">[5] 选中</span>：<span class="w">${name}</span>`,
       c5iq4: '<span class="y">注意</span>：IQ4_XS 只有 AVX2 版多 token 内核。AVX-512 的 CPU 不借用它，因为舍入方式会变，于是退回 ggml-cpu',
       cVerdict: {
-        'refuse-avx2': '这台 CPU 太老，任何专家内核都跑不了。引擎在第 0 秒说清原因并退出。',
+        'refuse-avx2': '这台 CPU 太老，现成引擎的专家内核都跑不了。引擎在第 0 秒说清原因并退出。v0.1.39 起，setup 可以在这台电脑上现场编一个实验版引擎（STRATA_ISA_FLOOR），专家改走 ggml-cpu：能跑，但很慢。',
         'refuse-avx512': '标准 Q2_0 包只有 AVX-512 内核。没有 AVX-512 就在启动时拒绝，换原生格式的包才能在 AVX2 CPU 上跑。',
         'strata-vnni': '标准 Q2_0 包走 Strata 自己写的 AVX-512 内核。',
         iq512: '同一份程序，这台 CPU 走最宽的 512 位路线：权重解码一次，整组 token 共用。',
@@ -451,6 +451,7 @@
     const dp = {
       'cuda-hw': pick('__dp4a(a, b, acc)'), 'cuda-sw': pick('strata_dp4a(a, b, acc)'),
       'hip-sudot4': pick('__builtin_amdgcn_sudot4(true, a, true, b, acc, false)'), 'hip-sdot4': pick('__builtin_amdgcn_sdot4(a, b, acc, false)'),
+      'hip-sdwa': pick('asm("v_mul_i32_i24 … v_add3_u32 …")'),
       'hip-loop': pick(T.loopCode),
     }[id];
     if (t.backend === 'cuda') return [SRC[0], 'acc = ' + dp + ';', SRC[2]];
@@ -536,7 +537,7 @@
         $('[data-s=p-br-v]').textContent = T.branch[br.id];
         $('[data-s=p-br-f]').innerHTML = T.sBranchF(br.file);
         await ctx.sleep(550);
-        const fn = { 'cuda-hw': M.dp4aRef, 'cuda-sw': M.dp4aSm60, 'hip-loop': M.dp4aHipLoop }[br.id] || M.dp4aRef;
+        const fn = { 'cuda-hw': M.dp4aRef, 'cuda-sw': M.dp4aSm60, 'hip-sdwa': M.dp4aSdwa, 'hip-loop': M.dp4aHipLoop }[br.id] || M.dp4aRef;
         const v = fn(DOT_A, DOT_B, DOT_C);
         $('[data-s=p-dot-f]').innerHTML = T.sDotF + T.sDotSame(v);
         pipe.set(4); term.log(t.backend === 'cuda' ? T.l4cuda(t.sm) : T.l4hip(t.arch)); await ctx.sleep(450);

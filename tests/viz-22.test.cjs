@@ -37,6 +37,7 @@ test('the HIP portable loop and the CUDA sm_60 fallback agree with the reference
     const a = m.pack(x), b = m.pack(y), want = m.dp4aRef(a, b, c);
     assert.equal(m.dp4aHipLoop(a, b, c), want);
     assert.equal(m.dp4aSm60(a, b, c), want);
+    assert.equal(m.dp4aSdwa(a, b, c), want);
   }
 });
 
@@ -46,6 +47,8 @@ test('dp4a branch follows the #if chains in dp4a.hpp and hip_compat/intrinsics.h
   assert.equal(m.dp4aBranch({ backend: 'cuda', sm: 60 }).id, 'cuda-sw');
   for (const arch of ['gfx1100', 'gfx1101', 'gfx1102', 'gfx1200', 'gfx1201']) assert.equal(m.dp4aBranch({ backend: 'hip', arch }).id, 'hip-sudot4');
   for (const arch of ['gfx1030', 'gfx1031', 'gfx1032']) assert.equal(m.dp4aBranch({ backend: 'hip', arch }).id, 'hip-sdot4');
+  assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1012' }).id, 'hip-sdwa', 'v0.1.39: RDNA1 SDWA sequence');
+  assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1012', portableDot: true }).id, 'hip-loop', 'STRATA_GFX1012_PORTABLE_DOT');
   assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1150' }).id, 'hip-loop');
   assert.throws(() => m.dp4aBranch({ backend: 'metal' }));
 });
@@ -57,6 +60,8 @@ test('HIP architecture tiers match cmake/hip_backend.cmake', () => {
   assert.equal(m.hipTier('gfx1200'), 'community');
   assert.equal(m.hipTier('gfx1102'), 'unvalidated');
   assert.equal(m.hipTier('gfx1030'), 'unvalidated');
+  assert.equal(m.hipTier('gfx1012'), 'unvalidated', 'v0.1.39 adds gfx1012');
+  assert.equal(m.hipTier('gfx1031'), 'unvalidated', 'v0.1.39 adds gfx1031');
   assert.equal(m.hipTier('gfx1100:xnack-'), 'validated', 'feature suffix is stripped');
   assert.equal(m.hipTier('gfx906'), 'refused');
 });

@@ -1,5 +1,5 @@
 /* Pure logic behind the chapter 22 widgets. Teaching model, not Strata code.
-   The branch rules mirror files at the pinned commit 99f3dbd:
+   The branch rules mirror files at the pinned commit 6f32ec0 (v0.1.39):
    include/strata/kernels/dp4a.hpp, include/strata/hip_compat/intrinsics.hpp, cmake/hip_backend.cmake,
    CMakeLists.txt (CUDA guard), src/program/generate.cpp and src/kernels/cpu/native_expert.cpp. */
 (function (root) {
@@ -35,6 +35,15 @@
     }
     return sum | 0;
   }
+  // The RDNA1 (gfx1012) SDWA sequence: four sign-extended byte products (v_mul_i32_i24), added two at a time
+  // into the accumulator with v_add3_u32, which wraps modulo 2^32.
+  function dp4aSdwa(a, b, c) {
+    const x = unpack(a), y = unpack(b);
+    let acc = c >>> 0;
+    acc = (acc + ((x[0] * y[0]) >>> 0) + ((x[1] * y[1]) >>> 0)) >>> 0;
+    acc = (acc + ((x[2] * y[2]) >>> 0) + ((x[3] * y[3]) >>> 0)) >>> 0;
+    return acc | 0;
+  }
   // The CUDA sm_60 fallback: read the operands as int8 arrays, add in int32.
   function dp4aSm60(a, b, c) {
     const x = unpack(a), y = unpack(b);
@@ -53,6 +62,8 @@
       const base = String(t.arch || '').replace(/:.*$/, '');
       if (SUDOT4.includes(base)) return { id: 'hip-sudot4', file: 'intrinsics.hpp' };
       if (SDOT4.includes(base)) return { id: 'hip-sdot4', file: 'intrinsics.hpp' };
+      // gfx1012 (RDNA1): the SDWA sequence, unless -DSTRATA_GFX1012_PORTABLE_DOT=ON asks for the portable loop.
+      if (base === 'gfx1012' && !t.portableDot) return { id: 'hip-sdwa', file: 'intrinsics.hpp' };
       return { id: 'hip-loop', file: 'intrinsics.hpp' };
     }
     throw new Error('未知后端');
@@ -63,10 +74,10 @@
     const base = String(arch).replace(/:.*$/, '');
     if (['gfx1100', 'gfx1201'].includes(base)) return 'validated';
     if (['gfx1101', 'gfx1200'].includes(base)) return 'community';
-    if (['gfx1102', 'gfx1030'].includes(base)) return 'unvalidated';
+    if (['gfx1012', 'gfx1102', 'gfx1030', 'gfx1031'].includes(base)) return 'unvalidated';
     return 'refused';
   }
-  // CMakeLists.txt lines 95-103: below 7.5 only with STRATA_EXPERIMENTAL_SM60, below 6.0 never.
+  // CMakeLists.txt lines 156-165: below 7.5 only with STRATA_EXPERIMENTAL_SM60, below 6.0 never.
   function cudaTier(sm, experimental) {
     if (sm < 60) return 'refused';
     if (sm < 75) return experimental ? 'experimental' : 'refused';
@@ -101,7 +112,7 @@
     return dims.reduce((p, d) => { if (!Number.isInteger(d) || d < 1) throw new Error('每一维至少 1 项'); return p * d; }, 1);
   }
 
-  const api = { pack, unpack, dp4aRef, dp4aHipLoop, dp4aSm60, dp4aBranch, hipTier, cudaTier, cpuPath, lanes, combos, TYPES, MT_MIN };
+  const api = { pack, unpack, dp4aRef, dp4aHipLoop, dp4aSdwa, dp4aSm60, dp4aBranch, hipTier, cudaTier, cpuPath, lanes, combos, TYPES, MT_MIN };
   root.VizMath = root.VizMath || {};
   root.VizMath.portable = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
