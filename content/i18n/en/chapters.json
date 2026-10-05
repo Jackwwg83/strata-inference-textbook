@@ -1125,7 +1125,7 @@
           "AMD cards can run NVIDIA machine code directly"
         ],
         "correct": 1,
-        "why": "The build script uses -include to push hip_compat/cuda_runtime.h into every source file; it holds 82 lines of #define renaming, and built-ins such as __dp4a and warp shuffles are implemented separately per GPU architecture in intrinsics.hpp. The source itself is not changed."
+        "why": "The build script uses -include to push hip_compat/cuda_runtime.h into every source file; it holds 88 lines of #define renaming, and built-ins such as __dp4a and warp shuffles are implemented separately per GPU architecture in intrinsics.hpp. The source itself is not changed."
       },
       {
         "text": "gfx1102 compiles and passes Strata's built-in tests. By this chapter's evidence levels, which statement is most accurate?",
@@ -1249,7 +1249,7 @@
   {
     "id": "25",
     "title": "From one sequence to many users: a scheduler design class",
-    "deck": "Upstream Strata serves one sequence at a time. This chapter is a design class: use scheduling algorithms and queueing theory to work out \"how long the wait is\", then see what must be isolated for multiple sequences.",
+    "deck": "By default, upstream Strata serves one sequence at a time; since v0.1.39 you can turn on batch slots. This chapter is a design class: use scheduling algorithms and queueing theory to work out \"how long the wait is\", then see what must be isolated for multiple sequences.",
     "part": "VI · Verification and practice",
     "courses": [
       "Operating Systems",
@@ -1258,20 +1258,20 @@
     ],
     "prereq": "Chapters 23 and 24 (the serving layer, the FIFO and the request lifecycle); expert routing from Chapter 10 and the KV cache from Chapter 17 help.",
     "goals": [
-      "Tell apart connections, queued requests, active sequences and sequences per computation, and explain upstream Strata's current FIFO, one-sequence setup",
+      "Tell apart connections, queued requests, active sequences and sequences per computation, and explain upstream Strata's default FIFO, one-sequence behavior and the optional batch slots of v0.1.39",
       "Compare FIFO, SJF and round-robin on waiting time and first-word time for the same requests, and use Little's law and M/M/1 to explain how utilization drives waiting",
       "Explain the idea of continuous batching, and which state must be isolated and which budget must be reserved atomically before going multi-sequence"
     ],
     "quiz": [
       {
-        "text": "Five people open the web page at the same time and ask the same upstream Strata a question. How many sequences are generating right now?",
+        "text": "In the default setup, five people open the web page at the same time and ask the same upstream Strata a question. How many sequences are generating right now?",
         "choices": [
           "Five: the HTTP server is multi-threaded",
           "One: the other requests queue at the FIFO lock",
           "It depends on how much VRAM the GPU has"
         ],
         "correct": 1,
-        "why": "The multi-threaded HTTP server lets all five connect, but there is a FIFO lock in front of the engine, and upstream serves one sequence at a time. Connections and active sequences are two different numbers."
+        "why": "The multi-threaded HTTP server lets all five connect, but there is a FIFO lock in front of the engine, and in the default setup upstream serves one sequence at a time. Connections and active sequences are two different numbers."
       },
       {
         "text": "Three requests arrive together, with lengths 8, 3 and 5. Which policy gives the shortest average waiting time?",
@@ -1388,7 +1388,7 @@
         "why": "Caches, compute graphs and the file cache all need to \"warm up\", so the first few runs are usually slower. Finish A first and all that slowness lands on A. Warm up first, then alternate A and B, so changes in the machine's state are spread over both sides."
       },
       {
-        "text": "Strata's server handles one sequence at a time, and requests are served first come, first served. Five users send requests at once. Which metric gets worse first for the users who arrive later?",
+        "text": "In the default setup, Strata's server handles one sequence at a time, and requests are served first come, first served. Five users send requests at once. Which metric gets worse first for the users who arrive later?",
         "choices": [
           "Time to first token (TTFT)",
           "The decode speed between tokens",
