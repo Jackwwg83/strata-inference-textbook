@@ -1,0 +1,210 @@
+<div class="hook"><span class="eyebrow">لا بدّ أنك سألت هذا السؤال</span>
+<p>ألصقتَ مقطعًا طويلًا من الشيفرة، ثم سألت: «أين تغيّر المتغير في السطر 3 لاحقًا؟». ليجيب النموذج، عليه أن يعود إلى النص السابق، وأن يعرف أين ينظر. لا يستطيع أن ينظر إلى عشرة آلاف حرف بالاهتمام نفسه.</p>
+<p>«أعود إلى النص وفي ذهني سؤال، وأنظر أكثر إلى الأجزاء الأقرب صلة به». هذا هو <dfn>الانتباه</dfn> (attention). يشرح هذا الفصل أولًا كيف يُحسب الانتباه بمثال صغير يمكن حسابه باليد. ثم يبيّن لماذا يغلو كلما طال السياق. وفي الأخير يعرض حيلتين يستخدمهما نموذج Strata لتوفير الجهد: تتشارك 24 رأسًا للاستعلام في مجموعتين من «الملاحظات»، وينظر النموذج في كل خطوة إلى 2051 موضعًا على الأكثر.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> الانتباه = «استعلام» الكلمة الحالية يمنح كل موضع في النص السابق درجة، ثم يحوّل softmax الدرجات إلى أوزان، ثم تُمزج «قيم» المواضع حسب الأوزان. يتزايد عمل الانتباه الكامل مع مربّع الطول. أما نموذج Strata ففيه 12 طبقة فقط تعمل بالانتباه، وتتشارك 24 رأسًا للاستعلام في مجموعتين من المفاتيح والقيم، وينظر النموذج في كل خطوة إلى 2051 موضعًا مختارًا على الأكثر.</p>
+
+<h2 id="sec-1">8.1 الانتباه: العودة إلى الكتاب وفي الذهن سؤال</h2>
+<p>تخيّل أنك في مكتبة تبحث عن مادة. في ذهنك سؤال، وهذا هو <dfn>الاستعلام</dfn> (query، ويُرمز له بـ q). على كل كتاب ملصق على الظهر، وهذا هو <dfn>المفتاح</dfn> (key، ويُرمز له بـ k). ومحتوى الكتاب هو <dfn>القيمة</dfn> (value، ويُرمز لها بـ v). تقارن سؤالك بكل ملصق. كلما زادت الصلة قرأتَ الكتاب بعناية أكبر. وفي النهاية تمزج ما قرأته بحسب «درجة العناية»، فتخرج بالجواب.</p>
+<aside class="primer" id="c08-attention">
+<h3>آلية الانتباه: Q وK وV</h3>
+<p>في النموذج، لكل موضع في النص السابق متجه. تحوّله طبقة الانتباه بثلاث مصفوفات متعلَّمة إلى ثلاثة متجهات: المفتاح k («ما أنا»)، والقيمة v («ما أستطيع تقديمه»). أما الموضع الحالي فيُنتج أيضًا استعلامًا q («ما الذي أبحث عنه»). يجري الحساب في أربع خطوات:</p>
+<ol>
+<li><strong>التقييم</strong>: يُجرى <dfn>الضرب النقطي</dfn> بين الاستعلام وكل مفتاح: <span class="equation">sᵢ = q · kᵢ = q₁kᵢ₁ + q₂kᵢ₂ + …</span>. كلما اتفق اتجاه المتجهين زاد الناتج.</li>
+<li><strong>التحجيم</strong>: تُقسم كل درجة على √d، حيث d طول المتجه (عدد أبعاده). كلما زاد عدد الأبعاد زاد الضرب النقطي بطبيعته. وبلا تحجيم يصير softmax في الخطوة التالية متطرفًا، فلا ينظر إلا إلى موضع واحد تقريبًا.</li>
+<li><strong>softmax</strong>: <span class="equation">wᵢ = e<sup>sᵢ</sup> ÷ Σⱼ e<sup>sⱼ</sup></span>. تتحول الدرجات إلى أوزان، كلها موجبة ومجموعها 1.</li>
+<li><strong>الجمع الموزون</strong>: الخرج = <span class="equation">Σ wᵢ · vᵢ</span>.</li>
+</ol>
+<p>لنحسب أصغر مثال باليد. في النص السابق موضعان، وقيمتاهما [2, 0] و[0, 4]. إذا كانت الدرجتان بعد التحجيم صفرًا، فالوزنان <span class="equation">e⁰ ÷ (e⁰ + e⁰) = ½</span> و½، والخرج هو <span class="equation">½ × [2, 0] + ½ × [0, 4] = [1, 2]</span>. فإذا رفعنا الدرجة الأولى إلى <span class="equation">ln 3 ≈ 1.10</span> صار الوزنان <span class="equation">3 ÷ (3 + 1) = ¾</span> و¼، وصار الخرج [1.5, 1].</p>
+<p>انتبه إلى أمرين. الأول: الخرج متجه جديد <strong>ممزوج</strong>، وليس جملة منسوخة كما هي من النص السابق. الثاني: k يحدد «أين ننظر»، وv يحدد «ماذا نرى». دور كل منهما مختلف، وتبديلهما لا يعطي النتيجة نفسها في العادة.</p>
+<p>تفتح النماذج الحقيقية عدة مجموعات من q وk وv في الوقت نفسه، وتسمى <dfn>الانتباه متعدد الرؤوس</dfn>. يبحث كل «رأس» عمّا يهمه، ثم تُجمع النتائج في النهاية.</p>
+<p>الصلة بهذا الفصل: في كل طبقة QSA من نموذج Strata 24 رأسًا للاستعلام، وبُعد كل رأس 256. لذلك نقسم عند التحجيم على <span class="equation">√256 = 16</span>.</p>
+<p class="further">قراءات إضافية: <a href="https://ar.wikipedia.org/wiki/%D8%A7%D9%86%D8%AA%D8%A8%D8%A7%D9%87_%28%D8%AA%D8%B9%D9%84%D9%85_%D8%A7%D9%84%D8%A2%D9%84%D8%A9%29" target="_blank" rel="noopener noreferrer">ويكيبيديا: انتباه (تعلم الآلة)</a> · <a href="https://en.wikipedia.org/wiki/Softmax_function" target="_blank" rel="noopener noreferrer">Wikipedia: Softmax function</a> · <a href="https://www.3blue1brown.com/lessons/attention" target="_blank" rel="noopener noreferrer">3Blue1Brown: Attention (شرح متحرك)</a> · <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener noreferrer">The Illustrated Transformer</a> · <a href="https://arxiv.org/abs/1706.03762" target="_blank" rel="noopener noreferrer">Attention Is All You Need (الورقة الأصلية)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 312" role="img" aria-label="الشكل 8-1: خطوات الانتباه الأربع. الكلمة الحالية تعطي الاستعلام، والنص السابق يعطي المفاتيح والقيم؛ ثم التقييم والتحجيم وsoftmax والجمع الموزون">
+<rect class="f-soft" fill="#e5f1df" x="10" y="8" width="180" height="50" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="29" font-size="13" font-weight="600" text-anchor="middle">الكلمة الحالية</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="48" font-size="12" text-anchor="middle">الاستعلام q: عمّ أبحث؟</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="8" width="180" height="50" rx="8"/>
+<text class="f-text" fill="#182f2b" x="300" y="29" font-size="13" font-weight="600" text-anchor="middle">كل موضع في النص السابق</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="48" font-size="12" text-anchor="middle">لكلٍّ مفتاح k وقيمة v</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 58V70H200V80M300 58V70H200"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="82" width="280" height="38" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="106" font-size="13" text-anchor="middle">① التقييم: ضرب q في كل k (ضرب نقطي)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="136" width="280" height="38" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="160" font-size="13" text-anchor="middle">② التحجيم: القسمة على √d (d = الأبعاد)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="190" width="280" height="38" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="214" font-size="13" text-anchor="middle">③ softmax: الدرجات تصير أوزانًا مجموعها 1</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="244" width="280" height="56" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="268" font-size="13" font-weight="600" text-anchor="middle">④ الجمع الموزون: مجموع الأوزان × القيم</text>
+<text class="f-on" fill="#ffffff" x="200" y="289" font-size="12" text-anchor="middle">ينتج متجه خرج هذا الرأس</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 120V134M200 174V188M200 228V242"/>
+</svg><figcaption>الشكل 8-1　خطوات الانتباه الأربع. الخطوتان الأوليان تحددان «أين ننظر»، والثالثة تحوّل «كم ننظر» إلى نِسَب، والأخيرة تأخذ المحتوى بهذه النِسَب.</figcaption></figure>
+<p>يختصر المحاكي أدناه المتجهات إلى بعدين، لترى الضرب النقطي على المستوى: أيّ سهم مفتاح يقترب اتجاهه من سهم الاستعلام تنال كلمته انتباهًا أكبر.</p>
+<div class="viz" data-viz="attention-step"><figure class="fig"><svg viewBox="0 0 400 284" role="img" aria-label="الشكل 8-2: مثال تعليمي بعدين. يشير الاستعلام إلى ما بين القطة والكرة، فينال كلٌّ منهما نحو نصف الوزن، والخرج مزيج من قيمتيهما">
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M30 110H190M110 30V190"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" d="M110 110L171.6 110M110 110L93.2 59.6M110 110L140.8 62.4M110 110L65.2 126.8"/>
+<circle class="f-muted" fill="#5c6d66" cx="171.6" cy="110" r="3.5"/><circle class="f-muted" fill="#5c6d66" cx="93.2" cy="59.6" r="3.5"/><circle class="f-muted" fill="#5c6d66" cx="140.8" cy="62.4" r="3.5"/><circle class="f-muted" fill="#5c6d66" cx="65.2" cy="126.8" r="3.5"/>
+<text class="f-text" fill="#182f2b" x="178" y="122" font-size="12">القطة</text>
+<text class="f-text" fill="#182f2b" x="88" y="52" font-size="12" text-anchor="end">تطارد</text>
+<text class="f-text" fill="#182f2b" x="122" y="48" font-size="12">الكرة</text>
+<text class="f-text" fill="#182f2b" x="60" y="144" font-size="12" text-anchor="end">تركض</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3.5" d="M110 110L181.2 65.5"/>
+<circle class="f-accent" fill="#136d5a" cx="181.2" cy="65.5" r="5"/>
+<text class="f-accent" fill="#136d5a" x="188" y="72" font-size="13" font-weight="600">q</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="24" font-size="12">أوزان الانتباه</text>
+<text class="f-text" fill="#182f2b" x="220" y="52" font-size="12">القطة</text><rect class="f-accent" fill="#136d5a" x="270" y="41" width="50" height="14"/><text class="f-text" fill="#182f2b" x="390" y="52" font-size="12" text-anchor="end">0.50</text>
+<text class="f-text" fill="#182f2b" x="220" y="86" font-size="12">تطارد</text><rect class="f-accent" fill="#136d5a" x="270" y="75" width="2" height="14"/><text class="f-text" fill="#182f2b" x="390" y="86" font-size="12" text-anchor="end">0.02</text>
+<text class="f-text" fill="#182f2b" x="220" y="120" font-size="12">الكرة</text><rect class="f-accent" fill="#136d5a" x="270" y="109" width="47" height="14"/><text class="f-text" fill="#182f2b" x="390" y="120" font-size="12" text-anchor="end">0.47</text>
+<text class="f-text" fill="#182f2b" x="220" y="154" font-size="12">تركض</text><rect class="f-accent" fill="#136d5a" x="270" y="143" width="0.5" height="14"/><text class="f-text" fill="#182f2b" x="390" y="154" font-size="12" text-anchor="end">0.00</text>
+<text class="f-text" fill="#182f2b" x="10" y="220" font-size="12">يشير q إلى ما بين «القطة» و«الكرة»، فينال كلٌّ منهما نحو النصف</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="242" font-size="12">القيم: القطة 3 و0، الكرة 1 و3، والباقي لا يكاد يشارك</text>
+<text class="f-text" fill="#182f2b" x="10" y="266" font-size="12">Σ wᵢ·vᵢ ≈ 0.50×[3, 0] + 0.47×[1, 3] + … ≈ [1.98, 1.46]</text>
+</svg><figcaption>الشكل 8-2　حين يقع الاستعلام بين مفتاحين يمزج الانتباه القيمتين بنسبتيهما. وكلما أدرتَ الاستعلام نحو جهة مالت النسبة نحوها.</figcaption></figure></div>
+<p>تأتي q وk وv في طبقة QSA من ثلاث مصفوفات إسقاط هي <code>attn_q</code> و<code>attn_k</code> و<code>attn_v</code>. <span class="ev ev-code">حقيقة من الشيفرة</span>[S18] وقبل أن يُخزَّن المفتاح في الذاكرة المؤقتة، يُدار بحسب موضعه. يسمى هذا <dfn>ترميز الموضع الدوراني</dfn> (RoPE): الكلمة نفسها في موضعين مختلفين تعطي مفتاحين مختلفين قليلًا، ومن هنا يعرف النموذج الترتيب. أما القيمة فلا تُدار أبدًا (<code>qsa.hpp</code>، السطر 180). وبعد حساب الانتباه تُضرب النتيجة في بوابة خرج من نوع sigmoid، ثم تُسلَّم إلى الإسقاط التالي. [S18]</p>
+
+<h2 id="sec-2">8.2 كل كلمة جديدة تعني نظرة إضافية: O(n²)</h2>
+<p>للانتباه قاعدة صارمة: عند توليد الكلمة رقم t لا يُسمح إلا بالنظر إلى المواضع من 1 إلى t، دون التطلع إلى ما بعدها. هذا هو <dfn>القناع السببي</dfn>: يُحجب «المستقبل»، انظر الشكل 8-3. عند توليد الإجابة لا توجد كلمات لاحقة أصلًا، فلا فرق بين الحجب وعدمه. أما عند قراءة المُطالبة (prefill، الفصل 1) فتُحسب المُطالبة كلها دفعة واحدة، وتكون الكلمات اللاحقة موجودة فعلًا في الذاكرة. لذلك يجب أن يحجب كل صف صراحةً المواضع التي على يمينه، وإلا «سرّب» النموذج الإجابة لنفسه.</p>
+<figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="الشكل 8-3: القناع السببي لـ6 كلمات. الصف i لا يرى إلا الأعمدة من 1 إلى i، والزاوية العليا اليمنى كلها محجوبة، و21 خانة مرئية">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">الأعمدة: المواضع المنظور إليها (المفاتيح)</text>
+<text class="f-text" fill="#182f2b" x="125" y="36" font-size="12" text-anchor="middle">قطتي</text><text class="f-text" fill="#182f2b" x="155" y="36" font-size="12" text-anchor="middle">ركضت</text><text class="f-text" fill="#182f2b" x="185" y="36" font-size="12" text-anchor="middle">نحو</text><text class="f-text" fill="#182f2b" x="215" y="36" font-size="12" text-anchor="middle">كرة</text><text class="f-text" fill="#182f2b" x="245" y="36" font-size="12" text-anchor="middle">من</text><text class="f-text" fill="#182f2b" x="275" y="36" font-size="12" text-anchor="middle">صوف</text>
+<text class="f-text" fill="#182f2b" x="100" y="61" font-size="12" text-anchor="end">قطتي</text><text class="f-text" fill="#182f2b" x="100" y="91" font-size="12" text-anchor="end">ركضت</text><text class="f-text" fill="#182f2b" x="100" y="121" font-size="12" text-anchor="end">نحو</text><text class="f-text" fill="#182f2b" x="100" y="151" font-size="12" text-anchor="end">كرة</text><text class="f-text" fill="#182f2b" x="100" y="181" font-size="12" text-anchor="end">من</text><text class="f-text" fill="#182f2b" x="100" y="211" font-size="12" text-anchor="end">صوف</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="136" font-size="12">الصفوف</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="152" font-size="12">(الاستعلام)</text>
+<rect class="f-accent" fill="#136d5a" x="111" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="141" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="171" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="231" y="41" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="41" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="71" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="71" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="171" y="71" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="71" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="231" y="71" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="71" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="101" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="101" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="171" y="101" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="101" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="231" y="101" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="101" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="131" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="131" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="171" y="131" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="201" y="131" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="231" y="131" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="131" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="161" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="161" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="171" y="161" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="201" y="161" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="231" y="161" width="28" height="28"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="261" y="161" width="28" height="28"/>
+<rect class="f-accent" fill="#136d5a" x="111" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="141" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="171" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="201" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="231" y="191" width="28" height="28"/><rect class="f-accent" fill="#136d5a" x="261" y="191" width="28" height="28"/>
+<text class="f-text" fill="#182f2b" x="304" y="80" font-size="12">مضيء: مسموح</text>
+<text class="f-text" fill="#182f2b" x="304" y="100" font-size="12">فاتح: المستقبل</text>
+<text class="f-text" fill="#182f2b" x="304" y="118" font-size="12">يجب حجبه</text>
+<text class="f-text" fill="#182f2b" x="20" y="242" font-size="12">1 + 2 + … + 6 = 6 × 7 ÷ 2 = 21 = n(n+1)/2</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="262" font-size="12">هذا عدد الخانات المرئية؛ يتضاعف الطول فتتضاعف 4 مرات تقريبًا</text>
+</svg><figcaption>الشكل 8-3　القناع السببي مثلث سفلي. عدد الخانات المرئية نحو n²/2، وهذا أصل أن الانتباه «يغلو كلما طال النص».</figcaption></figure>
+<aside class="primer" id="c08-complexity">
+<h3>التعقيد الحسابي وO(n²)</h3>
+<p>لتقدير «بطء» خوارزمية لا نعدّ الثواني. نسأل: كيف ينمو العمل حين يكبر الدخل؟ هذا هو <dfn>التعقيد الزمني</dfn>، ويُكتب بـ<dfn>رمز O الكبير</dfn>. يعني O(n) أن العمل يتناسب مع n: إذا تضاعف الدخل تضاعف العمل. ويعني O(n²) أنه يتناسب مع مربّع n: إذا تضاعف الدخل صار العمل 4 أضعاف، وإذا صار الدخل 10 أضعاف صار العمل 100 ضعف.</p>
+<p>لا ينظر رمز O الكبير إلا إلى «شكل» النمو، ويتجاهل الثوابت والحدود الصغرى. <span class="equation">n(n+1)/2 = n²/2 + n/2</span>، وحين تكون n كبيرة يمكن إهمال n/2، ولا يغيّر الثابت ½ الشكل. لهذا فالتعقيد هو O(n²).</p>
+<p>لنحسب الانتباه. لقراءة مُطالبة من n كلمة يجب، تحت القناع السببي، حساب <span class="equation">n(n+1)/2</span> زوجًا من «استعلام وموضع». عندما تكون n = 1,000 يكون العدد نحو 500,000 زوج. وعندما تكون n = 262,144 (أطول سياق يدعمه Strata) يكون نحو 34.4 مليار زوج، ويُحسب هذا في كل طبقة ولكل رأس. لا يظهر O(n²) في النصوص القصيرة، لكنه يطغى على كل شيء في النصوص الطويلة.</p>
+<p>الصلة بهذا الفصل: لخفض التعقيد طريقان فقط. إما أن نقلل كلفة كل زوج (يصغر الثابت ويبقى الشكل)، وإما أن نقلل عدد الأزواج المطلوب حسابها (يتغير الشكل). الاختيار في القسم 8.4 من النوع الثاني. أما GDN في الفصل 9 فيذهب أبعد: يحوّل «النظر إلى التاريخ» إلى تحديث حالة بتعقيد O(1).</p>
+<p class="further">قراءات إضافية: <a href="https://ar.wikipedia.org/wiki/%D8%AA%D8%B9%D9%82%D9%8A%D8%AF_%D8%A7%D9%84%D9%88%D9%82%D8%AA" target="_blank" rel="noopener noreferrer">ويكيبيديا: تعقيد الوقت</a> · <a href="https://ar.wikipedia.org/wiki/%D8%AA%D9%85%D8%AB%D9%8A%D9%84_O_%D8%A7%D9%84%D9%83%D8%A8%D8%B1%D9%89" target="_blank" rel="noopener noreferrer">ويكيبيديا: تمثيل O الكبرى</a> · <a href="https://ar.wikipedia.org/wiki/%D8%AA%D8%AD%D9%84%D9%8A%D9%84_%D8%A7%D9%84%D8%AE%D9%88%D8%A7%D8%B1%D8%B2%D9%85%D9%8A%D8%A7%D8%AA" target="_blank" rel="noopener noreferrer">ويكيبيديا: تحليل الخوارزميات</a></p>
+</aside>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> الانتباه في مرحلة قراءة المُطالبة حلقتان متداخلتان: <code>for i in 1..n: for j in 1..i: score(q[i], k[j])</code>. عملها مثلثي الشكل، مثل ترتيب الفقاعات. أما في مرحلة التوليد فكل كلمة جديدة تحسب صفًّا واحدًا، أي O(n). لكن توليد m كلمة يعيدنا إلى O(n·m) في المجموع.</p>
+<p>اسحب المنزلق أدناه وشاهد، وأنت ترفع طول السياق من 1K إلى 262K، كم زوجًا يحسب الانتباه الكامل، وكم يحسب QSA الذي «ينظر إلى 2051 موضعًا على الأكثر في كل مرة»:</p>
+<div class="viz" data-viz="attention-cost"><figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="الشكل 8-4: في سياق 262K ينظر آخر رمز إلى 262,144 موضعًا في الانتباه الكامل وإلى 2051 في QSA؛ وقراءة المُطالبة كلها تحتاج نحو 34.4 مليار زوج في الانتباه الكامل ونحو 540 مليون في QSA">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="12">عدد المواضع التي ينظر إليها آخر رمز: الانتباه الكامل</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="22" width="144.3" height="16"/><text class="f-text" fill="#182f2b" x="160" y="35" font-size="12">262,144</text>
+<text class="f-text" fill="#182f2b" x="10" y="64" font-size="12">عدد المواضع التي ينظر إليها آخر رمز: QSA</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="70" width="55.4" height="16"/><text class="f-text" fill="#182f2b" x="71" y="83" font-size="12">2,051</text>
+<text class="f-text" fill="#182f2b" x="10" y="112" font-size="12">عدد الأزواج لقراءة المُطالبة كلها: الانتباه الكامل</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="118" width="360.4" height="16"/><text class="f-on" fill="#ffffff" x="364" y="131" font-size="12" text-anchor="end">نحو 34.4 مليار</text>
+<text class="f-text" fill="#182f2b" x="10" y="160" font-size="12">عدد الأزواج لقراءة المُطالبة كلها: QSA</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="166" width="284.1" height="16"/><text class="f-on" fill="#ffffff" x="288" y="179" font-size="12" text-anchor="end">نحو 540 مليون</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 196H390M10 192V200M136.7 192V200M263.3 192V200M390 192V200"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="214" font-size="12">10²</text>
+<text class="f-muted" fill="#5c6d66" x="136.7" y="214" font-size="12" text-anchor="middle">10⁵</text>
+<text class="f-muted" fill="#5c6d66" x="263.3" y="214" font-size="12" text-anchor="middle">10⁸</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="214" font-size="12" text-anchor="end">10¹¹</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="234" font-size="12">السياق 262,144 رمزًا؛ مقياس لوغاريتمي، كل علامة تضرب العدد في 1000</text>
+</svg><figcaption>الشكل 8-4　في سياق 262K يقلّل «النظر إلى 2051 موضعًا على الأكثر» أزواج قراءة المُطالبة كلها نحو 64 مرة. لاحظ أن المحور الأفقي لوغاريتمي.</figcaption></figure></div>
+<p>هذا العدد يحسب أزواج الانتباه نفسها فقط، ولا يحسب جهد «اختيار المواضع». الاختيار ليس مجانيًا، لكنه أرخص بكثير. نعود إليه في القسم 8.4.</p>
+
+<h2 id="sec-3">8.3 GQA: 24 سائلًا يتشاركون دفترَي ملاحظات</h2>
+<p>ليعود الانتباه إلى النص السابق يجب تخزين k وv لكل موضع فيه. يسمى هذا المخزن <dfn>ذاكرة KV المؤقتة</dfn> (KV cache)، ويشرح الفصل 17 كيف تُدار صفحةً صفحة. كلما طال السياق كبرت ذاكرة KV المؤقتة. والحيلة الأولى لتوفير المساحة أن <strong>تتشارك</strong> عدة رؤوس استعلام مجموعة واحدة من المفاتيح والقيم. هذا هو <dfn>الانتباه بالاستعلامات المجمّعة</dfn> (GQA).</p>
+<p>في كل طبقة QSA من نموذج Strata 24 رأسًا للاستعلام، ولكن فيها رأسَي KV فقط، وبُعد كل رأس 256. <span class="ev ev-code">حقيقة من الشيفرة</span>[S04] تنقسم رؤوس الاستعلام الـ24 إلى مجموعتين: الرؤوس من 0 إلى 11 تستخدم رأس KV رقم 0، والرؤوس من 12 إلى 23 تستخدم رأس KV رقم 1، انظر الشكل 8-5. وتؤكد الشيفرة المصدرية أن الربط هو <strong>قسمة صحيحة</strong> <span class="equation">h ÷ 12</span>، وليس باقي القسمة <span class="equation">h % 2</span>. كلتا الصيغتين تعطي نتيجة «سليمة الشكل»، لكن واحدة منهما فقط هي هذا النموذج. [S18]</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="الشكل 8-5: تنقسم 24 رأسًا للاستعلام إلى مجموعتين، في كل منهما 12 رأسًا تتشارك رأس KV واحدًا. يخزّن كل رمز في كل طبقة مجموعتين فقط من المفاتيح والقيم بدلًا من 24">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="12" text-anchor="middle">24 رأسًا للاستعلام (مرقّمة 0-23)</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="34" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="48" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="62" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="76" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="90" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="104" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="118" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="132" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="146" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="160" y="28" width="12" height="24"/><rect class="f-soft" fill="#e5f1df" x="174" y="28" width="12" height="24"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="214" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="228" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="242" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="256" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="270" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="284" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="298" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="312" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="326" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="340" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="354" y="28" width="12" height="24"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="368" y="28" width="12" height="24"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M20 58V64H186V58M103 64V84M214 58V64H380V58M297 64V84"/>
+<text class="f-muted" fill="#5c6d66" x="103" y="76" font-size="12" text-anchor="end">الرؤوس 0-11</text>
+<text class="f-muted" fill="#5c6d66" x="297" y="76" font-size="12" text-anchor="end">الرؤوس 12-23</text>
+<rect class="f-accent" fill="#136d5a" x="38" y="86" width="130" height="36" rx="6"/>
+<text class="f-on" fill="#ffffff" x="103" y="109" font-size="13" text-anchor="middle">رأس KV رقم 0</text>
+<rect class="f-accent" fill="#136d5a" x="232" y="86" width="130" height="36" rx="6"/>
+<text class="f-on" fill="#ffffff" x="297" y="109" font-size="13" text-anchor="middle">رأس KV رقم 1</text>
+<text class="f-text" fill="#182f2b" x="20" y="150" font-size="12">رقم رأس KV لرأس الاستعلام h هو ناتج قسمة h على 12 (قسمة صحيحة)</text>
+<text class="f-text" fill="#182f2b" x="20" y="176" font-size="12">ما يُخزَّن لكل رمز في كل طبقة (المفاتيح والقيم)</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="186" width="25" height="16"/>
+<text class="f-text" fill="#182f2b" x="52" y="199" font-size="12">GQA: 2 × 256 × 2 × 2 bytes = 2 KiB</text>
+<rect class="f-warn" fill="#9e5d24" x="20" y="212" width="300" height="16"/>
+<text class="f-text" fill="#182f2b" x="20" y="246" font-size="12">لو خزّن كل رأس نسخته: 24 KiB، أي 12 ضعف GQA</text>
+</svg><figcaption>الشكل 8-5　24 رأسًا للاستعلام لها رأسا KV فقط: لكل رأس أن يسأل ما يشاء، أما الملاحظات فتتشاركها المجموعتان. فصارت ذاكرة KV المؤقتة أصغر 12 مرة.</figcaption></figure>
+<p>لنحسب التكلفة. نخزّن لكل رمز في كل طبقة QSA رأسَي KV، وبُعد كل رأس 256، ومعهما K وV، وكل قيمة بصيغة FP16 أي 2 byte. الناتج: <span class="equation">2 × 256 × 2 × 2 = 2,048 byte</span>. فتبلغ 12 طبقة QSA معًا 24,576 byte. وسياق 32K (أي 32,768 رمزًا) يساوي 805,306,368 byte، أي 768 MiB بالضبط. <span class="ev ev-est">تقدير تعليمي</span></p>
+<p>من الطريف أن تعليق <code>qsa.hpp</code> يكتب هذه الكمية «805 MiB». [S18] الصحيح أن <span class="equation">805,306,368 ÷ 2²⁰ = 768</span>، أما 805 فهي MB عشرية ناتجة عن قسمة عدد البايتات على 10<sup>6</sup>. الفرق بين MB وMiB نحو 4.9%. لا يهم هذا في الأعداد الصغيرة، لكنه في ميزانية من عشرات الـGB يعني فرقًا من عدة GB. يعتمد هذا الكتاب 768 MiB المحسوبة بندًا بندًا.</p>
+<p>لو عملت الطبقات الـ48 كلها بالانتباه، وخزّن كل رأس من الرؤوس الـ24 نسخته من K/V، لاحتاج كل رمز إلى 48 ضعف عدد البايتات. في سياق 262K هذا هو الفرق بين نحو 288 GiB ونحو 6 GiB. <span class="ev ev-est">تقدير تعليمي</span> وعند التشغيل الفعلي يستخدم Strata افتراضيًا KV بثمانية بتات حين يزيد السياق على 4K، ومن 64K فما فوق يضع معظم KV في الذاكرة (RAM)، ولا يترك في ذاكرة الفيديو (VRAM) إلا الجزء الذي يقرؤه الانتباه كثيرًا. يذكر المصدر الأصلي أن هذا لا يغيّر القيم التي يقرؤها الانتباه، بل يغيّر مكان KV فقط. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03]</p>
+
+<h2 id="sec-4">8.4 QSA: النظر إلى 2051 موضعًا مختارًا فقط</h2>
+<p>وفّر GQA في التخزين. والحيلة الثانية لتوفير الحساب أبسط: <strong>لا ننظر إلى الكل، بل إلى المختار فقط</strong>. في كل مرة تولّد فيها طبقة QSA رمزًا، يمنح <dfn>المُفهرِس</dfn> (indexer) الرخيص درجة لكل مواضع النص السابق، ويختار منها 2051 موضعًا على الأكثر، ثم يجري الانتباه الحقيقي على هذه المواضع وحدها. يعرض الشكل 8-6 المسار كاملًا.</p>
+<figure class="fig"><svg viewBox="0 0 400 344" role="img" aria-label="الشكل 8-6: ست مراحل في خطوة QSA واحدة: إلحاق المفتاح والقيمة، تقييم المُفهرِس، اختيار أعلى 2051، الجمع حسب جدول الصفحات، الانتباه على المواضع المختارة فقط، ضرب بوابة الخرج">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="4" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="22" font-size="13" font-weight="600" text-anchor="middle">① إلحاق K وV</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="40" font-size="12" text-anchor="middle">يُكتبان في ذاكرة KV المقسّمة إلى صفحات</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="60" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="78" font-size="13" font-weight="600" text-anchor="middle">② تقييم المُفهرِس</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="96" font-size="12" text-anchor="middle">كل 4 مواضع تُدمج في مفتاح صغير ببُعد 128</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="116" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="134" font-size="13" font-weight="600" text-anchor="middle">③ اختيار أعلى 2051 موضعًا درجةً</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="152" font-size="12" text-anchor="middle">إن كان السياق أقل من 2051 يُختار كله</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="172" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="190" font-size="13" font-weight="600" text-anchor="middle">④ الجمع حسب جدول الصفحات</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="208" font-size="12" text-anchor="middle">تُنسخ K وV للمواضع المختارة إلى منطقة مؤقتة متصلة</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="228" width="360" height="44" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="246" font-size="13" font-weight="600" text-anchor="middle">⑤ الانتباه</text>
+<text class="f-on" fill="#ffffff" x="200" y="264" font-size="12" text-anchor="middle">24 رأسًا للاستعلام تطبّق softmax على المواضع المختارة فقط</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="284" width="360" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="302" font-size="13" font-weight="600" text-anchor="middle">⑥ بوابة الخرج</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="320" font-size="12" text-anchor="middle">تُضرب النتيجة في sigmoid(gate) ثم تذهب إلى إسقاط الخرج</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 48V58M200 104V114M200 160V170M200 216V226M200 272V282"/>
+</svg><figcaption>الشكل 8-6　خطوة QSA واحدة. المرحلتان ② و③ تحددان «أي المواضع ننظر إليها»، وهما من خوارزمية النموذج؛ والمرحلة ④ تحدد «من أين نأخذ»، وهي من تنفيذ النظام. يجب إثبات صحة كل من النوعين على حدة.</figcaption></figure>
+<p>هذه تفاصيل مهمة، كلها من <code>qsa.hpp</code>:</p>
+<ul>
+<li><strong>من أين يأتي الرقم 2051.</strong> عرض الاختيار هو <span class="equation">min(n_kv, 2048 + 4 − 1)</span>، حيث n_kv عدد المواضع المخزّنة. الرقم 2048 ميزانية الاختيار «بالكتل»، وكل كتلة 4 مواضع. والمواضع الثلاثة الزائدة هي «الذيل» الذي لم يكتمل ككتلة. إذا لم يزد السياق على 2051 فالاختيار هو «اختيار الكل»، ويجب أن يطابق الانتباه الكامل <strong>تمامًا</strong>، فلا مجال للتقريب. <span class="ev ev-code">حقيقة من الشيفرة</span>[S18]</li>
+<li><strong>المُفهرِس رخيص.</strong> يخزّن لكل 4 مواضع مفتاحًا صغيرًا واحدًا بـ128 بُعدًا (متوسط 4 مفاتيح أصلية، ثم تطبيع ثم تدوير). <span class="ev ev-code">حقيقة من الشيفرة</span>[S18] عند التقييم يحسب كل رأس من رؤوس الفهرسة الأربعة ضربه النقطي ويمرّره عبر ReLU، ثم تُجمع النتائج. <strong>لا</strong> يوجد softmax، و<strong>لا</strong> قسمة على √d (<code>qsa.hpp</code>، السطور 252-265). وبالمقارنة مع الانتباه الحقيقي (رأسا KV بـ256 بُعدًا لكل موضع، و24 رأسًا للاستعلام) فإن البيانات التي يلمسها أقل بكثير.</li>
+<li><strong>اختيار أعلى k، وعند التعادل يُقدَّم الأصغر رقمًا.</strong> يعيد الاختيار المواضع ذات أعلى الدرجات. وإذا تساوت الدرجتان فُضّل الموضع الأصغر رقمًا، وتُرتَّب النتيجة تصاعديًا بالرقم. [S18] لخوارزمية اختيار أعلى k عنصرًا من n عددًا، انظر عمود <a href="#chapter/10/c10-top-k">«اختيار أعلى k (top-k)»</a> في الفصل 10.</li>
+<li><strong>ما لم يُختر فهو غير موجود.</strong> الموضع الذي لم يُجمع يكون وزنه في الانتباه <strong>صفرًا بالضبط</strong>، حتى لو كانت درجته الأعلى أصلًا. تفعل الشيفرة المصدرية ذلك بجعل قناع هذه المواضع سالب ما لا نهاية، و<span class="equation">e<sup>−∞</sup> = 0</span>. [S18]</li>
+</ul>
+<p>وهذا ليس مثل FlashAttention المعروف. يحسب FlashAttention الانتباه الكامل <strong>بدقة</strong>، عبر التقسيم إلى كتل وإعادة الحساب وترتيب القراءة والكتابة في ذاكرة الفيديو بعناية، لكنه أسرع فقط. [R03] أما اختيار QSA فيغيّر مجموعة المواضع المشاركة في الحساب، فالدالة المحسوبة صارت دالة أخرى. يمكن لمحرك أن يستخدم الاثنين: يختار أولًا، ثم يحسب الجزء المختار بنواة (kernel) فعّالة. لكن صحة كل من التحسينين يجب إثباتها على حدة.</p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذا نهج من مرحلتين: «استرجاع تقريبي ثم حساب دقيق». هو الفكرة نفسها في قواعد البيانات: يُستخدم الفهرس أولًا لتصفية الصفوف المرشحة تصفية خشنة، ثم يُرجع إلى الجدول للمقارنة الدقيقة. والفرق أن تصفية الفهرس في قاعدة البيانات لا تضيّع نتيجة صحيحة، أما الاختيار هنا فقد يُفلت موضعًا. لذلك هو جزء من الحساب الذي يحدده النموذج، ويجب أن ينفّذه المحرك كما هو، وألا يستبدل به اختيارًا آخر «قريبًا منه».</p>
+
+<h2 id="sec-5">8.5 هل تغيّر المكان أم تغيّرت المجموعة؟</h2>
+<p>في محرك الاستدلال نوعان من التحسين يبدو كلاهما «قراءة أقل من KV»، لكنهما مختلفان في الجوهر:</p>
+<ul>
+<li><strong>تغيير المكان فقط</strong>: البايتات نفسها من KV تنتقل من ذاكرة الفيديو إلى الذاكرة (RAM)، أو يتغير تخطيط الصفحات. تبقى القيم التي يقرؤها الانتباه كما هي، فيجب أن تتطابق النتيجة بتًّا بتًّا. التخزين المتدفق لـKV في Strata من هذا النوع: يكتب المصدر الأصلي أن «الانتباه يقرأ القيم نفسها تمامًا، وإنما تغيّر مكان وضع KV». <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03]</li>
+<li><strong>تغيير المجموعة</strong>: حذف جزء من المواضع التاريخية، أو استبدال قاعدة الاختيار. هذا يغيّر مدخلات النموذج، ويجب تقييم جودته على حدة.</li>
+</ul>
+<p>اختيار QSA جزء من قاعدة النموذج نفسه. وعبارة «ننظر في كل خطوة إلى 2051 موضعًا» <strong>لا تساوي</strong> «يكفي تخزين 2051 موضعًا». قد يختار الرمز التالي مواضع قديمة مختلفة تمامًا، فيجب الاحتفاظ بكل KV. والذي يمكن أن يتغير هو أي مستوى من التخزين يحتفظ بها.</p>
+<p>وحدود الاختيار حساسة أيضًا. قد لا يفصل بين درجة الموضع 2051 ودرجة الموضع 2052 إلا القليل، وخطأ عددي ضئيل جدًا قد يبدّل موضعًا، وهذا الموضع المبدَّل حصة كاملة من مدخلات الانتباه. لذلك يخزّن Strata مفاتيح الفهرسة بصيغة FP32 لا بصيغة FP16 الأوفر. حسب التعليق في الشيفرة، ستُحدث FP16 اضطرابًا نسبيًا في كل درجة بنحو 2<sup>−11</sup>، والحدود هي بالضبط المكان الذي يضرّه هذا الاضطراب أكثر. وثمن FP32 هو 1.5 KiB لكل رمز في طبقات QSA الـ12 مجتمعة. [S18] أما مفاتيح الفهرسة بثمانية بتات المذكورة في الخطة فعليها أولًا أن تثبت نفسها ببيانات قياس «معدل انقلاب الاختيار». [S18]</p>
+<p>ويجب النظر إلى القناع السببي على مراحل أيضًا. يقصر <code>qsa.hpp</code> نفسه صراحةً على «مرحلة التوليد فقط»: عند التوليد يقع كل موضع في الذاكرة المؤقتة قبل الاستعلام الحالي بطبيعة الحال، فالمحتوى الوحيد للقناع هو ربط الذيل. أما قناع قراءة المُطالبة فصفًّا صفًّا: الاستعلام i لا يرى إلا الكتل الكاملة التي لا يتجاوز آخر موضع فيها i، إضافة إلى مواضع الذيل. وهذا مسار شيفرة آخر. [S18] فالشيفرة التي تجتاز اختبار الرمز الواحد قد لا تجتاز اختبار السببية في قراءة عدة صفوف.</p>
+
+<h2 id="sec-6">8.6 تطبيق عملي: احسب ميزانية لسياق طويل</h2>
+<p>افتح المختبر التفاعلي «ميزانية الحالة التاريخية» في هذا الفصل. يحسب بهندسة هذا الفصل (12 طبقة QSA، ورأسا KV، و256 بُعدًا) ذاكرة KV المؤقتة، والنافذة المقيمة في ذاكرة الفيديو، وحالة GDN التي سنشرحها في الفصل 9. المهام المقترحة:</p>
+<ol>
+<li>غيّر السياق من 32K إلى 128K، وتأكد أن KV الرئيسية صارت 4 أضعاف بالضبط. ثم حوّل البايتات إلى GiB، وراجع هل خلطتَ بين GB وGiB.</li>
+<li>غيّر عدد المحادثات النشطة معًا من 1 إلى 5، وانظر أي الكميات تتضاعف 5 مرات وأيها لا يتغير.</li>
+</ol>
+<p>ثم ارجع إلى الرسمين التفاعليين في هذا الفصل. في «خطوة انتباه واحدة» أدِر q ببطء من «القطة» إلى «الكرة»، وسجّل الزاوية التي يتساوى عندها وزناهما. وفي «كم يكلّف النظر إلى الوراء» ابحث عن طول السياق الذي يبدأ عنده QSA بالتوفير مقارنة بالانتباه الكامل، وفسّره بالرقم 2051.</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>الانتباه = ضرب نقطي بين الاستعلام وكل مفتاح ← قسمة على √d ← softmax إلى أوزان ← مزج القيم حسب الأوزان. الخرج ممزوج، وليس منسوخًا.</li>
+<li>عمل الانتباه الكامل O(n²): قراءة مُطالبة من n كلمة تحسب <span class="equation">n(n+1)/2</span> زوجًا. في نموذج Strata 12 طبقة فقط تعمل بالانتباه، وتتشارك 24 رأسًا للاستعلام رأسَي KV، فصارت ذاكرة KV المؤقتة أصغر 48 مرة.</li>
+<li>ينظر QSA في كل خطوة إلى 2051 موضعًا مختارًا على الأكثر (وإن كان السياق أقصر نظر إلى الكل)، ووزن ما لم يُختر صفر بالضبط. لكن كل KV يجب أن تبقى محفوظة، لأن الخطوة التالية قد تختار أي موضع قديم.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «الانتباه المتناثر ينظر إلى 2000 موضع فقط في كل مرة، فذاكرة KV المؤقتة تحتاج إلى تخزين 2000 رمز فقط».</strong></p>
+<p>ما يُنظر إليه في كل خطوة هو «مجموعة العمل»، وليس «المجموعة الكاملة». استعلام الرمز التالي مختلف، وقد تكون المواضع التي يختارها مختلفة تمامًا. لذلك تحتاج ذاكرة KV المؤقتة إلى نسخة لكل موضع تاريخي. يمكن نقل الجزء الأقل قراءةً إلى الذاكرة (RAM)، لكن لا يجوز حذفه. فالحذف يغيّر المعلومات التي يستطيع النموذج رؤيتها.</p>
+
+<details class="deep"><summary>تعمّق أكثر: المعاملات المجمَّدة، واختبار تبديل جدول الصفحات، وطريقة قبول الاختيار</summary>
+<h3>يجمّد CUDA Graph المعاملات «التي تتغير مع كل رمز»</h3>
+<p>لتوفير تكلفة إطلاق عشرات النوى، يسجّل Strata كل طبقة في CUDA Graph، ثم يعيد تشغيل هذا الرسم مع كل رمز (يشرحه الفصل 15). والفخ هنا أن الرسم يسجّل <strong>قيم معاملات</strong> النواة وقت التسجيل أيضًا. دقّقت <code>qsa.hpp</code> في هذه المشكلة، ووجدت أن 6 معاملات في 5 نقاط دخول تتغير مع كل رمز: الموضع الجديد pos، وعدد المواضع المخزّنة n_kv، وعدد الكتل المكتملة، وعرض الاختيار، وغيرها. [S18]</p>
+<p>لو سُجّل الرسم هكذا مباشرة لكانت النتيجة أسوأ من الانهيار: سيكتب <code>kv_append</code> كل رمز في الموضع 0، ولن يرى التقييم والاختيار إلا موضعًا واحدًا، فلا ينظر الانتباه في المحادثة كلها إلا إلى خانة واحدة. سيبقى الخرج أعدادًا منتهية تبدو معقولة، والعَرَض هو نفسه عَرَض «النموذج لا يستخدم السياق»، فيسهل أن يُنسب خطأً إلى ذاكرة KV أو الاختيار أو الأوزان. [S18]</p>
+<p>الحل «حالة خطوة» توضع في ذاكرة الفيديو: تُكتب مرة واحدة مع كل رمز [<span class="equation">pos, n_kv = pos + 1</span>، عدد الكتل المكتملة، عرض الاختيار]، وتقرأ كل النوى منها، فتبقى قائمة المعاملات ثابتة بين الرموز. وتحسب دالة واحدة الأعداد الأربعة من pos، فلا يستطيع المستدعي تحديث بعضها دون بعض. [S18]</p>
+<h3>اختبار تبديل جدول الصفحات: ألا يتسرب التخطيط إلى النتيجة</h3>
+<p>تُخزَّن ذاكرة KV المؤقتة صفحةً صفحة. الرأس h في الموضع المنطقي t موضعه الفيزيائي <span class="equation">(table[t / page_size] × n_head_kv + h) × page_size + t % page_size</span>. في الصفحة الواحدة تتجاور المواضع المتتالية للرأس الواحد، وهذا أحب نمط وصول إلى الانتباه. ولضمان ألا يؤثر التخطيط في النتيجة يشغّل الاختبار البيانات نفسها بأحجام صفحات 1 و4 و512، ويخلط جدول الصفحات عشوائيًا، ويشترط أن يكون خرج الانتباه <strong>مطابقًا تمامًا</strong>. [S18] وهذا هو معيار القبول لتحسينات «تغيير المكان فقط».</p>
+<h3>مواضع الذيل تُختار دائمًا</h3>
+<p>المواضع الأخيرة التي لم تكتمل ككتلة ليس لها مفتاح مجمَّع خاص بها. يضيف المُفهرِس إلى درجاتها 10<sup>9</sup>، فيضمن أن تُختار. وهذا يوافق المدخل السببي في llama.cpp أثناء التوليد (<code>qsa.hpp</code>، السطور 258-261). ويفسّر هذا أيضًا لماذا عرض الاختيار 2048 + 3: ذيل من 3 مواضع على الأكثر، إضافة إلى ميزانية الكتل الكاملة.</p>
+<h3>كيف تقبل تنفيذًا للاختيار</h3>
+<p>عبارة «كل أخطاء الدرجات أصغر من 10<sup>−4</sup>» لا تكفي لإثبات أن حسابين اختارا المواضع نفسها. يجب أن يقارن القبول على ثلاث طبقات: هل أرقام المواضع المختارة متطابقة (مقارنة دقيقة)؛ وهل بيانات K وV المجمَّعة متطابقة؛ وهل خرج الانتباه الأخير ضمن التسامح. ويجب أيضًا بناء عينات درجاتها متقاربة جدًا، لتلاحظ متى يغيّر اضطراب صغير حدّ top-k؛ وعينات فيها درجات متعادلة، للتحقق من قاعدة «الأصغر رقمًا أولًا». إن اختزال الأسئلة الثلاثة في عبارة «الخطأ صغير» يخفي الفرق الحقيقي.</p>
+<h3>يجب توضيح أي نوع من «عدم الفقد» نعني</h3>
+<p>تغيير مكان البيانات وتخطيطها وتقسيمها إلى كتل يمكن عادةً أن يعطي نتيجة مطابقة بتًّا بتًّا. أما تغيير مجموعة المواضع المشاركة في الحساب أو الدقة العددية فيحتاج إلى بيان أثره في الجودة على حدة. مثلًا، يوفر KV بأربعة بتات في المصدر الأصلي نصف ذاكرة الفيديو، لكن حيرة النموذج (perplexity) ترتفع على المستندات الطويلة بنسبة 8%-12%، ولذلك يبقى الافتراضي ثمانية بتات. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03] لا يصح أن نقول إجمالًا إن كل تسريع «بلا فقد».</p>
+</details>

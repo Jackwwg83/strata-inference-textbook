@@ -1,0 +1,202 @@
+<div class="hook"><span class="eyebrow">ربما لاحظت</span>
+<p>بعض النماذج التي تبلغ معاملاتها مئات المليارات تعمل على بطاقة رسوميات عادية واحدة، بينما نموذج عادي لا يتجاوز بضعة عشرات المليارات من المعاملات قد لا يتّسع في البطاقة نفسها. أغلب هذه النماذج الكبيرة «القابلة للتشغيل» هي نماذج <dfn>MoE</dfn> (Mixture of Experts، مزيج الخبراء).</p>
+<p>السر هو هذا: نموذج MoE يوقظ لكل رمز (token) يولّده جزءًا صغيرًا فقط من معاملاته، ويترك الباقي ينتظر في مكان آخر. يشرح هذا الفصل ثلاثة أمور: ما الخبير، ومن يختار الخبراء، وأين يوضع الخبراء الذين لم يُختاروا.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> النموذج الذي تشغّله Strata فيه 512 خبيرًا في كل طبقة، ويختار كل رمز 10 خبراء فقط في كل طبقة. المعاملات كثيرة، لكن كل خطوة تستخدم نحو 5% منها فقط. لذلك يمكن أن يبقى الخبراء قليلو الاستخدام في الذاكرة (RAM) ولا يزاحمون غيرهم في بطاقة الرسوميات.</p>
+
+<h2 id="sec-1">10.1 ما الخبير؟</h2>
+<p>تخيّل مستشفى أولًا. النموذج العادي مثل طبيب عام واحد: كلما جاء مريض استخدم كل معارفه. أما نموذج MoE فمثل مستشفى فيه أطباء اختصاص كثيرون: يمر المريض أولًا على مكتب الفرز، فيستدعي المكتب الأطباء الأنسب لحالته فقط ليتشاوروا، ويبقى الباقون يشربون الشاي. الشكل 10-1 يضع النموذجين جنبًا إلى جنب.</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="الشكل 10-1: النموذج الكثيف يستخدم كل معاملاته لكل رمز، أما نموذج MoE فيوقظ في كل طبقة عددًا قليلًا من الخبراء فقط">
+<defs>
+<pattern id="c10-dense" width="17" height="17" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="14" height="14" rx="2"/></pattern>
+<pattern id="c10-sparse" width="17" height="17" patternUnits="userSpaceOnUse"><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x=".5" y=".5" width="13" height="13" rx="2"/></pattern>
+</defs>
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">نموذج كثيف</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="38" font-size="12" text-anchor="middle">كل رمز يستخدم كل المعاملات</text>
+<rect fill="url(#c10-dense)" x="17" y="52" width="167" height="167"/>
+<text class="f-text" fill="#182f2b" x="303" y="20" font-size="13" font-weight="600" text-anchor="middle">نموذج MoE</text>
+<text class="f-muted" fill="#5c6d66" x="303" y="38" font-size="12" text-anchor="middle">في كل طبقة يستيقظ قليل من الخبراء</text>
+<rect fill="url(#c10-sparse)" x="220" y="52" width="167" height="167"/>
+<rect class="f-accent" fill="#136d5a" x="271" y="86" width="14" height="14" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="339" y="154" width="14" height="14" rx="2"/>
+<text class="f-muted" fill="#5c6d66" x="100" y="242" font-size="12" text-anchor="middle">الجميع يعمل</text>
+<text class="f-muted" fill="#5c6d66" x="303" y="242" font-size="12" text-anchor="middle">10 من 512 في كل طبقة، نحو 2%</text>
+</svg><figcaption>الشكل 10-1　النموذج الكثيف يستخدم كل معاملاته في كل خطوة. نموذج MoE يوقظ في كل خطوة قليلًا من الخبراء، ولا يشارك الباقون في الحساب إطلاقًا.</figcaption></figure>
+<p>داخل النموذج، <dfn>الخبير</dfn> مجموعة من المعاملات تقوم بنوع واحد من التحويل الحسابي. وهو ليس نموذجًا صغيرًا له وعي خاص، ولا يقابل بالضرورة «تخصصًا» يفهمه البشر، مثل «خبير الرياضيات» أو «خبير اللغة». ما يتقنه كل خبير يتشكّل تلقائيًا أثناء التدريب.</p>
+<p>النموذج الذي تشغّله Strata فيه 48 طبقة. في كل طبقة 512 خبيرًا خاصًّا بها، إضافة إلى <dfn>خبير مشترك</dfn> يشارك في كل مرة. <span class="ev ev-code">حقيقة من الشيفرة</span>[S04][S13] الشكل 10-2 يبيّن ما يوجد داخل الخبير الواحد.</p>
+<figure class="fig"><svg viewBox="0 0 400 330" role="img" aria-label="الشكل 10-2: الخبير الواحد يتكوّن من ثلاث مصفوفات هي gate وup وdown، ومجموع معاملاته 4.9 مليون">
+<rect class="f-soft" fill="#e5f1df" x="110" y="8" width="180" height="36" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="31" font-size="13" text-anchor="middle">المدخل: 2560 رقمًا</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V58H110V72M200 58H290V72"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="74" width="160" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="110" y="95" font-size="13" font-weight="600" text-anchor="middle">مصفوفة gate</text>
+<text class="f-muted" fill="#5c6d66" x="110" y="113" font-size="12" text-anchor="middle">2560 → 640</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="74" width="160" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="290" y="95" font-size="13" font-weight="600" text-anchor="middle">مصفوفة up</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="113" font-size="12" text-anchor="middle">2560 → 640</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M110 122V136H290V122M200 136V148"/>
+<rect class="f-accent" fill="#136d5a" x="60" y="150" width="280" height="40" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="175" font-size="12" text-anchor="middle">تنشيط gate ثم الضرب عنصرًا بعنصر في up</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 190V214"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="120" y="216" width="160" height="48" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="237" font-size="13" font-weight="600" text-anchor="middle">مصفوفة down</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="255" font-size="12" text-anchor="middle">640 → 2560</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 264V276"/>
+<text class="f-text" fill="#182f2b" x="200" y="292" font-size="12" text-anchor="middle">المخرج: 2560 رقمًا</text>
+<text class="f-text" fill="#182f2b" x="200" y="320" font-size="12" font-weight="600" text-anchor="middle">عدد المعاملات: 3 × 2560 × 640 = 4,915,200</text>
+</svg><figcaption>الشكل 10-2　الخبير الواحد ثلاث مصفوفات: تضغط المدخل من 2560 بُعدًا إلى 640، ثم تعيده إلى 2560. في كل خبير نحو 4.9 مليون معامل.</figcaption></figure>
+<p>العرض الرئيسي للنموذج 2560، والعرض الداخلي للخبير 640. <span class="ev ev-code">حقيقة من الشيفرة</span>[S04][S06] المصفوفات الثلاث معًا تعطي نحو 4.9 مليون معامل لكل خبير. احفظ هذا الرقم، فسنحتاجه في القسم التالي.</p>
+
+<h2 id="sec-2">10.2 كيف يختار مكتب الفرز الخبراء</h2>
+<p>في كل طبقة <dfn>موجِّه (router)</dfn>، وهو مكتب الفرز. ينظر إلى بيانات الرمز الحالي، ويعطي كل خبير من الخبراء الـ 512 في هذه الطبقة درجة، ثم يختار العشرة الأعلى درجة. تسمى هذه الخطوة <dfn>اختيار أعلى k (top-k)</dfn>، وهنا k = 10. <span class="ev ev-code">حقيقة من الشيفرة</span>[S13]</p>
+<p>كل خبير من العشرة المختارين يحسب نتيجته. بعد ذلك يحوّل الموجِّه الدرجات إلى «حصة صوت»، أي معاملات وزن، ويجمع النتائج العشر حسب أوزانها، ثم يضيف نتيجة الخبير المشترك ويسلّم الناتج للطبقة التالية. أما الخبراء الـ 502 الذين لم يُختاروا فلا يشاركون في الحساب إطلاقًا في هذه الخطوة. هذا الأسلوب، حيث يتوقف «هل نحسب أم لا» على المدخل، يسمى <dfn>الحساب الشرطي</dfn>.</p>
+<p>من الصعب أن تكوّن إحساسًا بذلك من الكلام وحده. المحاكي التالي يبطّئ العملية. اضغط <strong>خطوة</strong> وتابعها خطوة خطوة:</p>
+<div class="viz" data-viz="moe-router"><figure class="fig"><svg viewBox="0 0 400 420" role="img" aria-label="الشكل 10-3: حساب طبقة MoE واحدة. يعطي الموجِّه درجات لـ 512 خبيرًا ويختار 10 منهم، ثم تُجمع نتائجهم موزونة بالدرجات، ثم يُضاف الخبير المشترك">
+<defs><pattern id="c10-grid" width="10" height="10" patternUnits="userSpaceOnUse"><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" stroke-width=".6" x=".5" y=".5" width="8" height="8" rx="1.5"/></pattern></defs>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="6" width="340" height="38" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" font-weight="600" text-anchor="middle">مدخل هذه الطبقة: بيانات الرمز الحالي</text>
+<rect class="f-soft" fill="#e5f1df" x="30" y="64" width="340" height="38" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="88" font-size="13" font-weight="600" text-anchor="middle">الموجِّه: يعطي كل خبير من الـ 512 درجة</text>
+<rect fill="url(#c10-grid)" x="40" y="122" width="320" height="160"/>
+<rect class="f-accent" fill="#136d5a" x="70.5" y="132.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="210.5" y="142.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="320.5" y="162.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="120.5" y="182.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="260.5" y="192.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="160.5" y="212.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="340.5" y="222.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="90.5" y="242.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="230.5" y="252.5" width="8" height="8" rx="1.5"/><rect class="f-accent" fill="#136d5a" x="300.5" y="272.5" width="8" height="8" rx="1.5"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="298" font-size="12" text-anchor="middle">512 خانة = 512 خبيرًا</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="314" font-size="12" text-anchor="middle">الخانات العشر المضيئة = الأعلى درجة، وهي المختارة</text>
+<rect class="f-accent" fill="#136d5a" x="30" y="326" width="340" height="38" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="350" font-size="13" font-weight="600" text-anchor="middle">10 خبراء يحسب كلٌّ منهم نتيجة، وتُجمع حسب الأوزان</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="376" width="340" height="38" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="400" font-size="13" font-weight="600" text-anchor="middle">+ الخبير المشترك ← إلى الطبقة التالية</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 44V62M200 102V120M200 316V324M200 364V374"/>
+</svg><figcaption>الشكل 10-3　حساب طبقة MoE واحدة. تمرّ الطبقات الـ 48 كلها بهذه الخطوات، لذا يجري الاختيار 48 × 10 = 480 مرة لكل رمز.</figcaption></figure></div>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> لإيجاد أعلى 10 من بين 512 درجة لا حاجة إلى ترتيب الـ 512 كلها. يشرح العمود التالي ثلاث طرق وتعقيد كل منها.</p>
+<aside class="primer" id="c10-top-k">
+<h3>اختيار أعلى k: إيجاد أكبر k عددًا من بين n عددًا</h3>
+<p>أبسط طريقة أن ترتّب الأعداد الـ n كلها وتأخذ أول k، وتعقيدها O(n log n). لكننا نريد أول 10 فقط، ولا يهمنا ترتيب الـ 502 الباقين. فالترتيب الكامل يبذل جهدًا كثيرًا بلا فائدة.</p>
+<p>طريقة أوفر أن نستخدم <dfn>كومة صغرى</dfn> لا تحمل إلا k عددًا: نمسح الأعداد من البداية، وكلما وجدنا عددًا أكبر من رأس الكومة (أي المرتبة k الحالية) استبدلناه به. حجم الكومة يبقى k دائمًا، وكل تعديل يكلّف O(log k) فقط، فيصبح التعقيد الكلي O(n log k). عند n = 512 وk = 10 يكون ذلك نحو ثلث عمل الترتيب الكامل.</p>
+<p>وهناك طريقة ثالثة اسمها <dfn>الاختيار السريع</dfn> (quickselect)، تستعير فكرة «التقسيم» من الفرز السريع، ومتوسط كلفتها O(n) فقط. وعلى GPU يستخدم المبرمجون أيضًا الاختزال المتوازي، فتقارن خيوط كثيرة في وقت واحد. الاختيار بينها يتوقف على العتاد وعلى حجم k. وهذا الكتاب لم يتحقق من الطريقة التي تستخدمها نواة Strata.</p>
+<p>مهما كانت الخوارزمية، يجب أن تحدد <strong>من يُختار عند تساوي الدرجات</strong>. وإلا فقد يختار تشغيلان بالمدخل نفسه خبراء مختلفين.</p>
+<p class="further">للاستزادة: <a href="https://ar.wikipedia.org/wiki/%D9%83%D9%88%D9%85%D8%A9_%D8%AB%D9%86%D8%A7%D8%A6%D9%8A%D8%A9" target="_blank" rel="noopener noreferrer">ويكيبيديا: كومة ثنائية</a> · <a href="https://en.wikipedia.org/wiki/Quickselect" target="_blank" rel="noopener noreferrer">Wikipedia: Quickselect (finding the k-th element in linear time)</a> · <a href="https://ar.wikipedia.org/wiki/%D8%AE%D9%88%D8%A7%D8%B1%D8%B2%D9%85%D9%8A%D8%A9_%D8%A7%D9%84%D8%A7%D8%AE%D8%AA%D9%8A%D8%A7%D8%B1" target="_blank" rel="noopener noreferrer">ويكيبيديا: خوارزمية الاختيار</a></p>
+</aside>
+
+<h2 id="sec-3">10.3 لنحسب: 125 مليار معامل، فكم يستخدم كل رمز؟</h2>
+<p>بمعرفة أن «كل خبير 4.9 مليون معامل» وأن «كل رمز يختار 480 مرة» يمكننا حساب ما يستخدمه رمز واحد فعلًا من المعاملات:</p>
+<div class="table-wrap"><table><thead><tr><th>البند</th><th>العملية</th><th>الناتج</th></tr></thead><tbody>
+<tr><td>معاملات كل الخبراء الموجَّهين</td><td>4,915,200 × 24,576</td><td>نحو 120.8 مليار</td></tr>
+<tr><td>مجموع معاملات النموذج (README)</td><td>—</td><td>نحو 125 مليار <span class="ev ev-report">تقرير المصدر الأصلي</span></td></tr>
+<tr><td>المعاملات خارج الخبراء</td><td>125 مليار − 120.8 مليار</td><td>نحو 4.2 مليار <span class="ev ev-est">تقدير تعليمي</span></td></tr>
+<tr><td>معاملات الخبراء التي يستخدمها رمز واحد</td><td>4,915,200 × 480</td><td>نحو 2.4 مليار</td></tr>
+<tr><td>ما يستخدمه رمز واحد فعلًا من المعاملات</td><td>2.4 مليار + نحو 4.2 مليار</td><td>نحو 6.6 مليار، أي نحو 5% من المجموع <span class="ev ev-est">تقدير تعليمي</span></td></tr>
+</tbody></table></div>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="الشكل 10-4: 97% من معاملات النموذج في الخبراء الموجَّهين، بينما يستخدم كل رمز نحو 5% فقط من المعاملات">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="12">أين تذهب المعاملات (طول الشريط بالنسبة)</text>
+<text class="f-text" fill="#182f2b" x="20" y="44" font-size="12" font-weight="600">كل معاملات النموذج: نحو 125 مليار</text>
+<rect class="f-accent" fill="#136d5a" x="20" y="52" width="347.9" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="367.9" y="52" width="12.1" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="88" font-size="12">اللون الأساسي: الخبراء الموجَّهون نحو 120.8 مليار (97%)</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="106" font-size="12">البرتقالي: الباقي نحو 4.2 مليار (3%)</text>
+<text class="f-text" fill="#182f2b" x="20" y="140" font-size="12" font-weight="600">ما يستخدمه كل رمز فعلًا: نحو 6.6 مليار (5%)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="148" width="360" height="18"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="148" width="6.9" height="18"/>
+<rect class="f-warn" fill="#9e5d24" x="26.9" y="148" width="12.1" height="18"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="184" font-size="12">الخبراء المختارون نحو 2.4 مليار</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="202" font-size="12">+ الجزء المستخدم في كل خطوة نحو 4.2 مليار</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="224" font-size="12">الجزء الفاتح: معاملات لم تُستخدم في هذه الخطوة، ويمكن تركها في الذاكرة (RAM)</text>
+</svg><figcaption>الشكل 10-4　97% من معاملات هذا النموذج في الخبراء الموجَّهين، لكن كل رمز يستخدم نحو 5% فقط. وهذا ما يسمح بوضع الخبراء النادرين الاستخدام في مكان آخر.</figcaption></figure>
+<p>«المعاملات خارج الخبراء» حُسبت بطرح الأرقام التقريبية في README، وهي تفيد فقط في تكوين إحساس بالحجم. <span class="ev ev-est">تقدير تعليمي</span>[S01][S04]</p>
+<p>ننظر الآن إلى عدد البايتات. تنص الشيفرة على أن الخبير الواحد يشغل 1,382,400 بايت في الصيغة القياسية. <span class="ev ev-code">حقيقة من الشيفرة</span>[S06] بالتوزيع على 4.9 مليون معامل يكون لكل معامل نحو 2.25 بت، أي أقل بأكثر من 7 أضعاف من 16 بت الأصلية. يسمى هذا الضغط <dfn>التكميم</dfn>، وسيشرحه الفصل 4 بالتفصيل. بهذه الصيغة تبلغ الـ 24,576 خبيرًا نحو 34 GB، والخبراء الـ 480 التي يقرؤها رمز واحد نحو 664 MB. <span class="ev ev-est">تقدير تعليمي</span></p>
+
+<h2 id="sec-4">10.4 أين يوضع الخبراء الذين لم يُختاروا</h2>
+<p>34 GB من الخبراء لا تتّسع في بطاقة ذاكرتها 12 GB. حل Strata هو التخزين على مستويات <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02]:</p>
+<ul>
+<li><strong>بطاقة الرسوميات (GPU)</strong> تضع أولًا الأجزاء التي يحتاجها كل رمز، وتخصص كل ما تبقى من ذاكرة الفيديو (VRAM) لحفظ <strong>الخبراء الأكثر اختيارًا</strong>.</li>
+<li><strong>الذاكرة (RAM)</strong> تحمل كل الخبراء. الخبير الذي اختاره الموجِّه وليس في البطاقة يسمى «إخفاقًا» (miss)، وتحسبه وحدة CPU في الغالب داخل الذاكرة مباشرة، وفي الوقت نفسه الذي تعمل فيه البطاقة.</li>
+</ul>
+<p>لماذا لا ننقل الخبير المُخفِق إلى البطاقة مؤقتًا ليُحسب هناك؟ المفتاح هو <dfn>عرض النطاق</dfn>، أي عدد البايتات التي يمكن نقلها في الثانية. في المحاكي التالي تنقل أربعة أماكن الـ 664 MB نفسها في آن واحد، لنرى من يصل أولًا:</p>
+<div class="viz" data-viz="transfer-race"><figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="الشكل 10-5: نقل 664 MB من VRAM وRAM وPCIe وقرص SSD يستغرق نحو 1.0 و8.0 و10.5 و94.9 ميلي ثانية على الترتيب">
+<text class="f-muted" fill="#5c6d66" x="10" y="14" font-size="12">كم يستغرق نقل 664 MB (الذروة النظرية، طول الشريط بالنسبة)</text>
+<text class="f-text" fill="#182f2b" x="10" y="42" font-size="12">VRAM</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="30" width="2.3" height="16"/>
+<text class="f-text" fill="#182f2b" x="106" y="43" font-size="12">1.0 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="82" font-size="12">RAM</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="70" width="18.5" height="16"/>
+<text class="f-text" fill="#182f2b" x="122" y="83" font-size="12">8.0 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="122" font-size="12">PCIe 5.0</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="110" width="24.4" height="16"/>
+<text class="f-text" fill="#182f2b" x="128" y="123" font-size="12">10.5 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="162" font-size="12">قرص SSD</text>
+<rect class="f-warn" fill="#9e5d24" x="96" y="150" width="220" height="16"/>
+<text class="f-text" fill="#182f2b" x="322" y="163" font-size="12">94.9 ms</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="12">الزمن = 664 MB ÷ عرض النطاق (672 / 83 / 63 / 7 GB/s)</text>
+</svg><figcaption>الشكل 10-5　نقل البيانات مرة واحدة عبر PCIe يستغرق 10.5 ميلي ثانية. النقل وحده يحدّ السرعة بأقل من 94 رمزًا في الثانية. والقراءة من القرص تستغرق نحو 0.1 ثانية.</figcaption></figure></div>
+<p>النتيجة واضحة: لا يصح أن ينقل كل رمز بياناته عبر PCIe. لذلك تجعل Strata وحدة CPU تحسب معظم الخبراء المُخفِقين في الذاكرة نفسها، فلا تمر بياناتهم عبر هذا الممر الضيق. وتذكر وثائق المصدر الأصلي أيضًا أنها ترسل جزءًا صغيرًا من الخبراء المُخفِقين عبر PCIe إلى البطاقة لتحسبه، كي يتوازن العمل بين الطرفين. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03]</p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذه هي فكرة التسلسل الهرمي للذاكرة في مقرر «تنظيم الحاسوب»: ضع الأكثر استخدامًا في أسرع مستوى. وفي الفصل 1 عمود «التسلسل الهرمي للذاكرة» يقارن عرض النطاق في كل مستوى.</p>
+<p>عدد الخبراء الذين يمكن حفظهم في البطاقة يؤثر مباشرة في السرعة. الشكل 10-6 يعرض قياسات من وثائق المصدر الأصلي.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="الشكل 10-6: كم من الخبراء الـ 24,576 يوجد في البطاقة. الافتراضي 1,589 خبيرًا، وبعد نقل سجل المحادثة خارج ذاكرة الفيديو 3,872 خبيرًا، وترتفع السرعة من 50.9 إلى 62.6 رمزًا في الثانية">
+<text class="f-text" fill="#182f2b" x="20" y="22" font-size="13" font-weight="600">كل الخبراء: 24,576 (طول الشريط بالنسبة)</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="54" font-size="12">الإعداد الافتراضي</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="62" width="360" height="22" rx="4"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="62" width="23.3" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="20" y="104" font-size="12">1,589 في البطاقة (نحو 6%) · 50.9 رمزًا في الثانية</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="138" font-size="12">بعد نقل معظم سجل المحادثة إلى الذاكرة</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="146" width="360" height="22" rx="4"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="146" width="56.7" height="22" rx="4"/>
+<text class="f-text" fill="#182f2b" x="20" y="188" font-size="12">3,872 في البطاقة (نحو 16%) · 62.6 رمزًا في الثانية</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="212" font-size="12">قياس المصدر الأصلي: RTX 5070 12 GB، Q2_0، سياق 262K،</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="230" font-size="12">إصدار المحرك 0.1.5</text>
+</svg><figcaption>الشكل 10-6　كلما زاد عدد الخبراء المحفوظين في البطاقة قلّ ما تحسبه وحدة CPU وزادت السرعة. البيانات من وثائق المصدر الأصلي. [S03]</figcaption></figure>
+<p>مع سياق طويل طوله 262K يشغل سجل المحادثة نفسه جزءًا كبيرًا من ذاكرة الفيديو. بعد نقل معظمه إلى الذاكرة (RAM) صار في البطاقة مكان لـ 2,283 خبيرًا إضافيًا، فارتفعت سرعة التوليد من 50.9 إلى 62.6 رمزًا في الثانية. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03] وتقول الوثائق أيضًا إن كل 1 GB إضافي من ذاكرة الفيديو يتّسع لنحو 700 خبير. [S02] وهذا يتوافق مع حساب البايتات: 1 GB ÷ 1,382,400 بايت ≈ 723.</p>
+
+<h2 id="sec-5">10.5 الخبراء المشهورون يتغيرون: الذاكرة المؤقتة تتبع المحادثة</h2>
+<p>أي الخبراء مشهور يتوقف على موضوع حديثك. الخبراء الذين يكثر استخدامهم عند كتابة الشيفرة قد يختلفون كثيرًا عمّن يكثر استخدامهم عند كتابة نثر عربي. لذلك لا تُحدَّد ذاكرة الخبراء المؤقتة في Strata مرة واحدة، بل تتعدّل أثناء المحادثة: تُدخل البطاقة الخبراء الذين اختيروا كثيرًا مؤخرًا، وتُخرج النادرين. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02] الشكل 10-7 رسم توضيحي.</p>
+<figure class="fig"><svg viewBox="0 0 400 244" role="img" aria-label="الشكل 10-7: بعد أن يتحول الموضوع من الشيفرة إلى النثر، تُخرج الذاكرة المؤقتة في ذاكرة الفيديو خبيرين نادرين وتُدخل خبيرين مشهورين، ويبقى عدد الخانات ثابتًا">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">ذاكرة الخبراء المؤقتة في ذاكرة الفيديو (رسم توضيحي: 8 خانات فقط)</text>
+<text class="f-text" fill="#182f2b" x="10" y="42" font-size="12">أثناء الحديث عن الشيفرة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="52" width="40" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="30" y="70" font-size="12" text-anchor="middle">#027</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="56" y="52" width="40" height="26" rx="3"/><text class="f-muted" fill="#5c6d66" x="76" y="70" font-size="12" text-anchor="middle">#331</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="102" y="52" width="40" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="122" y="70" font-size="12" text-anchor="middle">#045</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="148" y="52" width="40" height="26" rx="3"/><text class="f-muted" fill="#5c6d66" x="168" y="70" font-size="12" text-anchor="middle">#408</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="194" y="52" width="40" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="214" y="70" font-size="12" text-anchor="middle">#156</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="240" y="52" width="40" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="260" y="70" font-size="12" text-anchor="middle">#073</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="286" y="52" width="40" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="306" y="70" font-size="12" text-anchor="middle">#219</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="332" y="52" width="40" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="352" y="70" font-size="12" text-anchor="middle">#360</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M76 80V114M168 80V114"/>
+<text class="f-text" fill="#182f2b" x="10" y="108" font-size="12">بعد التحول إلى كتابة النثر</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="118" width="40" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="30" y="136" font-size="12" text-anchor="middle">#027</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="118" width="40" height="26" rx="3"/><text class="f-on" fill="#ffffff" x="76" y="136" font-size="12" text-anchor="middle">#112</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="102" y="118" width="40" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="122" y="136" font-size="12" text-anchor="middle">#045</text>
+<rect class="f-accent" fill="#136d5a" x="148" y="118" width="40" height="26" rx="3"/><text class="f-on" fill="#ffffff" x="168" y="136" font-size="12" text-anchor="middle">#290</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="194" y="118" width="40" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="214" y="136" font-size="12" text-anchor="middle">#156</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="240" y="118" width="40" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="260" y="136" font-size="12" text-anchor="middle">#073</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="286" y="118" width="40" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="306" y="136" font-size="12" text-anchor="middle">#219</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="332" y="118" width="40" height="26" rx="3"/><text class="f-text" fill="#182f2b" x="352" y="136" font-size="12" text-anchor="middle">#360</text>
+<text class="f-text" fill="#182f2b" x="10" y="172" font-size="12">خرجا: #331 و#408 (قلّ اختيارهما مؤخرًا، فعادا إلى الذاكرة ينتظران)</text>
+<text class="f-text" fill="#182f2b" x="10" y="192" font-size="12">دخلا: #112 و#290 (كثر اختيارهما مؤخرًا، فانتقلا إلى ذاكرة الفيديو)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="218" font-size="12">عدد الخانات ثابت، والمتغيّر هو «من يسكن ذاكرة الفيديو».</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">الأرقام للتوضيح فقط.</text>
+</svg><figcaption>الشكل 10-7　إذا تغيّر الموضوع تغيّر الخبراء المشهورون أيضًا. تُخرج الذاكرة المؤقتة النادرين وتُدخل المشهورين، ويبقى حجم ذاكرة الفيديو كما هو.</figcaption></figure>
+<p>الأمر يشبه ترتيب سطح المطبخ: إن كنت تطبخ هذه الأيام أطباقًا حارة، فالفلفل والتوابل في متناول يدك. وإن انتقلت إلى الخَبز تغيّر ما على السطح. حجم السطح ثابت، وما يوضع عليه يحدده الاستخدام الأخير. وسيشرح الفصل 12 بالتفصيل كيف تقرر هذه الذاكرة من يدخل ومن يخرج.</p>
+<p>انتبه إلى نقطة: الذاكرة المؤقتة تغيّر <strong>مكان الحساب</strong> فقط، ولا تغيّر <strong>ما يُحسب</strong>. الخبير الذي أُخرج ما زال في الذاكرة (RAM)، وإذا اختير تحسبه وحدة CPU. لم ينقص النموذج خبير واحد. (سيذكر الفصل 26 أن CPU وGPU قد تختلفان في آخر خانات عشرية عند حساب الخبير نفسه، لكن هذا ليس «ضياع خبير».)</p>
+
+<h2 id="sec-6">10.6 تطبيق عملي: أحسّ بأثر «الشهرة» في نسبة الإصابة</h2>
+<p>مقدار فائدة الذاكرة المؤقتة يتوقف على مدى انتظام تكرار اختيار الخبراء. إذا حمل قلة مشهورون قدرًا كبيرًا من العمل، فحفظهم يجعل البطاقة تعمل أكثر ووحدة CPU تعمل أقل. وإذا كان لكل خبير الفرصة نفسها تمامًا في أن يُختار، فحفظ 6% من الخبراء يعطي نحو 6% من الإصابات فقط.</p>
+<p>افتح مختبر هذا الفصل التفاعلي «مسار الذاكرة المؤقتة والتعارضات»، وجرّب سجلّين للوصول: سجلًا يتركز على عدد قليل من المفاتيح، وآخر موزعًا بالتساوي. بعدد الخانات نفسه، انظر كم يختلف معدل الإصابة. كلما تركّز الوصول ازدادت قيمة الذاكرة المؤقتة المحدودة. والسياسات في المختبر خوارزميات عامة من الكتب الدراسية، وليست السياسة التكيفية التي تستخدمها Strata فعلًا.</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>في نموذج MoE خبراء كثيرون في كل طبقة، ويختار الموجِّه لكل رمز عددًا قليلًا منهم. في نموذج Strata يُختار 10 من 512 في كل طبقة، أي 480 اختيارًا لكل رمز.</li>
+<li>كثرة المعاملات لا تعني أن كل خطوة تستخدم الكثير منها: هذا النموذج يستخدم نحو 5% من معاملاته لكل رمز.</li>
+<li>الخبراء المشهورون يُحفظون في بطاقة الرسوميات، وكل الخبراء في الذاكرة (RAM)، وتحسب وحدة CPU في الغالب من أخفق منهم في مكانه. كلما كبرت ذاكرة الفيديو حُفظ خبراء أكثر وزادت السرعة.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «الخبير الذي لم يُختر بلا فائدة، فنحذفه لنوفّر المساحة».</strong></p>
+<p>الخبير الذي لم يُختر في هذه الخطوة قد يُستخدم مع الرمز التالي. وحذف الخبراء يغيّر النموذج نفسه. نسخة Coder التي تقدمها Strata حذفت نصف الخبراء: بحسب مؤلفيها احتفظت بـ 91% من درجة النموذج الأصلي في اختبار البرمجة SWE-bench Verified، لكنها ضعفت بوضوح في النصوص الأخرى، ومنها الصينية. لذلك يوصي المصدر الأصلي باختيار النسخة التي تحتفظ بكل الخبراء عند الكتابة بالصينية. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S01]</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: حدود top-k وعقد الواجهة وطريقة التقييم</summary>
+<h3>top-k حدّ غير متصل</h3>
+<p>قد تكون درجتا المرتبة 10 والمرتبة 11 متقاربتين جدًا. خطأ عددي صغير للغاية قد يبدّل خبيرًا كاملًا، فيكون فرق المخرجات أكبر بكثير من فرق الدرجتين. لذلك لا يكفي القول إن «خطأ كل درجات التوجيه أقل من 10⁻⁴» لإثبات أن حسابين اختارا الخبراء أنفسهم. يجب أن يسجّل الاختبار أرقام الخبراء المختارين وأوزانهم والمخرج المدمج كلًّا على حدة، وأن يبني عمدًا عينات حدّية وعينات تعادل وقيمًا شاذة.</p>
+<h3>العنوان الثابت لا يعني المحتوى الثابت</h3>
+<p>كتب الملف <code>expert_source.hpp</code> عقد الواجهة على شكل تحذيرات متتالية. [S06] أولها: مدخل الخبراء <code>x_f</code> المرسل في كل طبقة يستخدم <strong>القطعة نفسها</strong> من الذاكرة المثبّتة، فعنوانها ثابت أبدًا، ومحتواها يختلف في كل طبقة. فإذا خزّن أحدهم نتيجة تكميمه بحسب العنوان، فسيعيد استخدام بيانات الطبقة 0 في الطبقات الـ 47 التالية. والنتيجة رمز محدود القيمة، يبدو معقولًا، لكنه خاطئ تمامًا.</p>
+<p>وهذا يقابل مسألة «تصميم المفتاح» في هياكل البيانات: مكان الكائن لا يدل على أي نسخة منه. في الهندسة تُستخدم أجيال (generation) صريحة أو رقم الطبقة أو هوية المحتوى أو عمر محدود، ولا يُكتفى بتساوي المؤشرات للحكم على تساوي البيانات.</p>
+<h3>وزن التوجيه يُضرب مرة واحدة فقط</h3>
+<p>العقد الثاني في الملف نفسه: مجمّع الخبراء <strong>لا</strong> يضرب وزن التوجيه، فالضرب تتولاه خطوة الدمج على الجهاز وحدها. <span class="ev ev-code">حقيقة من الشيفرة</span>[S06] لو ضربه المجمّع أيضًا لما اكتُشف الخطأ تقريبًا في طبقة واحدة، لكنه يتضخم عبر 48 طبقة. والعقد الثالث: هندسة الخبير (2560 و640 و1,382,400 بايت) يثبتها ملف النموذج، وعند عدم التطابق يُرفض الملف بدل أن يُقرأ قسرًا. فالقراءة بعرض خاطئ تدخل بصمت بايتات الخبير المجاور دون أي رسالة خطأ.</p>
+<h3>لماذا لا تطابق صيغة المعاملات عدد البايتات الفعلي</h3>
+<p>بحساب «2 بت لكل معامل» يحتاج الخبير إلى 4,915,200 × 2 ÷ 8 = 1,228,800 بايت فقط. والصيغة الفعلية 1,382,400 بايت، والفرق 153,600 بايت (نحو 11%) هو بيانات وصفية يحتاجها التكميم، مثل معاملات القياس. وتختلف أطوال السجلات من حزمة تكميم إلى أخرى. [S06] فلا يصح أن نعدّ الصيغة المبسطة للمعاملات هي الحجم الحقيقي في أي صيغة.</p>
+<h3>كيف نقيّم سياسة الذاكرة المؤقتة بإنصاف</h3>
+<p>إذا اخترت الخبراء المشهورين من سجل وصول معيّن ثم قست نسبة الإصابة على السجل نفسه، جاءت النتيجة مرتفعة أكثر من الواقع، لأن السياسة «رأت الأسئلة من قبل». الصحيح أن تقسّم السجلات حسب الطلب أو المهمة إلى مجموعة محجوزة، وتقيس على سجلات لم تُرَ. ولا تقسّم محادثة طويلة واحدة إلى شرائح متشابهة وتضعها في الطرفين، وإلا تسرّبت المعلومات. وعند الإبلاغ عن نسبة الإصابة اكتب أيضًا سعة الذاكرة المؤقتة، والتوزيع على الطبقات، ومقام عدّ الإصابات، وهل القياس عند البدء البارد أم بعد الإحماء، ومصدر سجل الوصول. أما عبارة «نسبة الإصابة 70%» وحدها فلا تصلح أساسًا لأي ميزانية سعة.</p>
+</details>

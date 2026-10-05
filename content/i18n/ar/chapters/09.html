@@ -1,0 +1,214 @@
+<div class="hook"><span class="eyebrow">تشبيه أولًا</span>
+<p>هناك طريقتان لتدوين الملاحظات في اجتماع. الأولى كاتب الاختزال: يدوّن كل جملة، فيزداد الدفتر سُمكًا، وحين تريد شيئًا تقلّب الصفحات إلى الوراء. والثانية السبّورة: لوح واحد بحجم ثابت، وكلما جاء كلام جديد مسحتَ شيئًا من القديم وأعدتَ كتابة جزء، فيبقى اللوح بالحجم نفسه دائمًا.</p>
+<p>الانتباه في الفصل 8 هو كاتب الاختزال. وهذا الفصل عن السبّورة: في نموذج Strata تستخدم 36 طبقة من 48 طبقة آلية <dfn>GDN</dfn> (‏Gated DeltaNet)، ولكل رأس في كل طبقة «سبّورة» واحدة بحجم 128 × 128 لا تكبر مهما طالت المحادثة. سنستعين بأمثلة صغيرة يمكن حلّها باليد لنرى كيف تُمسح هذه السبّورة وكيف تُكتب وكيف تُقرأ.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> تضغط GDN التاريخ كله في مصفوفة حالة ثابتة الحجم. مع كل رمز (token) جديد: تُخفِّض الحالة كلها أولًا، ثم تقرأ القيمة القديمة بالمفتاح الحالي، ثم تكتب بجداء خارجي واحد الفرق فقط «القيمة المطلوبة ناقص القيمة القديمة». لا يكبر حجم الحالة مع السياق، لكنها تفقد جزءًا من المعلومات، وإذا اختلّت الخطوات خطوة واحدة تغيّرت النتيجة بصمت.</p>
+
+<h2 id="sec-1">9.1 نوعان من الذاكرة: تقليب الملاحظات أو المسح والكتابة على سبّورة</h2>
+<p>يحتفظ الانتباه بمفتاح وقيمة لكل موضع في التاريخ، ويرجع إليهما عند الحاجة. الميزة أن شيئًا لا يضيع؛ والثمن أنه كلما طال السياق زاد ما يُخزَّن وبطؤ البحث (الفصل 8). أما GDN فتسلك طريقًا آخر: لا تحتفظ بسجل لكل عنصر، بل تُبقي <strong>حالة</strong> ثابتة الحجم وتحدّثها مرة واحدة مع كل رمز. انظر الشكل 9-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="الشكل 9-1: تنمو ذاكرة KV المؤقتة في الانتباه خطيًّا مع السياق إلى نحو 6 GiB عند 262K، بينما تبقى حالة GDN عند نحو 112 MiB دائمًا">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">عدد البايتات التي تشغلها الذاكرة (حسب طول السياق)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M50 190H380M50 190V36"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M50 190L380 40"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" stroke-dasharray="7 4" d="M50 187.3H380"/>
+<text class="f-text" fill="#182f2b" x="96" y="80" font-size="12">ذاكرة KV المؤقتة في الانتباه:</text>
+<text class="f-text" fill="#182f2b" x="96" y="98" font-size="12">تزيد 24 KiB لكل رمز</text>
+<text class="f-text" fill="#182f2b" x="130" y="176" font-size="12">حالة GDN: ثابتة عند نحو 112 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="46" y="44" font-size="12" text-anchor="end">6 GiB</text>
+<text class="f-muted" fill="#5c6d66" x="46" y="194" font-size="12" text-anchor="end">0</text>
+<text class="f-muted" fill="#5c6d66" x="50" y="208" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="208" font-size="12" text-anchor="middle">128K</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="208" font-size="12" text-anchor="end">262K</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="230" font-size="12">KV بدقة FP16 و12 طبقة QSA؛ وGDN تشمل سجل الالتفاف</text>
+</svg><figcaption>الشكل 9-1　تواصل ذاكرة KV المؤقتة الصعود مع السياق، وحالة GDN بالحجم نفسه منذ الرمز الأول. الثمن: سبّورة ثابتة الحجم لا تتسع لتفاصيل بلا حدود.</figcaption></figure>
+<aside class="primer" id="c09-rnn-state">
+<h3>الشبكات العصبية المتكررة و«الحالة»</h3>
+<p>الحدس: حين تعدّ الأغنام لا تحفظ في رأسك إلا رقمًا واحدًا: «وصلتُ إلى الخروف رقم كم». كلما رأيت خروفًا زدتَ الرقم واحدًا. لا تحتاج أن تتذكر شكل كل خروف لتخبر بالمجموع في أي لحظة. هذا «الشيء المحفوظ في رأسك» هو <dfn>الحالة</dfn>.</p>
+<p>التعريف: نظام يحدّث نفسه في كل خطوة وفق «حالة قديمة + مدخل جديد ← حالة جديدة»، ونكتبها <span dir="ltr">hₜ = f(hₜ₋₁, xₜ)</span>. العدّاد في الدوائر الرقمية و<dfn>الآلة المحدودة الحالات</dfn> في نظرية المترجمات لهما الشكل نفسه. فإذا استبدلنا f بشبكة عصبية قابلة للتدريب حصلنا على <dfn>الشبكة العصبية المتكررة</dfn> (RNN).</p>
+<p>خاصيتان مهمتان. الأولى: حجم الحالة ثابت، فعمل كل خطوة لا يتوقف على عدد الخطوات السابقة، أي O(1). وقراءة نص من n كلمة تكلّف O(n)، وهذا أرخص من O(n²) في الانتباه. الثانية: الحجم الثابت يعني أن الحالة <strong>تفقد معلومات</strong>: «عدّاد الأغنام» يخبرك بالمجموع، لكنه لا يعرف لون الخروف رقم 17. ومشكلة RNN القديمة هي بالضبط «نسيان ما مضى من زمن بعيد». تخفّف النماذج الأحدث مثل GDN ذلك بحالة مصفوفية أكبر وقاعدة كتابة أذكى، لكن فقدان المعلومات يبقى.</p>
+<p>وهناك نتيجة هندسية أيضًا: الحالة لا تسير إلا إلى الأمام. إذا كانت بيدك حالة الخطوة t فلا يمكنك عادةً <strong>الرجوع</strong> منها إلى الخطوة t − 2، لأن الكتابة مسحت جزءًا من المعلومات القديمة. وللتراجع عليك أن تحفظ لقطة مسبقًا، أو أن تعيد التشغيل من البداية.</p>
+<p>الصلة بالفصل: لكل طبقة من طبقات GDN الـ 36 في Strata حالتها الخاصة، تُدفع إلى الأمام رمزًا بعد رمز.</p>
+<p class="further">قراءة إضافية: <a href="https://ar.wikipedia.org/wiki/%D8%B4%D8%A8%D9%83%D8%A9_%D8%B9%D8%B5%D8%A8%D9%8A%D8%A9_%D9%85%D8%AA%D9%83%D8%B1%D8%B1%D8%A9" target="_blank" rel="noopener noreferrer">ويكيبيديا: شبكة عصبية متكررة</a> · <a href="https://ar.wikipedia.org/wiki/%D8%A2%D9%84%D8%A9_%D9%85%D8%AD%D8%AF%D9%88%D8%AF%D8%A9_%D8%A7%D9%84%D8%AD%D8%A7%D9%84%D8%A7%D8%AA" target="_blank" rel="noopener noreferrer">ويكيبيديا: آلة محدودة الحالات</a> · <a href="https://en.wikipedia.org/wiki/Recurrent_neural_network" target="_blank" rel="noopener noreferrer">Wikipedia: Recurrent neural network</a></p>
+</aside>
+<p>في Strata، 36 طبقة من 48 هي طبقات GDN. <span class="ev ev-code">حقيقة من الشيفرة</span>[S04] تحفظ حالة الجلسة لكل طبقة GDN حالة تكرارية وسجل التفاف خاصَّين بها؛ أما المخازن المؤقتة للحسابات الوسيطة فمجموعة واحدة تتشاركها الطبقات الـ 36، بينما الحالة يجب أن تكون نسخة لكل طبقة، لأن «التكرار» هو لبّ الفكرة كلها. [S13] (الملف <code>session.cpp</code> السطور 38-44) وعند بدء محادثة جديدة تُصفَّر كل الحالات. [S13] وطبقة GDN ليس لها حتى معامل «موضع»: مدخلها لكل رمز هو صف الأعداد ذاك فقط، والذي ينتقل من رمز إلى رمز هو هذه الحالة (الملف <code>layer.hpp</code> السطور 516-518).</p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> انظر إلى طبقة GDN على أنها آلة حالات. الحالة 48 مصفوفة عشرية بحجم 128 × 128، والمدخل متجه الرمز الحالي، ودالة الانتقال هي معادلة التكرار في هذا الفصل. إنها التجريد نفسه للدارة التتابعية في «المنطق الرقمي»: المنطق التركيبي يحسب الحالة التالية، والسجلات تحفظ الحالة الحالية.</p>
+
+<h2 id="sec-2">9.2 الجداء الخارجي: إعادة كتابة جدول كامل دفعة واحدة</h2>
+<p>السبّورة مصفوفة. فكيف نكتب فيها العلاقة «المفتاح k يقابل القيمة v»؟ الجواب هو الجداء الخارجي.</p>
+<aside class="primer" id="c09-outer-product">
+<h3>الجداء الخارجي والتحديث من الرتبة الأولى</h3>
+<p>الجداء النقطي في الفصل 3 يحوّل متجهين إلى <strong>عدد واحد</strong>: <span dir="ltr">q · k = Σ qᵢkᵢ</span>. أما <dfn>الجداء الخارجي</dfn> فيفعل العكس، فيحوّل متجهين إلى <strong>جدول</strong>: العنصر في الصف i والعمود j من k vᵀ يساوي kᵢ × vⱼ. إذا كان في k ثلاثة أعداد وفي v عددان فالجداء الخارجي جدول 3 × 2؛ انظر الشكل 9-2 بعد هذا الصندوق.</p>
+<p>لهذا الجدول سمة خاصة: كل صف فيه مضاعف لـ v (الصف <span dir="ltr">i = kᵢ × v</span>). كل الصفوف «تشير إلى الاتجاه نفسه»، ونقول في الجبر الخطي إن <dfn>رتبته</dfn> تساوي 1. ولذلك يسمى إضافة جداء خارجي إلى مصفوفة <dfn>تحديثًا من الرتبة الأولى</dfn>: <span dir="ltr">S ← S + k vᵀ</span>.</p>
+<p>لماذا يصلح التحديث من الرتبة الأولى للذاكرة؟ لأن «القراءة» بالمفتاح k نفسه تعيد v تمامًا. نقرأ بالعملية Sᵀk: ضرب نقطي لكل عمود في k. إذا كانت <span dir="ltr">S = k vᵀ</span> وطول k يساوي 1 فإن <span dir="ltr">Sᵀk = v × (k · k) = v</span>. وإذا كانت المفاتيح المختلفة متعامدة (ضربها النقطي 0) فلا يتدخل ما يكتبه أحدها فيما يكتبه غيره؛ وإذا تداخلت اختلطت محتوياتها.</p>
+<p>والتكلفة واضحة أيضًا: يمسّ التحديث الواحد من الرتبة الأولى كل خانة في الجدول، أي S × S عملية ضرب وجمع؛ لكنه لا يعتمد إلا على الزوج الحالي k وv، ولا يحتاج إلى النظر في أي تاريخ سابق.</p>
+<p>الصلة بالفصل: تجري GDN مع كل رمز تحديثًا واحدًا من الرتبة الأولى لكل رأس قيمة، على سبّورة بحجم 128 × 128 لكل رأس.</p>
+<p class="further">قراءة إضافية: <a href="https://en.wikipedia.org/wiki/Outer_product" target="_blank" rel="noopener noreferrer">Wikipedia: Outer product</a> · <a href="https://ar.wikipedia.org/wiki/%D8%B1%D8%AA%D8%A8%D8%A9_%28%D8%AC%D8%A8%D8%B1_%D8%AE%D8%B7%D9%8A%29" target="_blank" rel="noopener noreferrer">ويكيبيديا: رتبة (جبر خطي)</a> · <a href="https://ar.wikipedia.org/wiki/%D9%85%D8%B5%D9%81%D9%88%D9%81%D8%A9_%28%D8%B1%D9%8A%D8%A7%D8%B6%D9%8A%D8%A7%D8%AA%29" target="_blank" rel="noopener noreferrer">ويكيبيديا: مصفوفة (رياضيات)</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 222" role="img" aria-label="الشكل 9-2: عندما تكون k تساوي 1 و0 و2 وv تساوي 2 و3 يكون الجداء الخارجي جدولًا من 3 صفوف وعمودين، وكل صف مضاعف لـ v">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">v = [2, 3]</text>
+<rect class="f-soft" fill="#e5f1df" x="170" y="24" width="56" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="198" y="44" font-size="13" text-anchor="middle">2</text>
+<rect class="f-soft" fill="#e5f1df" x="230" y="24" width="56" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="258" y="44" font-size="13" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="120" y="44" font-size="12" text-anchor="middle">k</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="62" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="84" font-size="13" text-anchor="middle">1</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="100" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-soft" fill="#e5f1df" x="104" y="138" width="32" height="34" rx="3"/><text class="f-text" fill="#182f2b" x="120" y="160" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="170" y="62" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="198" y="84" font-size="13" text-anchor="middle">2</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="62" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="258" y="84" font-size="13" text-anchor="middle">3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="100" width="56" height="34" rx="3"/><text class="f-muted" fill="#5c6d66" x="198" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="100" width="56" height="34" rx="3"/><text class="f-muted" fill="#5c6d66" x="258" y="122" font-size="13" text-anchor="middle">0</text>
+<rect class="f-accent" fill="#136d5a" x="170" y="138" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="198" y="160" font-size="13" text-anchor="middle">4</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="138" width="56" height="34" rx="3"/><text class="f-on" fill="#ffffff" x="258" y="160" font-size="13" text-anchor="middle">6</text>
+<text class="f-text" fill="#182f2b" x="296" y="84" font-size="12">= 1 × v</text>
+<text class="f-text" fill="#182f2b" x="296" y="122" font-size="12">= 0 × v</text>
+<text class="f-text" fill="#182f2b" x="296" y="160" font-size="12">= 2 × v</text>
+<text class="f-text" fill="#182f2b" x="20" y="196" font-size="12">الصف i والعمود j = kᵢ × vⱼ؛ كل صف مضاعف لـ v فالرتبة 1</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="216" font-size="12">نضيفه إلى الحالة: S ← S + k vᵀ، وهذا تحديث من الرتبة الأولى</text>
+</svg><figcaption>الشكل 9-2　الجداء الخارجي «ينسج» متجهين في جدول. المعلومات في الجدول هي في الحقيقة سلسلتا أعداد فقط، k وv، ولهذا سُميت الرتبة الأولى.</figcaption></figure>
+
+<h2 id="sec-3">9.3 قاعدة دلتا: نقرأ القيمة القديمة أولًا ونكتب الفرق فقط</h2>
+<p>أبسط طريقة للكتابة أن نضيف k vᵀ في كل مرة. المشكلة أنك إذا كتبت المفتاح نفسه مرتين <strong>تراكمت</strong> القيمتان. جرّب على سبّورة 2 × 2: نكتب أولًا «تفاح» (مفتاحه [1, 0]) ← [2, 3]، ثم نعدّل التفاح إلى [5, 1]. بالجمع البسيط يصير الصف الأول من السبّورة [2, 3] + [5, 1] = [7, 4]، ونقرؤه فنجده [7, 4]، وهو ليس أيًّا من القيمتين.</p>
+<p>حل <dfn>قاعدة دلتا</dfn> أن نقرأ بالمفتاح قبل الكتابة لنرى ما هو مخزَّن على السبّورة فعلًا (نسميه v̂)، ثم نكتب الفرق فقط <span dir="ltr">δ = v − v̂</span>، أي «المطلوب ناقص القديم». عند كتابة التفاح للمرة الثانية يكون <span dir="ltr">v̂ = [2, 3]</span>، و<span dir="ltr">δ = [5, 1] − [2, 3] = [3, −2]</span>، فإذا أضفناه صار الصف الأول <span dir="ltr">[5, 1]</span>، وعند القراءة نحصل على القيمة الجديدة تمامًا. انظر الشكل 9-3.</p>
+<div class="viz" data-viz="delta-memory"><figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="الشكل 9-3: نكتب التفاح 2 و3 ثم نعدّله إلى 5 و1. الجمع البسيط يعيد عند القراءة 7 و4، وقاعدة دلتا تعيد 5 و1">
+<text class="f-text" fill="#182f2b" x="200" y="16" font-size="12" text-anchor="middle">نكتب تفاح ← [2, 3] ثم نعدّل تفاح ← [5, 1]</text>
+<text class="f-text" fill="#182f2b" x="100" y="42" font-size="13" font-weight="600" text-anchor="middle">الجمع البسيط</text>
+<rect class="f-warn" fill="#9e5d24" x="30" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="77" font-size="14" text-anchor="middle">7</text>
+<rect class="f-warn" fill="#9e5d24" x="104" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="137" y="77" font-size="14" text-anchor="middle">4</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="30" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="63" y="121" font-size="14" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="104" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="137" y="121" font-size="14" text-anchor="middle">0</text>
+<text class="f-warn" fill="#9e5d24" x="100" y="160" font-size="12" text-anchor="middle">قراءة تفاح = [7, 4]</text>
+<text class="f-warn" fill="#9e5d24" x="100" y="178" font-size="12" text-anchor="middle">القديم والجديد متراكمان</text>
+<text class="f-text" fill="#182f2b" x="300" y="42" font-size="13" font-weight="600" text-anchor="middle">قاعدة دلتا</text>
+<rect class="f-accent" fill="#136d5a" x="230" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="77" font-size="14" text-anchor="middle">5</text>
+<rect class="f-accent" fill="#136d5a" x="304" y="52" width="66" height="40" rx="3"/><text class="f-on" fill="#ffffff" x="337" y="77" font-size="14" text-anchor="middle">1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="263" y="121" font-size="14" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="304" y="96" width="66" height="40" rx="3"/><text class="f-muted" fill="#5c6d66" x="337" y="121" font-size="14" text-anchor="middle">0</text>
+<text class="f-text" fill="#182f2b" x="300" y="160" font-size="12" text-anchor="middle">قراءة تفاح = [5, 1]</text>
+<text class="f-text" fill="#182f2b" x="300" y="178" font-size="12" text-anchor="middle">صحيحة</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="208" font-size="12">كتابة دلتا الثانية: القيمة القديمة v̂ = [2, 3]</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="228" font-size="12">الفرق δ = [5, 1] − [2, 3] = [3, −2]، فيصير الصف الأول [5, 1]</text>
+</svg><figcaption>الشكل 9-3　المفتاح نفسه مكتوب مرتين: الجمع البسيط يكدّس القيمتين القديمة والجديدة، وقاعدة دلتا تخصم القديمة ثم تكتب، فيعود عند القراءة أحدث قيمة.</figcaption></figure></div>
+<p>في GDN الحقيقية مقبض إضافي: قوة الكتابة β. نضرب الفرق في β قبل كتابته: <span dir="ltr">δ = β(v − v̂)</span>. فـ <span dir="ltr">β = 1</span> تعني «غيّر إلى القيمة الجديدة كليًّا»، و<span dir="ltr">β = 0.25</span> تعني «تحرّك ربع المسافة فقط نحو القيمة الجديدة». ويجب أن تقع β بين 0 و1، ولذلك تمرّرها الطبقة أولًا عبر sigmoid، فالنواة (kernel) لا تتولى هذه الخطوة (شرحنا هذا العقد في الفصل 7). [S17]</p>
+<p>سبّورة 2 × 2 فيها 4 أعداد فقط. وكلما زاد عدد المفاتيح المكتوبة وزاد تداخلها اشتد التشويش المتبادل: في المحاكي أعلاه، بعد كتابة التفاح والموز ثم البرتقال، يُقرأ البرتقال بدقة، لكن التفاح والموز يتغيّران. السبّورة الحقيقية 128 × 128 وتشويشها أقل بكثير، لكن مبدأ «الحجم الثابت = فقدان» واحد.</p>
+
+<h2 id="sec-4">9.4 الاضمحلال المُبوَّب: خطوة واحدة في غير موضعها تغيّر النتيجة</h2>
+<p>تحتاج السبّورة إلى «النسيان» أيضًا. فمع وصول كل رمز تضرب GDN السبّورة كلها في معامل اضمحلال α، ثم تجري كتابة دلتا. إذا اقتربت α من 1 بالكاد يبهت القديم؛ وإذا اقتربت من 0 كاد التشغيل يبدأ من سبّورة فارغة. لكل رأس قيمة α خاصة به، تُحسب من الرمز الحالي: <span dir="ltr">α = e<sup>gate</sup></span>. [S17]</p>
+<p>تُحسب gate بالعلاقة softplus(…) × ssm_a (الملف <code>layer.hpp</code> السطر 14). ناتج softplus لا يقل عن 0، وssm_a معامل في النموذج لكل رأس قيمة. ما دام ssm_a سالبًا فإن gate لا تزيد على 0، وتقع α بين 0 و1، وهذا يعادل «خصمًا من الذاكرة القديمة في كل خطوة».</p>
+<p>لنكتب الخطوة الكاملة لرأس قيمة واحد، والحالة S مصفوفة «بُعد المفتاح × بُعد القيمة» <span class="ev ev-code">حقيقة من الشيفرة</span>[S17]:</p>
+<ol>
+<li>الاضمحلال: <span dir="ltr">S̄ = α S</span></li>
+<li>قراءة القيمة القديمة: <span dir="ltr">v̂ = S̄ᵀ k</span></li>
+<li>حساب الفرق: <span dir="ltr">δ = β (v − v̂)</span></li>
+<li>الكتابة: <span dir="ltr">S′ = S̄ + k δᵀ</span></li>
+<li>الخرج: <span dir="ltr">o = S′ᵀ q</span></li>
+</ol>
+<p>يؤكد ملف الترويسة الخاص بـ GDN أن الاضمحلال يجب أن يقع <strong>قبل</strong> التحديث من الرتبة الأولى، وفيه اختبار يثبّت ذلك. [S17] لماذا الترتيب مهم إلى هذا الحد؟ لنحسب باليد بعد تقليص المصفوفة إلى عدد واحد. خذ الحالة القديمة <span dir="ltr">S = 2</span> و<span dir="ltr">α = 0.5</span> و<span dir="ltr">k = 1</span> و<span dir="ltr">v = 3</span> و<span dir="ltr">β = 0.25</span> و<span dir="ltr">q = 1</span>:</p>
+<ul>
+<li><strong>نضمحل ثم نكتب</strong> (العقد): <span dir="ltr">S̄ = 1</span>؛ <span dir="ltr">v̂ = 1</span>؛ <span dir="ltr">δ = 0.25 × (3 − 1) = 0.5</span>؛ <span dir="ltr">S′ = 1.5</span>؛ الخرج 1.5.</li>
+<li><strong>نكتب ثم نضمحل</strong> (خطأ): <span dir="ltr">v̂ = 2</span>؛ <span dir="ltr">δ = 0.25 × (3 − 2) = 0.25</span>؛ بعد الكتابة 2.25؛ ثم نضرب في 0.5 فنحصل على 1.125.</li>
+</ul>
+<p>كلا الناتجين معقول ومنتهٍ وضمن النطاق، وواحد منهما فقط يطابق النموذج. الترتيب الخاطئ يخصم من <strong>المعلومة التي كُتبت للتو</strong> أيضًا، وكأنك «تنسى جزءًا مما دوّنته لحظة تدوينه». الأداة التالية تتيح لك تغيير المعاملات، وتحسب الجانبين معًا:</p>
+<div class="viz" data-viz="gdn-order"><figure class="fig"><svg viewBox="0 0 400 206" role="img" aria-label="الشكل 9-4: بالمعاملات نفسها يعطي الاضمحلال ثم الكتابة 1.5، وتعطي الكتابة ثم الاضمحلال 1.125">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">S = 2، α = 0.5، k = 1، v = 3، β = 0.25، q = 1</text>
+<rect class="f-soft" fill="#e5f1df" x="8" y="26" width="188" height="170" rx="8"/>
+<text class="f-text" fill="#182f2b" x="102" y="48" font-size="13" font-weight="600" text-anchor="middle">نضمحل ثم نكتب (العقد)</text>
+<text class="f-text" fill="#182f2b" x="18" y="76" font-size="12">S̄ = 0.5 × 2 = 1</text>
+<text class="f-text" fill="#182f2b" x="18" y="100" font-size="12">v̂ = 1 × 1 = 1</text>
+<text class="f-text" fill="#182f2b" x="18" y="124" font-size="12">δ = 0.25 × (3 − 1) = 0.5</text>
+<text class="f-text" fill="#182f2b" x="18" y="148" font-size="12">S′ = 1 + 1 × 0.5 = 1.5</text>
+<text class="f-text" fill="#182f2b" x="18" y="178" font-size="13" font-weight="600">الخرج o = 1.5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="204" y="26" width="188" height="170" rx="8"/>
+<text class="f-warn" fill="#9e5d24" x="298" y="48" font-size="13" font-weight="600" text-anchor="middle">نكتب ثم نضمحل (خطأ)</text>
+<text class="f-text" fill="#182f2b" x="210" y="76" font-size="12">v̂ = 2 × 1 = 2</text>
+<text class="f-text" fill="#182f2b" x="210" y="100" font-size="12">δ = 0.25 × (3 − 2) = 0.25</text>
+<text class="f-text" fill="#182f2b" x="210" y="124" font-size="12">بعد الكتابة = 2 + 0.25 = 2.25</text>
+<text class="f-text" fill="#182f2b" x="210" y="148" font-size="12">S′ = 0.5 × 2.25 = 1.125</text>
+<text class="f-warn" fill="#9e5d24" x="210" y="178" font-size="13" font-weight="600">الخرج o = 1.125</text>
+</svg><figcaption>الشكل 9-4　اختلاف الترتيب يغيّر النتيجة. الترتيب الخاطئ يخصم النصف من الـ 0.25 المكتوب للتو أيضًا.</figcaption></figure></div>
+<p>هذا المثال أحادي البعد مادة جيدة لكتابة الاختبارات. كل حدّ من ثلاثة حدود يتحقق من أمر واحد: عند <span dir="ltr">α = 0</span> تُمسح الذاكرة القديمة كلها؛ وعند <span dir="ltr">β = 0</span> لا يُكتب شيء؛ وعند <span dir="ltr">k = 0</span> لا يتغيّر أي مفتاح. في هذه الحالات الثلاث يتفق الترتيبان أحيانًا ويختلفان أحيانًا، وهذا بالضبط ما يكشف هل بدّل التنفيذ الترتيب خفية.</p>
+
+<h2 id="sec-5">9.5 لماذا يمكن التوازي، ولماذا لا يمكن</h2>
+<p>انظر مرة أخرى إلى الخطوات الخمس، تجد أمرًا لا يلفت النظر: لرأس القيمة h وبُعد القيمة j الثابتين، لا تمسّ كل خطوة إلا أعداد العمود j من السبّورة. قراءة القيمة القديمة جمع على بُعد المفتاح i، والكتابة لا تغيّر إلا العمود j. ولا اتصال بين الأعمدة المختلفة. <span class="ev ev-code">حقيقة من الشيفرة</span>[S17] لذلك يمكن لخيط واحد (thread) أن يستأثر بعمود ويحسبه من أوله إلى آخره، فلا نحتاج في التكرار كله إلى حاجز تزامن واحد. انظر الشكل 9-5.</p>
+<figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="الشكل 9-5: داخل الرمز الواحد يمكن إسناد كل عمود من السبّورة إلى خيط مختلف ليُحسب بالتوازي؛ لكن الانتقال بين رمزين متجاورين يجب أن يتم بالترتيب">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">داخل الرمز الواحد: كل عمود لخيط واحد</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="94" y="26" width="30" height="120"/><rect class="f-accent" fill="#136d5a" x="128" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="162" y="26" width="30" height="120"/><rect class="f-accent" fill="#136d5a" x="196" y="26" width="30" height="120"/><rect class="f-soft" fill="#e5f1df" x="230" y="26" width="30" height="120"/>
+<text class="f-muted" fill="#5c6d66" x="75" y="164" font-size="12" text-anchor="middle">j=0</text>
+<text class="f-muted" fill="#5c6d66" x="143" y="164" font-size="12" text-anchor="middle">j=2</text>
+<text class="f-muted" fill="#5c6d66" x="211" y="164" font-size="12" text-anchor="middle">j=4</text>
+<text class="f-muted" fill="#5c6d66" x="54" y="40" font-size="12" text-anchor="end">i=0</text>
+<text class="f-muted" fill="#5c6d66" x="54" y="140" font-size="12" text-anchor="end">i=S−1</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M276 30V142M270 134L276 144L282 134"/>
+<text class="f-text" fill="#182f2b" x="288" y="80" font-size="12">الجمع والكتابة</text>
+<text class="f-text" fill="#182f2b" x="288" y="98" font-size="12">على بُعد المفتاح i</text>
+<text class="f-text" fill="#182f2b" x="20" y="192" font-size="12" font-weight="600">بين الرموز: واحدًا بعد الآخر حتمًا</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="65" y="224" font-size="12" text-anchor="middle">الحالة Sₜ</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="195" y="224" font-size="12" text-anchor="middle">الحالة Sₜ₊₁</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="202" width="90" height="34" rx="6"/><text class="f-text" fill="#182f2b" x="325" y="224" font-size="12" text-anchor="middle">الحالة Sₜ₊₂</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M110 219H148M140 213L148 219L140 225M240 219H278M270 213L278 219L270 225"/>
+</svg><figcaption>الشكل 9-5　التوازي في «الأعمدة»، والتسلسل في «الزمن». داخل الخطوة الواحدة يمكن حساب 128 × 48 عمودًا في وقت واحد؛ لكن الخطوة <span dir="ltr">t + 1</span> يجب أن تنتظر حالة الخطوة t.</figcaption></figure>
+<p>ولكي تتناغم الخيوط المتوازية حين تقرأ الذاكرة، غيّرت Strata ترتيب تخزين الحالة من ترتيب التنفيذ المرجعي (بُعد المفتاح، بُعد القيمة، الرأس) إلى (بُعد المفتاح، الرأس، بُعد القيمة)، فتقرأ الخيوط المتجاورة عناوين متجاورة. الحالة مخزن مؤقت وقت التشغيل لا أوزان، فللتخطيط حرية الاختيار؛ لكن ملف الترويسة ينبّه إلى أن التخطيطين يفهرسان الأعداد الثلاثة نفسها، فإذا خُلطا معًا فلن يظهر أي خطأ. [S17]</p>
+<p>لكن «الأعمدة يمكن توازيها» لا تعني أن «الرموز يمكن توازيها». حالة الخطوة <span dir="ltr">t + 1</span> تعتمد على حالة الخطوة t، فيبقى اتجاه الزمن سلسلة واحدة. والمتوازي هو عمل الخطوة الواحدة، لا ما بين الخطوات.</p>
+<p>وفي ازدواج الرؤوس تفصيل أيضًا. في GDN ستة عشر رأسًا للمفاتيح والاستعلامات وثمانية وأربعون رأس قيمة، ويقترن رأس القيمة h برأس المفاتيح رقم h % 16 (باقي القسمة). [S17] أما GQA في الفصل 8 فتستخدم القسمة الصحيحة. أي أن اتفاقية الوحدتين متعاكسة تمامًا، ولو كتبتَ «دالة عامة لربط الرؤوس المتعددة» وأعدت استخدامها في كل مكان لأخطأتَ.</p>
+<p>وأخيرًا نحسب الحساب. الحالة الرئيسية لكل طبقة GDN هي 128 × 128 × 48 عددًا من نوع FP32، أي 3,145,728 بايت، وهي 3 MiB بالضبط؛ فالطبقات الـ 36 تساوي 108 MiB. وبإضافة سجل الالتفاف (10,240 قناة × 3 أعمدة × 4 بايت <span dir="ltr">= 120 KiB</span> لكل طبقة) يصير المجموع نحو 112.2 MiB. <span class="ev ev-est">تقدير تعليمي</span> (الأحجام من [S04]؛ وعدد الأعداد العشرية لكل طبقة في <code>session.cpp</code> السطور 41-44) هذا العدد ثابت من الرمز الأول إلى الرمز رقم 262,144. لكنه ليس كل حالة النموذج: فذاكرة KV المؤقتة في طبقات QSA ما زالت تنمو مع السياق.</p>
+<p>ملاحظة جانبية: يقول الوصف في أول ملف ترويسة GDN «48 طبقة GDN و12 طبقة QSA»، والمجموع 60 طبقة، وهذا لا يطابق الحقيقة <span dir="ltr">36 + 12 = 48</span>. [S17] يعتمد هذا الكتاب على التعريف الهندسي القابل للتنفيذ وعلى تخصيص حالة الجلسة، ولا يعدّ التعليق القديم حقيقة عن النموذج. [S04][S13]</p>
+
+<h2 id="sec-6">9.6 تطبيق عملي: GDN أحادية البعد، وكم يصعب «التراجع»</h2>
+<p>افتح المختبر التفاعلي لهذا الفصل «تحديث واحد في التكرار». يقلّص GDN إلى حالة عددية واحدة ويعرض ترتيبي التحديث الصحيح والخاطئ جنبًا إلى جنب. نقترح ثلاثة أمور:</p>
+<ol>
+<li>اضبط <span dir="ltr">α = 0</span> ثم <span dir="ltr">β = 0</span> ثم <span dir="ltr">k = 0</span>، وتحقق واحدةً واحدةً من الخواص الحدّية الثلاث في القسم 9.4.</li>
+<li>جد مجموعة معاملات يتفق عندها الترتيبان في النتيجة؛ ثم فسّر لماذا يختلفان في الحالة العامة.</li>
+<li>ارجع إلى «الترتيب مهم حقًا» في هذا الفصل واسحب α إلى 1: هل ما زال الترتيبان مختلفين؟ فسّر ذلك بالمعادلة.</li>
+</ol>
+<p>كون الحالة لا تسير إلا إلى الأمام يصير مشكلة عملية في فك الترميز التخميني (الفصلان 18 و19): يخمّن المحرك أولًا بضع كلمات بطريقة رخيصة (تستخدم Strata طبقة MTP الموجودة في النموذج)، ثم تتحقق الطبقات الـ 48 كاملةً من كل ذلك دفعة واحدة، وما أخطأ فيه التخمين يجب التراجع عنه. [S02] ذاكرة KV المؤقتة سهلة: لا ضرر في بقاء المفاتيح والقيم في مواضع التخمين الخاطئ، فتُكتب فوقها مباشرةً عند معالجة هذه المواضع في المرة القادمة. أما حالة GDN فقد غيّرتها الكلمات المخمَّنة خطأً، ولا يكفي «إرجاع العدّاد». وطريقة Strata: نافذة التحقق <strong>لا تمسّ</strong> حالة GDN؛ وبعد تحديد قبول أول n كلمة، تُعاد هذه الكلمات الـ n باستخدام المدخلات المحفوظة في النافذة، فيتقدم سجل الالتفاف والحالة التكرارية. <span class="ev ev-code">حقيقة من الشيفرة</span>[S08] انظر الشكل 9-6.</p>
+<figure class="fig"><svg viewBox="0 0 400 256" role="img" aria-label="الشكل 9-6: عند رفض المسودة تكفي ذاكرة KV المؤقتة أن تُكتب فوق المواضع الخاطئة لاحقًا؛ أما حالة GDN فتبقى دون مساس، وتُعاد الكلمات المقبولة بالمدخلات المحفوظة">
+<text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">نتحقق من 3 رموز مسودة ونقبل أول رمزين</text>
+<text class="f-text" fill="#182f2b" x="20" y="42" font-size="12">ذاكرة KV المؤقتة (تُخزَّن حسب الموضع)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="50" width="70" height="30" rx="4"/><text class="f-text" fill="#182f2b" x="55" y="70" font-size="12" text-anchor="middle">مُودَعة</text>
+<rect class="f-accent" fill="#136d5a" x="96" y="50" width="70" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="131" y="70" font-size="12" text-anchor="middle">مسودة 1 ✓</text>
+<rect class="f-accent" fill="#136d5a" x="172" y="50" width="70" height="30" rx="4"/><text class="f-on" fill="#ffffff" x="207" y="70" font-size="12" text-anchor="middle">مسودة 2 ✓</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="248" y="50" width="70" height="30" rx="4"/><text class="f-warn" fill="#9e5d24" x="283" y="70" font-size="12" text-anchor="middle">مسودة 3 ✗</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="102" font-size="12">موضع ✗ يُترك كما هو،</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="120" font-size="12">ويُكتب فوقه حين نعالج هذا الموضع مرة أخرى</text>
+<text class="f-text" fill="#182f2b" x="20" y="152" font-size="12">حالة GDN (نسخة واحدة فقط)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="160" width="100" height="44" rx="4"/><text class="f-text" fill="#182f2b" x="70" y="178" font-size="12" text-anchor="middle">لا تُمسّ</text><text class="f-text" fill="#182f2b" x="70" y="196" font-size="12" text-anchor="middle">أثناء التحقق</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M120 182H150M142 176L150 182L142 188"/>
+<rect class="f-soft" fill="#e5f1df" x="152" y="160" width="124" height="44" rx="4"/><text class="f-text" fill="#182f2b" x="214" y="178" font-size="12" text-anchor="middle">إعادة تشغيل</text><text class="f-text" fill="#182f2b" x="214" y="196" font-size="12" text-anchor="middle">المسودتين 1 و2</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M276 182H304M296 176L304 182L296 188"/>
+<rect class="f-accent" fill="#136d5a" x="306" y="160" width="74" height="44" rx="4"/><text class="f-on" fill="#ffffff" x="343" y="178" font-size="12" text-anchor="middle">الحالة</text><text class="f-on" fill="#ffffff" x="343" y="196" font-size="12" text-anchor="middle">الجديدة</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="228" font-size="12">الإعادة تستخدم المدخلات المحفوظة في نافذة التحقق</text>
+<text class="f-warn" fill="#9e5d24" x="20" y="248" font-size="12">إرجاع عدّاد الموضع وحده يُبقي في الحالة أثر المسودة 3</text>
+</svg><figcaption>الشكل 9-6　ذاكرة KV المؤقتة تُخزَّن حسب الموضع، وما أخطأ يمكن الكتابة فوقه؛ أما حالة GDN فنسخة واحدة، وما أخطأ لا يمكن مسحه. لذلك لا تمسّها Strata أولًا، وبعد التأكد تعيد الكلمات المقبولة.</figcaption></figure>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>تحفظ GDN التاريخ في مصفوفة حالة ثابتة الحجم: 128 × 128 لكل رأس قيمة في كل طبقة، وللطبقات الـ 36 مجتمعةً نحو 112 MiB لا تنمو مع السياق؛ والثمن أنها تفقد معلومات ولا تسير إلا إلى الأمام.</li>
+<li>خطوة كل رمز: نضمحل أولًا <span dir="ltr">S̄ = αS</span>، ثم نقرأ القيمة القديمة <span dir="ltr">v̂ = S̄ᵀk</span>، ثم نحسب الفرق <span dir="ltr">δ = β(v − v̂)</span>، ثم نكتب بالجداء الخارجي <span dir="ltr">S′ = S̄ + kδᵀ</span>. الاضمحلال قبل الكتابة هو العقد، والعكس يخصم من المعلومة الجديدة أيضًا.</li>
+<li>داخل الخطوة الواحدة لا يتدخل عمود من السبّورة في غيره، فيمكن إسناد كل عمود إلى خيط؛ أما بين رمز ورمز فالسلسلة تسلسلية.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «حجم حالة GDN ثابت، فذاكرة النموذج كله لا تنمو مع السياق، ويمكن التراجع عنها بحرية.»</strong></p>
+<p>الثابت هو حالة طبقات GDN الـ 36 فقط. أما ذاكرة KV المؤقتة في طبقات QSA الـ 12 فتنمو مع السياق كالمعتاد. والحجم الثابت لا يعني أن «الرجوع ممكن»: فعند الكتابة مُحي جزء من المعلومات القديمة، وللعودة إلى حالة أقدم لا طريق إلا أن تحفظ لقطة مسبقًا أو أن تعيد التشغيل من حالة معروفة.</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: أشكال الموتّرات (tensor) الكاملة، وبعض العقود التي يسهل أن تُقرأ خطأ، وكيف نختبر تكرارًا</summary>
+<h3>الصياغة الكاملة لتكرار GDN واحد</h3>
+<p>يصف الملف <code>gdn.hpp</code> الخطوة الواحدة بهذه الأسطر الستة (الحالة مكتوبة بفهرس التنفيذ المرجعي <span dir="ltr">st[i, j, h]</span>) [S17]:</p>
+<ul>
+<li><span dir="ltr">dec = exp(gate)</span>، عدد واحد لكل رأس قيمة؛ <span dir="ltr">st = state × dec</span></li>
+<li><span dir="ltr">sk[h, j] = Σᵢ st[i, j, h] × k[idx[h]][i]</span> (قراءة القيمة القديمة)</li>
+<li><span dir="ltr">d[h, j] = (v[h, j] − sk[h, j]) × beta[h]</span> (الفرق)</li>
+<li><span dir="ltr">st[i, j, h] += k[idx[h]][i] × d[h, j]</span> (الكتابة من الرتبة الأولى)</li>
+<li><span dir="ltr">o[h, j] = Σᵢ st[i, j, h] × q[idx[h]][i]</span> (القراءة)</li>
+</ul>
+<p>حيث <span dir="ltr">idx[h] = h % h_k</span> و<span dir="ltr">h_k = 16</span> و<span dir="ltr">h_v = 48</span> و<span dir="ltr">S = 128</span>. كل سطر لا يمسّ إلا العمود (j, h)، وهذا أساس القول «خيط لكل عمود وبلا حاجز». [S17]</p>
+<h3>أربعة عقود للمدخلات يسهل أن تُقرأ خطأ</h3>
+<ul>
+<li><strong>q وk مُطبَّعتان بالمعيار L2 سلفًا، وq مضروبة سلفًا في 1/√S.</strong> يضرب مساران في llama.cpp هذا المعامل في موضعين مختلفين، لذلك تقع المسؤولية على المستدعي. [S17] وε في تطبيع L2 تُضاف إلى مجموع المربعات، ولا تُقسم على العرض، وإلا حدث فرق قدره √128 ≈ 11.3 مرة (الفصل 7). [S17]</li>
+<li><strong>gate قيمة قبل أخذ الأُسّ.</strong> تُحسب <span dir="ltr">dec = exp(gate)</span> داخل النواة. [S17]</li>
+<li><strong>beta تمرّرها الطبقة عبر sigmoid أولًا.</strong> عقد النواة هو <span dir="ltr">d = (v − sk) × beta</span>، وما يصلها يجب أن يكون كسرًا جاهزًا؛ فإذا مُرّر الإسقاط الخام صارت قوة الكتابة بلا حد وقد تكون موجبة أو سالبة. [S17]</li>
+<li><strong>v لا تُطبَّع.</strong> لا يُطبَّع إلا q وk (الملف <code>layer.hpp</code> السطر 23).</li>
+</ul>
+<p>الخطوة الأخيرة في الطبقة <span dir="ltr">y = rms_norm(o) × ssm_norm × sigmoid(z)</span>، بتطبيع RMS لكل رأس على حدة؛ والدالة هنا sigmoid لا SiLU التي استخدمها qwen3.5. [S17]</p>
+<h3>سجل الالتفاف: كتلة صغيرة أخرى من الحالة</h3>
+<p>قبل التكرار تمر 10,240 قناة عبر التفاف قصير طوله 4. يحتاج هذا الالتفاف إلى تذكّر أول 3 أعمدة من المدخل، مرتبة «الأقدم أولًا»: المعامل رقم 0 في نواة الالتفاف يُضرب في أقدم عمود، والمدخل الجديد يقع في العمود الأخير. تُخزَّن الأوزان بتخطيط GGML الأصلي، والبُعد الأسرع تغيّرًا فيه هو tap، وهذا يختلف عن الترتيب الصفّي في التنفيذ المرجعي. [S17] هذه الأعمدة الثلاثة من التاريخ، مثل الحالة التكرارية، نسخة لكل طبقة تتقدم مع الرموز، ويجب معالجتها عند التراجع أيضًا. [S08]</p>
+<h3>كيف نختبر تكرارًا</h3>
+<p>الصنف الأول اختبارات الحدود: <span dir="ltr">α = 0</span> تتحقق من النسيان، و<span dir="ltr">β = 0</span> تتحقق من عدم الكتابة، و<span dir="ltr">k = 0</span> تتحقق من عدم تحديث أي مفتاح، مع اختبار ترتيب «الاضمحلال قبل الكتابة» (في التنفيذ المرجعي لـ GDN خاصية خاصة تثبّته). [S17]</p>
+<p>الصنف الثاني اختبارات اللقطة والإعادة: نعالج متتالية ثابتة، ونحفظ حالة الخطوة t، ونكمل خطوتين، ثم نستعيد اللقطة ونعيد الخطوتين، ونشترط أن تتطابق النتيجة بتًّا بتًّا مع الحساب المتصل دون انقطاع. فمنطق الإيداع (commit) في فك الترميز التخميني يعتمد بالضبط على هذه الخاصية. [S08]</p>
+<p>الصنف الثالث اختبارات ربط الرؤوس: كلٌّ من الاقتران بباقي القسمة والاقتران بالقسمة الصحيحة ينتج خرجًا بالشكل الصحيح، فيجب أن يستخدم الاختبار بيانات تفرّق بينهما، وإلا لن يكتشف أبدًا أن أحدهما استُخدم بدل الآخر. [S17]</p>
+<p>لا تحاول «الرجوع» من الحالة النهائية إلى حالة أقدم. قد يضرب الاضمحلال بعض الاتجاهات فتقترب من 0، وتكتب كتابة دلتا فوق القيمة القديمة؛ وما لم تُحفظ المعلومات اللازمة فلا وجود عمومًا لهذه العملية العكسية.</p>
+</details>

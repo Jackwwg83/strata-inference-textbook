@@ -1,0 +1,263 @@
+<div class="hook"><span class="eyebrow">تشبيه أولًا</span>
+<p>يجب أن تمرّ مسوّدة على 48 محررًا. لو أعاد كل محرر نسخ النص كله بيده قبل أن يعدّله، لتشوّه النص الأصلي تمامًا عند النسخة الثامنة والأربعين. الطريقة الأذكى: يكتفي كل محرر بإلصاق ورقة ملاحظات على الهامش فيها تعديلاته المقترحة، ويبقى النص الأصلي كما هو.</p>
+<p>النموذج الذي يشغّله Strata فيه 48 طبقة بالضبط، وكل طبقة محرر واحد. يفكّك هذا الفصل طبقة واحدة: ماذا تقرأ، وماذا تحسب، وكيف «تلصق» نتيجتها من جديد. ثم ننظر في بضع واجهات يكون فيها الشكل صحيحًا تمامًا، لكن المعنى قد يفسد بهدوء.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> تنقسم الطبقة إلى نصفين. أولًا «مزج التاريخ» (36 طبقة تستعمل GDN و12 طبقة تستعمل انتباه QSA)، ثم «معالجة الخبراء» (MoE). كل نصف هو: «قراءة المتبقّي ← التطبيع ← حساب تصحيح صغير ← إضافته إلى المتبقّي». والمتبقّي في Strata ليس متجهًا واحدًا، بل 4 حارات متوازية.</p>
+
+<h2 id="sec-1">7.1 ماذا تفعل الطبقة: أرقام تدخل وأرقام تخرج</h2>
+<p>بالنسبة إلى النموذج، الرمز (token) بين طبقتين مجرد صف من الأرقام. في النموذج الذي يستعمله Strata يضم هذا الصف 2560 رقمًا، ويسمى <dfn>المتجه المخفي</dfn>. <span class="ev ev-code">حقيقة من الشيفرة</span>[S04] تقرأ كل طبقة صفًا من 2560 رقمًا، وتُخرج صفًا بالطول نفسه، وتسلّمه إلى الطبقة التالية. وما ينتقل من طبقة إلى طبقة هو «فهم» يزداد ثراءً داخل هذا الصف من الأرقام.</p>
+<aside class="primer" id="c07-layer-activation">
+<h3>طبقات الشبكة العصبية ودوال التنشيط</h3>
+<p>الحدس: طبقة الشبكة العصبية تشبه صفًا من لوحات المزج الصوتي. كل مقبض إخراج يمزج كل المدخلات بنسب خاصة به. هذه الخطوة هي ضرب المصفوفات الذي رأيناه في الفصل 3: المخرجات = مصفوفة الأوزان × المدخلات. والأرقام في مصفوفة الأوزان هي «المعاملات» التي تعلّمها النموذج في التدريب.</p>
+<p>ضرب المصفوفات وحده لا يكفي. ضربان متتاليان للمصفوفات يساويان ضربًا واحدًا: A(Bx) = (AB)x. لو كدّست 100 طبقة لبقيت قدرتك قدرة طبقة واحدة، ولا تستطيع أن تتعلم أنماطًا ملتوية. لذلك يأتي بعد كل ضرب مصفوفات <dfn>دالة تنشيط</dfn>: دالة غير خطية تعمل على كل رقم وحده، و«تثني» الخط المستقيم. هذه ثلاث دوال شائعة، وتجد منحنياتها في الشكل 7-2 بعد هذا المربع:</p>
+<ul>
+<li><dfn>ReLU</dfn>: الأرقام السالبة تصير 0، والموجبة تبقى كما هي. الأبسط بينها.</li>
+<li><dfn>sigmoid</dfn> (σ): σ(z) = 1 ÷ (1 + e<sup>−z</sup>). تضغط أي رقم في المدى من 0 إلى 1، ولذلك تُستعمل كثيرًا «مفتاحًا» أو «بوابة»: 0 مغلقة و1 مفتوحة تمامًا.</li>
+<li><dfn>SiLU</dfn>: SiLU(z) = z × σ(z). تبدو كنسخة ملساء من ReLU، وتنخفض قليلًا تحت الصفر عند المدخلات السالبة.</li>
+</ul>
+<p>صلتها بالفصل: في كل طبقة من طبقات Strata تظهر sigmoid وSiLU في مواضع مختلفة. يجمعهما الناس غالبًا تحت اسم «البوابات»، لكن إن بدّلتَ إحداهما بالأخرى تغيّرت القيم كلها، كما سنرى في القسم 7.5.</p>
+<p class="further">قراءة إضافية: <a href="https://ar.wikipedia.org/wiki/%D8%B4%D8%A8%D9%83%D8%A9_%D8%B9%D8%B5%D8%A8%D9%88%D9%86%D9%8A%D8%A9_%D8%A7%D8%B5%D8%B7%D9%86%D8%A7%D8%B9%D9%8A%D8%A9" target="_blank" rel="noopener noreferrer">ويكيبيديا: شبكة عصبونية اصطناعية</a> · <a href="https://en.wikipedia.org/wiki/Activation_function" target="_blank" rel="noopener noreferrer">Wikipedia: Activation function</a> · <a href="https://ar.wikipedia.org/wiki/%D8%AF%D8%A7%D9%84%D8%A9_%D8%B3%D9%8A%D9%86%D9%8A%D8%A9" target="_blank" rel="noopener noreferrer">ويكيبيديا: دالة سينية</a> · <a href="https://pytorch.org/docs/stable/generated/torch.nn.SiLU.html" target="_blank" rel="noopener noreferrer">وثائق PyTorch: SiLU</a></p>
+</aside>
+<figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="الشكل 7-2: منحنيات دوال التنشيط الثلاث ReLU وsigmoid وSiLU، وsigmoid محصورة بين 0 و1">
+<text class="f-text" fill="#182f2b" x="20" y="18" font-size="12" font-weight="600" direction="rtl" text-anchor="end">ثلاث دوال تنشيط (المحور الأفقي z من −4 إلى 4)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 196H360M200 60V214"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="0.6" stroke-dasharray="2 3" d="M40 164H360"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="232" font-size="12" text-anchor="middle">−4</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="232" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="360" y="232" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="168" font-size="12" text-anchor="end">1</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="72" font-size="12" text-anchor="end">4</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2.5" d="M40 196L200 196L360 68"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="2" stroke-dasharray="6 3" d="M40.0 198.3L50.0 198.8L60.0 199.3L70.0 199.9L80.0 200.6L90.0 201.3L100.0 202.1L110.0 202.9L120.0 203.6L130.0 204.3L140.0 204.8L150.0 204.9L160.0 204.6L170.0 203.7L180.0 202.0L190.0 199.5L200.0 196.0L210.0 191.5L220.0 186.0L230.0 179.7L240.0 172.6L250.0 164.9L260.0 156.8L270.0 148.3L280.0 139.6L290.0 130.9L300.0 122.1L310.0 113.3L320.0 104.6L330.0 95.9L340.0 87.3L350.0 78.8L360.0 70.3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" stroke-dasharray="1 3" d="M40.0 195.4L50.0 195.3L60.0 195.1L70.0 194.8L80.0 194.5L90.0 194.1L100.0 193.6L110.0 192.9L120.0 192.2L130.0 191.3L140.0 190.2L150.0 188.9L160.0 187.4L170.0 185.7L180.0 183.9L190.0 182.0L200.0 180.0L210.0 178.0L220.0 176.1L230.0 174.3L240.0 172.6L250.0 171.1L260.0 169.8L270.0 168.7L280.0 167.8L290.0 167.1L300.0 166.4L310.0 165.9L320.0 165.5L330.0 165.2L340.0 164.9L350.0 164.7L360.0 164.6"/>
+<text class="f-text" fill="#182f2b" x="300" y="98" font-size="12" direction="rtl" text-anchor="end">ReLU (متصل)</text>
+<text class="f-text" fill="#182f2b" x="232" y="136" font-size="12" direction="rtl" text-anchor="end">SiLU (متقطع)</text>
+<text class="f-text" fill="#182f2b" x="270" y="156" font-size="12" direction="rtl" text-anchor="end">sigmoid (منقّط)</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="246" font-size="12" direction="rtl" text-anchor="end">sigmoid بين 0 و1 دائمًا، فتصلح «بوابة»</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="264" font-size="12" direction="rtl" text-anchor="end">أما SiLU وReLU فلا سقف لهما</text>
+</svg><figcaption>الشكل 7-2　منحنيات دوال التنشيط الثلاث. كلها تثني الخط المستقيم، لكن مداها يختلف، فلا يجوز تبديل إحداها بالأخرى كيفما اتفق.</figcaption></figure>
+<p>موضع دالة التنشيط في طبقة GDN في Strata مكتوب بوضوح تام: بعد الالتفاف (convolution) تُطبَّق SiLU على <strong>القطعة كلها</strong> من 10240 رقمًا، وبعدها فقط تُقسَّم إلى q وk وv. وقوة الكتابة β تمرّ أولًا عبر sigmoid. وأخيرًا يُضرب الخرج في sigmoid(z). <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>layer.hpp</code> السطور 10–22) لو غيّرتَ ترتيب أي موضع من هذه الثلاثة أو دالته، لبقيت النتيجة صفًّا من الأرقام العادية، لكنها خاطئة.</p>
+
+<h2 id="sec-2">7.2 الطبقات الـ 48 ليست متشابهة: 36 طبقة GDN و12 طبقة QSA</h2>
+<p>النصف الأول من كل طبقة «ينظر إلى التاريخ»: على الرمز الحالي أن يجد المعلومات ذات الصلة في النص السابق. جهّز نموذج Strata طريقتين للنظر إلى الوراء. <dfn>QSA</dfn> نوع من الانتباه: يحتفظ بسجل لكل موضع في النص السابق، ويختار منه ما يلزم حين يحتاج (الفصل 8). أما <dfn>GDN</dfn> فيضغط النص السابق في «سبّورة» ثابتة الحجم، ويمسحها ويكتب عليها عند كل رمز جديد (الفصل 9).</p>
+<p>قاعدة واحدة تحدد أي طبقة تستعمل أي طريقة: الطبقة التي يساوي باقي قسمة رقمها على 4 العدد 3 هي QSA، وبقية الطبقات GDN. <span class="ev ev-code">حقيقة من الشيفرة</span>[S04] يبدأ ترقيم الطبقات من 0، فطبقات QSA هي 3 و7 و11 … 47، وعددها 12، وبقية الطبقات الـ 36 هي GDN. انظر الشكل 7-3.</p>
+<figure class="fig"><svg viewBox="0 0 400 222" role="img" aria-label="الشكل 7-3: الطبقات الـ 48 مرتّبة بأرقامها في صفين، وآخر طبقة في كل 4 طبقات هي طبقة انتباه QSA وعددها 12، وبقية الطبقات الـ 36 هي GDN">
+<text class="f-text" fill="#182f2b" x="20" y="18" font-size="12" font-weight="600" direction="rtl" text-anchor="end">توزيع العمل على 48 طبقة (خانة لكل طبقة)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="35" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="50" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="65" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="95" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="110" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="125" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="155" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="185" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="245" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="260" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="275" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="305" y="30" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="320" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="335" y="30" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="30" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="365" y="30" width="13" height="26"/>
+<text class="f-muted" fill="#5c6d66" x="26.5" y="72" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="71.5" y="72" font-size="12" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="131.5" y="72" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="371.5" y="72" font-size="12" text-anchor="middle">23</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="35" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="50" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="65" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="95" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="110" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="125" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="155" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="170" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="185" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="230" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="245" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="260" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="275" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="305" y="84" width="13" height="26"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="320" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="335" y="84" width="13" height="26"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="350" y="84" width="13" height="26"/><rect class="f-accent" fill="#136d5a" x="365" y="84" width="13" height="26"/>
+<text class="f-muted" fill="#5c6d66" x="26.5" y="126" font-size="12" text-anchor="middle">24</text>
+<text class="f-muted" fill="#5c6d66" x="371.5" y="126" font-size="12" text-anchor="middle">47</text>
+<text class="f-text" fill="#182f2b" x="20" y="152" font-size="12" direction="rtl" text-anchor="end">الخانات الداكنة: طبقات انتباه QSA، وعددها 12</text>
+<text class="f-text" fill="#182f2b" x="20" y="170" font-size="12" direction="rtl" text-anchor="end">(الترقيم من الصفر: 3 و7 و11 … 47)</text>
+<text class="f-text" fill="#182f2b" x="20" y="190" font-size="12" direction="rtl" text-anchor="end">الخانات الفاتحة: طبقات GDN، وعددها 36</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="210" font-size="12" direction="rtl" text-anchor="end">القاعدة:</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="210" font-size="12">layer % 4 == 3 → QSA, else GDN</text>
+</svg><figcaption>الشكل 7-3　آخر طبقة في كل 4 طبقات هي QSA. انتبه: الرقم 3 بالترقيم من الصفر هو «الطبقة الرابعة» بالعدّ البشري، والقاعدة «مرة كل 4 طبقات» لا «مرة كل 3 طبقات».</figcaption></figure>
+<p>مهما كان المازج المستعمل في النصف الأول، فهيكل الطبقة واحد. تكتب الشيفرة المصدرية ترتيب عمليات الطبقة في سطرين <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>layer.hpp</code> السطور 511–518):</p>
+<ul>
+<li>النصف الأول: قراءة المتبقّي ← المازج (GDN أو QSA) ← كتابة في المتبقّي</li>
+<li>النصف الثاني: قراءة المتبقّي ← MoE (خبراء الفصل 10) ← كتابة في المتبقّي</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 364" role="img" aria-label="الشكل 7-1: خطوات الطبقة الست. النصف الأول: قراءة المتبقّي ثم المازج ثم الكتابة؛ والنصف الثاني: قراءة المتبقّي ثم MoE ثم الكتابة؛ وتتكرر 48 طبقة">
+<rect class="f-soft" fill="#e5f1df" x="80" y="8" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle" direction="rtl">المتبقّي: 4 حارات × 2560 رقمًا</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="58" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="80" font-size="13" text-anchor="middle" direction="rtl">① قراءة المتبقّي: تطبيع ثم دمج</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="108" width="240" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="128" font-size="13" font-weight="600" text-anchor="middle" direction="rtl">② المازج: النظر إلى التاريخ</text>
+<text class="f-on" fill="#ffffff" x="200" y="146" font-size="12" text-anchor="middle" direction="rtl">GDN (36 طبقة) أو QSA (12 طبقة)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="170" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="192" font-size="13" text-anchor="middle" direction="rtl">③ كتابة: التصحيح يُضاف لكل حارة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="220" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="242" font-size="13" text-anchor="middle" direction="rtl">④ قراءة المتبقّي مرة أخرى</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="270" width="240" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="290" font-size="13" font-weight="600" text-anchor="middle" direction="rtl">⑤ MoE: معالجة الخبراء</text>
+<text class="f-on" fill="#ffffff" x="200" y="308" font-size="12" text-anchor="middle" direction="rtl">اختيار 10 خبراء وجمعهم بأوزانهم</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="322" width="240" height="34" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="344" font-size="13" text-anchor="middle" direction="rtl">⑥ كتابة ← التسليم للطبقة التالية</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V56M200 92V106M200 154V168M200 204V218M200 254V268M200 316V320"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M70 58V204M70 220V356"/>
+<text class="f-muted" fill="#5c6d66" x="14" y="130" font-size="12" direction="rtl" text-anchor="end">النصف</text>
+<text class="f-muted" fill="#5c6d66" x="14" y="146" font-size="12" direction="rtl" text-anchor="end">الأول</text>
+<text class="f-muted" fill="#5c6d66" x="14" y="286" font-size="12" direction="rtl" text-anchor="end">النصف</text>
+<text class="f-muted" fill="#5c6d66" x="14" y="302" font-size="12" direction="rtl" text-anchor="end">الثاني</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="4 3" d="M320 339H346V25H320"/>
+<text class="f-muted" fill="#5c6d66" x="352" y="186" font-size="12">× 48</text>
+</svg><figcaption>الشكل 7-1　هيكل الطبقة: نصفان، كل منهما «قراءة ← حساب ← كتابة». المازج مسؤول عن «النظر في النص السابق»، وMoE مسؤول عن «معالجة الرمز الحالي». الطبقات الـ 48 كلها على هذا الهيكل.</figcaption></figure>
+<p>وهناك فرق يسهل إغفاله: طبقة QSA تحتاج إلى معرفة موضع الرمز الحالي، أما طبقة GDN فليس لديها معامل موضع أصلًا. كل ما تحتاجه GDN لكل رمز هو ذلك الصف من الأرقام، وما يتقدم بين الرموز هو حالة سبّورتها. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>layer.hpp</code> السطور 516–518)</p>
+
+<h2 id="sec-3">7.3 التطبيع: اضبط مستوى الصوت أولًا</h2>
+<p>تمرّ الأرقام في الطبقات الـ 48 بجمع وطرح متواصلين، فبعضها يكبر باستمرار وبعضها يصغر. لو تُركت هكذا لتلقّت مصفوفة الطبقة التالية «همسًا» تارة و«صراخًا» تارة، ويصعب التعلّم في ذلك. لذلك يُضبط المتجه على «مستوى الصوت القياسي» قبل كل عملية حسابية تقريبًا.</p>
+<aside class="primer" id="c07-normalization">
+<h3>التطبيع: L2 وRMS</h3>
+<p><dfn>التطبيع</dfn> (normalization) هو قسمة المتجه على «حجمه» بحيث يبقى اتجاهه فقط. والسؤال: كيف نقيس «الحجم»؟ طريقتان شائعتان لا يفصل بينهما إلا مقام القسمة:</p>
+<ul>
+<li><dfn>معيار L2</dfn>: ‖x‖ = √(x₁² + x₂² + … + x_d²)، وهو الطول الهندسي للمتجه. بعد تطبيع L2 يصير طول المتجه 1.</li>
+<li><dfn>الجذر التربيعي لمتوسط المربعات</dfn> (RMS): √((x₁² + … + x_d²) ÷ d)، أي نحسب <strong>متوسط</strong> المربعات أولًا ثم نأخذ الجذر. بعد تطبيع RMS يصير «متوسط مستوى الصوت» لكل مركّبة 1.</li>
+</ul>
+<p>مثال: x = [3, 4]. طول L2 هو √(9 + 16) = 5، والتطبيع يعطي [0.6, 0.8]. وقيمة RMS هي √(25 ÷ 2) ≈ 3.54، والتطبيع يعطي نحو [0.85, 1.13]. النتيجتان لهما الاتجاه نفسه، ويختلف حجماهما بمعامل √2. وعمومًا يختلف ناتجا التطبيعين في متجه ببعد d بمعامل √d.</p>
+<p>وفي الصيغ الفعلية رقم صغير جدًا ε (إبسيلون) يوضع <strong>داخل</strong> الجذر، ليمنع القسمة على 0 إذا كان المتجه كله أصفارًا. ويضرب <dfn>RMSNorm</dfn> الناتج بعد ذلك في مجموعة معاملات متعلَّمة، فيحصل كل مركّبة على مستوى صوتها الخاص.</p>
+<p>صلته بالفصل: يستعمل Strata النوعين، في مواضع مختلفة. وإن استعملتَ أحدهما مكان الآخر فلن يظهر أي خطأ، بل فرق بمعامل √d فقط.</p>
+<p class="further">قراءة إضافية: <a href="https://en.wikipedia.org/wiki/Normalization_(machine_learning)" target="_blank" rel="noopener noreferrer">Wikipedia: Normalization (machine learning)</a> · <a href="https://arxiv.org/abs/1910.07467" target="_blank" rel="noopener noreferrer">ورقة RMSNorm الأصلية</a> · <a href="https://pytorch.org/docs/stable/generated/torch.nn.RMSNorm.html" target="_blank" rel="noopener noreferrer">وثائق PyTorch: RMSNorm</a> · <a href="https://en.wikipedia.org/wiki/Norm_%28mathematics%29" target="_blank" rel="noopener noreferrer">Wikipedia: Norm (mathematics)</a></p>
+</aside>
+<p>في Strata: كلما قُرئ المتبقّي، تُطبَّع كل حارة بطريقة RMS على حدة. أما GDN فتطبّق تطبيع L2 على q وk، ولا تطبّقه على v. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>gr.hpp</code> السطر 81؛ <code>layer.hpp</code> السطران 12 و23) ويحذّر ملف الترويسة الخاص بـ GDN صراحةً: ε حدّ أدنى يُضاف إلى <strong>مجموع المربعات</strong>، لا إلى المتوسط، فلا يجوز القسمة على العرض. ولو قُرئت خطأً على أنها «متوسط المربعات»، لاختلفت النتيجة بمعامل √128 ≈ 11.3، لأن كل رأس فيه 128 بُعدًا. [S17] وقيمة ε في تطبيع RMS لهذا النموذج هي 10<sup>−6</sup>. [S14][S18]</p>
+<p>الأداة الصغيرة التالية تحسب لك. اختر مدخلات مختلفة وقارن بين التطبيعين:</p>
+<div class="viz" data-viz="norm-compare"><figure class="fig"><svg viewBox="0 0 400 272" role="img" aria-label="الشكل 7-5: المدخلان 3 و4؛ تطبيع L2 يعطي 0.6 و0.8، وتطبيع RMS يعطي 0.85 و1.13، والفرق بينهما بمعامل جذر 2">
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12" direction="rtl" text-anchor="end">المدخل x</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="28" width="180" height="14"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="46" width="240" height="14"/>
+<text class="f-text" fill="#182f2b" x="286" y="40" font-size="12">3</text>
+<text class="f-text" fill="#182f2b" x="346" y="58" font-size="12">4</text>
+<text class="f-text" fill="#182f2b" x="10" y="104" font-size="12" direction="rtl" text-anchor="end">تطبيع L2</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="88" width="36" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="100" y="106" width="48" height="14"/>
+<text class="f-text" fill="#182f2b" x="142" y="100" font-size="12">0.60</text>
+<text class="f-text" fill="#182f2b" x="154" y="118" font-size="12">0.80</text>
+<text class="f-text" fill="#182f2b" x="10" y="164" font-size="12" direction="rtl" text-anchor="end">تطبيع RMS</text>
+<rect class="f-warn" fill="#9e5d24" x="100" y="148" width="50.9" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="100" y="166" width="67.9" height="14"/>
+<text class="f-text" fill="#182f2b" x="157" y="160" font-size="12">0.85</text>
+<text class="f-text" fill="#182f2b" x="174" y="178" font-size="12">1.13</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="208" font-size="12" direction="rtl" text-anchor="end">L2: نقسم على</text>
+<text class="f-muted" fill="#5c6d66" x="110" y="208" font-size="12">√(9 + 16) = 5</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="226" font-size="12" direction="rtl" text-anchor="end">RMS: نقسم على</text>
+<text class="f-muted" fill="#5c6d66" x="120" y="226" font-size="12">√(25 ÷ 2) ≈ 3.54</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="244" font-size="12" direction="rtl" text-anchor="end">الاتجاه واحد، والفرق في الحجم</text>
+<text class="f-muted" fill="#5c6d66" x="150" y="244" font-size="12">√2 ≈ 1.41</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="262" font-size="12" direction="rtl" text-anchor="end">وفي d بُعدًا يكون الفرق</text>
+<text class="f-muted" fill="#5c6d66" x="120" y="262" font-size="12">√d</text>
+</svg><figcaption>الشكل 7-5　المدخل نفسه، والتطبيعان يختلفان بـ «القسمة على d» فقط. عند d = 128 يصير الفرق 11.3 مرة.</figcaption></figure></div>
+
+<h2 id="sec-4">7.4 المتبقّي: كل طبقة تكتب «ملاحظات التعديل» فقط</h2>
+<p>لنعد إلى تشبيه المحررين في البداية. لا تعيد كل طبقة كتابة صف الأرقام، بل تحسب «تصحيحًا» وتضيفه. وهذا الممر الذي «يبقى فيه النص الأصلي وتتراكم فيه التصحيحات» يسمى المتبقّي.</p>
+<aside class="primer" id="c07-residual">
+<h3>الوصلة المتبقية</h3>
+<p>تكتب <dfn>الوصلة المتبقية</dfn> (residual connection) الطبقة على الصورة x′ = x + f(x): الخرج يساوي المدخل مضافًا إليه التصحيح f(x) الذي حسبته الطبقة. وإن لم يكن في طبقة ما «شيء يستحق التعديل»، يكفيها أن تجعل f(x) قريبًا من 0، فيمرّ المدخل كما هو.</p>
+<p>لماذا هذا مهم؟ من دون المتبقّي تضطر المعلومات إلى عبور ضرب المصفوفات ودالة التنشيط في كل طبقة، وكلما زادت الطبقات تشوهت الإشارة الأصلية كما في لعبة «الهمس عبر الصف»؛ وفي التدريب تضعف إشارة الخطأ العائدة إلى الوراء أيضًا. مع المتبقّي يوجد «ممر مباشر»: تصل معلومات الطبقة الأولى إلى الطبقة الـ 48 كما هي تقريبًا، وتعود إشارة الخطأ عبر الممر نفسه. استعملت شبكة ResNet عام 2015 هذه الفكرة، فدرّبت شبكات صور من مئات الطبقات بثبات.</p>
+<p>تُكتب نماذج اللغة الحديثة عادةً على صورة x′ = x + f(norm(x)): تطبيع أولًا، ثم الحساب، ثم الإضافة إلى x الأصلي. انتبه: ما يُضاف هو x <strong>غير المطبَّع</strong>.</p>
+<p>صلته بالفصل: وسّع نموذج Strata هذا الممر المباشر إلى 4 حارات، وتُضاف إليها النتيجة مع أوزان قابلة للتعلّم.</p>
+<p class="further">قراءة إضافية: <a href="https://en.wikipedia.org/wiki/Residual_neural_network" target="_blank" rel="noopener noreferrer">Wikipedia: Residual neural network</a> · <a href="https://arxiv.org/abs/1512.03385" target="_blank" rel="noopener noreferrer">ورقة ResNet الأصلية</a> · <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener noreferrer">The Illustrated Transformer (شرح مصوّر، يشمل المتبقّي والتطبيع)</a></p>
+</aside>
+<p>المتبقّي في Strata 4 حارات متوازية، في كل منها 2560 رقمًا. <span class="ev ev-code">حقيقة من الشيفرة</span>[S04][S13] عند القراءة تُطبَّع كل حارة على حدة، ثم تُدمج في متجه واحد يُسلَّم إلى المازج أو إلى MoE. وعند الكتابة يُضاف التصحيح نفسه إلى <strong>كل</strong> حارة، لكن تضربه كل حارة في وزن مختلف. الوزن هو w = 2 × sigmoid(inject ÷ 4)، حيث inject رقم يُحسب أثناء قراءة المتبقّي. (<code>gr.hpp</code> السطور 6–8 و114–120)</p>
+<p>في تصميم «ضعف sigmoid» هذا حيلة ذكية: sigmoid(0) = 0.5، فعندما يكون inject = 0 يكون w = 1 بالضبط، وتتحول الكتابة إلى جمع عادي للمتبقّي. وتشير تعليقات الشيفرة المصدرية إلى هذه النقطة صراحةً، وفي الاختبارات تأكيد خاص لها. ويتراوح الوزن بين 0 و2، فيقرر النموذج بنفسه هل «تُصغي» كل حارة أكثر أم أقل. انظر الشكل 7-4.</p>
+<div class="viz" data-viz="layer-walk"><figure class="fig"><svg viewBox="0 0 400 266" role="img" aria-label="الشكل 7-4: قراءة متجه واحد من حارات المتبقّي الأربع، وحساب التصحيح Δ، ثم ضرب Δ في وزن كل حارة وإضافته إليها">
+<text class="f-text" fill="#182f2b" x="8" y="43" font-size="12" direction="rtl" text-anchor="end">الحارة 0</text>
+<text class="f-text" fill="#182f2b" x="8" y="73" font-size="12" direction="rtl" text-anchor="end">الحارة 1</text>
+<text class="f-text" fill="#182f2b" x="8" y="103" font-size="12" direction="rtl" text-anchor="end">الحارة 2</text>
+<text class="f-text" fill="#182f2b" x="8" y="133" font-size="12" direction="rtl" text-anchor="end">الحارة 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="31" width="320" height="14" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="61" width="320" height="14" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="91" width="320" height="14" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="121" width="320" height="14" rx="3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 38V160"/>
+<circle class="f-text" fill="#182f2b" cx="100" cy="38" r="3"/><circle class="f-text" fill="#182f2b" cx="100" cy="68" r="3"/><circle class="f-text" fill="#182f2b" cx="100" cy="98" r="3"/><circle class="f-text" fill="#182f2b" cx="100" cy="128" r="3"/>
+<text class="f-muted" fill="#5c6d66" x="106" y="154" font-size="12" direction="rtl" text-anchor="end">① قراءة</text>
+<rect class="f-accent" fill="#136d5a" x="60" y="162" width="160" height="36" rx="8"/>
+<text class="f-on" fill="#ffffff" x="140" y="185" font-size="12" text-anchor="middle" direction="rtl">② حساب التصحيح Δ</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M220 180H320V38"/>
+<circle class="f-text" fill="#182f2b" cx="320" cy="38" r="3"/><circle class="f-text" fill="#182f2b" cx="320" cy="68" r="3"/><circle class="f-text" fill="#182f2b" cx="320" cy="98" r="3"/><circle class="f-text" fill="#182f2b" cx="320" cy="128" r="3"/>
+<text class="f-text" fill="#182f2b" x="328" y="28" font-size="12">+Δ×w₀</text>
+<text class="f-text" fill="#182f2b" x="328" y="58" font-size="12">+Δ×w₁</text>
+<text class="f-text" fill="#182f2b" x="328" y="88" font-size="12">+Δ×w₂</text>
+<text class="f-text" fill="#182f2b" x="328" y="118" font-size="12">+Δ×w₃</text>
+<text class="f-muted" fill="#5c6d66" x="236" y="174" font-size="12" direction="rtl" text-anchor="end">③ كتابة</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="222" font-size="12" direction="rtl" text-anchor="end">وزن الكتابة w = 2 × sigmoid(inject ÷ 4)</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="240" font-size="12" direction="rtl" text-anchor="end">عند inject = 0 يكون w = 1، أي جمع عادي</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="258" font-size="12" direction="rtl" text-anchor="end">التصحيح Δ نفسه يُضاف لكل حارة، والوزن وحده يختلف</text>
+</svg><figcaption>الشكل 7-4　للمتبقّي في Strata أربع حارات. عند القراءة تُدمج في متجه واحد؛ وعند الكتابة يُضرب التصحيح نفسه في وزن كل حارة ويُضاف إليها.</figcaption></figure></div>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> تشبه الوصلة المتبقية «الرقعة» (patch) في أنظمة التحكم بالإصدارات: كل طبقة ترسل diff ولا تعيد كتابة الملف كله. تُطبَّق الرقع الـ 48 واحدة بعد أخرى، ويبقى المحتوى الأصلي موجودًا دائمًا. والثمن: إذا طُبّقت رقعة خاطئة في أي طبقة، سرى الخطأ في الممر المباشر حتى النهاية، ولا شيء «يخفّفه».</p>
+
+<h2 id="sec-5">7.5 الشكل الصحيح لا يكفي: لا بد أن يكون المعنى صحيحًا أيضًا (عقود الوحدات)</h2>
+<p>تتألف الطبقة من نحو اثنتي عشرة خطوة صغيرة، وكل خطوة قد تنجح في اختبارها وحدها، ثم يخطئ تركيبها. أخطر الأخطاء هي تلك التي يكون فيها <strong>الشكل صحيحًا تمامًا والقيم عادية تمامًا</strong>: لا انهيار ولا NaN، فقط يحسب البرنامج إجابة أخرى بهدوء. تسجّل الشيفرة المصدرية لـ Strata عدة «عقود» من هذا النوع، ويختار الشكل 7-6 أربعة منها.</p>
+<figure class="fig"><svg viewBox="0 0 400 250" role="img" aria-label="الشكل 7-6: أربعة عقود بين الوحدات. إذا كُتب أي منها خطأً بقيت النتيجة أرقامًا عادية">
+<text class="f-muted" fill="#5c6d66" x="14" y="18" font-size="12" direction="rtl" text-anchor="end">العقد</text>
+<text class="f-muted" fill="#5c6d66" x="114" y="18" font-size="12" direction="rtl" text-anchor="end">الصحيح</text>
+<text class="f-muted" fill="#5c6d66" x="258" y="18" font-size="12" direction="rtl" text-anchor="end">الخطأ (أرقام عادية)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="28" width="96" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="14" y="48" font-size="12" direction="rtl" text-anchor="end">بوابة</text>
+<text class="f-text" fill="#182f2b" x="14" y="66" font-size="12" direction="rtl" text-anchor="end">الكتابة β</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="108" y="28" width="140" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="114" y="48" font-size="12" direction="rtl" text-anchor="end">تمر أولًا عبر sigmoid</text>
+<text class="f-muted" fill="#5c6d66" x="114" y="66" font-size="12" direction="rtl" text-anchor="end">تقع بين 0 و1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="252" y="28" width="140" height="48" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="258" y="48" font-size="12" direction="rtl" text-anchor="end">نسيان sigmoid</text>
+<text class="f-muted" fill="#5c6d66" x="258" y="66" font-size="12" direction="rtl" text-anchor="end">قوة الكتابة بلا حدّ</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="82" width="96" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="14" y="102" font-size="12" direction="rtl" text-anchor="end">بوابة</text>
+<text class="f-text" fill="#182f2b" x="14" y="120" font-size="12" direction="rtl" text-anchor="end">الإخراج</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="108" y="82" width="140" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="114" y="102" font-size="12" direction="rtl" text-anchor="end">تُضرب في sigmoid(z)</text>
+<text class="f-muted" fill="#5c6d66" x="114" y="120" font-size="12" direction="rtl" text-anchor="end">صيغة هذا النموذج</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="252" y="82" width="140" height="48" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="258" y="102" font-size="12" direction="rtl" text-anchor="end">نقل SiLU من qwen3.5</text>
+<text class="f-muted" fill="#5c6d66" x="258" y="120" font-size="12" direction="rtl" text-anchor="end">شكل واحد وقيم مختلفة</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="136" width="96" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="14" y="156" font-size="12" direction="rtl" text-anchor="end">أوزان</text>
+<text class="f-text" fill="#182f2b" x="14" y="174" font-size="12" direction="rtl" text-anchor="end">التوجيه</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="108" y="136" width="140" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="114" y="156" font-size="12" direction="rtl" text-anchor="end">ضربة واحدة عند الدمج</text>
+<text class="f-muted" fill="#5c6d66" x="114" y="174" font-size="12" direction="rtl" text-anchor="end">المعامل 0.2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="252" y="136" width="140" height="48" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="258" y="156" font-size="12" direction="rtl" text-anchor="end">ضرب إضافي عند الخبراء</text>
+<text class="f-muted" fill="#5c6d66" x="258" y="174" font-size="12">0.2 × 0.2 = 0.04</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="190" width="96" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="14" y="210" font-size="12" direction="rtl" text-anchor="end">مخرجات</text>
+<text class="f-text" fill="#182f2b" x="14" y="228" font-size="12" direction="rtl" text-anchor="end">الخبراء</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="108" y="190" width="140" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="114" y="210" font-size="12" direction="rtl" text-anchor="end">خبراء هذه الطبقة</text>
+<text class="f-muted" fill="#5c6d66" x="114" y="228" font-size="12" direction="rtl" text-anchor="end">مع أوزان هذه الطبقة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="252" y="190" width="140" height="48" rx="4"/>
+<text class="f-warn" fill="#9e5d24" x="258" y="210" font-size="12" direction="rtl" text-anchor="end">خبراء الطبقة السابقة</text>
+<text class="f-muted" fill="#5c6d66" x="258" y="228" font-size="12" direction="rtl" text-anchor="end">مع أوزان هذه الطبقة</text>
+</svg><figcaption>الشكل 7-6　أربعة عقود، وأربع طرائق للخطأ «تبدو عادية تمامًا». لا تُسقط أي منها البرنامج، بل تجعل النموذج يقول جملة أخرى.</figcaption></figure>
+<ul>
+<li><strong>يجب أن تمرّ β عبر sigmoid أولًا، والطبقة هي المسؤولة عن ذلك.</strong> نواة (kernel) الخطوة الواحدة في GDN لا تفعل هذا، وعقدها أن «β المستلَمة هي بالفعل نسبة بين 0 و1». ويكتب ملف الترويسة بأحرف كبيرة: النواة لا تفعل، والطبقة يجب أن تفعل. [S17]</li>
+<li><strong>بوابة الإخراج هي sigmoid لا SiLU.</strong> يستعمل نموذج qwen3.5 هنا SiLU، وهذا النموذج لا يستعملها. [S17] اسما الدالتين مرتبطان بكلمة «بوابة»، والشكل واحد، لكن القيم مختلفة تمامًا.</li>
+<li><strong>وزن التوجيه يُضرب مرة واحدة فقط.</strong> حزمة الخبراء <strong>لا</strong> تضرب وزن التوجيه، بل تتولى خطوة الدمج على بطاقة الرسوميات (GPU) الضرب كله. ولو ضُرب في الموضعين لما كاد يظهر الخطأ في طبقة واحدة، وبعد تكديس 48 طبقة يتضخم الانحراف كلما تدحرج. [S06]</li>
+<li><strong>يجب أن تُقرن مخرجات الخبراء بأوزان هذه الطبقة.</strong> لتعمل CPU على الخبراء في الوقت نفسه الذي تعمل فيه GPU، سلّمت نسخة مبكرة نتيجة خبراء الطبقة l إلى الطبقة l+1 لتدمجها، فاستُعملت أوزان الطبقة l+1. ويصف التعليق ما ينتجه ذلك بأنه «رمز محدود وسلس وحتمي، لكنه لا ينتمي إلى هذا النموذج». وعلاجه تقسيم الطبقة إلى رسمين بيانيين: بعد التوجيه تعمل CPU أولًا، ثم يجري الدمج بأوزان هذه الطبقة. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>layer.hpp</code> السطور 146–165 و177–179)</li>
+</ul>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذا مثال حيّ من مقرر «هندسة البرمجيات» على «عقد الواجهة» و«اختبار التكامل». نجاح اختبار الوحدة لكل دالة لا يعني أن تركيبها صحيح. على العقد أن يحدد بوضوح «من المسؤول عن ماذا» (من يطبّق sigmoid ومن يضرب الوزن)، وعلى اختبار التكامل أن يقارن خرج الطبقة كلها، ورمزًا كاملًا، بتنفيذ مرجعي.</p>
+
+<h2 id="sec-6">7.6 تطبيق عملي: شاهد كيف تقرأ الطبقة وتحسب وتكتب</h2>
+<p>لا توجد في هذا الفصل صفحة مختبر مستقلة، فالأداتان التفاعليتان هما المختبر:</p>
+<ol>
+<li>في «جولة داخل طبقة واحدة» ابدأ من الطبقة 0 واضغط «خطوة» 6 مرات، ولاحظ أن الأرقام في الحارات تتغير قليلًا في كل مرة. ثم اسحب طبقة البداية إلى 3 وتأكد أن المازج صار QSA. وأخيرًا اسحب قيمة inject للحارة 0 إلى 0 وتحقق أن وزن الكتابة صار 1 بالضبط.</li>
+<li>في «تطبيع L2 مقابل تطبيع RMS» اضغط [3, 4] ثم 128 بُعدًا، وسجّل النسبة في المرتين، وتحقق أنها تساوي √d.</li>
+</ol>
+<p>تمرين بالورقة والقلم: مخرجا خبيرين هما [2, 0] و[0, 4]، ووزنا التوجيه 0.25 و0.75. نتيجة الدمج الصحيحة هي 0.25 × [2, 0] + 0.75 × [0, 4] = [0.5, 3]. فماذا تكون النتيجة لو كانت حزمة الخبراء قد ضربت الأوزان مرة، ثم ضُربت ثانيةً عند الدمج؟ ولماذا يصعب اكتشاف هذا الخطأ بمجرد «النظر هل الخرج عادي»؟</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>الطبقة = نصفان: قراءة المتبقّي ← المازج (36 طبقة GDN و12 طبقة QSA، والقاعدة أن الطبقة ذات layer % 4 == 3 هي QSA) ← كتابة؛ ثم قراءة المتبقّي ← MoE ← كتابة.</li>
+<li>التطبيع يضبط المتجه على حجم قياسي. L2 يقسم على جذر مجموع المربعات، وRMS يقسم على جذر متوسط المربعات، والفرق بينهما بمعامل √d؛ وتستعمل GDN تطبيع L2 على q وk، ومن استعمل غيره أخطأ بمعامل 11.3.</li>
+<li>المتبقّي يجعل كل طبقة تكتب «التصحيح» فقط. للمتبقّي في Strata أربع حارات، ووزن الكتابة w = 2 × sigmoid(inject ÷ 4)، وعند inject = 0 يكون الجمع عاديًا.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «كل مُعامِل (operator) مُختبَر، فالطبقة المركّبة منها صحيحة حتمًا».</strong></p>
+<p>قد تصحّ المعاملات كلها كلٌّ على حدة، ويبقى الخطأ ممكنًا عند التركيب: أن تُمرَّر نتيجة طبقة خاطئة، أو تُنسى sigmoid، أو يُضرب وزن مرة زائدة، أو يُستعمل مقام تطبيع خاطئ. كل هذه الأخطاء تنتج أرقامًا عادية لا يراها اختبار الوحدة. لا بد من مقارنة خرج الطبقة كلها، ورمز كامل، بتنفيذ مرجعي.</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: الصيغة الحقيقية للمتبقّي متعدد الحارات، واختيار صيغة التنشيط حسب النوع، وكيف تحدد أي طبقة أخطأت</summary>
+<h3>الصيغة التعليمية x′ = x + f(norm(x)) ليست مساواة حرفية في Strata</h3>
+<p>استعمل متن الفصل صيغة المتبقّي بمتجه واحد لبناء الحدس. أما هندسة النموذج الحقيقية ففيها <code>hc = 4</code>، والمتبقّي R في حالة الجلسة بنية متعددة الحارات بحجم 4 × 2560. [S04][S13] وإن استبدلتَ به متبقّيًا عاديًا بمتجه واحد صار النموذج نموذجًا آخر.</p>
+<p>الخطوات الكاملة لقراءة المتبقّي (<code>gr_read</code>) هي: تُطبَّع كل حارة بطريقة RMS على حدة فينتج xn (يُكتب معامل التطبيع عند التخزين على صورة 1 + w)؛ ثم تُجمع الحارات الأربع وتمرّ في «عنق زجاجة» ببعد 320: lo = SiLU((نسخة BF16 من xn × w_down) ÷ hc). انتبه: القسمة على hc تقع <strong>داخل</strong> SiLU، ويسهل إغفالها، وهي تغيّر النتيجة فعلًا. بعد ذلك mixed = متوسط xn × sigmoid(lo × w_up) على الحارات؛ وinject = xn × w_inject. و«المزج الأخير» بعد آخر طبقة لا يحوي inject لأنه لا كتابة بعده. (<code>gr.hpp</code> السطور 79–91)</p>
+<p>الكتابة (<code>gr_write</code>) هي R_out[c] = R[c] + block_out × w[c]، مع w[c] = 2 × sigmoid(inject[c] ÷ hc). (<code>gr.hpp</code> السطور 114–120)</p>
+<p>أوزان الحارات هذه كلها بصيغة BF16. وملف الحزمة يوسّعها إلى 32 بتًا عند التخزين ليبسّط فك الترميز؛ ويعيدها المحرك إلى 16 بتًا عند التحميل دون أي فقد في الدقة، فيوفّر 1.374 GiB من أصل 5.305 GiB من الأوزان الكثيفة. ويقول التعليق إن هذا هو الفرق بين «تتسع الأوزان الكثيفة مع ذاكرة الخبراء المؤقتة في ذاكرة الفيديو (VRAM)» و«لا تتسع». (<code>gr.hpp</code> السطور 10–14)</p>
+<h3>صيغة التنشيط تتبع نوع الموتّر لا اسمه</h3>
+<p>قبل ضرب المصفوفات بأوزان مكمَّمة، يجب تحويل متجه الإدخال إلى صيغة مطابقة. سجّل <code>layer.cpp</code> درسًا: الموتّرات التي تحمل الاسم نفسه قد تستعمل أنواع تكميم مختلفة في طبقات مختلفة. مثلًا <code>attn_qkv</code> في طبقات GDN الـ 36: 13 طبقة منها IQ4_XS، و18 طبقة Q3_K، و4 طبقات Q4_K، وطبقة واحدة Q2_0. والقاعدة تُحدَّد حسب <strong>النوع</strong>: الترميز بـ 2 بت يُقرَن بإدخال بصيغة Q8_0، وبقية أنواع التكميم تُقرَن بـ Q8_K. واختيار الصيغة الخطأ يجعل ضرب المصفوفات ينحرف بين 0.6% و1.4%، فتحصل على متجه «يبدو معقولًا» لا على متجه معطوب. [S14]</p>
+<h3>كيف تعرف أي طبقة وأي خطوة أخطأت</h3>
+<p>أعدّ Strata مستويين من «كشف الحساب». سجل المتبقّي طبقةً بعد طبقة (residual ladder) يخبرك <strong>من أي طبقة</strong> بدأ الانحراف عن التنفيذ المرجعي؛ وسجل مستوى نصف الطبقة يفصّل كل طبقة إلى «خرج نصف الانتباه» و«خرج نصف MoE» ومجموعتي inject، فيخبرك <strong>أي خطوة</strong>. وهذه النسخ نفسها مُسجَّلة داخل رسم CUDA البياني لكل طبقة وتُعاد معه؛ وعند إيقافها لا تكلّف شيئًا. (<code>layer.hpp</code> السطور 448–456)</p>
+<p>وهناك مفتاح تصحيح آخر هو <code>--sync-every-layer</code>: يُدخل بعد كل طبقة مزامنة وفحصًا للأخطاء. وهو يكشف أخطاء مثل «نواة قرأت مخزنًا مؤقتًا (buffer) لن تكتبه إلا طبقة لاحقة»، وهي أخطاء لا تظهر عادةً؛ وثمنه أنه يخالف شرط المسار السريع «ممنوع المزامنة»، ولذلك هو معامل وقت التشغيل لا السلوك الافتراضي. [S13]</p>
+<h3>لماذا لا غنى عن اختبارات التركيب</h3>
+<p>قد تمرّر الوحدات بعضها إلى بعض تنشيطات طبقة خاطئة، أو تطبيعًا مكررًا، أو وزنًا مكررًا، أو تخطيطًا خاطئًا، أو حالة خاطئة. وكل نوع منها قد ينجح في اختبار الوحدة الخاص به. الطريقة الصحيحة: ثبّت المدخلات والتاريخ، وقارن نقطة نقطة نقاط الفحص الوسيطة، أي خرج الطبقة كلها وخرج نصف الطبقة، بتنفيذ مرجعي مستقل. أما مقارنة الرمز الأخير وحده فمتأخرة وخشنة في الغالب.</p>
+</details>
