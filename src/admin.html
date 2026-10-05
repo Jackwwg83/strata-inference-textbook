@@ -55,6 +55,8 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:now
 .rank td:first-child{width:46%}
 .inline-bar{height:8px;border-radius:0 4px 4px 0;background:var(--mark);min-width:2px}
 .empty{color:var(--muted);font-size:13px;padding:10px 0}
+.right{color:var(--mark);font-weight:600}
+.trap{color:var(--warn);font-weight:600}
 details{margin-top:8px}
 summary{cursor:pointer;color:var(--muted);font-size:12px}
 .login{max-width:380px;margin:12vh auto 0}
@@ -189,7 +191,29 @@ function dataTable(head, rows) {
   return `<details><summary>查看数据表</summary><div class="scroll"><table><thead><tr>${head.map((h, i) => `<th class="${i ? 'num' : ''}">${h}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map((c, i) => `<td class="${i ? 'num' : ''}">${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div></details>`;
 }
 
-const TYPE = { pageview: '浏览', chapter_done: '学完', quiz_answer: '答题' };
+const TYPE = { pageview: '浏览', chapter_done: '学完', quiz_answer: '答题', read: '阅读', lab_guess: '实验猜测' };
+const pct = (n, d) => d ? Math.round(n / d * 100) + '%' : '—';
+const dur = sec => sec >= 60 ? Math.floor(sec / 60) + ' 分 ' + String(sec % 60).padStart(2, '0') + ' 秒' : sec + ' 秒';
+const ABC = ['A', 'B', 'C'];
+
+function readingTable(rows) {
+  if (!rows.length) return '<div class="empty">暂无数据</div>';
+  const max = Math.max(...rows.map(r => r.median_seconds));
+  return `<div class="scroll"><table><thead><tr><th>章节</th><th class="num">读者</th><th class="num">阅读时长中位数</th><th></th><th class="num">读过一半</th><th class="num">读到底</th></tr></thead><tbody>${rows.map(r =>
+    `<tr><td>第 ${esc(r.chapter)} 章</td><td class="num">${fmt(r.readers)}</td><td class="num">${dur(r.median_seconds)}</td><td style="width:22%"><div class="inline-bar" style="width:${(r.median_seconds / max * 100).toFixed(1)}%"></div></td><td class="num">${pct(r.half, r.readers)}</td><td class="num">${pct(r.finished, r.readers)}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function guessTable(rows) {
+  if (!rows.length) return '<div class="empty">暂无数据</div>';
+  return `<div class="scroll"><table><thead><tr><th>实验</th><th class="num">猜过</th><th class="num">猜对率</th><th class="num">A</th><th class="num">B</th><th class="num">C</th></tr></thead><tbody>${rows.map(r => {
+    const counts = [r.c0, r.c1, r.c2];
+    // The most chosen wrong option shows the most common misconception.
+    let trap = -1;
+    counts.forEach((n, i) => { if (i !== r.right && n > 0 && (trap < 0 || n > counts[trap])) trap = i; });
+    return `<tr><td>${esc(r.lab)}</td><td class="num">${fmt(r.answers)}</td><td class="num">${pct(r.correct, r.answers)}</td>${counts.map((n, i) =>
+      `<td class="num${i === r.right ? ' right' : i === trap ? ' trap' : ''}">${pct(n, r.answers)}</td>`).join('')}</tr>`;
+  }).join('')}</tbody></table></div>`;
+}
 const DEVICE = { desktop: '桌面', mobile: '手机', tablet: '平板' };
 const SITE = { zh: '中文', en: 'English', ja: '日本語', ko: '한국어', es: 'Español', ar: 'العربية' };
 
@@ -219,7 +243,7 @@ function render(s) {
     <div class="card tile"><div class="label">浏览量</div><div class="value">${fmt(s.summary.pageviews)}</div><div class="note">近 ${s.days} 天</div></div>
     <div class="card tile"><div class="label">访客·天</div><div class="value">${fmt(s.summary.visitorDays)}</div><div class="note">每天去重后相加</div></div>
     <div class="card tile"><div class="label">学完章节</div><div class="value">${fmt(completions)}</div><div class="note">读者手动标记</div></div>
-    <div class="card tile"><div class="label">事件总数</div><div class="value">${fmt(s.summary.events)}</div><div class="note">浏览 + 学完 + 答题</div></div>
+    <div class="card tile"><div class="label">事件总数</div><div class="value">${fmt(s.summary.events)}</div><div class="note">浏览 + 学完 + 答题 + 阅读 + 实验猜测</div></div>
   </section>
   <section class="card" style="margin-bottom:14px">
     <h2>每日访客</h2><p class="sub">近 ${s.days} 天，北京时间按天统计；悬停看浏览量</p>
@@ -243,9 +267,13 @@ function render(s) {
     <div class="card"><h2>设备</h2><p class="sub">&nbsp;</p>${rankTable(s.devices, '设备', r => DEVICE[r.device] || r.device)}</div>
     <div class="card"><h2>浏览器</h2><p class="sub">WeChat = 微信内置浏览器</p>${rankTable(s.browsers, '浏览器', r => r.browser)}</div>
   </section>
+  <section class="grid two" style="margin-bottom:14px">
+    <div class="card"><h2>阅读时长与深度</h2><p class="sub">只算页面在前台、90 秒内有操作的时间；同一访客当天多次阅读合并计算。「读过一半 / 读到底」按滚动到的最远位置算</p>${readingTable(s.reading || [])}</div>
+    <div class="card"><h2>实验猜测</h2><p class="sub">读者看答案前的第一次猜测。<span class="right">绿色</span>是正确选项，<span class="trap">橙色</span>是选得最多的错误选项，代表最常见的误解</p>${guessTable(s.guesses || [])}</div>
+  </section>
   <section class="grid two">
     <div class="card"><h2>自测答题</h2><p class="sub">按章节；正确率低的章节可能讲得不够清楚</p>${s.quiz.length ? `<table><thead><tr><th>章节</th><th class="num">答题</th><th class="num">正确率</th></tr></thead><tbody>${s.quiz.map(q => `<tr><td>第 ${esc(q.chapter)} 章</td><td class="num">${fmt(q.answers)}</td><td class="num">${(q.correct / q.answers * 100).toFixed(0)}%</td></tr>`).join('')}</tbody></table>` : '<div class="empty">暂无数据</div>'}</div>
-    <div class="card"><h2>最近事件</h2><p class="sub">最新 20 条，不含访客标识</p>${s.recent.length ? `<div class="scroll"><table><thead><tr><th>时间</th><th>事件</th><th>页面</th><th>地区</th><th>设备</th></tr></thead><tbody>${s.recent.map(e => `<tr><td class="mono">${esc(new Date(e.ts).toLocaleString('zh-CN', { timeZone: TZ, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))}</td><td>${esc(TYPE[e.type] || e.type)}${e.detail ? ' · ' + esc(e.detail.replace(':correct', ' 对').replace(':incorrect', ' 错')) : ''}</td><td class="mono">${esc(e.route)}</td><td>${esc([e.city, e.country && regionName(e.country)].filter(Boolean).join(' · '))}</td><td>${esc((DEVICE[e.device] || e.device) + ' · ' + e.browser)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">暂无数据</div>'}</div>
+    <div class="card"><h2>最近事件</h2><p class="sub">最新 20 条，不含访客标识</p>${s.recent.length ? `<div class="scroll"><table><thead><tr><th>时间</th><th>事件</th><th>页面</th><th>地区</th><th>设备</th></tr></thead><tbody>${s.recent.map(e => `<tr><td class="mono">${esc(new Date(e.ts).toLocaleString('zh-CN', { timeZone: TZ, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))}</td><td>${esc(TYPE[e.type] || e.type)}${e.detail ? ' · ' + esc(e.type === 'read' ? dur(+e.detail.split(':')[0]) + ' · ' + e.detail.split(':')[1] + '%' : e.type === 'lab_guess' ? ABC[+e.detail[0]] + (e.detail.endsWith(':correct') ? ' 对' : ' 错') : e.detail.replace(':correct', ' 对').replace(':incorrect', ' 错')) : ''}</td><td class="mono">${esc(e.route)}</td><td>${esc([e.city, e.country && regionName(e.country)].filter(Boolean).join(' · '))}</td><td>${esc((DEVICE[e.device] || e.device) + ' · ' + e.browser)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">暂无数据</div>'}</div>
   </section>
   <p class="foot">隐私边界：不存 IP，不设 cookie，不收集笔记内容；访客标识每天轮换，不能跨天关联同一个人。开启"请勿追踪"或 GPC 的浏览器、爬虫和无头浏览器不计入。北京时间按天统计。</p>`;
   bindTips('c-daily', daily, d => `${esc(d.day)}<br>访客 ${fmt(d.value)} · 浏览 ${fmt(d.pageviews)}`);
