@@ -12,7 +12,7 @@
   const T = Viz.t({
     zh: {
       code: 'KV_BUDGET', title: 'KV 预算器', tag: '教学推演 · 只算主 KV 与 GDN 状态',
-      intro: '选上下文长度、KV 格式和要保留的对话数，看字节数怎样变。Strata 的服务一次只跑<b>一段</b>对话；其余对话可以把状态“停放”在内存里。注意看同一个字节数写成 <b>GB</b> 和 <b>GiB</b> 时差多少。',
+      intro: '选上下文长度、KV 格式和要保留的对话数，看字节数怎样变。Strata 的服务默认一次只跑<b>一段</b>对话（可选的 parallel 槽位这里不算）；其余对话可以把状态“停放”在内存里。注意看同一个字节数写成 <b>GB</b> 和 <b>GiB</b> 时差多少。',
       lgVkv: '显存里的 KV', lgGdn: 'GDN 递推状态（固定大小）', lgRkv: '内存里的 KV 主副本（流式）', lgPark: '停放在内存的其他对话',
       stageLabel: '显存与内存的占用条', vram: '显存', ram: '内存',
       ctxLabel: '上下文长度', sesLabel: '保留几段对话',
