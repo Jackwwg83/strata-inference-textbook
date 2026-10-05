@@ -1,6 +1,6 @@
 # 源码研究范围与关键复核
 
-研究日期：2026-10-04。固定 SHA：`99f3dbd0b21d1401b3769e0c0d963913607f380b`。
+研究日期：2026-10-05（v0.1.39 重新锚定）。固定 SHA：`6f32ec070f23ced9f50e704d854d775da52591ab`。
 
 ## 阅读范围
 
@@ -8,25 +8,25 @@
 
 | 来源 | 文件 / 窗口 | 关注点 |
 | --- | --- | --- |
-| [S01](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/README.md#L1-L240) | `README.md` L1–L240 | 项目宣称的模型、设备与单请求行为；并非独立实测。 |
-| [S02](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/docs/HOW_IT_WORKS.md#L1-L84) | `docs/HOW_IT_WORKS.md` L1–L84 | GPU 热专家、CPU 缺失专家、SSD n-gram，及 MTP / prompt lookup。 |
-| [S03](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/docs/DETAILS.md#L15-L160) | `docs/DETAILS.md` L15–L160 | 版本混合的性能表、量化 KV、低内存模式与输出确定性；本教材未复测。 |
-| [S04](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/core/layout.hpp#L1-L102) | `include/strata/core/layout.hpp` L1–L102 | 48 层、36 GDN / 12 QSA、512 专家与 check_layer / check_all。 |
-| [S05](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/core/expert_cache.hpp#L1-L165) | `include/strata/core/expert_cache.hpp` L1–L165 | 槽位、分层准入、异步填充、字节校验；开头含历史阶段注释。 |
-| [S06](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/core/expert_source.hpp#L1-L145) | `include/strata/core/expert_source.hpp` L1–L145 | 固定地址不等于固定内容；路由权重仅应用一次；RAM 补集与临时指针。 |
-| [S07](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/core/coupled_draft.hpp#L1-L97) | `include/strata/core/coupled_draft.hpp` L1–L97 | 与目标采样结果精确匹配；位置计数器与惩罚历史；耦合开关默认关闭。 |
-| [S08](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/core/verify.hpp#L1-L140) | `include/strata/core/verify.hpp` L1–L140 | run / commit / wait_commit；GDN、indexer、PLE 与 KV 的不同提交方式。 |
-| [S09](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/spec/controller.cpp#L1-L74) | `src/spec/controller.cpp` L1–L74 | 期望产出 / 成本决策、条件接受率与 EMA；未审计所有调用分支。 |
-| [S10](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/core/conversation_cache.hpp#L1-L150) | `include/strata/core/conversation_cache.hpp` L1–L150 | token 前缀、图像身份、steering 模式、容量；不是多租户安全契约。 |
-| [S11](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/ngram/ple_reader.cpp#L1-L125) | `src/ngram/ple_reader.cpp` L1–L125 | 八路组相联、组内轮换替换、页对齐及 I/O 线程。 |
-| [S12](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/prefill/prefill.hpp#L1-L145) | `include/strata/prefill/prefill.hpp` L1–L145 | 按专家分组、DMA 环、借用缓存空间、多 GPU chunk 流水。 |
-| [S13](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/core/session.hpp#L1-L165) | `include/strata/core/session.hpp` L1–L165 | k=10、各层状态、共享 scratch、分层范围、图捕获与残差依赖。 |
-| [S14](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/src/core/layer.cpp#L1-L150) | `src/core/layer.cpp` L1–L150 | 量化代码 / scale / offset 字节核验；权重类型而非名称决定计算分派。 |
-| [S15](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/serve/server.py#L1-L130) | `serve/server.py` L1–L130 | FIFO 单序列、Engine.generate、驻留子进程、context 拒绝、MockEngine。 |
-| [S16](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/serve/frontend.py#L1-L110) | `serve/frontend.py` L1–L110 | 消息归一化、Jinja 模板、reasoning / content / tool 增量解析。 |
-| [S17](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/gdn.hpp#L1-L113) | `include/strata/kernels/gdn.hpp` L1–L113 | 衰减先于秩一更新；模运算头映射；L2 与 RMS 区别。开头层数注释过时。 |
-| [S18](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/include/strata/kernels/qsa.hpp#L1-L145) | `include/strata/kernels/qsa.hpp` L1–L145 | GQA、页表、indexer、2051 宽度上界、动态 step buffer。旧 MiB 注释有单位错误。 |
-| [S19](https://github.com/Niko1221/Strata/blob/99f3dbd0b21d1401b3769e0c0d963913607f380b/LICENSE#L1-L21) | `LICENSE` L1–L21 | 仓库代码许可；不能代替模型权重及其他第三方许可。 |
+| [S01](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/README.md#L1-L211) | `README.md` L1–L211 | 项目宣称的模型、设备与单请求行为；并非独立实测。 |
+| [S02](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/HOW_IT_WORKS.md#L1-L77) | `docs/HOW_IT_WORKS.md` L1–L77 | GPU 热专家、CPU 缺失专家、SSD n-gram，及 MTP / prompt lookup。 |
+| [S03](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/DETAILS.md#L15-L172) | `docs/DETAILS.md` L15–L172 | 版本混合的性能表、量化 KV、低内存模式与输出确定性；本教材未复测。 |
+| [S04](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/core/layout.hpp#L1-L97) | `include/strata/core/layout.hpp` L1–L97 | 48 层、36 GDN / 12 QSA、512 专家与 check_layer / check_all。 |
+| [S05](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/core/expert_cache.hpp#L1-L199) | `include/strata/core/expert_cache.hpp` L1–L199 | 槽位、分层准入、异步填充、字节校验；开头含历史阶段注释。 |
+| [S06](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/core/expert_source.hpp#L1-L166) | `include/strata/core/expert_source.hpp` L1–L166 | 固定地址不等于固定内容；路由权重仅应用一次；RAM 补集与临时指针。 |
+| [S07](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/core/coupled_draft.hpp#L1-L90) | `include/strata/core/coupled_draft.hpp` L1–L90 | 与目标采样结果精确匹配；位置计数器与惩罚历史；耦合开关默认关闭。 |
+| [S08](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/core/verify.hpp#L1-L192) | `include/strata/core/verify.hpp` L1–L192 | run / commit / wait_commit；GDN、indexer、PLE 与 KV 的不同提交方式。 |
+| [S09](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/src/spec/controller.cpp#L1-L73) | `src/spec/controller.cpp` L1–L73 | 期望产出 / 成本决策、条件接受率与 EMA；未审计所有调用分支。 |
+| [S10](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/core/conversation_cache.hpp#L1-L216) | `include/strata/core/conversation_cache.hpp` L1–L216 | token 前缀、图像身份、steering 模式、容量；不是多租户安全契约。 |
+| [S11](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/src/ngram/ple_reader.cpp#L1-L125) | `src/ngram/ple_reader.cpp` L1–L125 | 八路组相联、组内轮换替换、页对齐及 I/O 线程。 |
+| [S12](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/prefill/prefill.hpp#L1-L184) | `include/strata/prefill/prefill.hpp` L1–L184 | 按专家分组、DMA 环、借用缓存空间、多 GPU chunk 流水。 |
+| [S13](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/core/session.hpp#L1-L166) | `include/strata/core/session.hpp` L1–L166 | k=10、各层状态、共享 scratch、分层范围、图捕获与残差依赖。 |
+| [S14](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/src/core/layer.cpp#L1-L150) | `src/core/layer.cpp` L1–L150 | 量化代码 / scale / offset 字节核验；权重类型而非名称决定计算分派。 |
+| [S15](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/serve/server.py#L1-L145) | `serve/server.py` L1–L145 | FIFO 单序列、Engine.generate、驻留子进程、context 拒绝、MockEngine。 |
+| [S16](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/serve/frontend.py#L1-L111) | `serve/frontend.py` L1–L111 | 消息归一化、Jinja 模板、reasoning / content / tool 增量解析。 |
+| [S17](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/kernels/gdn.hpp#L1-L97) | `include/strata/kernels/gdn.hpp` L1–L97 | 衰减先于秩一更新；模运算头映射；L2 与 RMS 区别。开头层数注释过时。 |
+| [S18](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/kernels/qsa.hpp#L1-L145) | `include/strata/kernels/qsa.hpp` L1–L145 | GQA、页表、indexer、2051 宽度上界、动态 step buffer。旧 MiB 注释有单位错误。 |
+| [S19](https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/LICENSE#L1-L21) | `LICENSE` L1–L21 | 仓库代码许可；不能代替模型权重及其他第三方许可。 |
 
 ## 关键复核与教学用途
 
