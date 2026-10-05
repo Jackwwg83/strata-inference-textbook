@@ -1,9 +1,9 @@
 'use strict';
-// Right-to-left pages: after an Arabic letter, digits count as Arabic numbers, and a dash between two of them
-// does not join them, so "4-3" shows as "3-4". This wraps each number-dash-number run so it reads left to right:
-// a <span dir="ltr"> in HTML text, and invisible isolate marks (LRI ... PDI) inside SVG text, where spans do not work.
-const NUM = String.raw`\d+(?:[.,]\d+)*%?`;
-const RUN = new RegExp(`${NUM}\\s?[-\\u2010-\\u2015\\u2212]\\s?${NUM}`, 'g');
+// Right-to-left pages. Figure numbers, ranges and units keep the Unicode default for Arabic text, which Arabic
+// readers expect ("4-3" shows as "3-4" and reads right to left as 4-3). Bracketed number vectors such as [7, 4]
+// are maths notation and must read left to right, so each one is wrapped: a <span dir="ltr"> in HTML text, and
+// invisible isolate marks (LRI ... PDI) inside SVG text, where spans do not work.
+const RUN = /\[[-\u2212+]?\d[\d.,\s\u2212+-]*\]/g;
 const LRI = '⁦', PDI = '⁩';
 
 function isolateNumbers(html) {
