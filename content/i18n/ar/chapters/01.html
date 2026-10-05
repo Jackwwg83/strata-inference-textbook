@@ -1,0 +1,282 @@
+<div class="hook"><span class="eyebrow">لنبدأ بأمر غريب</span>
+<p>يبدأ README الخاص بـ Strata بهذه العبارة: شغّل نموذج ذكاء اصطناعي بـ 125 مليار معامل على حاسوب الألعاب الخاص بك. ويشترط بطاقة رسوميات (GPU) بذاكرة فيديو (VRAM) لا تقل عن 12 GB. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S01]</p>
+<p>احسب بالمنطق السليم: 125 مليار معامل، حتى لو شغل كل معامل بايتًا واحدًا فقط، تساوي 125 GB. فكيف تتسع لها بطاقة سعتها 12 GB؟ هذا الكتاب يجيب عن أسئلة من هذا النوع: كيف يعمل نموذج الذكاء الاصطناعي فعلًا داخل حاسوبك؟ وسنربط في الطريق أساسيات بنية الحاسوب ونظم التشغيل والخوارزميات والشبكات.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> يولّد الذكاء الاصطناعي للمحادثة رمزًا (token) واحدًا في كل مرة. ولتوليد هذا الرمز الواحد تعمل بطاقة الرسوميات والذاكرة (RAM) والمعالج والقرص معًا. براعة Strata أنه يرتّب هذه الأربعة بحيث يكفي كل منها بالقدر المطلوب تمامًا.</p>
+
+<h2 id="sec-1">1.1 ماذا يحدث بعد أن تضغط Enter</h2>
+<p>تكتب جملة في مربع المحادثة وتضغط Enter. بعد ثوانٍ تظهر الإجابة كلمة بعد كلمة. وبين اللحظتين تمر جملتك بست عمليات تحويل، كما في الشكل 1-1.</p>
+<div class="viz" data-viz="token-journey"><figure class="fig"><svg viewBox="0 0 400 486" role="img" aria-label="الشكل 1-1: ست عمليات تحويل تنقل الجملة من المدخل إلى المخرج، وتتكرر الخطوات من 4 إلى 6 مع كل رمز (token) يُولَّد">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="30" font-size="14" font-weight="600" text-anchor="middle" direction="rtl">① رسالتك</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="48" font-size="12" text-anchor="middle" direction="rtl">«ساعدني في شرح ما هو MoE»</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="80" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="102" font-size="14" font-weight="600" text-anchor="middle" direction="rtl">② قالب المحادثة</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="120" font-size="12" text-anchor="middle" direction="rtl">علامات الأدوار + تعليمات النظام + وصف الأدوات</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="152" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="174" font-size="14" font-weight="600" text-anchor="middle" direction="rtl">③ المُجزِّئ (tokenizer)</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="192" font-size="12" text-anchor="middle" direction="rtl">النص ← قائمة معرّفات الرموز (أعداد صحيحة)</text>
+<rect class="f-accent" fill="#136d5a" x="40" y="224" width="300" height="50" rx="10"/>
+<text class="f-on" fill="#ffffff" x="190" y="246" font-size="14" font-weight="600" text-anchor="middle" direction="rtl">④ محرك الاستدلال: طبقة بعد طبقة</text>
+<text class="f-on" fill="#ffffff" x="190" y="264" font-size="12" text-anchor="middle" direction="rtl">بعد 48 طبقة ← احتمالات الرمز التالي</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="296" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="318" font-size="14" font-weight="600" text-anchor="middle" direction="rtl">⑤ أخذ العينات</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="336" font-size="12" text-anchor="middle" direction="rtl">اختيار رمز واحد حسب الاحتمال</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="368" width="300" height="50" rx="10"/>
+<text class="f-text" fill="#182f2b" x="190" y="390" font-size="14" font-weight="600" text-anchor="middle" direction="rtl">⑥ فك الترميز والدفع</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="408" font-size="12" text-anchor="middle" direction="rtl">المعرّف ← نص يُدفع إلى شاشتك</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M190 58V78M190 130V150M190 202V222M190 274V294M190 346V366"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 4" d="M340 393H372V249H346"/>
+<path class="f-muted" fill="#5c6d66" d="M346 249l8-5v10z"/>
+<text class="f-muted" fill="#5c6d66" x="190" y="446" font-size="12" text-anchor="middle" direction="rtl">الخط المتقطع: إن لم تكتمل الإجابة، نضيف الرمز الجديد</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="464" font-size="12" text-anchor="middle" direction="rtl">إلى النهاية ونعود إلى الخطوة ④. كل دورة تنتج رمزًا واحدًا.</text>
+</svg><figcaption>الشكل 1-1　ست عمليات تحويل لجملة واحدة. تتكرر الخطوات ④–⑥ مع كل رمز يُولَّد.</figcaption></figure></div>
+<p>في الشكل بضع كلمات جديدة. إليك شرحها ببساطة.</p>
+<p><dfn>الرمز (token)</dfn> هو أصغر وحدة يقرأ بها النموذج النص ويكتب. قد يكون حرفًا صينيًا واحدًا أو كلمة أو نصف كلمة إنجليزية أو علامة ترقيم. النموذج لا يتعرف على الحروف مباشرة؛ هو يعرف معرّفات الرموز فقط. و<dfn>المُجزِّئ (tokenizer)</dfn> هو البرنامج الذي يقطّع النص إلى رموز ثم يحوّلها إلى معرّفات، كما في الشكل 1-2.</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="الشكل 1-2: يقطّع المُجزِّئ الجملة إلى رموز ثم يحوّلها إلى معرّفات صحيحة، ولا يرى النموذج سوى المعرّفات">
+<text class="f-muted" fill="#5c6d66" x="200" y="20" font-size="12" text-anchor="middle" direction="rtl">النص الأصلي: يحوّل المحرك النص إلى أرقام</text>
+<rect class="f-soft" fill="#e5f1df" x="30" y="34" width="62" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="61" y="56" font-size="14" text-anchor="middle" direction="rtl">أرقام</text>
+<rect class="f-soft" fill="#e5f1df" x="98" y="34" width="44" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="120" y="56" font-size="14" text-anchor="middle" direction="rtl">إلى</text>
+<rect class="f-soft" fill="#e5f1df" x="148" y="34" width="56" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="176" y="56" font-size="14" text-anchor="middle" direction="rtl">النص</text>
+<rect class="f-soft" fill="#e5f1df" x="210" y="34" width="56" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="238" y="56" font-size="14" text-anchor="middle" direction="rtl">محرك</text>
+<rect class="f-soft" fill="#e5f1df" x="272" y="34" width="36" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="290" y="56" font-size="14" text-anchor="middle" direction="rtl">ال</text>
+<rect class="f-soft" fill="#e5f1df" x="314" y="34" width="56" height="34" rx="7"/><text class="f-text" fill="#182f2b" x="342" y="56" font-size="14" text-anchor="middle" direction="rtl">يحوّل</text>
+<text class="f-muted" fill="#5c6d66" x="61" y="88" font-size="12" text-anchor="middle">26425</text><text class="f-muted" fill="#5c6d66" x="120" y="88" font-size="12" text-anchor="middle">31650</text><text class="f-muted" fill="#5c6d66" x="176" y="88" font-size="12" text-anchor="middle">29871</text><text class="f-muted" fill="#5c6d66" x="238" y="88" font-size="12" text-anchor="middle">1204</text><text class="f-muted" fill="#5c6d66" x="290" y="88" font-size="12" text-anchor="middle">40121</text><text class="f-muted" fill="#5c6d66" x="342" y="88" font-size="12" text-anchor="middle">18723</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 100V118"/>
+<path class="f-muted" fill="#5c6d66" d="M200 124l-5-8h10z"/>
+<rect class="f-accent" fill="#136d5a" x="30" y="130" width="340" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="149" font-size="12" text-anchor="middle" direction="rtl">كل ما يراه النموذج:</text>
+<text class="f-on" fill="#ffffff" x="200" y="168" font-size="12" text-anchor="middle">[18723, 40121, 1204, 29871, 31650, 26425]</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="192" font-size="12" text-anchor="middle" direction="rtl">رسم توضيحي: التقطيع والمعرّفات الحقيقية يحددها مُجزِّئ النموذج</text>
+</svg><figcaption>الشكل 1-2　التجزئة: يُقطَّع النص أولًا إلى رموز، ثم يُبحث عن كل رمز ويُحوَّل إلى معرّف. لا يتعامل النموذج من أوله إلى آخره إلا مع هذه الأعداد الصحيحة.</figcaption></figure>
+<p><dfn>أخذ العينات (sampling)</dfn> هو الخطوة ⑤. النموذج لا «يقول» الكلمة التالية مباشرة، بل يعطي احتمالًا لكل رمز مرشح، ثم يختار أخذ العينات رمزًا واحدًا وفق هذه الاحتمالات. يشرحه الفصل 2 بالتفصيل.</p>
+<p>انظر إلى الخط المتقطع في الشكل 1-1. النموذج يولّد رمزًا واحدًا فقط في كل دورة: لكتابة إجابة من 300 رمز تتكرر الخطوات من ④ إلى ⑥ ثلاثمئة مرة. لذلك تُقاس «سرعة التوليد» عادة بعدد الرموز في الثانية، وتُكتب token/s.</p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> عملية التوليد كلها حلقة واحدة: <code>while not done: probs = model(tokens); t = sample(probs); tokens.append(t)</code>. مدخل كل دورة يتضمن مخرج الدورة السابقة. ويسمى النموذج الذي «يتغذى على مخرجاته» هكذا نموذجًا <dfn>انحداريًا ذاتيًا (autoregressive)</dfn>.</p>
+
+<h2 id="sec-2">1.2 لماذا تتأخر الكلمة الأولى دائمًا قليلًا</h2>
+<p>ربما لاحظت: بعد إرسال السؤال تنتظر لحظة قبل ظهور الكلمة الأولى، ثم تتوالى الكلمات بسرعة. السبب أن الإجابة تمر بمرحلتين، كما في الشكل 1-3.</p>
+<div class="viz" data-viz="first-token-wait"><figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="الشكل 1-3: الخط الزمني لإجابة واحدة. تُقرأ المُطالبة كلها دفعة واحدة أولًا، ثم تُكتب الإجابة رمزًا في كل دورة">
+<text class="f-muted" fill="#5c6d66" x="390" y="18" font-size="12" direction="rtl">الخط الزمني لإجابة واحدة (رسم توضيحي، دون مقياس)</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="32" width="150" height="48" rx="8"/>
+<text class="f-on" fill="#ffffff" x="85" y="52" font-size="13" font-weight="600" text-anchor="middle">prefill</text>
+<text class="f-on" fill="#ffffff" x="85" y="70" font-size="12" text-anchor="middle" direction="rtl">المُطالبة كلها معًا</text>
+<rect class="f-soft" fill="#e5f1df" x="168" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="186" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="204" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="222" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="240" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="258" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="276" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="294" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="312" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="330" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="348" y="32" width="14" height="48" rx="3"/><rect class="f-soft" fill="#e5f1df" x="366" y="32" width="14" height="48" rx="3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 88V94H160V88M168 88V94H380V88"/>
+<text class="f-muted" fill="#5c6d66" x="85" y="110" font-size="12" text-anchor="middle" direction="rtl">انتظار الكلمة الأولى</text>
+<text class="f-muted" fill="#5c6d66" x="274" y="110" font-size="12" text-anchor="middle" direction="rtl">decode (كتابة الإجابة): رمز في كل دورة</text>
+<text class="f-text" fill="#182f2b" x="390" y="142" font-size="12" direction="rtl">قياس المصدر الأصلي (RTX 5070 بسعة 12 GB، Q2_0، مُطالبة بطول 4K):</text>
+<text class="f-text" fill="#182f2b" x="390" y="164" font-size="12" direction="rtl">· prefill: نحو 1,299 رمزًا في الثانية</text>
+<text class="f-text" fill="#182f2b" x="390" y="184" font-size="12" direction="rtl">· decode: نحو 93 رمزًا في الثانية</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="206" font-size="12" direction="rtl">prefill أسرع بأكثر من عشرة أضعاف، لأن رموز المُطالبة</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="224" font-size="12" direction="rtl">تُحسب معًا (الفصل 16)</text>
+</svg><figcaption>الشكل 1-3　نقرأ المُطالبة أولًا ثم نكتب الإجابة. في القراءة تُحسب المُطالبة كلها معًا، فيُعالَج عدد أكبر بكثير من الرموز في الثانية؛ أما الكتابة فرمزًا بعد رمز.</figcaption></figure></div>
+<p>تسمى المرحلة الأولى <dfn>prefill</dfn> (قراءة المُطالبة): يقرأ النموذج سؤالك كله دفعة واحدة. رموز السؤال كلها معروفة مسبقًا، فيمكن حسابها معًا. وتسمى المرحلة الثانية <dfn>decode</dfn> (كتابة الإجابة): كل رمز جديد يعتمد على السابق، فلا يمكن إلا أن يأتي واحدًا بعد واحد.</p>
+<p>تُظهر قياسات المصدر الأصلي لـ Strata أن الجهاز نفسه يعالج في prefill نحو 1,299 رمزًا في الثانية، وفي decode نحو 93 رمزًا في الثانية. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03] لذلك كلما طال السؤال طال انتظار الكلمة الأولى. وينبّه README أيضًا: الرسالة الأولى في المحادثة تُقرأ كاملة، وتحتاج نحو دقيقة واحدة لكل 30,000 رمز؛ أما الأسئلة التالية فيُقرأ الجزء المضاف فقط، فتبدأ الإجابة بعد ثوانٍ. [S01]</p>
+
+<h2 id="sec-3">1.3 النموذج والمحرك والتطبيق: ثلاثة أدوار يُخلط بينها كثيرًا</h2>
+<p>لنشبّهها بمطعم، كما في الشكل 1-4. وثائق Strata نفسها تستخدم تشبيه المطبخ. [S02]</p>
+<figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="الشكل 1-4: الأدوار الثلاثة، التطبيق ومحرك الاستدلال والنموذج، تقابل في المطعم الاستقبال والمطبخ والوصفة">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="120" height="70" rx="10"/>
+<text class="f-text" fill="#182f2b" x="70" y="40" font-size="15" font-weight="600" text-anchor="middle" direction="rtl">التطبيق</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="62" font-size="12" text-anchor="middle" direction="rtl">استقبال المطعم</text>
+<text class="f-text" fill="#182f2b" x="390" y="30" font-size="12" direction="rtl">يستقبلك وينظّم كلامك ثم يقدّم الطبق</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="50" font-size="12" direction="rtl">القالب والتجزئة وتحويل المخرجات إلى نص</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="70" font-size="12" direction="rtl">Strata: خدمة Python داخل serve/</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M70 80V108"/>
+<text class="f-muted" fill="#5c6d66" x="79" y="99" font-size="12">معرّفات الرموز</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="110" width="120" height="70" rx="10"/>
+<text class="f-on" fill="#ffffff" x="70" y="140" font-size="15" font-weight="600" text-anchor="middle" direction="rtl">محرك الاستدلال</text>
+<text class="f-on" fill="#ffffff" x="70" y="162" font-size="12" text-anchor="middle" direction="rtl">المطبخ والطهاة</text>
+<text class="f-text" fill="#182f2b" x="390" y="130" font-size="12" direction="rtl">يُجري الحساب على عتادك أنت</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="150" font-size="12" direction="rtl">يوزّع VRAM وRAM وCPU وGPU</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="170" font-size="12" direction="rtl">Strata نفسه: C++ / CUDA / HIP</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M70 180V208"/>
+<text class="f-muted" fill="#5c6d66" x="79" y="199" font-size="12">قراءة المعاملات</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="210" width="120" height="70" rx="10"/>
+<text class="f-text" fill="#182f2b" x="70" y="240" font-size="15" font-weight="600" text-anchor="middle" direction="rtl">النموذج</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="262" font-size="12" text-anchor="middle" direction="rtl">الوصفة</text>
+<text class="f-text" fill="#182f2b" x="390" y="230" font-size="12" direction="rtl">معاملات مدرَّبة + قواعد حساب ثابتة</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="250" font-size="12" direction="rtl">نحو 125 مليار معامل</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="270" font-size="12" text-anchor="end">Qwen3.8-Flash-Next</text>
+</svg><figcaption>الشكل 1-4　لكل دور من الثلاثة مهمته. يسلّم التطبيق إلى المحرك قائمة معرّفات رموز، ويحسب المحرك وفق وصفة النموذج.</figcaption></figure>
+<ul>
+<li><strong>النموذج هو الوصفة.</strong> هو كمٌّ كبير من الأرقام المدرَّبة (تسمى «المعاملات» أو «الأوزان»)، مع مجموعة قواعد حساب ثابتة. Qwen3.8-Flash-Next نموذج.</li>
+<li><strong>محرك الاستدلال هو المطبخ والطهاة.</strong> مهمته أن ينفّذ الحساب على عتادك وفق الوصفة. Strata محرك استدلال، وكذلك llama.cpp وvLLM.</li>
+<li><strong>التطبيق هو الاستقبال.</strong> يستقبلك، وينظّم كلامك ويسلّمه إلى المطبخ، ثم يقدّم لك الطبق الجاهز. واجهة المحادثة على الويب المرفقة مع Strata، وأدوات البرمجة المتصلة عبر API، كلها في هذه الطبقة. [S01]</li>
+</ul>
+<p>إذا ميّزت هذه الطبقات الثلاث، فلن تبحث عن المشكلة في المكان الخطأ. مهما أسرع المحرك فلن يصير النموذج أذكى: الوصفة ثابتة، فإذا غيّرت المطبخ يجب أن يبقى طعم الطبق نفسه. وبالعكس، إذا ساءت جودة الإجابة فقد يكون السبب في الوصفة (نموذج مختلف أو ضغط مفرط)، أو في المطبخ (خطأ في المحرك جعل الحساب خاطئًا)، أو في الاستقبال (القالب أو البروتوكول نقل كلامك نقلًا خاطئًا).</p>
+
+<h2 id="sec-4">1.4 ثلاثة «مستودعات» داخل حاسوب واحد</h2>
+<p>سرعة المطبخ تتوقف كثيرًا على مكان وضع الأشياء. والحاسوب كذلك. للتخزين المتصل بالاستدلال ثلاث طبقات، كما في الشكل 1-5.</p>
+<figure class="fig"><svg viewBox="0 0 400 380" role="img" aria-label="الشكل 1-5: ثلاث طبقات تخزين هي VRAM وRAM وقرص SSD، كلما صعدت صارت أسرع وأصغر، وما وضعه Strata في كل طبقة">
+<rect class="f-accent" fill="#136d5a" x="30" y="10" width="340" height="100" rx="10"/>
+<text class="f-on" fill="#ffffff" x="200" y="34" font-size="14" font-weight="600" text-anchor="middle" direction="rtl">ذاكرة الفيديو (VRAM): 12–24 GB</text>
+<text class="f-on" fill="#ffffff" x="200" y="54" font-size="12" text-anchor="middle" direction="rtl">الطاولة: تمدّ يدك فتأخذ</text>
+<text class="f-on" fill="#ffffff" x="200" y="74" font-size="12" text-anchor="middle" direction="rtl">الجزء الذي يحتاجه كل رمز</text>
+<text class="f-on" fill="#ffffff" x="200" y="92" font-size="12" text-anchor="middle" direction="rtl">+ آلاف الخبراء الأكثر استخدامًا + سجل المحادثة</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="126" width="360" height="112" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="150" font-size="14" font-weight="600" text-anchor="middle" direction="rtl">الذاكرة (RAM): 32–64 GB</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="170" font-size="12" text-anchor="middle" direction="rtl">المخزن: خطوات قليلة للوصول إليه</text>
+<text class="f-text" fill="#182f2b" x="200" y="190" font-size="12" text-anchor="middle" direction="rtl">كل الخبراء الـ 24,576</text>
+<text class="f-text" fill="#182f2b" x="200" y="208" font-size="12" text-anchor="middle" direction="rtl">الخبراء غير الموجودين في GPU يحسبهم</text>
+<text class="f-text" fill="#182f2b" x="200" y="226" font-size="12" text-anchor="middle" direction="rtl">المعالج (CPU) في مكانهم</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="254" width="380" height="92" rx="10"/>
+<text class="f-text" fill="#182f2b" x="200" y="278" font-size="14" font-weight="600" text-anchor="middle" direction="rtl">قرص SSD</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="298" font-size="12" text-anchor="middle" direction="rtl">المستودع تحت الأرض: الأكبر والأبطأ</text>
+<text class="f-text" fill="#182f2b" x="200" y="318" font-size="12" text-anchor="middle" direction="rtl">جدول بحث بحجم 28.8 GB، يقرأ كل رمز</text>
+<text class="f-text" fill="#182f2b" x="200" y="336" font-size="12" text-anchor="middle" direction="rtl">بضعة صفوف منه فقط</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="370" font-size="12" text-anchor="middle" direction="rtl">كلما صعدت: أسرع وأصغر وأغلى</text>
+</svg><figcaption>الشكل 1-5　كيف يستخدم Strata طبقات التخزين الثلاث. السعات هي متطلبات العتاد في README، وتوزيع المهام من وثائق المصدر الأصلي. [S01][S02]</figcaption></figure>
+<p>بطاقة الرسوميات (GPU) هي الأسرع حسابًا، لكن ذاكرتها هي الأصغر: بطاقات الألعاب الشائعة لا تتجاوز 12–24 GB. أما الذاكرة (RAM) فأكبر بكثير، لكنها بعيدة عن البطاقة، فتمر البيانات عبر ناقل يسمى PCIe. وقرص SSD هو الأكبر والأبطأ.</p>
+<p>وهذا توزيع المهام في Strata <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02]:</p>
+<ol>
+<li>الجزء الذي يحتاجه كل رمز، مع آلاف «الخبراء» الأكثر استخدامًا، يوضع في VRAM.</li>
+<li>كل الخبراء يوضعون في RAM. أما الخبراء غير الموجودين على البطاقة فيحسبهم المعالج في مكانهم داخل RAM، ويعمل في الوقت نفسه مع البطاقة.</li>
+<li>على القرص جدول بحث بحجم 28.8 GB، يقرأ كل رمز بضعة صفوف منه فقط.</li>
+</ol>
+<p>الفصل 10 مخصص لشرح «الخبراء». يكفيك الآن أن تعرف أنهم مفتاح قدرة Strata على تشغيل نموذج كبير على بطاقة صغيرة.</p>
+<aside class="primer" id="c01-memory-hierarchy">
+<h3>تسلسل الذاكرة الهرمي</h3>
+<p>أجهزة التخزين في الحاسوب تقايض دائمًا بين «السرعة» و«السعة» و«الثمن»: الأسرع أصغر وأغلى، والأكبر أبطأ. لذلك يرصّها الحاسوب في هرم: البيانات الأكثر استخدامًا في الطبقة الأسرع، وغير المستخدمة كثيرًا في الأسفل، وتُنقل إلى الأعلى عند الحاجة. هذا هو <dfn>تسلسل الذاكرة الهرمي</dfn>.</p>
+<p>للسرعة مقياسان. <dfn>عرض النطاق (bandwidth)</dfn> هو عدد البايتات التي تُنقل في الثانية، كسَعة الأنبوب. و<dfn>زمن الاستجابة (latency)</dfn> هو مدة الانتظار من إرسال الطلب حتى وصول أول بايت، كالزمن الذي يستغرقه الماء من الصنبور إلى الكأس. محرك الاستدلال يقرأ كمية كبيرة من المعاملات لكل رمز يولّده، فأكثر ما يهمه عرض النطاق. الشكل 1-6 يبيّن عرض النطاق النظري لكل طبقة في جهاز قياس المصدر الأصلي.</p>
+<figure class="fig"><svg viewBox="0 0 400 238" role="img" aria-label="الشكل 1-6: عرض النطاق النظري لكل طبقة تخزين في جهاز قياس المصدر الأصلي: VRAM نحو 672 GB/s، وRAM نحو 83 GB/s، وPCIe 5.0 نحو 63 GB/s، وقرص SSD نحو 7 GB/s">
+<text class="f-muted" fill="#5c6d66" x="390" y="18" font-size="12" direction="rtl">أقصى عرض نطاق نظري بوحدة GB/s (طول الشريط بالتناسب)</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">VRAM</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="36" width="250" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="348" y="49" font-size="12">672</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">RAM</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="72" width="31" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="390" y="85" font-size="12" direction="rtl">83 (DDR5-5200، قناتان)</text>
+<text class="f-text" fill="#182f2b" x="10" y="120" font-size="12">ناقل PCIe</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="108" width="23" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="390" y="121" font-size="12" direction="rtl">نحو 63 (PCIe 5.0 x16، اتجاه واحد)</text>
+<text class="f-text" fill="#182f2b" x="10" y="156" font-size="12">قرص SSD</text>
+<rect class="f-accent" fill="#136d5a" x="92" y="144" width="3" height="16" rx="1"/>
+<text class="f-text" fill="#182f2b" x="390" y="157" font-size="12" direction="rtl">نحو 7 (قراءة تسلسلية NVMe المعتادة)</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="190" font-size="12" direction="rtl">VRAM حسب مواصفات RTX 5070، وRAM حسب جهاز قياس</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="207" font-size="12" direction="rtl">المصدر الأصلي؛ والقياس الفعلي أقل عادة.</text>
+<text class="f-muted" fill="#5c6d66" x="390" y="226" font-size="12" direction="rtl">القراءة من VRAM أسرع من القراءة من القرص بنحو مئة ضعف.</text>
+</svg><figcaption>الشكل 1-6　في الحاسوب الواحد قد يصل الفرق في عرض النطاق بين الطبقات إلى مئة ضعف. وضع البيانات كثيرة الاستخدام في الطبقة السريعة هو نقطة انطلاق كل تصميم للذاكرة المؤقتة.</figcaption></figure>
+<p>تصميم Strata كله يمكن اعتباره وضعًا للبيانات على هذا الهرم: الخبراء الشائعون في VRAM، وكل الخبراء في RAM، وجدول البحث الكبير على القرص. وسنعود إلى هذا الشكل مرارًا في الفصول القادمة.</p>
+<p class="further">للاستزادة: <a href="https://ar.wikipedia.org/wiki/%D9%87%D8%B1%D9%85%D9%8A%D8%A9_%D8%A7%D9%84%D8%B0%D8%A7%D9%83%D8%B1%D8%A9" target="_blank" rel="noopener noreferrer">ويكيبيديا: هرمية الذاكرة</a> · <a href="https://en.wikipedia.org/wiki/Memory_hierarchy" target="_blank" rel="noopener noreferrer">Wikipedia: Memory hierarchy</a> · <a href="https://csapp.cs.cmu.edu/" target="_blank" rel="noopener noreferrer">كتاب CS:APP (الفصل 6)</a></p>
+</aside>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذا هو تسلسل الذاكرة في مقرر «بنية الحاسوب»، مع طبقة إضافية هي VRAM. فبالنسبة إلى المعالج CPU، ذاكرة VRAM هي ذاكرة على جهاز آخر، ولا يستطيع قراءتها وكتابتها مباشرة كما يفعل مع ذاكرته، بل تُنقل البيانات عبر PCIe (يشرح الفصل 14 الوصول المباشر إلى الذاكرة DMA).</p>
+
+<h2 id="sec-5">1.5 لنحسب: 24,576 و480</h2>
+<p>يقول README إن هذا النموذج مكوَّن من 24,576 «خبيرًا»، وإن الكلمة الواحدة تحتاج 10 منهم فقط. [S01] هذه العبارة مبسّطة ليسهل فهمها. فلنتحقق منها في الشيفرة.</p>
+<p>تعرّف الشيفرة بنية النموذج بأنها 48 طبقة، في كل طبقة 512 خبيرًا <span class="ev ev-code">حقيقة من الشيفرة</span>[S04]؛ ويختار كل رمز 10 خبراء في <strong>كل طبقة</strong> <span class="ev ev-code">حقيقة من الشيفرة</span>[S13]. يرسم الشكل 1-7 هذه البنية.</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="الشكل 1-7: 48 طبقة، في كل طبقة 512 خبيرًا يُختار منهم 10، فيُجري الرمز الواحد 480 اختيارًا للخبراء">
+<text class="f-muted" fill="#5c6d66" x="390" y="18" font-size="12" direction="rtl">كل صف هو الخبراء الـ 512 في طبقة؛ المضيء هو الـ 10 المختارون</text>
+<text class="f-muted" fill="#5c6d66" x="52" y="43" font-size="12" direction="rtl">طبقة 1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="34" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="87.2" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="101.7" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="121.9" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="165.3" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="212.0" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="285.1" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="301.5" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="318.5" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="341.8" y="34" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="355.6" y="34" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="52" y="61" font-size="12" direction="rtl">طبقة 2</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="52" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="118.1" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="160.9" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="180.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="195.6" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="209.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="268.1" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="287.6" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="301.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="311.5" y="52" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="323.5" y="52" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="52" y="79" font-size="12" direction="rtl">طبقة 3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="70" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="72.7" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="84.7" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="124.4" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="134.5" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="147.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="215.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="256.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="314.1" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="344.3" y="70" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="355.6" y="70" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="52" y="115" font-size="12" direction="rtl">طبقة 46</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="106" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="64.5" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="87.8" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="119.3" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="147.1" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="177.3" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="194.3" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="203.8" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="217.0" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="259.2" y="106" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="328.5" y="106" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="52" y="133" font-size="12" direction="rtl">طبقة 47</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="124" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="92.2" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="106.7" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="147.7" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="181.7" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="207.6" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="219.5" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="260.5" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="271.8" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="297.0" y="124" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="383.4" y="124" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="52" y="151" font-size="12" direction="rtl">طبقة 48</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="60" y="142" width="330" height="10" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="76.5" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="92.2" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="155.9" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="176.7" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="227.7" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="244.7" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="268.1" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="296.4" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="328.5" y="142" width="4" height="10"/>
+<rect class="f-accent" fill="#136d5a" x="345.6" y="142" width="4" height="10"/>
+<text class="f-muted" fill="#5c6d66" x="225" y="97" font-size="13" text-anchor="middle" direction="rtl">⋮ (و42 طبقة أخرى في الوسط)</text>
+<text class="f-text" fill="#182f2b" x="200" y="180" font-size="13" font-weight="600" text-anchor="middle" direction="rtl">48 طبقة × 10 لكل طبقة = 480 اختيارًا</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="202" font-size="12" text-anchor="middle" direction="rtl">48 طبقة × 512 لكل طبقة = 24,576 خبيرًا (المجموع)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="224" font-size="12" text-anchor="middle" direction="rtl">«10 خبراء لكل كلمة» تعني: في كل طبقة</text>
+</svg><figcaption>الشكل 1-7　يمر الرمز الواحد بالطبقات الـ 48، وفي كل طبقة يُختار 10 خبراء من جديد، فيكون المجموع 480 اختيارًا لا 10.</figcaption></figure>
+<ul>
+<li>48 × 512 = <strong>24,576</strong>، وهذا إجمالي عدد الخبراء.</li>
+<li>يمر الرمز الواحد بالطبقات الـ 48، ويختار 10 في كل طبقة، فالمجموع 48 × 10 = <strong>480</strong> اختيارًا للخبراء.</li>
+</ul>
+<p>الرقم «10» يخص كل طبقة، لا النموذج كله. إن فهمته على أن النموذج كله يستخدم 10 خبراء فقط، فسيقلّ تقديرك لحجم الحساب ولنقل البيانات بمقدار 48 ضعفًا. وهذه عادة يكررها الكتاب: <strong>الرقم يجب أن يأتي مع وحدته ونطاقه</strong>.</p>
+
+<h2 id="sec-6">1.6 كيف تقرأ هذا الكتاب: لكل رقم مصدر</h2>
+<p>كل استنتاج في الكتاب يبيّن نوع الدليل الذي يستند إليه:</p>
+<ul>
+<li><span class="ev ev-code">حقيقة من الشيفرة</span> قُرئت مباشرة من الشيفرة في نسخة مثبتة. مثلًا «48 طبقة».</li>
+<li><span class="ev ev-report">تقرير المصدر الأصلي</span> شرح كتبه مؤلفو Strata في الوثائق أو بيانات قاسوها، ولم يعد الكتاب قياسها. مثلًا «تولّد RTX 5070 نحو 94 رمزًا في الثانية». [S01]</li>
+<li><span class="ev ev-est">تقدير تعليمي</span> نتيجة حسبها الكتاب بنموذج مبسّط لتبني حدسك، وليست قياسًا. كل التجارب التفاعلية في المتصفح من هذا النوع.</li>
+<li>المبادئ الأساسية: قواعد عامة في الرياضيات أو الحاسوب، لا تعتمد على Strata، ولا تحمل وسمًا إضافيًا.</li>
+</ul>
+<p>لماذا هذا التدقيق؟ لأن الأرقام في عالم الذكاء الاصطناعي تنتقل بسهولة من سياقها إلى سياق آخر. سرعة على بطاقة غيرك، أو استهلاك ذاكرة في إعداد معيّن، أو عبارة مبسّطة في صورة دعائية، قد تضلّلك إذا فُصلت عن شروطها. أن تتعلم السؤال «في أي ظروف حُصل على هذا الرقم؟» أنفع من حفظ أي رقم.</p>
+<p>قراءة الشيفرة في هذا الكتاب مثبتة على Strata v0.1.39، أي الإيداع (commit) 6f32ec0… بتاريخ 2026-10-04، ورقمه الكامل في تذييل الصفحة. وقد دُقّقت حقائق الكتاب في 2026-10-05. ما زال Strata يتطور بسرعة، وقد تختلف الأرقام في النسخ الأحدث.</p>
+<p><strong>تطبيق عملي:</strong> افتح تجربة هذا الفصل التفاعلية «رحلة رمز واحد». هي تفكّك مسار الشكل 1-1 إلى حلقات يمكن فحصها خطوة خطوة، فترى مدخل كل خطوة ومخرجها. جرّب أن تتخيل لأحد الأسهم مثالًا على «ماذا لو حدث خطأ»: كأن يتغير القالب، أو يكون المُجزِّئ غير مطابق للنموذج. أرقام التجربة كلها تقدير تعليمي، وليست قياسًا على حاسوبك.</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>النموذج وصفة، ومحرك الاستدلال مطبخ، والتطبيق استقبال. ولكل منها مهمته.</li>
+<li>نقرأ المُطالبة أولًا ثم نكتب الإجابة: في القراءة تُحسب المُطالبة كلها معًا، وفي الكتابة رمز واحد في كل دورة.</li>
+<li>اسأل عن كل رقم: أهو حقيقة من الشيفرة أم تقرير من المصدر الأصلي أم تقدير؟ وما وحدته ونطاقه؟</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «حجم ملف النموذج هو حجم VRAM المطلوب».</strong></p>
+<p>ليس بالضرورة. حجم الملف يدل فقط على عدد البايتات التي تشغلها الأوزان على القرص. أثناء التشغيل يمكن أن يبقى جزء من الأوزان في RAM ليحسبه المعالج أو يُرسل إلى البطاقة عند الحاجة؛ وتحتاج VRAM أيضًا إلى سجل المحادثة والبيانات المؤقتة. ينزّل Strata نموذجًا بنحو 70 GB ثم يعمل على بطاقة 12 GB. [S01]</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: لمن يريد قراءة الشيفرة</summary>
+<h3>الحدّ الحقيقي بين طبقة الخدمة والمحرك</h3>
+<p>في شيفرة الخدمة في Strata، ما تسلّمه طبقة التطبيق إلى المحرك ليس طلب HTTP ولا JSON خامًا، بل قائمة معرّفات رموز: الواجهة هي <code>Engine.generate(ids, max_new, sampling, cancel)</code>، وتعيد مكرِّرًا ينتج معرّفات الرموز واحدًا بعد واحد. <span class="ev ev-code">حقيقة من الشيفرة</span>[S15] أما رسم القالب والتجزئة وتحليل البروتوكول فكلها خارج هذا الحد. لذلك فأول خطوة عند تتبع مشكلة هي تحديد في أي جانب من الحد وقع الخطأ.</p>
+<p>ويذكر مطلع الملف نفسه أن الخدمة تعالج تسلسلًا واحدًا في المرة، وأن الطلبات تصطف بنظام «الداخل أولًا يخرج أولًا» (FIFO). [S15] هذا هو السلوك الافتراضي. ومنذ v0.1.39، إذا كتبت <code>"parallel": N</code> في ملف إعداد النموذج صار المحرك قادرًا على فك ترميز ما يصل إلى N محادثات معًا، وأقصى قيمة لـ N هي 8؛ وإن لم تكتبه أو كتبت 1 بقي واحدة في المرة. <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/serve/server.py#L1482-L1503" target="_blank" rel="noopener noreferrer">server.py</a> وينبّه README إلى أن هذا يبطّئ كل إجابة على بطاقة 12 GB. [S01] و«يدعم API متوافقًا مع OpenAI» لا يعني «يدعم عدة مستخدمين في وقت واحد»؛ والفصل 25 يناقش ما يلزم لتوسيعه إلى عدة مستخدمين.</p>
+<h3>«الذاكرات المؤقتة» على المستويات المختلفة لا تُخلط</h3>
+<p>الذاكرة المؤقتة العتادية في المعالج CPU تحفظ أسطر الذاكرة التي وُصل إليها مؤخرًا؛ وذاكرة الخبراء المؤقتة في Strata تضع جزءًا من الأوزان في VRAM؛ وذاكرة KV المؤقتة (KV cache) تحفظ النتائج الوسيطة لسجل المحادثة؛ وذاكرة الجلسة المؤقتة تحفظ حالة تسلسل كامل يمكن استئنافه؛ وذاكرة صفوف جدول البحث تحفظ الصفوف المقروءة من القرص. تختلف هذه الذاكرات تمامًا في ما تحفظه ومدة حياته وشروط إبطاله. وعبارة «أضف ذاكرة مؤقتة» لا معنى لها إلا إذا حددت <strong>ماذا نحفظ، وكيف نتأكد أنه الكائن نفسه، ومتى يبطل</strong>.</p>
+<h3>التعليق ليس حقيقة</h3>
+<p>قد تبقى تعليقات الشيفرة عند مرحلة تطوير قديمة. مثلًا يبدأ <code>expert_source.hpp</code> بعبارة «المرحلة 2 بلا ذاكرة مؤقتة (معدل الإصابة h = 0)»، ويذكر أن المرحلة 3 ستستبدل هذا الكائن بذاكرة مؤقتة في VRAM. [S06] أما المحرك في النسخة الحالية ففيه فعلًا ذاكرة مؤقتة للخبراء. [S02][S05] عند مثل هذا التناقض لا تحكم بتعليق واحد؛ تتبّع سلسلة الاستدعاءات الحالية والإعداد الافتراضي والاختبارات. ودليل الشيفرة في هذا الكتاب يراجع نوافذ الملفات الرئيسة المذكورة، <strong>وليس تدقيقًا سطرًا بسطر لكل المستودع</strong>.</p>
+<h3>نشاط صفي: ارسم حدود المسؤولية لرمز واحد</h3>
+<p>ارسم على ورقة خمسة مربعات: طبقة الخدمة، وحالة التسلسل، وتخزين الأوزان، ونوى الحساب (kernels)، والعتاد. اكتب لكل مربع مدخلًا ومخرجًا وشرطًا يجب أن يبقى صحيحًا دائمًا، مثل «حالة التسلسل ملك لمحادثتها وحدها». ثم ضع الأعطال الثلاثة في المربعات المحتملة: «الإجابة صحيحة لكنها بطيئة»، و«الإجابة تتغير عشوائيًا في كل مرة»، و«النصف الثاني من النص رموز مشوّهة». الهدف ليس أن تصيب فورًا، بل أن تتعلم تصميم تجارب تميّز بين الفرضيات.</p>
+</details>

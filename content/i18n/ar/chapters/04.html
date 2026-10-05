@@ -1,0 +1,217 @@
+<div class="hook"><span class="eyebrow">لنحسب أولًا</span>
+<p>125 مليار معامل، كل واحد منها مخزَّن بـ 16 بتًا كما هو شائع، تحتاج إلى 250 GB. ومع ذلك لا ينزّل مثبّت Strata سوى ملف نموذج بحجم 70 GB تقريبًا. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S01] سيحسب هذا الفصل السبب: في جزء الخبراء، لا يأخذ المعامل الواحد إلا 2.25 بت في المتوسط.</p>
+<p>حين يتقلّص الرقم من 16 بتًا إلى أكثر من 2 بقليل، أين تذهب المعلومات الضائعة؟ وكيف يظل النموذج صالحًا للعمل؟ يبدأ هذا الفصل من سؤال «كيف يُخزَّن رقم واحد في الحاسوب»، ثم ينتقل إلى «كيف تتقاسم كتلة كاملة من الأرقام مسطرة واحدة»، وينتهي بصيغ Strata الحقيقية.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> التكميم يقرّب كتلة كبيرة من الأعداد الكسرية بعدد قليل من المستويات الصحيحة: تتقاسم كل كتلة معامل قياس (scale) واحدًا s، ويخزّن كل رقم «كم مرة s» فقط. كلما قلّ عدد البتات صارت المستويات أخشن وكبر الخطأ. الخطأ نقبله عن قصد، لذلك يجب أن نقيسه.</p>
+
+<h2 id="sec-1">4.1 كم بتًا يأخذ الرقم الواحد؟</h2>
+<p>كل شيء داخل الحاسوب أصفار وآحاد. البت الواحد يعبّر عن حالتين فقط. وكل 8 بتات تكوّن بايتًا واحدًا، يعبّر عن 256 حالة. كلما زاد عدد البتات التي يستخدمها المعامل، صار أدق في تمثيل الأرقام، وصار يشغل مساحة أكبر. يضع الشكل 4-1 الحجم الكلي لـ 125 مليار معامل جنبًا إلى جنب عند عروض بتات مختلفة.</p>
+<figure class="fig"><svg viewBox="0 0 400 218" role="img" aria-label="الشكل 4-1: 125 مليار معامل مخزَّنة بـ 16 و8 و4 و2.25 بت تأخذ نحو 250 و125 و62.5 و35 GB، وكلها أكبر بكثير من 12 GB من ذاكرة الفيديو">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">125 مليار معامل بكل عرض بتات (الأشرطة بالمقياس)</text>
+<text class="f-text" fill="#182f2b" x="10" y="51" font-size="12">16 بت</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="36" width="260" height="20"/>
+<text class="f-text" fill="#182f2b" x="346" y="51" font-size="12">250 GB</text>
+<text class="f-text" fill="#182f2b" x="10" y="87" font-size="12">8 بت</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="72" width="130" height="20"/>
+<text class="f-text" fill="#182f2b" x="216" y="87" font-size="12">125 GB</text>
+<text class="f-text" fill="#182f2b" x="10" y="123" font-size="12">4 بت</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="108" width="65" height="20"/>
+<text class="f-text" fill="#182f2b" x="151" y="123" font-size="12">62.5 GB</text>
+<text class="f-text" fill="#182f2b" x="10" y="159" font-size="12">2.25 بت</text>
+<rect class="f-accent" fill="#136d5a" x="80" y="144" width="36.6" height="20"/>
+<text class="f-text" fill="#182f2b" x="122" y="159" font-size="12">نحو 35 GB</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M92.5 30V172"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="190" font-size="12">الخط المتقطع: حيث تنتهي 12 GB من ذاكرة الفيديو</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">تقدير تعليمي: 125 مليار × عدد البتات ÷ 8 = عدد البايتات</text>
+</svg><figcaption>الشكل 4-1　عدد البتات يحدد الحجم. حتى لو ضغطنا إلى 2.25 بت لكل معامل يبقى الحجم أكبر بكثير من 12 GB، ولهذا يحتاج الفصل 10 إلى «التخزين على طبقات».</figcaption></figure>
+<p>المعادلة بسيطة: عدد البايتات = عدد المعاملات × عدد البتات ÷ 8. أي 125 مليار × 2.25 ÷ 8 ≈ 35.2 مليار بايت، أي نحو 35 GB. <span class="ev ev-est">تقدير تعليمي</span> هذا هو متوسط حجم المعامل في جزء الخبراء فقط. أما أجزاء النموذج الأكثر حساسية فتستخدم بتات أكثر.</p>
+<p>قبل أن نشرح «كيف نضغط»، لننظر أولًا كيف تُخزَّن الأرقام العادية ذات الفاصلة في الحاسوب.</p>
+<aside class="primer" id="c04-float">
+<h3>النظام الثنائي والفاصلة العائمة: FP32 وFP16 وBF16</h3>
+<p>يكتب التدوين العلمي الرقم 123000 على الشكل 1.23 × 10⁵: رقم «معنوي» مضروب في قوة للعدد 10. يفعل الحاسوب الشيء نفسه، لكن الأساس هنا 2: كل رقم غير صفري يمكن كتابته على الشكل 1.xxx × 2ᵉ. ويُخزَّن في ثلاثة أجزاء: <dfn>بت الإشارة</dfn> (موجب أم سالب)، و<dfn>بتات الأس</dfn> (قيمة e، وتتحكم في <strong>المدى</strong>)، و<dfn>بتات الجزء الكسري</dfn> (mantissa، أي xxx بعد الرقم 1، وتتحكم في <strong>الدقة</strong>). تسمى هذه الطريقة <dfn>الفاصلة العائمة</dfn>، ومعيارها IEEE 754.</p>
+<p>تقسّم الصيغ الثلاث الأجزاء بطرق مختلفة، كما في الشكل 4-2. يستخدم FP32 ما مجموعه 1 + 8 + 23 بتًا. ويستخدم FP16 ما مجموعه 1 + 5 + 10 بتات، وأسّه من 5 بتات فقط، فلا يبلغ أكبر رقم فيه سوى 65504. ويستخدم BF16 ما مجموعه 1 + 8 + 7 بتات، فأسّه بعرض أس FP32 ومداه شبه مطابق، والثمن أن الجزء الكسري لم يبقَ منه سوى 7 بتات، فصارت الدقة أخشن بـ 8 أضعاف.</p>
+<div class="viz" data-viz="float-bits"><figure class="fig"><svg viewBox="0 0 400 222" role="img" aria-label="الشكل 4-2: توزيع البتات في الصيغ FP32 وFP16 وBF16. في FP32 هو 1 و8 و23 بتًا، وفي FP16 هو 1 و5 و10، وفي BF16 هو 1 و8 و7">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">مرسوم بنسبة عدد البتات: الإشارة 1 بت | الأس | الجزء الكسري</text>
+<text class="f-text" fill="#182f2b" x="10" y="47" font-size="13" font-weight="600">FP32</text>
+<rect class="f-warn" fill="#9e5d24" x="70" y="28" width="10" height="28"/>
+<rect class="f-soft" fill="#e5f1df" x="80" y="28" width="80" height="28"/><text class="f-text" fill="#182f2b" x="120" y="47" font-size="12" text-anchor="middle">الأس 8</text>
+<rect class="f-accent" fill="#136d5a" x="160" y="28" width="230" height="28"/><text class="f-on" fill="#ffffff" x="275" y="47" font-size="12" text-anchor="middle">الكسر 23</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="74" font-size="12">الأقصى نحو 3.4 × 10³⁸</text>
+<text class="f-text" fill="#182f2b" x="10" y="101" font-size="13" font-weight="600">FP16</text>
+<rect class="f-warn" fill="#9e5d24" x="70" y="82" width="10" height="28"/>
+<rect class="f-soft" fill="#e5f1df" x="80" y="82" width="50" height="28"/><text class="f-text" fill="#182f2b" x="105" y="101" font-size="12" text-anchor="middle">الأس 5</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="82" width="100" height="28"/><text class="f-on" fill="#ffffff" x="180" y="101" font-size="12" text-anchor="middle">الكسر 10</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="128" font-size="12">الأقصى 65504: مدى صغير ودقة متوسطة</text>
+<text class="f-text" fill="#182f2b" x="10" y="155" font-size="13" font-weight="600">BF16</text>
+<rect class="f-warn" fill="#9e5d24" x="70" y="136" width="10" height="28"/>
+<rect class="f-soft" fill="#e5f1df" x="80" y="136" width="80" height="28"/><text class="f-text" fill="#182f2b" x="120" y="155" font-size="12" text-anchor="middle">الأس 8</text>
+<rect class="f-accent" fill="#136d5a" x="160" y="136" width="70" height="28"/><text class="f-on" fill="#ffffff" x="195" y="155" font-size="12" text-anchor="middle">الكسر 7</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="182" font-size="12">المدى كمدى FP32، والدقة الأخشن</text>
+<text class="f-text" fill="#182f2b" x="200" y="210" font-size="12" text-anchor="middle">BF16 = أول 16 بت من FP32: المدى ثابت والدقة أخشن</text>
+</svg><figcaption>الشكل 4-2　ثلاث صيغ للفاصلة العائمة. بتات الأس تحدد كم يمكن أن يكون الرقم كبيرًا أو صغيرًا، وبتات الجزء الكسري تحدد مدى دقته.</figcaption></figure></div>
+<p>في BF16 حيلة ذكية: هو ببساطة FP32 بعد قطع آخر 16 بتًا. لذلك يكفي لتحويل BF16 إلى FP32 أن نضيف 16 صفرًا، دون أي فقد. أما تحويل FP32 إلى BF16 فيحتاج إلى تقريب الجزء المقطوع. تنسخ دالة التحويل في Strata طريقة ggml: «التقريب إلى الأقرب، وعند التعادل إلى الزوجي»، وتنظر عند حالة التعادل إلى البت رقم 16. ينبّه التعليق صراحةً إلى أن استخدام البت رقم 15 بالخطأ لا يخطئ إلا عند «التعادل التام»، وهذا نادر جدًا في البيانات الحقيقية، فلا يكشفه أي اختبار شامل من البداية إلى النهاية. <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/kernels/bf16_bits.hpp#L1-L16" target="_blank" rel="noopener noreferrer">bf16_bits.hpp</a> ويؤكد التعليق نفسه أن FP16 وBF16 ليسا طريقتين لكتابة الشيء نفسه: إذا استُخدمت دالة تحويل مكتوبة لأحدهما مع الآخر، فستنتج أرقامًا خاطئة «تبدو معقولة».</p>
+<p class="further">قراءة إضافية: <a href="https://docs.python.org/3/tutorial/floatingpoint.html" target="_blank" rel="noopener noreferrer">توثيق Python: حسابات الفاصلة العائمة، المشكلات والقيود</a> · <a href="https://ar.wikipedia.org/wiki/أي_إي_إي_إي_754" target="_blank" rel="noopener noreferrer">ويكيبيديا: أي إي إي إي 754</a> · <a href="https://ar.wikipedia.org/wiki/تنسيق_الفاصلة_العائمة_بنصف_الدقة" target="_blank" rel="noopener noreferrer">ويكيبيديا: تنسيق الفاصلة العائمة بنصف الدقة</a> · <a href="https://en.wikipedia.org/wiki/Bfloat16_floating-point_format" target="_blank" rel="noopener noreferrer">Wikipedia: bfloat16</a></p>
+</aside>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذا هو محتوى مقرر «تنظيم الحاسوب» والفصل 2 من CS:APP: الأس المنحاز، والبت الأعلى الضمني 1، والأعداد غير المنظَّمة (denormal)، وأنماط التقريب. وهذه بالذات هي الفخاخ الأشهر في استدلال النماذج: فيض FP16 من الأعلى، وفقد الدقة في الأعداد غير المنظَّمة، والفرق بين «التقريب إلى الأقرب» و«التقريب الحسابي المعتاد» عند التعادل.</p>
+
+<h2 id="sec-2">4.2 التكميم: مسطرة واحدة لقياس كتلة كاملة من الأرقام</h2>
+<p>في الفاصلة العائمة يحمل كل رقم أسّه الخاص، وهذا مرن لكنه مكلف في المساحة. أما التكميم فيغيّر الفكرة: <strong>كتلة كاملة من الأرقام تتقاسم مسطرة واحدة</strong>. المسافة بين تدريجات المسطرة هي <dfn>معامل القياس</dfn> (scale) s، ولا يسجّل كل رقم إلا «كم مرة s يساوي تقريبًا». هذا العدد الصحيح اسمه <dfn>الكود</dfn> (code).</p>
+<aside class="primer" id="c04-quant">
+<h3>التكميم الصحيح والخطأ</h3>
+<p>الحدس: تخيّل أنك تقيس طول الناس بمسطرة تدريجاتها سنتيمترات كاملة فقط. يسجَّل كل شخص على أنه «أقرب سنتيمتر كامل»، والخطأ لا يتجاوز نصف سنتيمتر. التكميم يفعل هذا: نختار أولًا المسافة s بين التدريجات، ثم نقرّب كل رقم إلى أقرب تدريجة. كلما كانت التدريجات أكثر كثافة قلّ الخطأ، لكن عدد المستويات التي يجب تسجيلها يزيد، فيزيد عدد البتات لكل رقم.</p>
+<p>أبسط صيغة هي <dfn>التكميم المنتظم المتماثل</dfn>. نستخدم كودًا من b بتات، ونأخذ Q = 2<sup>b−1</sup> − 1 (عند 4 بتات تكون Q = 7). نجد في الكتلة أكبر قيمة مطلقة a، ونضع s = a ÷ Q. كل رقم x يُرمَّز إلى q = round(x ÷ s)، وعند الاسترجاع x̂ = s × q. بهذا يقع أكبر رقم تمامًا عند المستوى ±Q، وتقع بقية الأرقام في ما بينهما.</p>
+<figure class="fig"><svg viewBox="0 0 400 188" role="img" aria-label="الشكل 4-3: التكميم المتماثل بـ 4 بتات يقسّم المجال من سالب 1 إلى 1 إلى 15 مستوى، وتقع أربعة أرقام عند المستويات سالب 7 وسالب 2 و1 و7">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="12" text-anchor="middle">تكميم متماثل بـ 4 بتات: s = 1 ÷ 7، والمجال [−1, 1] يُقسَّم إلى 15 مستوى</text>
+<circle class="f-warn" fill="#9e5d24" cx="20" cy="62" r="5"/><text class="f-warn" fill="#9e5d24" x="24" y="48" font-size="12" text-anchor="middle">−1</text>
+<circle class="f-warn" fill="#9e5d24" cx="146" cy="62" r="5"/><text class="f-warn" fill="#9e5d24" x="146" y="48" font-size="12" text-anchor="middle">−0.3</text>
+<circle class="f-warn" fill="#9e5d24" cx="236" cy="62" r="5"/><text class="f-warn" fill="#9e5d24" x="236" y="48" font-size="12" text-anchor="middle">0.2</text>
+<circle class="f-warn" fill="#9e5d24" cx="380" cy="62" r="5"/><text class="f-warn" fill="#9e5d24" x="376" y="48" font-size="12" text-anchor="middle">1</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 67V86M146 67L148.6 86M236 67L225.7 86M380 67V86"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M20 90H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 86V94M45.7 86V94M71.4 86V94M97.1 86V94M122.9 86V94M148.6 86V94M174.3 86V94M200 86V94M225.7 86V94M251.4 86V94M277.1 86V94M302.9 86V94M328.6 86V94M354.3 86V94M380 86V94"/>
+<circle class="f-accent" fill="#136d5a" cx="20" cy="90" r="4"/><circle class="f-accent" fill="#136d5a" cx="148.6" cy="90" r="4"/><circle class="f-accent" fill="#136d5a" cx="225.7" cy="90" r="4"/><circle class="f-accent" fill="#136d5a" cx="380" cy="90" r="4"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="112" font-size="12" text-anchor="middle">−7</text>
+<text class="f-muted" fill="#5c6d66" x="148.6" y="112" font-size="12" text-anchor="middle">−2</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="112" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="225.7" y="112" font-size="12" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="112" font-size="12" text-anchor="middle">7</text>
+<text class="f-text" fill="#182f2b" x="200" y="146" font-size="12" text-anchor="middle">الأرقام الأصلية [−1, −0.3, 0.2, 1] ← الأكواد [−7, −2, 1, 7]</text>
+<text class="f-text" fill="#182f2b" x="200" y="170" font-size="12" text-anchor="middle">المسترجَعة [−1, −0.286, 0.143, 1]، والخطأ لا يتجاوز s ÷ 2</text>
+</svg><figcaption>الشكل 4-3　التكميم يعني «الانجذاب إلى أقرب تدريجة». الرقم −0.3 انجذب إلى المستوى −2 (القيمة −0.286)، والرقم 0.2 انجذب إلى المستوى 1 (القيمة 0.143).</figcaption></figure>
+<p>الفرق بين القيمة المسترجَعة والرقم الأصلي هو <dfn>خطأ التكميم</dfn>. وغالبًا نلخّص خطأ الكتلة بـ <dfn>متوسط مربع الخطأ</dfn> (MSE): نربّع كل خطأ ثم نأخذ المتوسط. في المثال أعلاه MSE ≈ 0.00087. وما دام لا يوجد قصّ (clipping)، فإن خطأ كل رقم لا يتجاوز s ÷ 2.</p>
+<p class="further">قراءة إضافية: <a href="https://ar.wikipedia.org/wiki/متوسط_مربعات_الأخطاء" target="_blank" rel="noopener noreferrer">ويكيبيديا: متوسط مربعات الأخطاء</a> · <a href="https://ar.wikipedia.org/wiki/تكمية_(إشارة)" target="_blank" rel="noopener noreferrer">ويكيبيديا: تكمية (إشارة)</a> · <a href="https://huggingface.co/docs/transformers/main/en/main_classes/quantization" target="_blank" rel="noopener noreferrer">توثيق Hugging Face: التكميم (بالإنجليزية)</a></p>
+</aside>
+<p>لاحظ أن كل رقم هنا يخزّن عددًا صحيحًا صغيرًا، لكن الكتلة كلها تحتاج إلى تخزين s إضافي، وهذا الـ s يشغل مساحة أيضًا. كلما كبرت الكتلة قلّ نصيب كل رقم من s، وكلما صغرت صار s «أغلى». سنرى في القسم التالي أن هذه المفاضلة لا مفرّ منها.</p>
+
+<h2 id="sec-3">4.3 القيم الشاذة: رقم كبير واحد يُفسد كتلة كاملة</h2>
+<p>لمشاركة المسطرة نقطة ضعف: تدريجات المسطرة يحددها <strong>أكبر</strong> رقم في الكتلة. إذا كانت معظم أرقام الكتلة ضمن ±0.5 وظهر بينها رقم واحد −2.8، يتضخّم s عدة أضعاف، وتصير التدريجات خشنة، فتنجذب الأرقام الصغيرة إلى المستوى 0. هذا الرقم «الذي يبرز وسط القطيع» اسمه <dfn>القيمة الشاذة</dfn> (outlier)، كما في الشكل 4-4.</p>
+<div class="viz" data-viz="quant-block"><figure class="fig"><svg viewBox="0 0 400 228" role="img" aria-label="الشكل 4-4: 16 رقمًا في مجموعة واحدة بتكميم 4 بتات. بعد إضافة قيمة شاذة يصير معامل القياس 0.4 بدل 0.067، وتصير 7 أرقام صغيرة 0">
+<text class="f-text" fill="#182f2b" x="16" y="18" font-size="12" font-weight="600">16 رقمًا في مجموعة واحدة، بلا قيمة شاذة: s ≈ 0.067</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="16" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="27" y="46" font-size="12" text-anchor="middle">2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="39" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="50" y="46" font-size="12" text-anchor="middle">−5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="62" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="73" y="46" font-size="12" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="85" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="96" y="46" font-size="12" text-anchor="middle">6</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="108" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="119" y="46" font-size="12" text-anchor="middle">−3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="131" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="142" y="46" font-size="12" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="165" y="46" font-size="12" text-anchor="middle">−7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="177" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="188" y="46" font-size="12" text-anchor="middle">4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="211" y="46" font-size="12" text-anchor="middle">−1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="223" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="234" y="46" font-size="12" text-anchor="middle">4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="246" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="257" y="46" font-size="12" text-anchor="middle">−5</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="269" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="280" y="46" font-size="12" text-anchor="middle">3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="292" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="303" y="46" font-size="12" text-anchor="middle">7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="315" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="326" y="46" font-size="12" text-anchor="middle">−2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="338" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="349" y="46" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="361" y="28" width="22" height="26"/><text class="f-text" fill="#182f2b" x="372" y="46" font-size="12" text-anchor="middle">−6</text>
+<text class="f-muted" fill="#5c6d66" x="16" y="74" font-size="12">الأكواد استخدمت المجال من −7 إلى 7، وMSE ≈ 0.0004</text>
+<text class="f-text" fill="#182f2b" x="16" y="104" font-size="12" font-weight="600">نستبدل الرقم السابع بـ −2.8: صار s = 0.4</text>
+<rect class="f-warn" fill="#9e5d24" x="16" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="27" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="39" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="50" y="132" font-size="12" text-anchor="middle">−1</text>
+<rect class="f-warn" fill="#9e5d24" x="62" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="73" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="85" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="96" y="132" font-size="12" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="108" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="119" y="132" font-size="12" text-anchor="middle">−1</text>
+<rect class="f-warn" fill="#9e5d24" x="131" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="142" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-accent" fill="#136d5a" x="154" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="165" y="132" font-size="12" text-anchor="middle">−7</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="177" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="188" y="132" font-size="12" text-anchor="middle">1</text>
+<rect class="f-warn" fill="#9e5d24" x="200" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="211" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="223" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="234" y="132" font-size="12" text-anchor="middle">1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="246" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="257" y="132" font-size="12" text-anchor="middle">−1</text>
+<rect class="f-warn" fill="#9e5d24" x="269" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="280" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="292" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="303" y="132" font-size="12" text-anchor="middle">1</text>
+<rect class="f-warn" fill="#9e5d24" x="315" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="326" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-warn" fill="#9e5d24" x="338" y="114" width="22" height="26"/><text class="f-on" fill="#ffffff" x="349" y="132" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="361" y="114" width="22" height="26"/><text class="f-text" fill="#182f2b" x="372" y="132" font-size="12" text-anchor="middle">−1</text>
+<text class="f-muted" fill="#5c6d66" x="16" y="160" font-size="12">7 أرقام ليست صفرًا في الأصل صارت 0، وMSE ≈ 0.0097، نحو 24 ضعفًا</text>
+<text class="f-text" fill="#182f2b" x="16" y="192" font-size="12">بتقسيمها إلى مجموعات من 4: تخشن المجموعة الشاذة فقط، وMSE ≈ 0.0029</text>
+<text class="f-muted" fill="#5c6d66" x="16" y="214" font-size="12">الثمن: كل 4 أرقام تخزّن معامل قياس إضافيًا بـ 16 بتًا، أي +4 بت لكل وزن</text>
+</svg><figcaption>الشكل 4-4　الخانات تحمل أكواد 4 بتات. قيمة شاذة واحدة تُخشِّن تدريجات الكتلة كلها، والخانات الملوّنة بلون التحذير هي الأرقام الصغيرة التي «انجذبت» إلى 0.</figcaption></figure></div>
+<p>من الحلول <strong>تصغير الكتل</strong>: عندئذ لا تؤثر القيمة الشاذة إلا في مجموعتها الصغيرة. الثمن أن عدد قيم s يزيد. لنفترض أن في كل مجموعة g رقمًا، وكل رقم b بتات، وكل مجموعة تخزّن s إضافيًا بـ 16 بتًا. عندئذ يشغل كل رقم فعليًا b + 16 ÷ g بتًا. كود 4 بتات مع 32 رقمًا في المجموعة يعطي 4.5 بت فعليًا؛ ومع 4 أرقام في المجموعة يصير 8 بتات، فنكون قد ضغطنا نصف الحجم هباءً.</p>
+<p>لذلك فعبارة «تكميم 4 بتات» لا تعطي سوى عدد البتات الاسمي. التكلفة الحقيقية يجب أن تضم معامل القياس (وفي بعض الصيغ الإزاحة أيضًا). ومن طرق التعامل مع القيم الشاذة كذلك التدوير، وكتب الرموز (codebooks) غير المنتظمة، وترك بتات إضافية للطبقات الحساسة. لكن لكل منها تكلفة فك ترميز خاصة به، ويجب تقييمها كلها معًا.</p>
+
+<h2 id="sec-4">4.4 صيغة Q2_0 في Strata: 2.25 بت لكل وزن</h2>
+<p>في النموذج الذي يستخدمه Strata، كل خبراء الموجِّه (router) مخزَّنون بصيغة اسمها Q2_0، وتشغل 31.64 GiB من حزمة النموذج البالغة 38 GiB. <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/kernels/quantize_act.hpp#L8-L10" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a> وتبدو كتلتها كما في الشكل 4-5: 64 وزنًا تتقاسم معامل قياس d واحدًا بصيغة FP16 (بايتان)، وكل وزن كود من 2 بت، فتتسع 64 وزنًا في 16 بايتًا، والمجموع 18 بايتًا. <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/artifact/dequant.hpp#L8-L13" target="_blank" rel="noopener noreferrer">dequant.hpp</a></p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="الشكل 4-5: كتلة Q2_0 حجمها 18 بايتًا، أول بايتين معامل قياس FP16، و16 بايتًا بعدها تحمل 64 كودًا من 2 بت، والأكواد 0 و1 و2 و3 تُسترجَع إلى سالب d و0 وd و2d">
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">كتلة واحدة من Q2_0: 64 وزنًا، 18 بايتًا</text>
+<rect class="f-warn" fill="#9e5d24" x="20" y="32" width="40" height="32"/><text class="f-on" fill="#ffffff" x="40" y="53" font-size="13" text-anchor="middle">d</text>
+<rect fill="url(#c04-bytes)" x="60" y="32" width="320" height="32"/>
+<defs><pattern id="c04-bytes" width="20" height="32" patternUnits="userSpaceOnUse"><rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x=".5" y=".5" width="19" height="31"/></pattern></defs>
+<text class="f-muted" fill="#5c6d66" x="20" y="86" font-size="12">أول بايتين: معامل القياس d بصيغة FP16</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="106" font-size="12">16 بايتًا بعدها: 64 كودًا من 2 بت، 4 أكواد في كل بايت</text>
+<text class="f-text" fill="#182f2b" x="20" y="140" font-size="12">تكبير بايت واحد (8 بتات): الكود رقم 0 في أدنى بتين</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="150" width="80" height="28"/><text class="f-text" fill="#182f2b" x="100" y="169" font-size="12" text-anchor="middle">كود 3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="140" y="150" width="80" height="28"/><text class="f-text" fill="#182f2b" x="180" y="169" font-size="12" text-anchor="middle">كود 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="220" y="150" width="80" height="28"/><text class="f-text" fill="#182f2b" x="260" y="169" font-size="12" text-anchor="middle">كود 1</text>
+<rect class="f-accent" fill="#136d5a" x="300" y="150" width="80" height="28"/><text class="f-on" fill="#ffffff" x="340" y="169" font-size="12" text-anchor="middle">كود 0</text>
+<text class="f-text" fill="#182f2b" x="20" y="214" font-size="12">الكود</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="110" y="198" width="66" height="24"/><text class="f-text" fill="#182f2b" x="143" y="215" font-size="12" text-anchor="middle">0</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="178" y="198" width="66" height="24"/><text class="f-text" fill="#182f2b" x="211" y="215" font-size="12" text-anchor="middle">1</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="246" y="198" width="66" height="24"/><text class="f-text" fill="#182f2b" x="279" y="215" font-size="12" text-anchor="middle">2</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="314" y="198" width="66" height="24"/><text class="f-text" fill="#182f2b" x="347" y="215" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="20" y="240" font-size="12">القيمة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="224" width="66" height="24"/><text class="f-text" fill="#182f2b" x="143" y="241" font-size="12" text-anchor="middle">−d</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="178" y="224" width="66" height="24"/><text class="f-text" fill="#182f2b" x="211" y="241" font-size="12" text-anchor="middle">0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="246" y="224" width="66" height="24"/><text class="f-text" fill="#182f2b" x="279" y="241" font-size="12" text-anchor="middle">+d</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="314" y="224" width="66" height="24"/><text class="f-text" fill="#182f2b" x="347" y="241" font-size="12" text-anchor="middle">+2d</text>
+</svg><figcaption>الشكل 4-5　كتلة Q2_0: معادلة الاسترجاع هي (الكود − 1) × d. لها أربعة مستويات فقط، وهي غير متماثلة: مستوى سالب واحد ومستويان موجبان.</figcaption></figure>
+<p>معادلة الاسترجاع هي (الكود − 1) × d: فالأكواد 0 و1 و2 و3 تصير −d و0 و+d و+2d. <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/artifact/dequant.hpp#L68-L78" target="_blank" rel="noopener noreferrer">dequant.hpp</a> وبالمقارنة مع التكميم المتماثل في القسم السابق، فهي غير متماثلة ولها أربعة مستويات فقط. ويقول التعليق أيضًا إن حجم الكتلة 64 <strong>تأكّد</strong> من إزاحات ملف النموذج نفسه، وليس مفترضًا: فإصدار llama.cpp الذي أدخل هذه الصيغة أولًا استخدم 128.</p>
+<p>الآن يمكننا التحقق من الرقم الذي ذُكر في الفصل 10. كل كتلة من 18 بايتًا تحمل 64 وزنًا، فالمتوسط 18 × 8 ÷ 64 = <strong>2.25 بت</strong>. للخبير الواحد 4,915,200 معامل، تنقسم إلى 76,800 كتلة، وضربها في 18 بايتًا يعطي 1,382,400 بايت بالضبط، أي مطابق حرفيًا لحجم الخبير المحدد في الشيفرة المصدرية. <span class="ev ev-est">تقدير تعليمي</span>[S06] ومنها 76,800 × 2 = 153,600 بايت هي معاملات القياس: اسميًا 2 بت، وفعليًا 2.25 بت، والزيادة هي هذه المعاملات.</p>
+<p>تظهر في ملفات Strata الرأسية بضع صيغ كتل أخرى، ويمكن كذلك حساب عدد بتاتها الحقيقي:</p>
+<div class="table-wrap"><table><thead><tr><th>الصيغة</th><th>الكتلة</th><th>البتات الفعلية لكل وزن</th><th>أين تُستخدم في Strata</th></tr></thead><tbody>
+<tr><td>Q2_0</td><td>64 وزنًا، 18 بايتًا</td><td>2.25 بت</td><td>كل خبراء الموجِّه</td></tr>
+<tr><td>Q4_0</td><td>32 وزنًا، 18 بايتًا</td><td>4.5 بت</td><td>بعض الموتّرات الكثيفة</td></tr>
+<tr><td>Q8_0</td><td>32 وزنًا، 34 بايتًا</td><td>8.5 بت</td><td>التنشيطات المضروبة في أوزان Q2_0</td></tr>
+<tr><td>Q8_K</td><td>256 وزنًا، 292 بايتًا</td><td>9.125 بت</td><td>التنشيطات المضروبة في الأوزان المكمَّمة الأخرى</td></tr>
+</tbody></table></div>
+<p>أحجام الكتل في الجدول مأخوذة من تعليقات <code>dequant.hpp</code> و<code>quantize_act.hpp</code>. <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/kernels/quantize_act.hpp#L20-L36" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a> والصفان الأخيران هما صيغتا <strong>التنشيطات</strong>: قبل الضرب، تُكمَّم سلسلة الأرقام الداخلة إلى 8 بتات مؤقتًا، لتقترن بصيغة الأوزان. وفي حزمة النموذج الواحدة قد يستخدم الموتّر الذي له الاسم نفسه صيغًا مختلفة في طبقات مختلفة. وقاعدة Strata هي: صيغة التنشيط المقترنة يحددها <strong>نوع</strong> الموتّر، لا اسمه. <span class="ev ev-code">حقيقة من الشيفرة</span>[S14]</p>
+<p>وهناك تفصيل آخر: الصيغة نفسها قد يختلف عدد بايتاتها على القرص عنه في الذاكرة. يوسّع محمِّل Strata معاملات القياس FP16 لبعض الموتّرات إلى FP32 قبل وضعها في الذاكرة، ويسجّل الحجم بعد التوسيع، فلا تحسبه الشيفرة اللاحقة بنفسها بل تقرأ السجل فقط. <span class="ev ev-code">حقيقة من الشيفرة</span>[S14] لذلك لا يكفي عند تقدير ذاكرة الفيديو أن نقسم حجم الملف.</p>
+
+<h2 id="sec-5">4.5 المعادلة نفسها، أعداد كسرية مختلفة</h2>
+<p>الخطأ الذي يُدخله التكميم «مقصود». وهناك خطأ آخر «غير مقصود»: جمع الأعداد العائمة لا يحقق خاصية التجميع. انظر الشكل 4-6.</p>
+<figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="الشكل 4-6: في FP32 ناتج 10 أس 8 زائد 1 ثم ناقص 10 أس 8 هو 0، أما إذا طرحنا أولًا ثم أضفنا 1 فالناتج 1">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="20" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="102.5" y="46" font-size="13" font-weight="600" text-anchor="middle">(10⁸ + 1) − 10⁸</text>
+<text class="f-text" fill="#182f2b" x="102.5" y="72" font-size="12" text-anchor="middle">10⁸ + 1 لا يتسع</text>
+<text class="f-text" fill="#182f2b" x="102.5" y="94" font-size="12" text-anchor="middle">فيُقرَّب إلى 10⁸</text>
+<text class="f-warn" fill="#9e5d24" x="102.5" y="128" font-size="13" font-weight="600" text-anchor="middle">الناتج: 0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="20" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="297.5" y="46" font-size="13" font-weight="600" text-anchor="middle">(10⁸ − 10⁸) + 1</text>
+<text class="f-text" fill="#182f2b" x="297.5" y="72" font-size="12" text-anchor="middle">10⁸ − 10⁸ = 0</text>
+<text class="f-text" fill="#182f2b" x="297.5" y="94" font-size="12" text-anchor="middle">0 + 1 = 1، بلا فقد</text>
+<text class="f-text" fill="#182f2b" x="297.5" y="128" font-size="13" font-weight="600" text-anchor="middle">الناتج: 1</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="170" font-size="12" text-anchor="middle">في FP32 قرب 10⁸ يبعد الرقمان المتجاوران بمقدار 8</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="190" font-size="12" text-anchor="middle">المعادلة نفسها، وتغيير ترتيب الحساب يغيّر الناتج</text>
+</svg><figcaption>الشكل 4-6　جمع الأعداد العائمة لا يحقق خاصية التجميع. الحوسبة المتوازية تغيّر ترتيب الجمع، فقد تختلف آخر الخانات بين CPU وGPU لنفس المعادلة.</figcaption></figure>
+<p>يحدث هذا في محرك الاستدلال كل يوم. الخبير الواحد في Strata يُحسب على GPU عند إصابة ذاكرة بطاقة الرسوميات المؤقتة، وعلى CPU عند الإخفاق. سجّلت الشيفرة المصدرية مطابقة حقيقية: على جانب CPU يُخزَّن معامل قياس التنشيط بصيغة FP32، وعلى جانب GPU يُخزَّن وفق الصيغة بـ FP16، فاختلفا في <strong>كل</strong> الكتل الـ 80 بنحو 4.761 × 10⁻⁴ (خطأ نسبي). ولذلك أُضيفت نسخة خاصة تجعل GPU يستخدم معامل القياس الخاص بـ CPU. <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/kernels/quantize_act.hpp#L24-L30" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a> ويسجّل الملف نفسه أيضًا: إذا ضُرب تنشيط FP16 مباشرة في الأوزان المكمَّمة، فإن الفرق عن الإجابة المرجعية يبلغ 0.6%–0.9%، أي من 6 إلى 9 أضعاف الخطأ المسموح.</p>
+<p>وقاعدة التقريب مثلها. يكتب Strata تقريب تنشيطات 8 بتات على أنه «التقريب إلى الأقرب، وعند التعادل إلى الزوجي»، لا «التعادل بعيدًا عن 0» كما في <code>roundf</code> بلغة C. والفرق بينهما يظهر عند التعادل التام فقط، وهو نادر جدًا في البيانات الحقيقية، فيمكن أن يمرّ الخطأ من أي اختبار شامل. لذلك <strong>يبني اختبار المقارنة عمدًا</strong> مدخلات فيها حالات تعادل. <a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/kernels/quantize_act.hpp#L49-L53" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a></p>
+<p>يمكن أيضًا تكميم سجل المحادثة. يخزّن Strata ذاكرة KV المؤقتة افتراضيًا بـ 8 بتات. أما خيار KV بـ 4 بتات المتاح منذ الإصدار 0.1.8 من المحرك فيخفّض هذه الذاكرة إلى النصف، ويسرّع نحو 4% عند سياق 128K، لكنه يصير غير دقيق بوضوح في المستندات الطويلة: فتزيد الحيرة (perplexity، مقياس «مدى مفاجأة النموذج»، وكلما قلّ كان أفضل) بنسبة 8%–12%، ويبقى اختبار «إبرة في كومة قش» ناجحًا. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03] نصف الذاكرة مقابل خسارة قابلة للقياس في الجودة: هذه هي المفاضلة النموذجية في التكميم.</p>
+
+<h2 id="sec-6">4.6 تطبيق عملي: تسجيل حساب الخطأ</h2>
+<p>افتح مختبر هذا الفصل التفاعلي «البتات وخطأ التكميم». يستخدم المختبر التكميم المنتظم المتماثل الذي شرحه هذا الفصل، وليس Q2_0 ولا أي صيغة IQ.</p>
+<ol>
+<li>سجّل MSE وأكبر خطأ وعدد الأرقام التي صارت 0، عند 2 و4 و8 بتات.</li>
+<li>أضف قيمة شاذة وكرّر. وانظر كم تبلغ تكلفة تقاسم معامل القياس.</li>
+<li>قارن بين «إضافة بت واحد» و«تصغير المجموعة إلى النصف». عند المقارنة استخدم <strong>التخزين الكلي نفسه</strong>، واحسب بتات معامل القياس أيضًا، ولا تقارن بالبتات الاسمية فقط.</li>
+</ol>
+<p>مصفوفات المختبر ثابتة، وكل نتيجة يمكن التحقق منها بالقلم.</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>الفاصلة العائمة = إشارة + أس + جزء كسري. الأس يتحكم في المدى، والجزء الكسري في الدقة؛ مدى FP16 صغير، ودقة BF16 أخشن.</li>
+<li>التكميم يجعل كتلة كاملة من الأرقام تتقاسم معامل قياس s واحدًا، ويخزّن كل رقم «كم مرة s» فقط. عدد البتات الحقيقي = بتات الكود + نصيب كل رقم من بتات معامل القياس.</li>
+<li>الخطأ نوعان: ما يُدخله التكميم عن قصد، وما يسببه ترتيب الحساب العائم. يجب قياس النوعين، ولا يكفي أن نقول «لم ينهَر شيء».</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «التكميم مثل ضغط الملفات، وبعد فك الضغط يعود كل شيء كما كان».</strong></p>
+<p>zip ضغط بلا فقد، وبعد فك الضغط لا يختلف بايت واحد. أما التكميم فهو <strong>بفقد</strong>: الكود لا يتذكر إلا «أقرب تدريجة»، والأرقام الكسرية الأصلية لا تعود. التكميم الجيد يجعل الخسارة صغيرة حتى لا تكاد تُرى، لكن «لا تكاد» تحتاج إلى قياس. ذاكرة KV المؤقتة بـ 4 بتات في Strata مثال: تُوفَّر نصف الذاكرة، وتزيد الحيرة في المستندات الطويلة بنسبة 8%–12%. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03]</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: عدد البتات الاسمي، وحدّ الخطأ، ودرسان حقيقيان</summary>
+<h3>عدد البتات الاسمي ليس عدد البتات الحقيقي</h3>
+<p>لنفترض أن في الكتلة g = 32 وزنًا، وكل كود 4 بتات، وهناك معامل قياس إضافي بـ 16 بتًا. الأكواد تشغل 16 بايتًا، ومعامل القياس بايتين، فالمجموع 18 بايتًا، أي <strong>4.5 بت لكل وزن</strong>. وإذا أضفنا إزاحات أو حشوًا للمحاذاة أو فهارس، تغيّرت التكلفة أيضًا. لذلك لا يجوز أن نعلن بآلية «عدد المعاملات × 4 ÷ 8» حاجة الذاكرة من ذاكرة الفيديو: فالتمثيل على القرص، وعرض معامل القياس بعد التحميل، والمخزن المؤقت عند فك الحزم على GPU، قد تختلف كلها. أحجام الكتل المسجَّلة في الشيفرة المصدرية أوثق من لاحقة اسم الملف. [S14]</p>
+<h3>حدّ الخطأ يخص كتلة واحدة، لا النموذج كله</h3>
+<p>عند غياب القصّ واستخدام التقريب إلى الأقرب، لا يتجاوز خطأ العنصر الواحد s ÷ 2. وهذا مجرد حدّ لخطأ التكميم في كتلة واحدة، وليس ضمانًا لجودة مهام النموذج كله. فاللاخطية، وحدود الاختيار من نوع top-k (الفصل 10)، وتراكم عشرات الطبقات، كلها تغيّر طريقة انتشار الخطأ. لذلك يجب أن يتم القبول على ثلاث طبقات: هل فك ترميز الصيغة مطابق للعقد؟ هل خطأ الموتّر ضمن الميزانية عند مدخلات ثابتة؟ هل جودة المهام الحقيقية مقبولة؟ أما «لم ينهَر شيء» فلا يثبت حتى الطبقة الأولى.</p>
+<h3>الدرس الأول: ما أُهمل هو «عرض» معامل القياس</h3>
+<p>في <code>layer.cpp</code> تعليق مكتوب بأحرف كبيرة. كانت دالة قديمة تحسب بنفسها أحجام الأجزاء الثلاثة للموتّر المكمَّم، وتفترض أن كل معامل قياس يشغل 4 بايتات. لكن من بين 303 موتّرات مكمَّمة كان في 90 منها معامل القياس بصيغة FP16 (كل موتّرات خبراء Q2_0 الـ 58، إضافة إلى Q4_0 وQ5_0 وQ8_0 وIQ4_NL)، فجاء جزء معاملات القياس أكبر بمرتين، ولم يتطابق مجموع الأجزاء الثلاثة مع حجم الموتّر كله. كان الظن الأول أن «حجم المجموعة مكتوب خطأ»؛ وبعد فحص الموتّرات الـ 303 لم يظهر خطأ واحد في حجم المجموعة. <strong>المُدخل الذي لم يُفحص هو عرض معامل القياس، لا عدد المجموعات.</strong> والحل الآن: عند التحميل تُوسَّع معاملات القياس FP16 إلى FP32 ويُسجَّل الحجم الحقيقي، وتكتفي بقية الشيفرة بالتحقق دون حساب. <span class="ev ev-code">حقيقة من الشيفرة</span>[S14]</p>
+<h3>الدرس الثاني: اتفاق أداتين لا يعني الصواب</h3>
+<p>سجّل الملف نفسه أمرًا آخر: أداتا تعبئة بحثتا معًا عن كتلة بيانات اسمها <code>mins</code>، أما اسمها الحقيقي فهو <code>offsets</code>. فضاعت كتل الإزاحة في 54 موتّر Q4_K/Q5_K، وخُصِّصت منطقة الذاكرة بحجم ما بعد الضياع، ولم تُنسخ البايتات، فبلغ الفرق 136 MiB. خلاصة التعليق جديرة بالحفظ: <strong>اتفاق أداتين لا يكون دليلًا إلا إذا لم تتشاركا الافتراض الخاطئ نفسه.</strong> والذي كشف الخطأ أخيرًا هو الفحص الذي «يرفض عند عدم التطابق ولا يخمّن أبدًا». [S14]</p>
+<h3>الصيغة تتبع النوع، لا الاسم</h3>
+<p>افتُرض أثناء التطوير أن «الاسم يحدد الصيغة»: مثلًا أن <code>attn_qkv</code> لا بد أن يكون من عائلة K للتكميم. لكن الواقع أن توزيع الصيغ لنفس الاسم في الطبقات المختلفة مبعثر جدًا. ففي <code>attn_qkv</code> لطبقات GDN الـ 36: IQ4_XS في 13 طبقة، وQ3_K في 18، وQ2_0 في طبقة واحدة، وQ4_K في 4. لذلك تغيّرت القاعدة إلى القاعدة بحسب النوع: الأكواد من 2 بت تقترن بتنشيطات Q8_0، وبقية صيغ التكميم تقترن بـ Q8_K. وإذا أُخطئ الاقتران انحرفت نتيجة GEMV بنسبة 0.6%–1.4%: متجه «يبدو معقولًا»، لا متجه فاسد بوضوح. [S14]</p>
+<h3>تفاصيل في تكميم تنشيطات 8 بتات «تبدو خطأ لكنها ليست خطأ»</h3>
+<p>تكميم تنشيطات Q8_K ينسخ تنفيذ ggml المرجعي، بما فيه موضعان يبدوان خطأين مطبعيين: يستخدم القياس −127 ÷ max بدل −128 ÷ max؛ وقيمة max المأخوذة هي «القيمة بإشارتها للعنصر الأكبر قيمة مطلقة»، فتُرسَم القيمة العظمى الموجبة إلى −127. ويقول التعليق إن كتابة −128 بدل −127 تُدخل خطأً في القياس مقداره 0.79%، وهو من رتبة خطوة التكميم نفسها، فنحصل على تنشيط «يبدو صالحًا». <a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/kernels/quantize_act.hpp#L35-L48" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a></p>
+</details>

@@ -1,0 +1,245 @@
+<div class="hook"><span class="eyebrow">ربما لاحظتَ</span>
+<p>اسأل الذكاء الاصطناعي السؤال نفسه مرتين، وغالبًا تحصل على إجابتين مختلفتين. لكنه حاسوب في النهاية: فكيف يعطي المدخل نفسه مخرجات مختلفة؟</p>
+<p>الجواب في الخطوة ⑤ من الخطوات الست في الفصل 1. النموذج لا «يقول» الكلمة التالية مباشرة. هو يعطي جدول احتمالات فقط، ثم يختار منه كلمة واحدة كما لو رمى حجر نرد. يشرح هذا الفصل خطوة بخطوة كيف يُبنى هذا الجدول، وكيف يُرمى النرد، وما التصفيات التي تسبق الرمي.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> في كل خطوة يحلّ النموذج سؤال اختيار واحدًا: بناءً على النص السابق، يعطي كل رمز (token) في المفردات درجة؛ ثم يحوّل softmax الدرجات إلى احتمالات، ويختار رقم عشوائي واحد رمزًا حسب هذه الاحتمالات. معاملات مثل درجة الحرارة وtop-k وtop-p تعدّل هذا الجدول قبل الاختيار.</p>
+
+<h2 id="sec-1">2.1 النموذج لا يقرأ الحروف، بل سلسلة أرقام</h2>
+<p>قلنا في الفصل 1 إن <dfn>المُجزِّئ (tokenizer)</dfn> يقطّع النص إلى رموز (tokens) ثم يحوّلها إلى أرقام صحيحة. المُجزِّئ الذي يستخدمه Strata فيه 248,320 رمزًا، وطريقة التقطيع تسمى <dfn>BPE على مستوى البايت</dfn>: يُفكَّك النص أولًا إلى أصغر وحداته، أي البايتات، ثم تُدمج مرارًا القطع التي تظهر متجاورة كثيرًا في بيانات التدريب لتصير رمزًا واحدًا. الكلمة الشائعة تصير رمزًا واحدًا، والكلمة النادرة تنقسم إلى عدة قطع. <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/tools/strata_tokenizer.py#L3-L14" target="_blank" rel="noopener noreferrer">strata_tokenizer.py</a></p>
+<p>لأن القاع هو البايت، يمكن تمثيل أي نص، ولا يظهر أبدًا «هذا الحرف غير معروف». ويذكر وصف هذا المُجزِّئ أهم فحص عنده: ترميز نص ثم فك ترميزه يجب أن يعيد النص الأصلي بايتًا بايتًا. ويشمل الفحص الرموز التعبيرية والحروف الصينية متعددة البايتات والمسافات المتتالية.</p>
+<p>إذن الرمز ليس حرفًا واحدًا. يقول README الخاص بـ Strata: «الرمز الواحد يساوي نحو ¾ كلمة إنجليزية». [S01] هذه قاعدة تقريبية للإنجليزية؛ والنسبة تختلف في العربية والشيفرة والجداول. الطريقة الوحيدة الموثوقة لمعرفة عدد رموز نص ما هي أن تقطّعه فعلًا بهذا المُجزِّئ.</p>
+<p>وهناك أمر يسهل إغفاله: الجملة التي تكتبها ليست كل ما يقرؤه النموذج. في الخطوة ② يضيف <dfn>قالب المحادثة</dfn> قبلها وبعدها علامات الأدوار وتعليمات النظام ووصف الأدوات، كما في الشكل 2-1.</p>
+<figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="الشكل 2-1: تُلفّ رسالتك أولًا بقالب المحادثة، ثم يحوّلها المُجزِّئ إلى أرقام، ولا يستلم المحرك إلا سلسلة الأرقام هذه">
+<rect class="f-soft" fill="#e5f1df" x="40" y="8" width="320" height="44" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="27" font-size="13" font-weight="600" text-anchor="middle">① رسالتك</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="44" font-size="12" text-anchor="middle">«مرحبًا»</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 52V70"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="72" width="320" height="64" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="92" font-size="13" font-weight="600" text-anchor="middle">② لفّها بقالب المحادثة</text>
+<text class="f-text" fill="#182f2b" x="200" y="111" font-size="12" text-anchor="middle" direction="rtl">‹المستخدم› مرحبًا ‹نهاية› ‹المساعد›</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="128" font-size="12" text-anchor="middle">مستوى التفكير ووصف الأدوات يُكتبان في هذا النص أيضًا</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 136V154"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="156" width="320" height="48" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="176" font-size="13" font-weight="600" text-anchor="middle">③ المُجزِّئ</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="195" font-size="12" text-anchor="middle" direction="rtl">النص ← [3, 1023, 4, 5] (الأرقام للتوضيح)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 204V222"/>
+<rect class="f-accent" fill="#136d5a" x="40" y="224" width="320" height="44" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="251" font-size="13" font-weight="600" text-anchor="middle">④ المحرك يستلم سلسلة الأرقام فقط</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="12" text-anchor="middle">إذا تغيّر القالب تغيّرت الأرقام: وهذا سؤال آخر للنموذج</text>
+</svg><figcaption>الشكل 2-1　كلامك يُلفّ أولًا بالقالب ثم يُقطَّع إلى أرقام، وبعد ذلك فقط يأتي دور النموذج. القالب جزء من المدخل مثل الكلمات التي كتبتها.</figcaption></figure>
+<p>تعرض طبقة الخدمة في Strata القالب بقالب Jinja المرفق مع النموذج، وتشترط أن تطابق النتيجة طريقة Hugging Face تمامًا؛ وقد جرى التحقق بعشر حالات قياسية، منها وضع التفكير واستدعاء الأدوات. <span class="ev ev-code">حقيقة من الشيفرة</span>[S16] و«مستوى التفكير» الذي تختاره في الواجهة يُمرَّر هو أيضًا إلى القالب كمعامل: عند اختيار high تكون القيمة المرسلة فعليًا xhigh؛ وعند اختيار none تكون القيمة «إيقاف التفكير». [S16] وكل هذا يغيّر سلسلة الأرقام النهائية.</p>
+<p>الواجهة بين طبقة الخدمة والمحرك هي <code>Engine.generate(prompt_ids, max_new, sampling, cancel)</code>: يدخل إليها قائمة أرقام، ويخرج منها رقم رمز بعد رقم. [S15] النص موجود خارج هذه الحدود فقط.</p>
+
+<h2 id="sec-2">2.2 تخمين الرمز التالي فقط: قاعدة السلسلة</h2>
+<p>تخمّن لوحة مفاتيح الهاتف الكلمة التالية وأنت تكتب. النموذج اللغوي الكبير يفعل الشيء نفسه، لكن بدقة أعلى بكثير. في كل خطوة يجيب عن سؤال واحد: <strong>بعد كل الرموز السابقة، ما الرمز التالي؟</strong> والجواب ليس كلمة واحدة، بل جدول احتمالات: لكل رمز في المفردات احتمال، ومجموعها 1.</p>
+<p>احتمال الجملة كلها هو حاصل ضرب احتمالات التخمينات خطوة بخطوة، كما في الشكل 2-2. تسمى هذه القاعدة <dfn>قاعدة السلسلة</dfn>.</p>
+<figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="الشكل 2-2: احتمال الجملة يساوي حاصل ضرب الاحتمالات الشرطية في كل خطوة، واحتمال «أنا أحب القراءة» هو 0.20 × 0.10 × 0.60 = 0.012">
+<text class="f-text" fill="#182f2b" x="75" y="18" font-size="13" font-weight="600" text-anchor="middle">الخطوة 1</text>
+<text class="f-muted" fill="#5c6d66" x="75" y="36" font-size="12" text-anchor="middle">المعلوم: البداية</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">الخطوة 2</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="36" font-size="12" text-anchor="middle">المعلوم: أنا</text>
+<text class="f-text" fill="#182f2b" x="325" y="18" font-size="13" font-weight="600" text-anchor="middle">الخطوة 3</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="36" font-size="12" text-anchor="middle">المعلوم: أنا أحب</text>
+<rect class="f-accent" fill="#136d5a" x="23" y="48" width="104" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="35" y="66" font-size="13">أنا</text><text class="f-on" fill="#ffffff" x="117" y="66" font-size="12" text-anchor="end">0.20</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="23" y="80" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="35" y="98" font-size="13">أنت</text><text class="f-muted" fill="#5c6d66" x="117" y="98" font-size="12" text-anchor="end">0.15</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="23" y="112" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="35" y="130" font-size="13">اليوم</text><text class="f-muted" fill="#5c6d66" x="117" y="130" font-size="12" text-anchor="end">0.10</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="148" y="48" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="160" y="66" font-size="13">أريد</text><text class="f-muted" fill="#5c6d66" x="242" y="66" font-size="12" text-anchor="end">0.30</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="148" y="80" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="160" y="98" font-size="13">أحتاج</text><text class="f-muted" fill="#5c6d66" x="242" y="98" font-size="12" text-anchor="end">0.20</text>
+<rect class="f-accent" fill="#136d5a" x="148" y="112" width="104" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="160" y="130" font-size="13">أحب</text><text class="f-on" fill="#ffffff" x="242" y="130" font-size="12" text-anchor="end">0.10</text>
+<rect class="f-accent" fill="#136d5a" x="273" y="48" width="104" height="26" rx="5"/>
+<text class="f-on" fill="#ffffff" x="285" y="66" font-size="13">القراءة</text><text class="f-on" fill="#ffffff" x="367" y="66" font-size="12" text-anchor="end">0.60</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="273" y="80" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="285" y="98" font-size="13">الشاي</text><text class="f-muted" fill="#5c6d66" x="367" y="98" font-size="12" text-anchor="end">0.10</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="273" y="112" width="104" height="26" rx="5"/>
+<text class="f-text" fill="#182f2b" x="285" y="130" font-size="13">السفر</text><text class="f-muted" fill="#5c6d66" x="367" y="130" font-size="12" text-anchor="end">0.05</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M127 61H137V125H146M252 125H262V61H271"/>
+<text class="f-text" fill="#182f2b" x="200" y="170" font-size="13" font-weight="600" text-anchor="middle" direction="rtl">P(أنا أحب القراءة) = 0.20 × 0.10 × 0.60 = 0.012</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="196" font-size="12" text-anchor="middle" direction="rtl">كل خطوة احتمال شرطي: «بعد النص السابق، ما التالي؟»</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="216" font-size="12" text-anchor="middle">المظلَّل هو الطريق الذي سلكته الجملة؛ الاحتمالات للتوضيح</text>
+</svg><figcaption>الشكل 2-2　قاعدة السلسلة: احتمال الجملة كلها يساوي حاصل ضرب الاحتمالات الشرطية في كل خطوة. الكلمة «أحب» المختارة في الخطوة 2 ليست الأعلى احتمالًا؛ فالجملة لا تحتاج أن تختار المرتبة الأولى في كل خطوة.</figcaption></figure>
+<aside class="primer" id="c02-chain-rule">
+<h3>الاحتمال الشرطي وقاعدة السلسلة</h3>
+<p>ابدأ بحدس بسيط: احتمال أن يحمل شخص عشوائي في الشارع مظلة ليس مرتفعًا؛ لكنه يرتفع كثيرًا إذا عرفنا أن «المطر ينهمر في الخارج». احتمال وقوع A «بشرط أن B وقع» يسمى <dfn>الاحتمال الشرطي</dfn>، ويُكتب P(A | B)، وتعريفه P(A | B) = P(A و B) ÷ P(B).</p>
+<p>انقل الحدود في التعريف تحصل على قاعدة الضرب: P(A و B) = P(B) × P(A | B). وبتكرارها يتفكك الاحتمال المشترك لسلسلة طويلة من الأحداث إلى حاصل ضرب احتمالات شرطية: P(x₁, x₂, x₃) = P(x₁) × P(x₂ | x₁) × P(x₃ | x₁, x₂). هذه هي <dfn>قاعدة السلسلة</dfn>. لا تحتاج إلى أي افتراض، وتصح على كل توزيعات الاحتمال.</p>
+<p>النماذج اللغوية مبنية بهذه الصيغة بالضبط: في كل خطوة تتعلم شيئًا واحدًا فقط، هو P(الرمز التالي | كل الرموز السابقة). واحتمال «أنا أحب القراءة» في الشكل 2-2، أي 0.012، هو حاصل ضرب ثلاثة احتمالات شرطية. لاحظ أن الشرط هو <strong>كل</strong> الرموز السابقة؛ فإذا تغيّر حرف واحد في النص السابق، فقد يتغيّر جدول الاحتمالات في كل خطوة لاحقة.</p>
+<p class="further">قراءة إضافية: <a href="https://ar.wikipedia.org/wiki/%D8%A7%D8%AD%D8%AA%D9%85%D8%A7%D9%84_%D8%B4%D8%B1%D8%B7%D9%8A" target="_blank" rel="noopener noreferrer">ويكيبيديا: احتمال شرطي</a> · <a href="https://en.wikipedia.org/wiki/Independence_%28probability_theory%29" target="_blank" rel="noopener noreferrer">Wikipedia: Independence (probability theory)</a> · <a href="https://en.wikipedia.org/wiki/Chain_rule_(probability)" target="_blank" rel="noopener noreferrer">Wikipedia: Chain rule (probability)</a></p>
+</aside>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذه هي قاعدة الضرب في مقرر «نظرية الاحتمالات». وعلى عكس سلسلة ماركوف، الشرط هنا هو التاريخ <strong>كله</strong>، لا الحالة السابقة فقط. ولأن الشرط يشمل التاريخ كله، يحتاج المحرك إلى حفظ التاريخ واستخدامه مرارًا (ذاكرة KV المؤقتة (KV cache) في الفصل 17).</p>
+<p>توضيح لسوء فهم شائع: أثناء التوليد لا يتغيّر أي معامل من معاملات النموذج؛ الذي يتغيّر هو «الرموز الموجودة» أي التاريخ. المعاملات لا تتغيّر إلا أثناء التدريب. أما الذاكرة المؤقتة للخبراء في الفصل 10 فتتكيّف مع المحادثة، لكنها تغيّر <strong>مكان</strong> المعاملات لا <strong>قيمتها</strong>؛ فهذا أيضًا ليس «تعلّم النموذج».</p>
+
+<h2 id="sec-3">2.3 من الدرجات إلى الاحتمالات: softmax ودرجة الحرارة</h2>
+<p>ما تخرجه الطبقة الأخيرة من النموذج ليس احتمالات، بل سلسلة من <dfn>الدرجات</dfn>، واسمها المتخصص <dfn>logits</dfn>: رقم لكل رمز في المفردات، قد يكون موجبًا أو سالبًا، ومجموعها لا يساوي 1. لتحويلها إلى احتمالات نمرّرها في دالة تسمى <dfn>softmax</dfn> (الأُسّ المُطبَّع): نأخذ أُسّ كل درجة e<sup>z</sup> فيصير موجبًا، ثم نقسمه على مجموع كل الأسس ليصير المجموع 1.</p>
+<p>وقبل أخذ الأُسّ يمكن أن نقسم كل درجة على عدد T، ويسمى هذا العدد <dfn>درجة الحرارة</dfn>. إذا كانت T أصغر من 1 اتسعت الفروق بين الدرجات، فتزداد العالية ارتفاعًا ويصير التوزيع «حادًّا»، وتصير الإجابة أكثر تحفظًا. وإذا كانت T أكبر من 1 ضاقت الفروق، فيصير التوزيع «مسطّحًا»، وتزيد فرصة الكلمات النادرة، وتصير الإجابة أكثر تنوعًا. الشكل 2-3 يعرض مجموعة الدرجات نفسها عند ثلاث درجات حرارة.</p>
+<div class="viz" data-viz="softmax-temperature"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="الشكل 2-3: احتمالات مجموعة الدرجات نفسها عند درجات الحرارة 0.5 و1 و2. كلما انخفضت الحرارة زاد تفوّق القط صاحب أعلى درجة: 86% و62% و42% على الترتيب">
+<text class="f-text" fill="#182f2b" x="72" y="18" font-size="12" font-weight="600" text-anchor="middle" direction="rtl">T = 0.5 (أحدّ)</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="12" font-weight="600" text-anchor="middle">T = 1</text>
+<text class="f-text" fill="#182f2b" x="328" y="18" font-size="12" font-weight="600" text-anchor="middle" direction="rtl">T = 2 (أكثر تسطّحًا)</text>
+<rect class="f-accent" fill="#136d5a" x="17" y="68" width="16" height="112"/>
+<rect class="f-muted" fill="#5c6d66" x="40" y="164.8" width="16" height="15.2"/>
+<rect class="f-muted" fill="#5c6d66" x="63" y="177.9" width="16" height="2.1"/>
+<rect class="f-muted" fill="#5c6d66" x="86" y="179" width="16" height="1"/>
+<rect class="f-muted" fill="#5c6d66" x="109" y="179" width="16" height="1"/>
+<text class="f-text" fill="#182f2b" x="25" y="62" font-size="12" text-anchor="middle">86%</text>
+<rect class="f-accent" fill="#136d5a" x="145" y="98.9" width="16" height="81.1"/>
+<rect class="f-muted" fill="#5c6d66" x="168" y="150.2" width="16" height="29.8"/>
+<rect class="f-muted" fill="#5c6d66" x="191" y="169" width="16" height="11"/>
+<rect class="f-muted" fill="#5c6d66" x="214" y="173.3" width="16" height="6.7"/>
+<rect class="f-muted" fill="#5c6d66" x="237" y="178.5" width="16" height="1.5"/>
+<text class="f-text" fill="#182f2b" x="153" y="92" font-size="12" text-anchor="middle">62%</text>
+<rect class="f-accent" fill="#136d5a" x="273" y="125.7" width="16" height="54.3"/>
+<rect class="f-muted" fill="#5c6d66" x="296" y="147.1" width="16" height="32.9"/>
+<rect class="f-muted" fill="#5c6d66" x="319" y="160" width="16" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="342" y="164.5" width="16" height="15.5"/>
+<rect class="f-muted" fill="#5c6d66" x="365" y="172.7" width="16" height="7.3"/>
+<text class="f-text" fill="#182f2b" x="281" y="119" font-size="12" text-anchor="middle">42%</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M12 180.5H130M140 180.5H258M268 180.5H386"/>
+<text class="f-muted" fill="#5c6d66" x="25" y="196" font-size="12" text-anchor="middle">قط</text><text class="f-muted" fill="#5c6d66" x="48" y="196" font-size="12" text-anchor="middle">كلب</text><text class="f-muted" fill="#5c6d66" x="71" y="196" font-size="12" text-anchor="middle">طير</text><text class="f-muted" fill="#5c6d66" x="94" y="196" font-size="12" text-anchor="middle">سمك</text><text class="f-muted" fill="#5c6d66" x="117" y="196" font-size="12" text-anchor="middle">باص</text>
+<text class="f-muted" fill="#5c6d66" x="153" y="196" font-size="12" text-anchor="middle">قط</text><text class="f-muted" fill="#5c6d66" x="176" y="196" font-size="12" text-anchor="middle">كلب</text><text class="f-muted" fill="#5c6d66" x="199" y="196" font-size="12" text-anchor="middle">طير</text><text class="f-muted" fill="#5c6d66" x="222" y="196" font-size="12" text-anchor="middle">سمك</text><text class="f-muted" fill="#5c6d66" x="245" y="196" font-size="12" text-anchor="middle">باص</text>
+<text class="f-muted" fill="#5c6d66" x="281" y="196" font-size="12" text-anchor="middle">قط</text><text class="f-muted" fill="#5c6d66" x="304" y="196" font-size="12" text-anchor="middle">كلب</text><text class="f-muted" fill="#5c6d66" x="327" y="196" font-size="12" text-anchor="middle">طير</text><text class="f-muted" fill="#5c6d66" x="350" y="196" font-size="12" text-anchor="middle">سمك</text><text class="f-muted" fill="#5c6d66" x="373" y="196" font-size="12" text-anchor="middle">باص</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="224" font-size="12" text-anchor="middle" direction="rtl">الدرجات: قط 3، كلب 2، طير 1، سمك 0.5، باص −1 (افتراض تعليمي)</text>
+</svg><figcaption>الشكل 2-3　الدرجات نفسها بدرجات حرارة مختلفة تعطي جداول احتمالات بأشكال مختلفة. درجة الحرارة تغيّر «الحدّة أو التسطّح» فقط، ولا تغيّر من هو الأول.</figcaption></figure></div>
+<p>في صيغة softmax أُسّ، والأسس تنمو بسرعة هائلة. وهذا يسبب مشكلة في الحاسوب؛ يشرح الإطار التالي لماذا، وكيف تُحلّ بحيلة واحدة.</p>
+<aside class="primer" id="c02-softmax-overflow">
+<h3>softmax وفيضان الأعداد العشرية</h3>
+<p>يخزّن الحاسوب الأعداد العشرية في صيغة <dfn>الفاصلة العائمة</dfn>، وعدد خاناتها محدود، فأكبر قيمة يمكن تمثيلها محدودة أيضًا. أشهر صيغة هي العدد العائم ذو 32 بتًّا (FP32)، وأكبر قيمة فيه نحو 3.4 × 10³⁸. يبدو هذا كبيرًا، لكن e<sup>89</sup> تتجاوزه فعلًا. والنتيجة التي تتجاوز الحد تصير «ما لا نهاية» (∞)، وهذا يسمى <dfn>الفيضان العلوي (overflow)</dfn>. وحين يصير البسط والمقام ∞ معًا، فإن ∞ ÷ ∞ في الفاصلة العائمة تساوي <dfn>NaN</dfn> (Not a Number)، ويفسد جدول الاحتمالات كله.</p>
+<p>الحل سطر واحد: قبل أخذ الأُسّ، اطرح من كل درجة أكبر الدرجات m. لأن e<sup>z−m</sup> = e<sup>z</sup> ÷ e<sup>m</sup>، فالبسط والمقام يُقسمان على e<sup>m</sup> نفسه، والنسبة لا تتغيّر أبدًا. لكن بعد الطرح يصير أكبر عدد 0، وe<sup>0</sup> = 1، وباقي الأسس أصغر من 1، فلا يحدث فيضان بعد ذلك. هذا متكافئ رياضيًّا وآمن عدديًّا، ويسمى الكتابة <dfn>المستقرة عدديًّا</dfn>.</p>
+<p>مثال: الدرجات [1000, 999] إذا أخذنا أُسّها مباشرة صار الحدّان ∞؛ أما إذا طرحنا 1000 أولًا فتصير [0, −1]، والأسس [1, 0.3679]، والاحتمالات [0.7311, 0.2689]. وهذا ما تفعله نواة أخذ العينات (kernel) في Strata: تطرح أكبر قيمة من كل حدّ أولًا، ثم تحسب الأسس والاحتمالات التراكمية بدقة مضاعفة. <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/src/kernels/cuda/sampler.cu#L366-L408" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p class="further">قراءة إضافية: <a href="https://en.wikipedia.org/wiki/LogSumExp" target="_blank" rel="noopener noreferrer">Wikipedia: LogSumExp (the same max-subtraction trick)</a> · <a href="https://docs.python.org/3/tutorial/floatingpoint.html" target="_blank" rel="noopener noreferrer">Python docs: Floating-point arithmetic: issues and limitations</a> · <a href="https://ar.wikipedia.org/wiki/%D8%AF%D8%A7%D9%84%D8%A9_%D8%B3%D9%88%D9%81%D8%AA_%D9%85%D8%A7%D9%83%D8%B3" target="_blank" rel="noopener noreferrer">ويكيبيديا: دالة سوفت ماكس</a></p>
+</aside>
+<p>لماذا للأعداد العشرية حدّ أعلى، وما الفرق بين FP32 وFP16؟ نشرح ذلك بالتفصيل في الفصل 4.</p>
+
+<h2 id="sec-4">2.4 رمي النرد: اختيار واحد حسب الاحتمالات</h2>
+<p>بعد أن صار عندنا جدول احتمالات، كيف «نختار حسب الاحتمال»؟ تخيّل مسطرة طولها 1. نضع عليها احتمالات المرشحين واحدًا بعد آخر: القط يأخذ أول 0.62، والكلب يأخذ 0.23 التالية، وهكذا حتى تمتلئ المسطرة تمامًا. ثم نرمي دبوسًا عشوائيًّا، فأي مقطع سقط فيه الدبوس نختار كلمته، كما في الشكل 2-4. المقطع الأطول فرصته في أن يصيبه الدبوس أكبر.</p>
+<div class="viz" data-viz="sampling-dice"><figure class="fig"><svg viewBox="0 0 400 186" role="img" aria-label="الشكل 2-4: احتمالات المرشحين الخمسة تملأ القطعة من 0 إلى 1 واحدًا بعد آخر، والرقم العشوائي u = 0.8 يقع في مقطع الكلب، فيُختار الكلب">
+<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="12" direction="rtl" text-anchor="end">الاحتمالات موزّعة على [0, 1) بمقياس الرسم</text>
+<rect class="f-soft" fill="#e5f1df" x="20" y="44" width="224.5" height="34"/>
+<rect class="f-accent" fill="#136d5a" x="244.5" y="44" width="82.6" height="34"/>
+<rect class="f-soft" fill="#e5f1df" x="327.1" y="44" width="30.4" height="34"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="357.5" y="44" width="18.4" height="34"/>
+<rect class="f-muted" fill="#5c6d66" x="375.9" y="44" width="4.1" height="34"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 44V78M244.5 44V78M327.1 44V78M357.5 44V78M375.9 44V78M380 44V78"/>
+<text class="f-text" fill="#182f2b" x="132" y="66" font-size="13" text-anchor="middle">قط 0.62</text>
+<text class="f-on" fill="#ffffff" x="286" y="66" font-size="13" text-anchor="middle">كلب 0.23</text>
+<text class="f-text" fill="#182f2b" x="342" y="66" font-size="12" text-anchor="middle">طير</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M366.7 80V100M378 80V108H372"/>
+<text class="f-muted" fill="#5c6d66" x="368" y="112" font-size="12" direction="rtl" text-anchor="start">سمك (نحو 5%)، باص (نحو 1%)</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="96" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="244.5" y="96" font-size="12" text-anchor="middle">0.62</text>
+<text class="f-muted" fill="#5c6d66" x="318" y="96" font-size="12" text-anchor="middle">0.85</text>
+<path class="f-warn" fill="#9e5d24" d="M308 40l-5-10h10z"/>
+<text class="f-warn" fill="#9e5d24" x="308" y="24" font-size="12" text-anchor="middle">u = 0.8</text>
+<text class="f-text" fill="#182f2b" x="200" y="132" font-size="13" font-weight="600" text-anchor="middle" direction="rtl">0.8 يقع بين 0.62 و0.85، إذن يُختار «كلب»</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="156" font-size="12" text-anchor="middle" direction="rtl">u رقم عشوائي موزّع بانتظام في [0, 1)؛ أما greedy فيأخذ المقطع الأول دائمًا</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="176" font-size="12" text-anchor="middle" direction="rtl">درجة الحرارة T = 1، والدرجات هي نفسها في الشكل السابق</text>
+</svg><figcaption>الشكل 2-4　اختيار رمز حسب الاحتمال: الاحتمالات تحدد طول كل مقطع، والرقم العشوائي u يحدد أين يسقط الدبوس. التوزيع والسحب شيئان منفصلان.</figcaption></figure></div>
+<p>تسمى هذه الطريقة <dfn>أخذ العينات بالتحويل العكسي</dfn>: نحسب أولًا الاحتمالات التراكمية (0.62 ثم 0.85 ثم 0.94 ...)، ثم نبحث عن أول موضع يتجاوز u. هكذا تختار نواة أخذ العينات في Strata: تجمع الاحتمال التراكمي حدًّا بعد حدّ، وأول حدّ يتجاوز u هو النتيجة. <span class="ev ev-code">حقيقة من الشيفرة</span>[S07]</p>
+<p>وهناك طريقة أخرى هي <dfn>الجشع (greedy)</dfn>: لا نرمي النرد، بل نختار دائمًا الرمز الأعلى احتمالًا. مخرجات greedy محدَّدة تمامًا، وهي مناسبة حين نحتاج إلى إجابة ثابتة، كحلّ المسائل والاختبارات. وفي معاملات أخذ العينات في Strata، تعني درجة الحرارة الأصغر من أو المساوية لـ 0 أن نسلك طريق greedy؛ وإذا لم يكتب الطلب درجة حرارة، فتذكر طبقة الخدمة أن المحرك يستخدم greedy افتراضيًّا. <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/include/strata/kernels/sampler.hpp#L15-L28" target="_blank" rel="noopener noreferrer">sampler.hpp</a> · <a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/serve/server.py#L393-L398" target="_blank" rel="noopener noreferrer">server.py</a></p>
+<p>يبقى سؤال: كيف يرمي الحاسوب الدبوس «عشوائيًّا»؟ الحقيقة أنه <strong>يحسب</strong> رقمًا يبدو عشوائيًّا.</p>
+<aside class="primer" id="c02-prng">
+<h3>الأرقام شبه العشوائية والبذرة</h3>
+<p>الحاسوب آلة حتمية: المدخل نفسه يعطي المخرج نفسه دائمًا. و«الأرقام العشوائية» التي ينتجها هي في الحقيقة متتالية تحسبها صيغة، لكنها تبدو بلا أي نمط، وتسمى <dfn>أرقامًا شبه عشوائية</dfn>. نقطة بداية الصيغة تسمى <dfn>البذرة (seed)</dfn>: إذا تطابقت البذرة تطابقت المتتالية كلها. وهذا أمر جيد: إذا حدثت مشكلة، يمكنك إعادة المشهد نفسه بالبذرة نفسها.</p>
+<p>المولّدات الشائعة <strong>تسلسلية</strong>: كل رقم يُحسب من الرقم السابق، فإذا أردت الرقم رقم 1000 وجب أن تحسب أولًا الـ 999 قبله. وهناك مولّدات <strong>قائمة على عدّاد</strong>: الرقم رقم n يُحسب مباشرة من (البذرة, n)، ولا علاقة له بعدد ما حُسب قبله، كما في الشكل 2-5.</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="الشكل 2-5: المولّد التسلسلي يحسب الأرقام واحدًا بعد واحد، أما المولّد القائم على عدّاد فيحسب أي رقم عشوائي مباشرة من البذرة والموضع">
+<text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">تسلسلي: واحد بعد واحد</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="41" y="52" font-size="12" text-anchor="middle">البذرة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="102" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="133" y="52" font-size="12" text-anchor="middle">r₁</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="194" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="225" y="52" font-size="12" text-anchor="middle">r₂</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="286" y="32" width="62" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="317" y="52" font-size="12" text-anchor="middle">r₃</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M72 47H100M164 47H192M256 47H284"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="82" font-size="12" direction="rtl" text-anchor="end">للحصول على r₃ يجب حساب r₁ وr₂ أولًا</text>
+<text class="f-text" fill="#182f2b" x="10" y="118" font-size="13" font-weight="600">قائم على عدّاد: الموضع يُحسب مباشرة</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="130" width="100" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="60" y="150" font-size="12" text-anchor="middle" direction="rtl">(البذرة, 0)</text>
+<rect class="f-soft" fill="#e5f1df" x="145" y="130" width="100" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="195" y="150" font-size="12" text-anchor="middle" direction="rtl">(البذرة, 1)</text>
+<rect class="f-soft" fill="#e5f1df" x="280" y="130" width="100" height="30" rx="6"/><text class="f-text" fill="#182f2b" x="330" y="150" font-size="12" text-anchor="middle" direction="rtl">(البذرة, 2)</text>
+<text class="f-text" fill="#182f2b" x="60" y="182" font-size="12" text-anchor="middle">↓ u₀</text>
+<text class="f-text" fill="#182f2b" x="195" y="182" font-size="12" text-anchor="middle">↓ u₁</text>
+<text class="f-text" fill="#182f2b" x="330" y="182" font-size="12" text-anchor="middle">↓ u₂</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12" direction="rtl" text-anchor="end">كل موضع مستقل عن غيره، ويمكن حسابه بأي ترتيب</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="224" font-size="12" direction="rtl" text-anchor="end">وفي وقت واحد. وهذا ما يستخدمه Strata</text>
+</svg><figcaption>الشكل 2-5　نوعان من مولّدات الأرقام شبه العشوائية. نتيجة المولّد القائم على عدّاد تتوقف على (البذرة, الموضع) فقط، فيمكن إعادة إنتاجها حتى لو حُسبت بالتوازي أو بالقفز.</figcaption></figure>
+<p>يستخدم أخذ العينات في Strata مولّدًا قائمًا على عدّاد اسمه Philox: الرقم العشوائي للرمز رقم t يتحدد بـ (البذرة, الموضع t) وحدهما. وتوضح تعليقات الشيفرة سبب هذا الاختيار: يمكن أخذ عينات دفعة من الرموز بأي ترتيب، وتبقى النتيجة قابلة للإعادة. والرقم u المولَّد من 24 بتًّا يقع دائمًا داخل [0, 1) تمامًا، ولا يُقرَّب أبدًا إلى 1. <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/src/kernels/cuda/sampler.cu#L38-L63" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p class="further">قراءة إضافية: <a href="https://en.wikipedia.org/wiki/Random_number_generation" target="_blank" rel="noopener noreferrer">Wikipedia: Random number generation</a> · <a href="https://docs.python.org/3/library/random.html" target="_blank" rel="noopener noreferrer">Python docs: the random module</a> · <a href="https://ar.wikipedia.org/wiki/%D9%85%D9%88%D9%84%D8%AF_%D8%A3%D8%B9%D8%AF%D8%A7%D8%AF_%D8%B4%D8%A8%D9%87_%D8%B9%D8%B4%D9%88%D8%A7%D8%A6%D9%8A%D8%A9" target="_blank" rel="noopener noreferrer">ويكيبيديا: مولد أعداد شبه عشوائية</a> · <a href="https://en.wikipedia.org/wiki/Counter-based_random_number_generator" target="_blank" rel="noopener noreferrer">Wikipedia: Counter-based RNG</a></p>
+</aside>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> أخذ العينات بالتحويل العكسي هو بحث في دالة التوزيع التراكمي (CDF): يحوّل التوزيع المنتظم على [0, 1) إلى أي توزيع متقطع. وحين يكثر المرشحون تكون مصفوفة التراكم مرتبة، فيمكن استخدام البحث الثنائي لخفض كلفة العيّنة الواحدة إلى O(log n).</p>
+
+<h2 id="sec-5">2.5 سلسلة أخذ العينات: الترتيب مهم أيضًا</h2>
+<p>قبل أن يرمي المحرك الحقيقي النرد، يُقلِّم جدول الاحتمالات عدة مرات. لسلسلة أخذ العينات في Strata ست خطوات بترتيب ثابت، كما في الشكل 2-6. <span class="ev ev-code">حقيقة من الشيفرة</span>[S07]</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="الشكل 2-6: سلسلة أخذ العينات في Strata بالترتيب: عقوبة التكرار، top-k، top-p، min-p، درجة الحرارة، ثم الاختيار بالرقم العشوائي">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">على اليمين: عدد المرشحين المتبقين بعد هذه الخطوة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="26" width="290" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="288" y="45" font-size="13" font-weight="600" direction="rtl" text-anchor="start">① عقوبة التكرار</text>
+<text class="f-muted" fill="#5c6d66" x="288" y="62" font-size="12" direction="rtl" text-anchor="start">تُخفَّض درجة الرموز التي ظهرت حديثًا قليلًا</text>
+<text class="f-text" fill="#182f2b" x="390" y="52" font-size="12" text-anchor="end">248,320</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="80" width="290" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="288" y="99" font-size="13" font-weight="600" direction="rtl" text-anchor="start">② top-k</text>
+<text class="f-muted" fill="#5c6d66" x="288" y="116" font-size="12" direction="rtl" text-anchor="start">نُبقي أعلى k درجة فقط (الافتراضي 20)</text>
+<text class="f-text" fill="#182f2b" x="390" y="106" font-size="12" text-anchor="end">20</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="134" width="290" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="288" y="153" font-size="13" font-weight="600" direction="rtl" text-anchor="start">③ top-p</text>
+<text class="f-muted" fill="#5c6d66" x="288" y="170" font-size="12" direction="rtl" text-anchor="start">نجمع الاحتمال من الأعلى ونتوقف عند p (0.95)</text>
+<text class="f-text" fill="#182f2b" x="390" y="160" font-size="12" text-anchor="end">≤ 20</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="188" width="290" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="288" y="207" font-size="13" font-weight="600" direction="rtl" text-anchor="start">④ min-p</text>
+<text class="f-muted" fill="#5c6d66" x="288" y="224" font-size="12" direction="rtl" text-anchor="start">نحذف ما دون min_p مرة من احتمال الأول (معطَّل)</text>
+<text class="f-text" fill="#182f2b" x="390" y="214" font-size="12" text-anchor="end">أقل</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="242" width="290" height="44" rx="8"/>
+<text class="f-text" fill="#182f2b" x="288" y="261" font-size="13" font-weight="600" direction="rtl" text-anchor="start">⑤ درجة الحرارة</text>
+<text class="f-muted" fill="#5c6d66" x="288" y="278" font-size="12" direction="rtl" text-anchor="start">تعدّل حدّة التوزيع للمرشحين المتبقين فقط</text>
+<text class="f-text" fill="#182f2b" x="390" y="268" font-size="12" text-anchor="end">دون تغيير</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="296" width="290" height="44" rx="8"/>
+<text class="f-on" fill="#ffffff" x="288" y="315" font-size="13" font-weight="600" direction="rtl" text-anchor="start">⑥ الاختيار</text>
+<text class="f-on" fill="#ffffff" x="288" y="332" font-size="12" direction="rtl" text-anchor="start">رقم عشوائي u يختار واحدًا حسب التراكم</text>
+<text class="f-text" fill="#182f2b" x="390" y="322" font-size="12" text-anchor="end">1</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M155 70V80M155 124V134M155 178V188M155 232V242M155 286V296"/>
+</svg><figcaption>الشكل 2-6　سلسلة أخذ العينات في Strata. درجة الحرارة تأتي بعد القصّ: top-k وtop-p يقصّان المرشحين أولًا حسب التوزيع الأصلي، ثم لا تعدّل الحرارة إلا ما تبقّى. القيم الافتراضية مأخوذة من تعريف معاملات أخذ العينات.</figcaption></figure>
+<ul>
+<li><strong>عقوبة التكرار</strong>: تُخفَّض درجة الرموز التي ظهرت حديثًا، حتى لا يكرّر النموذج الكلام نفسه.</li>
+<li><strong>top-k</strong>: نُبقي أعلى k رمزًا فقط. القيمة الافتراضية في معاملات أخذ العينات في Strata هي 20؛ وتحصر طبقة الخدمة top-k بين 1 و64، لأن مسار أخذ العينات في المحرك لا يحتفظ بأكثر من 64 مرشحًا. <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/serve/server.py#L663-L666" target="_blank" rel="noopener noreferrer">server.py</a></li>
+<li><strong>top-p</strong>: نجمع الاحتمالات من الأعلى إلى الأدنى، ونتوقف عند الوصول إلى p، ونقطع كل ما بعده. القيمة الافتراضية p = 0.95.</li>
+<li><strong>min-p</strong>: نحذف المرشحين الذين لا يبلغ احتمالهم min_p مرة من احتمال الأول. القيمة الافتراضية 0، أي معطَّل.</li>
+<li><strong>درجة الحرارة</strong> و<strong>الاختيار</strong>: شرحناهما قبل قليل.</li>
+</ul>
+<p>لماذا يهمّ الترتيب؟ انظر إلى موضع درجة الحرارة: إنها بعد القصّ. لذلك فإن قصّ top-p يحدث حسب الاحتمالات حين تكون الحرارة 1. ومهما ارتفعت الحرارة بعد ذلك فلن تنقذ مرشحًا قُطع. وبالعكس، لو نقلنا الحرارة إلى البداية، فإن المعاملات نفسها ستقصّ مجموعة مرشحين مختلفة.</p>
+<p>وقد وقع Strata نفسه في هذا الفخ. تسجّل تعليقات الشيفرة إصلاحًا: كانت نسخة أقدم تطبّق عقوبة التكرار مرتين (مرة ثانية بعد الحرارة)، وتضع min-p قبل top-p. وتقول التعليقات بصراحة: <strong>كل ترتيب ينتج رمزًا «صالحًا»</strong>، ولذلك لا يمكن اكتشاف الخطأ بالنظر إلى المخرجات فقط؛ يجب مقارنة التوزيع نفسه حدًّا حدًّا بنتيجة محسوبة بشكل مستقل. <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/src/kernels/cuda/sampler.cu#L1-L11" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p>وهذا يعطينا عادة مهمة: <strong>للحكم على تطابق تطبيقين لأخذ العينات، قارن جداول الاحتمالات، لا النص النهائي فقط.</strong> قد يتطابق النص مع اختلاف التوزيع؛ وقد يختلف التوزيع قليلًا فيتفرّع النص في خطوة ما.</p>
+
+<h2 id="sec-6">2.6 تطبيق عملي: افصل «التوزيع» عن «السحب»</h2>
+<p>افتح المختبر التفاعلي لهذا الفصل «من logits إلى الاحتمالات». يستخدم ثلاث درجات فقط، ويجعل درجة الحرارة والرقم العشوائي u مقبضين مستقلين.</p>
+<ol>
+<li><strong>ثبّت u وغيّر درجة الحرارة فقط.</strong> سترى أطوال أعمدة الاحتمال تتغيّر، وقد يتغيّر الرمز المختار معها. درجة الحرارة تغيّر <strong>التوزيع</strong>.</li>
+<li><strong>ثبّت درجة الحرارة وغيّر u فقط.</strong> أعمدة الاحتمال لا تتحرك أبدًا، وإنما يتغيّر موضع الدبوس فقط. u يغيّر <strong>أي عيّنة تُسحب من التوزيع</strong>.</li>
+<li>اجمع الاحتمالات الثلاثة. الأرقام المعروضة على الشاشة بعد التقريب قد يكون مجموعها 0.999 أو 1.001. وهذا ليس خطأ برمجيًّا: عند الحكم بأن «المجموع يساوي 1» يجب السماح بخطأ عشري صغير جدًّا.</li>
+</ol>
+<p>المختبر والشكلان التفاعليان في هذه الصفحة كلها تقديرات تعليمية: الدرجات مفترضة، والأرقام العشوائية تأتي من دالة تجزئة بسيطة، لا من Philox الخاص بـ Strata.</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>في كل خطوة لا يُخرج النموذج إلا جدول احتمالات «للرمز التالي»؛ واحتمال الجملة كلها هو حاصل ضرب احتمالاتها الشرطية في كل خطوة (قاعدة السلسلة).</li>
+<li>يحوّل softmax الدرجات إلى احتمالات. وطرح أكبر قيمة أولًا لا يغيّر النتيجة، ويمنع فيضان الأعداد العشرية. أما درجة الحرارة فتغيّر حدّة التوزيع فقط.</li>
+<li>أخذ العينات = اختيار واحد حسب الاحتمال التراكمي بواسطة رقم شبه عشوائي. وترتيب سلسلة أخذ العينات جزء من المعنى: إذا اختلف الترتيب اختلف جدول الاحتمالات.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «إذا جعلتُ درجة الحرارة 0 فإن إجابة السؤال الواحد تتطابق حرفًا بحرف دائمًا.»</strong></p>
+<p>درجة الحرارة 0 تضمن فقط «أن نختار الأعلى درجة في كل خطوة». لكن الدرجة العليا نفسها ناتجة عن عمليات فاصلة عائمة؛ فإذا تغيّر ترتيب الجمع قد تختلف الخانات العشرية الأخيرة، وإذا كانت درجتا مرشحين متقاربتين جدًّا فقد يبدّل هذا الفرق الصغير رمزًا واحدًا، فيتفرّع بعده الكلام كله. وتسجّل وثائق Strata هذه الحالة: مع نماذج سلسلة IQ يستخدم المعالج نواة مختلفة لحساب رمز واحد ولحساب عدة رموز دفعة واحدة، والتقريب يختلف قليلًا، فقد تحصل المُطالبة (prompt) نفسها عند الحرارة 0 على إجابة أخرى (معقولة بالقدر نفسه). ولكي تتطابق الإجابتان بايتًا بايتًا، يجب أيضًا إيقاف عدة إعدادات: ذاكرة المُطالبة المؤقتة، وتبديل الخبراء داخل الذاكرة وخارجها، وتحويل جزء من العمل عبر PCIe. قياس المصدر الأصلي (IQ3_XXS، مُطالبة بنحو 3,600 رمز، 4 تكرارات): مع تشغيل كل هذه المفاتيح ظهرت إجابة واحدة فقط في 4 مرات؛ ومع الإعدادات الافتراضية ظهرت إجابتان. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03]</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: احسبها بيدك، ثم انظر إلى عقد طبقة الخدمة</summary>
+<h3>الصيغة الكاملة لقاعدة السلسلة</h3>
+<p>لتكن متتالية x₁…xₙ؛ تعطي قاعدة السلسلة:</p>
+<div class="equation">P(x₁…xₙ) = ∏ₜ P(xₜ | x₁…xₜ₋₁)</div>
+<p>في كل دورة من حلقة الاستدلال يُحسب توزيع شرطي واحد. و«التاريخ» ليس خلفية اختيارية، بل مدخل الدالة. إذا غيّرت رمزًا مبكرًا واحدًا فقد تتغيّر كل التوزيعات الشرطية بعده. وهذا يفسّر لماذا لا يمكن إعادة استخدام نتائج حساب النص السابق المخزَّنة (ذاكرة الجلسة في الفصل 20) إلا إذا تطابقت البادئة تمامًا.</p>
+<h3>حساب softmax وعيّنة واحدة بيدك</h3>
+<p>خذ z = [2, 1, 0] وT = 1. بعد طرح الأكبر 2 نحصل على [0, −1, −2]، وأسسها نحو [1, 0.3679, 0.1353]، ومجموعها 1.5032، وبالتطبيع نحصل على <strong>[0.6652, 0.2447, 0.0900]</strong>. والاحتمالات التراكمية نحو [0.6652, 0.9100, 1]. إذا كان u = 0.8 فأول قيمة تراكمية تتجاوزه هي 0.9100، فيُختار الحدّ الثاني؛ وu = 0.5 يختار الأول؛ وu = 0.95 يختار الثالث. أما greedy فيختار الأول دائمًا.</p>
+<h3>الحرارة المتجهة إلى 0 ليست greedy نفسها</h3>
+<p>رياضيًّا، حين تتجه T إلى 0 يتجه softmax إلى «احتمال الحدّ الأعلى درجة يساوي 1». لكن البرنامج لا يستطيع فعلًا أن يحسب z ÷ 0، ولذلك تكتب كل التطبيقات الهندسية greedy كفرع منفصل. وهناك تفصيل آخر هو <strong>التعادل</strong>: إذا تساوت درجتان تمامًا فلا بد من قاعدة ثابتة لاختيار أحدهما. تنص نواة greedy في Strata على أن الأصغر رقمًا يفوز، ويحافظ الإصدار المتوازي على هذه القاعدة، وتصفها التعليقات بأنها «لبّ حجة الصحة كلها». <span class="ev ev-code">حقيقة من الشيفرة</span><a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/src/kernels/cuda/sampler.cu#L98-L99" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<h3>فخ إشارة عقوبة التكرار</h3>
+<p>«تخفّض» عقوبة التكرار الدرجة، فيبدو أنها قسمة على عدد أكبر من 1. لكن الدرجة قد تكون سالبة: قسمة عدد سالب على 1.1 تجعله أكبر. وقد نقل Strata قاعدة llama.cpp: إذا كانت الدرجة موجبة قُسمت على معامل العقوبة، وإذا كانت أصغر من أو تساوي 0 ضُربت فيه. وتنبّه التعليقات إلى أن القسمة غير المشروطة هي أبسط ما يُكتب عند قراءة الورقة العلمية، لكنها تحوّل العقوبة إلى مكافأة في نصف المفردات. وهناك تفصيل آخر: عقوبة «الظهور» (presence) تنظر فقط هل ظهر الرمز أم لا، فهي مفتاح 0/1 لا يعدّ كم مرة ظهر. <a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/src/kernels/cuda/sampler.cu#L65-L80" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<h3>تطابق البذرة لا يعني تطابق المخرجات</h3>
+<p>افترض أن المرشح A كانت درجته الأعلى أصلًا، لكنه تكرّر كثيرًا في التاريخ. إذا طبّقنا top-k ثم العقوبة، أو العقوبة ثم top-k، فقد تختلف مجموعة المرشحين تمامًا. لذلك فإن «البذرة نفسها» لا تكفي أبدًا لإثبات أن المخرجات نفسها. يجب أيضًا تثبيت: التاريخ، ومعاملات أخذ العينات، وترتيب المعالجة، ومسار الحساب العددي الذي أنتج logits. وقد كتبت واجهة المسودة المقترنة في Strata هذا كله في العقد: الصف t من نافذة التحقق يُؤخذ منه عيّنة بـ Philox(البذرة, pos₀ + t)، ولا تُقبل المسودة إلا إذا كانت <strong>مساوية</strong> لنتيجة عيّنة هذا الصف؛ فتصير المخرجات دالة في البذرة فقط، وتحدد المسودة فقط كم رمزًا يخرج في الدورة الواحدة. هذا الوضع معطَّل افتراضيًّا. <span class="ev ev-code">حقيقة من الشيفرة</span>[S07]</p>
+<h3>عقد طبقة الخدمة: الرفض لا القطع الصامت</h3>
+<p>عند قراءة <code>serve/frontend.py</code>، انظر أولًا كيف تمرّر <code>ChatTemplate.render</code> الرسائل messages والأدوات tools وgeneration prompt، ثم كيف تحوّل <code>effort_kwargs</code> صيغ «مستوى التفكير» المختلفة إلى المستويات الأربعة التي يعرفها القالب. [S16] ثم انظر إلى رأس الملف <code>serve/server.py</code>: إذا تجاوز طول المُطالبة مع أقصى طول للمخرجات حجم السياق، يُرفض الطلب ويُعاد الرمز 400، و<strong>لا يُقطع أبدًا</strong>؛ وأقصى المخرجات إن لم يُكتب أو كُتب 0 أو −1 فمعناها «اكتب بقدر ما تبقّى من السياق». [S15] وفي الحساب يُترك هامش <code>CTX_SLACK = 8</code> مواضع، ليتوافق مع الفحص في جهة المحرك. [S15] هذه المواضع الثمانية ليست ثابتًا رياضيًّا للنموذج، بل اتفاق بين الواجهة الأمامية والخلفية.</p>
+<h3>كيف تتحقق من تطبيق لأخذ العينات</h3>
+<p>اسحب درجة الحرارة في المختبر وراقب الاحتمالات، لا الرمز المختار فقط. والمقارنة عند التحقق تكون بين التوزيعات: مع logits نفسها والمعاملات نفسها، يجب أن يعطي التطبيقان جدول احتمالات متطابقًا ضمن هامش الخطأ العشري. ولا يُشترط أن يساوي مجموع الأرقام المقرَّبة المعروضة على الشاشة 1 بالضبط.</p>
+</details>
