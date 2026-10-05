@@ -35,7 +35,7 @@
 <p>先把两个词说清楚。<dfn>吞吐</dfn>是单位时间完成多少工作，这里是每秒输出多少个 token，写作 token/s，越大越好。<dfn>延迟</dfn>是等一件事完成要多久，比如从发出请求到看到第一个字的时间，越小越好。两者经常被混着说，可它们回答的是不同的问题。</p>
 
 <h2 id="sec-2">27.2 一个数字要带着它的条件</h2>
-<p>README 里的“94 token/s”，在 Strata 的详细文档里有完整的出处。文档开头先写条件，再给表格 <span class="ev ev-report">上游报告</span>[S03]，见图 27-2。</p>
+<p>README 里的“94 token/s”从哪来？v0.1.39 的 README 在表下补了一行说明：Q2_0 这一行用的是引擎 0.1.36，其他行是 0.1.26。<span class="ev ev-report">上游报告</span>[S01] 详细文档里，0.1.36 那一段写着：Q2_0 在 4K 时的输出从 89 提到 93.5 token/s，32K 的读题从 2,170 提到 2,653。主表却是 0.1.26 的，同一格分别是 93.0 和 2,171。<span class="ev ev-report">上游报告</span>[S03] README 的读题速度写的是 2,650，对得上 0.1.36，对不上主表。只看“94”这个数，分不出它来自哪个版本，要看版本说明。主表的条件写在文档开头，见图 27-2。</p>
 <figure class="fig"><svg viewBox="0 0 400 292" role="img" aria-label="图 27-2：Strata 测速表格的条件清单：显卡、CPU 与内存、系统、引擎版本、量化、输入、输出和设置">
 <text class="f-text" fill="#182f2b" x="200" y="20" font-size="15" font-weight="600" text-anchor="middle">一个性能数字的“身份证”</text>
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="380" height="222" rx="10"/>
@@ -48,7 +48,7 @@
 <text class="f-muted" fill="#5c6d66" x="24" y="214" font-size="14">输出</text><text class="f-text" fill="#182f2b" x="120" y="214" font-size="14">生成 256 个 token</text>
 <text class="f-muted" fill="#5c6d66" x="24" y="240" font-size="14">设置</text><text class="f-text" fill="#182f2b" x="120" y="240" font-size="14">安装程序写的默认值，MTP 草稿开启</text>
 <text class="f-warn" fill="#9e5d24" x="200" y="280" font-size="14" text-anchor="middle">少一项，这个数就没法和别人的结果放在一起比</text>
-</svg><figcaption>图 27-2　Strata 详细文档里测速表格的条件。每一项都可能改变结果，所以每一项都要写出来。[S03]</figcaption></figure>
+</svg><figcaption>图 27-2　Strata 详细文档里测速主表（引擎 0.1.26）的条件。每一项都可能改变结果，所以每一项都要写出来。[S03]</figcaption></figure>
 <p>这份文档还有几处值得学的细节 <span class="ev ev-report">上游报告</span>[S03]：</p>
 <ul>
 <li><strong>标出版本混用。</strong>表格主体是 0.1.26 的结果，可 262K 那一列有几格没有重测，沿用的是 0.1.22 或 0.1.14 的数，用符号单独标了出来。混在一张表里的数，不一定是同一次实验。</li>
@@ -197,7 +197,7 @@
 <p><dfn>TTFT</dfn>（time to first token，首 token 延迟）是从发出请求到第一个 token 出现的时间。它包含排队和读题，决定了用户“等多久才看到动静”。RTX 5090 报告对它的定义很精确：从发出 HTTP 请求之前开始计时，到收到第一段非空文本为止，忽略空的角色信息和保活消息。<span class="ev ev-report">上游报告</span></p>
 <p>输出速度的算法更多。上面图里的速度 ② 和 ③ 只差一个“减 1”，可在输出很短时差别不小：只输出 26 个 token 时，两者相差 26 ÷ 25 − 1 = 4%。<span class="ev ev-est">教学推演</span> 输出只有 1 个 token 时，速度 ③ 根本没有定义，硬算就是除以 0。</p>
 <p>“实时速度表”也有讲究。Strata 服务端源码的注释说，界面上显示的实时速度是一个时间窗口内的速率，而不是“从第一个 token 起的平均”：后者在第一个 token 刚出来时约等于 1 ÷ 已过时间，曾经在监控界面上显示出五位数，之后的一秒钟里又偏低。代码里的窗口是 2 秒，不满 0.25 秒时按 0.25 秒算。<span class="ev ev-code">代码事实</span>[S15]</p>
-<p>多个用户同时使用时，还要再分清两件事。<dfn>系统总吞吐</dfn>是所有请求加起来每秒输出多少 token；<dfn>单流速度</dfn>是每个用户自己看到的速度。五个用户合计每秒 100 个 token，不等于每人每秒 100 个。Strata 的服务端一次只处理一个序列，请求按先来先服务排队。[S15] 所以对它来说，“五个人同时用”意味着后面四个人在排队，他们的 TTFT 会变长，而解码速度不变。第 25 章讲过这种排队的代价。</p>
+<p>多个用户同时使用时，还要再分清两件事。<dfn>系统总吞吐</dfn>是所有请求加起来每秒输出多少 token；<dfn>单流速度</dfn>是每个用户自己看到的速度。五个用户合计每秒 100 个 token，不等于每人每秒 100 个。默认配置下，Strata 的服务端一次只处理一个序列，请求按先来先服务排队。[S15] 所以“五个人同时用”意味着后面四个人在排队，他们的 TTFT 会变长，而解码速度不变。第 25 章讲过这种排队的代价。v0.1.39 可以在配置里打开 <code>"parallel"</code>，让几个请求一起解码，结果正好反过来。上游在 RTX 5070 上实测：4 个请求同时到达时，最后一个的首 token 从 11.2 秒提前到 1.8 秒；可总吞吐从 70.7 降到 63.1 token/s，每条流的速度从 79.6 降到 16.9 token/s。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/BATCHING.md#L125-L144" target="_blank" rel="noopener noreferrer">BATCHING.md</a>）这时服务端的实时速度 <code>tok_s</code> 是所有请求速率之和，也就是系统总吞吐。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/serve/server.py#L1957-L1967" target="_blank" rel="noopener noreferrer">server.py</a>）每个槽位自己的速度，另列在 <code>/metrics</code> 的 <code>live.slots</code> 里。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/docs/BATCHING.md#L66-L67" target="_blank" rel="noopener noreferrer">BATCHING.md</a>）两种配置哪个“更快”，要看你问的是 TTFT、总吞吐，还是单流速度。</p>
 
 <h2 id="sec-6">27.6 动手：把一次测量写成可复核的记录</h2>
 <p>本书随附了一份测量协议 <code>labs/benchmark_protocol.md</code> 和一个记录模板 <code>labs/benchmark_template.csv</code>。模板有 31 列，从仓库版本、构建参数、模型文件的哈希，到排队、TTFT、解码时长、显存峰值和质量是否通过，每次运行填一行。模板里一个真实跑分都没有填：没有在真实硬件上测过的格子，就该空着。</p>

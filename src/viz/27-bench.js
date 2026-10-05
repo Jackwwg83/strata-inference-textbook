@@ -56,7 +56,7 @@
       undef: '没有定义',
       rReady: '<span class="c">$</span> ready. 调好参数，按 [ ▶ 播放 ]',
       r0: '<span class="c">t = 0</span> 发出请求',
-      rQ1: (t) => `<span class="m">t = ${t} ms</span> 前面的请求结束，轮到你。服务端一次只处理一个序列，先来先服务`,
+      rQ1: (t) => `<span class="m">t = ${t} ms</span> 前面的请求结束，轮到你。服务端默认一次只处理一个序列，先来先服务`,
       rP1: (t) => `<span class="m">t = ${t} ms</span> 读题完成，吐出第 1 个 token → TTFT = ${t} ms`,
       rBurst: (t, k) => `<span class="m">t = ${t} ms</span> 这一步吐出 ${k} 个 token（${k - 1} 个草稿被接受）`,
       rStep: (t, i) => `<span class="m">t = ${t} ms</span> 第 ${i} 个 token`,

@@ -103,3 +103,11 @@ test('the cumulative live meter spikes at the first token; the 2-second window d
   assert.ok(Math.abs(m.meterWindow(t, later) - 40) < 2.5);
   assert.equal(m.meterMean(t, t.tFirst - 1), null);
 });
+
+test('the rate-clock log says the server handles one sequence at a time by default (Strata v0.1.39)', () => {
+  require('../src/viz/core.js');
+  require('../src/viz/27-bench.js');
+  const t = globalThis.Viz.tables.find(x => x.zh && x.zh.rCode === 'RATE_CLOCK');
+  assert.ok(t, 'the RATE_CLOCK table is registered');
+  assert.match(t.zh.rQ1(800), /默认/);
+});
