@@ -1,0 +1,263 @@
+<div class="hook"><span class="eyebrow">قياس غريب للزمن</span>
+<p>في تعليقات شيفرة Strata المصدرية حكاية غريبة. برنامج GPU صغير اسمه <code>gdn_gate</code> يعالج 48 رقمًا فقط، ومع ذلك يستغرق كل تشغيل منه 28 ميكروثانية. حكم كاتب التعليق: kernel بهذا الصغر لا يمكن أن تنفَّذ فعلًا في 28 ميكروثانية. <span class="ev ev-code">حقيقة من الشيفرة</span>[S13]</p>
+<p>يحسب GPU 48 رقمًا في لمح البصر. فأين يذهب الوقت الزائد؟ الجواب هو «التسجيل في الاستقبال»: كلما طلب CPU من GPU تشغيل برنامج صغير، عليه أولًا أن يمرّ بإجراءات الإرسال. وإن أرسلنا البرامج واحدًا واحدًا، احتاج الرمز الواحد إلى نحو ألفي إرسال. يشرح هذا الفصل كيف يوزّع GPU العمل، ومن أين تأتي رسوم التسجيل، وكيف تخفّض Strata ألفي تسجيل إلى بضع عشرات، بل إلى تسجيل واحد.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> البرنامج الصغير على GPU اسمه kernel، وكل إطلاق له يحمل تكلفة ثابتة بعشرات الميكروثانيات. توفّرها Strata بطريقتين: تدمج عدة kernels في واحدة، وتسجّل kernels الطبقة كلها في CUDA Graph يُرسَل دفعة واحدة. الثمن أن الـ graph يجمّد معاملاته، لذلك يجب أن يعيش «الموضع» الذي يتغير في كل خطوة في كتلة من ذاكرة الفيديو (VRAM) ذات عنوان ثابت.</p>
+
+<h2 id="sec-1">15.1 كيف يوزّع GPU العمل: الخيوط وكتل الخيوط وwarp</h2>
+<p>تخيّل قاعة ضخمة لتصحيح الامتحانات. هناك عشرات الآلاف من الأوراق، وكل معلّم يصحّح ورقة واحدة. ينقسم المعلّمون إلى قاعات كثيرة، ويجلسون داخل كل قاعة في صفوف من 32. يتبع الصف كله نداءً واحدًا: «اقلب الصفحة»، «انظر إلى السؤال الأول»، «ضع الدرجة». النداء واحد، أما الورقة في كل يد فمختلفة.</p>
+<p>هكذا يعمل GPU. البرنامج الصغير الذي يسلّمه CPU إلى GPU اسمه <dfn>kernel</dfn> (نواة حسابية). عند إطلاق kernel مرة واحدة، يفتح GPU آلاف الخيوط. كل <dfn>خيط</dfn> (thread) ينفّذ الشيفرة نفسها، ويختلف فقط رقم البيانات التي يعالجها. تُجمع الخيوط أولًا في <dfn>كتل خيوط</dfn> (blocks). تعمل خيوط الكتلة الواحدة على وحدة حسابية واحدة، ويمكنها أن تتشارك قطعة صغيرة من التخزين السريع. وداخل الكتلة تُصفّ الخيوط في مجموعات من 32 اسمها <dfn>warp</dfn>: الخيوط الـ 32 في warp واحد تنفّذ التعليمة نفسها في اللحظة نفسها. [R01] يرسم الشكل 15-1 هذه المستويات الثلاثة معًا.</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="الشكل 15-1: إطلاق kernel واحد يفتح شبكة، وتنقسم الشبكة إلى كتل خيوط، وكل 32 خيطًا داخل الكتلة تشكّل warp">
+<defs><pattern id="c15-lane" width="9" height="12" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="7" height="12" rx="1"/></pattern></defs>
+<rect class="f-soft" fill="#e5f1df" x="10" y="8" width="380" height="96" rx="10"/>
+<text class="f-text" fill="#182f2b" x="22" y="28" font-size="13" font-weight="600">إطلاق واحد = شبكة واحدة (grid)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="22" y="40" width="82" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="63" y="62" font-size="12" text-anchor="middle">كتلة 0</text>
+<text class="f-muted" fill="#5c6d66" x="63" y="80" font-size="12" text-anchor="middle">خيوط كثيرة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="114" y="40" width="82" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="155" y="62" font-size="12" text-anchor="middle">كتلة 1</text>
+<text class="f-muted" fill="#5c6d66" x="155" y="80" font-size="12" text-anchor="middle">خيوط كثيرة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="206" y="40" width="82" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="247" y="62" font-size="12" text-anchor="middle">كتلة 2</text>
+<text class="f-muted" fill="#5c6d66" x="247" y="80" font-size="12" text-anchor="middle">خيوط كثيرة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="298" y="40" width="82" height="52" rx="7"/>
+<text class="f-text" fill="#182f2b" x="339" y="62" font-size="12" text-anchor="middle">……</text>
+<text class="f-muted" fill="#5c6d66" x="339" y="80" font-size="12" text-anchor="middle">كتل كثيرة</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="4 3" d="M63 92V112H200V122"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="124" width="380" height="118" rx="10"/>
+<text class="f-text" fill="#182f2b" x="22" y="144" font-size="13" font-weight="600">كتلة خيوط واحدة: حتى 1024 خيطًا</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="167" font-size="12">warp 0</text>
+<rect fill="url(#c15-lane)" x="80" y="157" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="22" y="187" font-size="12">warp 1</text>
+<rect fill="url(#c15-lane)" x="80" y="177" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="22" y="207" font-size="12">warp 2</text>
+<rect fill="url(#c15-lane)" x="80" y="197" width="288" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="224" y="232" font-size="12" text-anchor="middle">…… كل صف من 32 خانة = 32 خيطًا</text>
+<text class="f-text" fill="#182f2b" x="200" y="262" font-size="12" text-anchor="middle">مجموعة warp: 32 خيطًا تنفّذ التعليمة نفسها في اللحظة نفسها</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="282" font-size="12" text-anchor="middle">كل خيط يختار بياناته بحسب رقمه</text>
+</svg><figcaption>الشكل 15-1　التقسيم الثلاثي للعمل في GPU. يفتح الإطلاق الواحد شبكة، وتنقسم الشبكة إلى كتل خيوط، وكل 32 خيطًا في الكتلة تشكّل warp يتبع النداء نفسه.</figcaption></figure>
+<p>هذا الترتيب منتشر في Strata. خذ مثلًا تبديل صفحات KV الذي سيأتي في الفصل 17: تقول الشيفرة إنها «تستخدم كتلة من 1,024 خيطًا لمسح الأرقام المختارة». <span class="ev ev-code">حقيقة من الشيفرة</span> وخذ أيضًا المعادلة التكرارية في طبقات GDN: يذكر تعليق في الشيفرة أن كل سطر من المعادلة يتعلق بعمود واحد من الحالة، وأن الأعمدة مستقلة عن بعضها، لذلك «يستطيع خيط واحد أن يتولى عمودًا كاملًا، ولا تحتاج الخطوة كلها إلى أن ينتظر خيط خيطًا آخر». [S17]</p>
+<aside class="primer" id="c15-gpu-model">
+<h3>نموذج البرمجة على GPU: الخيوط وكتل الخيوط وwarp</h3>
+<p>الحدس: CPU مثل بضعة أساتذة شاملين، يتعامل كل منهم مع تفرعات وقرارات معقدة؛ وGPU مثل آلاف المعيدين، لا يعرف كل منهم إلا تنفيذ عمل بسيط بحسب النداء، لكنهم كثيرون. ولكي يسرع GPU، يجب تقسيم العمل إلى آلاف المهام الصغيرة <strong>المستقلة</strong> عن بعضها.</p>
+<p>التعريف: يكتب المبرمج دالة kernel، ويحدد عند الإطلاق «كم كتلة خيوط، وكم خيطًا في كل كتلة». تُكتب في CUDA هكذا: <code>vecAdd&lt;&lt;&lt;4, 256&gt;&gt;&gt;(A, B, C)</code>: أربع كتل، في كل منها 256 خيطًا، أي 1,024 خيطًا في المجموع، ويحسب كل خيط بالمعادلة <code>threadIdx.x + blockDim.x × blockIdx.x</code> رقم العنصر الذي يتولاه. في GPU من NVIDIA الحالية تضم كتلة الخيوط الواحدة حتى 1,024 خيطًا، وتُجمع خيوط الكتلة في مجموعات من 32 هي الـ warp. [R01]</p>
+<p>رقم محدد: حين يقرأ warp من ذاكرة الفيديو، إن قرأت خيوطه الـ 32 عناوين <strong>متجاورة</strong>، استطاع العتاد دمجها في عدد قليل جدًا من معاملات الذاكرة، وهذا هو <dfn>الوصول المتجمّع</dfn> (coalesced access). وإن قرأت عناوين متباعدة جدًا، وجب تقسيمها إلى معاملات كثيرة، لا تستعمل كل منها إلا جزءًا صغيرًا من البايتات. سيعطيك مثال Strata في القسم التالي حجم الفرق.</p>
+<p>العلاقة بهذا الفصل: الـ kernel هي أصغر وحدة عمل يسلّمها CPU إلى GPU. وكلما صغرت الـ kernels وكثرت، صارت تكلفة «التسليم» نفسها أوضح.</p>
+<p class="further">للاستزادة: <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html" target="_blank" rel="noopener noreferrer">دليل برمجة NVIDIA CUDA: نموذج البرمجة</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/intro-to-cuda-cpp.html" target="_blank" rel="noopener noreferrer">NVIDIA: مدخل إلى CUDA C++ (مع مثال vecAdd)</a> · <a href="https://ar.wikipedia.org/wiki/%D9%83%D9%88%D8%AF%D8%A7" target="_blank" rel="noopener noreferrer">ويكيبيديا: كودا (CUDA)</a> · <a href="https://en.wikipedia.org/wiki/Thread_block_(CUDA_programming)" target="_blank" rel="noopener noreferrer">Wikipedia: Thread block</a></p>
+</aside>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> الـ warp هو وحدة التنفيذ في SIMT (تعليمة واحدة، خيوط كثيرة): تعليمة واحدة تقود 32 خيطًا، مثل تعليمات المتجهات في SIMD؛ لكن لكل خيط سجلاته ومؤشر برنامجه الخاص، فيستطيع أن يسلك فرعًا مختلفًا، والثمن أن يُنفَّذ جانبا الفرع بالتناوب. يشرح الفصل 13 الفرق بين SIMD وSIMT بالتفصيل.</p>
+
+<h2 id="sec-2">15.2 الخيوط المتجاورة تقرأ عناوين متجاورة: ترتيب البيانات مهم</h2>
+<p>الرياضيات نفسها، لكن اختلاف ترتيب البيانات قد يغيّر السرعة عدة أضعاف. يقارن الشكل 15-2 طريقتين للقراءة.</p>
+<figure class="fig"><svg viewBox="0 0 400 352" role="img" aria-label="الشكل 15-2: حين تقرأ الخيوط المتجاورة عناوين متجاورة تكون المعاملة الواحدة كلها مفيدة؛ وحين تتباعد كثيرًا تجلب كل معاملة 32 بايت ولا تستعمل منها إلا 4">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">الوصول المتجمّع: خيوط متجاورة تقرأ عناوين متجاورة</text>
+<circle class="f-soft" fill="#e5f1df" cx="44" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="44" y="46" font-size="12" text-anchor="middle">0</text>
+<circle class="f-soft" fill="#e5f1df" cx="88" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="88" y="46" font-size="12" text-anchor="middle">1</text>
+<circle class="f-soft" fill="#e5f1df" cx="132" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="132" y="46" font-size="12" text-anchor="middle">2</text>
+<circle class="f-soft" fill="#e5f1df" cx="176" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="176" y="46" font-size="12" text-anchor="middle">3</text>
+<circle class="f-soft" fill="#e5f1df" cx="220" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="220" y="46" font-size="12" text-anchor="middle">4</text>
+<circle class="f-soft" fill="#e5f1df" cx="264" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="264" y="46" font-size="12" text-anchor="middle">5</text>
+<circle class="f-soft" fill="#e5f1df" cx="308" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="308" y="46" font-size="12" text-anchor="middle">6</text>
+<circle class="f-soft" fill="#e5f1df" cx="352" cy="42" r="10"/><text class="f-text" fill="#182f2b" x="352" y="46" font-size="12" text-anchor="middle">7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 52L40 84M88 52L66 84M132 52L92 84M176 52L118 84M220 52L144 84M264 52L170 84M308 52L196 84M352 52L222 84"/>
+<rect class="f-accent" fill="#136d5a" x="28" y="86" width="208" height="22" rx="3"/>
+<text class="f-on" fill="#ffffff" x="132" y="101" font-size="12" text-anchor="middle">32 بايت متصلة، كلها مفيدة</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="132" font-size="12">8 خيوط، كل منها يقرأ 4 بايت، فتكفي معاملة ذاكرة واحدة</text>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="13" font-weight="600">الوصول المتباعد (stride): الخيوط المتجاورة متباعدة</text>
+<circle class="f-soft" fill="#e5f1df" cx="44" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="44" y="194" font-size="12" text-anchor="middle">0</text>
+<circle class="f-soft" fill="#e5f1df" cx="88" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="88" y="194" font-size="12" text-anchor="middle">1</text>
+<circle class="f-soft" fill="#e5f1df" cx="132" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="132" y="194" font-size="12" text-anchor="middle">2</text>
+<circle class="f-soft" fill="#e5f1df" cx="176" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="176" y="194" font-size="12" text-anchor="middle">3</text>
+<circle class="f-soft" fill="#e5f1df" cx="220" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="220" y="194" font-size="12" text-anchor="middle">4</text>
+<circle class="f-soft" fill="#e5f1df" cx="264" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="264" y="194" font-size="12" text-anchor="middle">5</text>
+<circle class="f-soft" fill="#e5f1df" cx="308" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="308" y="194" font-size="12" text-anchor="middle">6</text>
+<circle class="f-soft" fill="#e5f1df" cx="352" cy="190" r="10"/><text class="f-text" fill="#182f2b" x="352" y="194" font-size="12" text-anchor="middle">7</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M44 200L28 232M88 200L72 232M132 200L116 232M176 200L160 232M220 200L204 232M264 200L248 232M308 200L292 232M352 200L336 232"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="26" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="26" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="70" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="114" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="114" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="158" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="158" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="202" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="246" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="246" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="290" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="290" y="234" width="5" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="334" y="234" width="38" height="22" rx="3"/><rect class="f-warn" fill="#9e5d24" x="334" y="234" width="5" height="22"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="280" font-size="12">8 معاملات، كل منها تجلب 32 بايت</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="298" font-size="12">ولا تستعمل إلا 4 (الجزء الصغير بلون التحذير)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="324" font-size="12">معادلة GDN في Strata قبل إعادة الكتابة كانت هكذا:</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="342" font-size="12">يبعد الخيطان المتجاوران نحو 24.5 KB</text>
+</svg><figcaption>الشكل 15-2　نقرأ 8 أرقام بالطريقتين، ويختلف الترتيب فيتغير حجم النقل 8 أضعاف. حين تقرأ خيوط warp عناوين متجاورة، يستطيع العتاد دمجها في معاملة واحدة.</figcaption></figure>
+<p>طبقات GDN في Strata دفعت ثمن هذا الخطأ. يقول تعليق النواة المدموجة: كانت الطريقة القديمة تجعل warp واحدًا مسؤولًا عن عمود واحد من الحالة، فتنزل الخيوط الـ 32 على امتداد 128 سطرًا؛ لكن الحالة مخزّنة بترتيب «السطر، الرأس، العمود»، فيبعد الخيطان المتجاوران عن بعضهما نحو 24.5 KB فيما يقرآنه. فكانت النتيجة أن كل قطاع من 32 بايت يُجلب لا يُستعمل منه إلا 4 بايت، وتحتاج كل طبقة إلى 47.6 ميكروثانية لتنقل 6.3 MB من الحالة. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>بعد إعادة الكتابة، تتولى كتلة خيوط واحدة رأسًا كاملًا، وتُوزَّع 512 خيطًا على «مجموعات الأسطر والأعمدة»، فتصبح الأعمدة الـ 128 في السطر الواحد قراءة متصلة واحدة بحجم 512 بايت. <span class="ev ev-code">حقيقة من الشيفرة</span> والمبدأ هو مبدأ الشكل 15-2 نفسه: دع الخيوط المتجاورة تقرأ عناوين متجاورة. وتلتزم النواة الأساسية في GDN بهذه القاعدة أيضًا: تُخزَّن الحالة بالترتيب (i, h, j) وj هو الأسرع تغيرًا، فإذا ثبت i قرأ warp واحد على امتداد j ذاكرة متصلة. [S17]</p>
+<p>ترتيب البيانات خيار «مجاني»: الحالة مخزن مؤقت وقت التشغيل وليست أوزان النموذج، فيمكن ترتيبها كما نشاء. لكن الشيفرة تنبّه عن قصد إلى أن الترتيبين يفهرسان الأرقام الثلاثة نفسها، فإن اختلف الطرفان القارئ والكاتب في الترتيب، عمل البرنامج كالمعتاد وخرجت النتائج خاطئة بصمت. [S17]</p>
+
+<h2 id="sec-3">15.3 كل إطلاق لـ kernel يدفع «رسوم تسجيل»</h2>
+<p>نعود إلى الحكاية الغريبة في البداية. حين يطلب CPU من GPU تشغيل kernel، يمرّ الطلب عبر برنامج التشغيل (driver): يفحص المعاملات، ويحزم الأوامر، ويضعها في طابور الإرسال. تُنفَّذ هذه الإجراءات على CPU وتستغرق وقتًا، ونسميها <dfn>تكلفة الإطلاق</dfn>. فإن كانت الـ kernel نفسها تحسب بضع ميكروثوانٍ فقط، والإجراءات تحتاج عشر ميكروثوانٍ أو عشرين، فإن GPU ينهي واحدة ثم ينتظر التالية بلا عمل. يرسم الشكل 15-3 هذا «الانتظار».</p>
+<div class="viz" data-viz="kernel-launch"><figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="الشكل 15-3: 8 kernels صغيرة تُرسَل بثلاث طرق. الإطلاق واحدًا تلو الآخر 165 ميكروثانية، والدمج كل اثنتين 90 ميكروثانية، وCUDA Graph 60 ميكروثانية">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">إطلاق واحد تلو الآخر</text>
+<text class="f-text" fill="#182f2b" x="390" y="18" font-size="12" text-anchor="end">165 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="37" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="26" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="116.4" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="152.7" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="189.1" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="225.5" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="261.8" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="298.2" y="27" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="334.5" y="27" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="57" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="46" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="152.7" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="189.1" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="225.5" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="261.8" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="298.2" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="334.5" y="47" width="8.6" height="12"/><rect class="f-accent" fill="#136d5a" x="370.9" y="47" width="8.6" height="12"/>
+<text class="f-text" fill="#182f2b" x="10" y="92" font-size="13" font-weight="600">دمج كل اثنتين</text>
+<text class="f-text" fill="#182f2b" x="390" y="92" font-size="12" text-anchor="end">90 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="111" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="100" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="116.4" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="152.7" y="101" width="35.4" height="12"/><rect class="f-warn" fill="#9e5d24" x="189.1" y="101" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="131" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="120" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="152.7" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="189.1" y="121" width="17.7" height="12"/><rect class="f-accent" fill="#136d5a" x="225.5" y="121" width="17.7" height="12"/>
+<text class="f-text" fill="#182f2b" x="10" y="166" font-size="13" font-weight="600">CUDA Graph</text>
+<text class="f-text" fill="#182f2b" x="390" y="166" font-size="12" text-anchor="end">60 µs</text>
+<text class="f-muted" fill="#5c6d66" x="40" y="185" font-size="12">CPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="174" width="300" height="14"/>
+<rect class="f-warn" fill="#9e5d24" x="80" y="175" width="35.4" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="40" y="205" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="194" width="300" height="14"/>
+<rect class="f-accent" fill="#136d5a" x="116.4" y="195" width="72.7" height="12"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">توضيح: 8 kernels، كل منها تحسب 5 µs؛</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="254" font-size="12">وكل إرسال يستغرق 20 µs (لون التحذير)</text>
+</svg><figcaption>الشكل 15-3　يضيع وقت الـ kernels الصغيرة في انتظار الإرسال. عند الإطلاق واحدًا تلو الآخر يكاد صف GPU يكون فراغات كله؛ والدمج يقلّل عدد مرات الإرسال؛ أما CUDA Graph فيُرسَل مرة واحدة وتعمل عقده متتابعة. الأرقام افتراضات تعليمية.</figcaption></figure></div>
+<p>وهذا ليس افتراضًا. تقول تعليقات Strata بوضوح: «هذا المحرك مقيَّد بتكلفة الإطلاق، لا بعرض النطاق». قيست كل kernel في طبقة GDN بنحو 0.028 ملّي ثانية، حتى <code>gdn_gate</code> التي تعالج 48 رقمًا فقط، وهذا بالضبط تكلفة إطلاق عادي على هذا الجهاز. وتُطلَق طبقة GDN الواحدة نحو 19 مرة، وكتلة الطبقة الكاملة نحو 45 مرة. <span class="ev ev-code">حقيقة من الشيفرة</span>[S13] لا يذكر التعليق بطاقة الرسوميات ولا إصدار برنامج التشغيل المستخدمين في القياس، فاستعمل الأرقام التالية لتحس بمرتبة الحجم فقط.</p>
+<p>لنحسب. يقول تعليق آخر: عند إطلاق الـ kernels واحدة تلو الأخرى يحتاج الرمز الواحد إلى نحو 2,000 إطلاق؛ وقيست تكلفة كل استدعاء لبرنامج التشغيل بين 10 و22 ميكروثانية. <span class="ev ev-code">حقيقة من الشيفرة</span> فرسوم «التسجيل» وحدها تبلغ لكل رمز: 2,000 × 10 µs = 20 ملّي ثانية، إلى 2,000 × 22 µs ≈ 44 ملّي ثانية. وبلغة السرعة: حتى لو لم يحسب GPU شيئًا، فلن تتجاوز السرعة 23-50 رمزًا في الثانية. <span class="ev ev-est">تقدير تعليمي</span></p>
+<aside class="primer" id="c15-launch-fusion">
+<h3>تكلفة إطلاق kernel ودمج العمليات</h3>
+<p>الحدس: في المستشفى يحتاج التسجيل إلى طابور. فإن كان كل فحص صغير يتطلب تسجيلًا جديدًا، ضاع الصباح كله عند شباك التسجيل. وهناك حلان: الأول أن ندمج عدة فحوص في فحص واحد (<dfn>دمج العمليات</dfn>، kernel fusion)؛ والثاني أن يكتب الطبيب قائمة الفحوص كاملة مرة واحدة وتنفذها الممرضة بحسب القائمة (<dfn>CUDA Graph</dfn>).</p>
+<p>التعريف: تكلفة الإطلاق هي ما يدفعه CPU ثابتًا ليجهّز kernel ويرسلها، ولا تكاد تتعلق بمقدار ما تحسبه الـ kernel. لنفرض أن حساب kernel يستغرق w ميكروثانية، وإرسالها يستغرق L ميكروثانية. عند إرسال n من الـ kernels واحدة تلو الأخرى: إن كان w &lt; L فالزمن الكلي نحو n × L + w، ويقضي GPU معظم وقته منتظرًا؛ وإن كان w ≥ L فالزمن الكلي نحو L + n × w، ويختبئ الإرسال خلف الحساب. <span class="ev ev-est">تقدير تعليمي</span></p>
+<p>وفائدة الدمج لا تقف عند تقليل التسجيلات: حين تُدمج عدة عمليات في kernel واحدة، تبقى النتائج الوسيطة في السجلات أو في التخزين داخل الشريحة، فلا تُكتب إلى ذاكرة الفيديو ثم تُقرأ منها. والثمن أن الـ kernel تصبح أعقد، وقد تستهلك سجلات أكثر، فيقلّ عدد الخيوط التي تعمل في GPU معًا. أما CUDA Graph فلا يغيّر الـ kernel نفسها: إنه يسجّل سلسلة من العمليات وتبعياتها، ثم يرسلها كلها دفعة واحدة ويعيد تشغيلها، فيوفّر تكلفة الإرسال من جهة CPU. [R01]</p>
+<p>العلاقة بهذا الفصل: تستعمل Strata الطريقتين معًا. نرى الأرقام المحددة في القسم التالي.</p>
+<p class="further">للاستزادة: <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html" target="_blank" rel="noopener noreferrer">دليل برمجة NVIDIA CUDA: CUDA Graphs</a> · <a href="https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/" target="_blank" rel="noopener noreferrer">مدونة PyTorch: التسريع باستخدام CUDA Graphs</a> · <a href="https://en.wikipedia.org/wiki/Loop_fission_and_fusion" target="_blank" rel="noopener noreferrer">Wikipedia: Loop fusion (الفكرة المماثلة في المترجمات)</a></p>
+</aside>
+
+<h2 id="sec-4">15.4 طريقتان للتوفير: الدمج وCUDA Graph</h2>
+<p>يضع الشكل 15-4 الطريقتين جنبًا إلى جنب: الدمج يغيّر ما يعمل على GPU، والـ graph يغيّر طريقة إرسال CPU.</p>
+<figure class="fig"><svg viewBox="0 0 400 366" role="img" aria-label="الشكل 15-4: الدمج يكتب ثلاث kernels في واحدة وتبقى النتائج الوسيطة داخل الشريحة؛ وCUDA Graph يحوّل خمس عمليات إرسال إلى واحدة وتبقى العقد خمس kernels كما كانت">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">دمج العمليات: عدة kernels تصبح واحدة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="65" y="54" font-size="12" text-anchor="middle">التفاف + SiLU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="145" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="54" font-size="12" text-anchor="middle">معيار L2 (q)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="280" y="32" width="110" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="335" y="54" font-size="12" text-anchor="middle">معيار L2 (k)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M120 49H143M255 49H278"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="86" font-size="12">3 إطلاقات؛ تُكتب النتائج الوسيطة في ذاكرة الفيديو</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="104" font-size="12">ثم تقرؤها الـ kernel التالية من جديد</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 110V122"/>
+<rect class="f-accent" fill="#136d5a" x="10" y="124" width="380" height="34" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="146" font-size="12" text-anchor="middle">نواة واحدة (kernel): التفاف + SiLU + معيارا L2</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="178" font-size="12">إطلاق واحد؛ تبقى النتائج الوسيطة داخل الشريحة</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="196" font-size="12">(fused_gdn_conv_l2 في Strata)</text>
+<g transform="translate(0,32)">
+<text class="f-text" fill="#182f2b" x="10" y="192" font-size="13" font-weight="600">استخدام CUDA Graph: سجّل مرة وأعد التشغيل مرات</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="202" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="102" y="222" font-size="12" text-anchor="middle">بلا graph: إرسال متتابع</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="232" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="243" font-size="12" text-anchor="middle">إرسال kernel 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="250" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="261" font-size="12" text-anchor="middle">إرسال kernel 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="268" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="279" font-size="12" text-anchor="middle">إرسال kernel 3</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="286" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="297" font-size="12" text-anchor="middle">إرسال kernel 4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="304" width="145" height="14" rx="3"/><text class="f-muted" fill="#5c6d66" x="102" y="315" font-size="12" text-anchor="middle">إرسال kernel 5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="205" y="202" width="185" height="124" rx="8"/>
+<text class="f-text" fill="#182f2b" x="297" y="222" font-size="12" text-anchor="middle">مع graph: إرسال واحد للكل</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M233 266H361"/>
+<circle class="f-accent" fill="#136d5a" cx="233" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="265" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="297" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="329" cy="266" r="10"/><circle class="f-accent" fill="#136d5a" cx="361" cy="266" r="10"/>
+<text class="f-muted" fill="#5c6d66" x="297" y="300" font-size="12" text-anchor="middle">العقد هي الـ 5 kernels نفسها</text>
+<text class="f-muted" fill="#5c6d66" x="297" y="316" font-size="12" text-anchor="middle">التوفير في إرسال CPU فقط</text>
+</g>
+</svg><figcaption>الشكل 15-4　الدمج يغيّر ما يعمل على GPU: تصبح عدة عمليات kernel واحدة ولا تُحفظ النتائج الوسيطة في الذاكرة. والـ graph يغيّر طريقة إرسال CPU: تُسلَّم السلسلة كلها دفعة واحدة، وتبقى كل عقدة kernel كما كانت. ويمكن الجمع بين الطريقتين.</figcaption></figure>
+<p><strong>الدمج.</strong> في Strata مجموعة من النوى تبدأ أسماء ملفاتها بـ <code>fused_</code>. مثلًا تحلّ <code>fused_gdn_conv_l2</code> وحدها محل ثلاثة إطلاقات: «التفاف مع SiLU» ومعيار L2 مرتين؛ وتحلّ <code>fused_gdn_ab</code> محل ضرب مصفوفة في متجه مرتين وkernelين عنصرًا بعنصر. <span class="ev ev-code">حقيقة من الشيفرة</span> وكانت قراءة الوصلة المتبقية المختلطة تحتاج في كل مرة إلى ست kernels، ويمرّ بها كل رمز 96 مرة، فصارت بعد الدمج kernelين فقط. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p><strong>CUDA Graph.</strong> تسجّل Strata kernels كل طبقة في graph. وفي التعليقات قياس فعلي: كتلة الطبقة نفسها بعقدها الـ 43 تستغرق 2.393 ملّي ثانية عند الإطلاق واحدة تلو الأخرى، و1.585 ملّي ثانية فقط عند إعادة تشغيل graph مسجَّل، أي أسرع بـ 1.51 مرة، و«كل ما وُفِّر هو تكلفة الإطلاق». <span class="ev ev-code">حقيقة من الشيفرة</span>[S13] ويقول تعليق آخر بوضوح أكبر: الحساب في إعادة التشغيل مطابق تمامًا للإطلاق المنفرد، والفرق فقط أن «نحو 2,000 إطلاق kernel صارت 48 إطلاق graph». <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>وهل نستطيع الذهاب أبعد؟ نعم. في وضع تشغيل عرض الشاشة على ويندوز، يحتاج إطلاق الـ graph نفسه إلى نحو 0.3-0.4 ملّي ثانية؛ والحلقة الطبقية تطلق 96 graph لكل رمز، وقد قيس الرمز الواحد بـ 48.6 ملّي ثانية، بينما لا تشغل الـ kernels الفعلية على GPU إلا 12 ملّي ثانية. لذلك كتبت Strata نسخة «graph واحد لكل رمز» تضع فيها الطبقات الـ 48 كلها. <span class="ev ev-code">حقيقة من الشيفرة</span> يرتّب الشكل 15-5 المراحل الثلاث معًا.</p>
+<figure class="fig"><svg viewBox="0 0 400 218" role="img" aria-label="الشكل 15-5: عدد مرات الإرسال لكل رمز مولَّد، من نحو 2000 إطلاق kernel، إلى 48 حتى 96 إطلاق graph، ثم إطلاق واحد لـ graph الرمز كله">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">كم مرة يرسل CPU إلى GPU عن كل رمز مولَّد</text>
+<text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">إطلاق kernels واحدة تلو الأخرى</text>
+<text class="f-text" fill="#182f2b" x="390" y="44" font-size="12" text-anchor="end">نحو 2,000 مرة</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="52" width="344" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="10" y="94" font-size="12">كل طبقة في graph (واحد أو اثنان لكل طبقة)</text>
+<text class="f-text" fill="#182f2b" x="390" y="94" font-size="12" text-anchor="end">48-96 مرة</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="102" width="239" height="16" rx="3"/>
+<text class="f-text" fill="#182f2b" x="10" y="144" font-size="12">الرمز كله في graph واحد</text>
+<text class="f-text" fill="#182f2b" x="390" y="144" font-size="12" text-anchor="end">مرة واحدة</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="152" width="80" height="16" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="12">الأرقام من تعليقات session.hpp؛</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">وطول الشريط مرسوم بمقياس لوغاريتمي</text>
+</svg><figcaption>الشكل 15-5　تقلّل Strata عدد مرات الإرسال خطوة بعد خطوة: تسجّل الـ graph لكل طبقة أولًا، ثم تسجّل الرمز كله في graph واحد. وكل إرسال يُحذف يوفّر تكلفة ثابتة بين عشرات الميكروثانيات ومئاتها.</figcaption></figure>
+<p>فلماذا لا نسجّل الرمز كله من البداية؟ لأن بين الطبقات تسليمًا إلى مجموعة خبراء CPU: يعرف CPU أي الخبراء يجب أن يحسب بعد أن يصل GPU إلى خطوة الموجِّه (router). وقد جعلت Strata «الطبقة» وحدةَ الـ graph في أول الأمر لتسمح للمضيف بالتدخل بين الطبقات، فتبدأ مجموعة خبراء CPU عملها بينما يشغّل GPU المقطع التالي. [S13] أما graph الرمز كله فيستعمل kernel بخيط واحد على GPU تنتظر على الجهاز أن يكتب المضيف علامةً، فلا يستدعي المضيف برنامج التشغيل بعد ذلك. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+
+<h2 id="sec-5">15.5 الـ graph يجمّد المعاملات: الموضع المجمَّد</h2>
+<p>لـ CUDA Graph طبع خاص: عند التسجيل تُنسخ <strong>معاملات</strong> الـ kernel كما هي داخل الـ graph، وفي كل إعادة تشغيل بعد ذلك تُستعمل هذه النسخة. كتبت Strata تجربة صغيرة للتحقق: يعيد الـ graph عند إعادة التشغيل قراءةَ البيانات في المخزن المؤقت للإدخال، لكنه لا يعيد قراءة معاملات الـ kernel. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>والمشكلة أن بعض المعاملات يتغير مع كل رمز. وأوضحها <strong>الموضع</strong>: رقم هذا الرمز في التسلسل. فإن مرّرنا الموضع معاملًا إلى kernel تكتب في ذاكرة KV المؤقتة، كان 0 لحظة التسجيل، وبقي 0 في كل إعادة تشغيل بعدها. المحاكي التالي يبطّئ هذه العملية: اختر أولًا «المعامل مسجَّل بالقيمة»، ثم تقدّم <strong>خطوة</strong> بعد خطوة عبر عدة رموز:</p>
+<div class="viz" data-viz="graph-freeze"><figure class="fig"><svg viewBox="0 0 400 256" role="img" aria-label="الشكل 15-6: حين يُسجَّل الموضع بالقيمة في الـ graph تُكتب الرموز الأربعة كلها في الموضع 0؛ وحين تقرأ الـ kernel الموضع من مخزن step تكتب كل رمز في خانته">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">خطأ: الموضع مسجَّل في الـ graph كمعامل</text>
+<rect class="f-warn" fill="#9e5d24" x="10" y="28" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="53" font-size="13" text-anchor="middle">t3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="58" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="106" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="154" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="298" y="28" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="346" y="28" width="44" height="40" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="32" y="84" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="80" y="84" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="128" y="84" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="176" y="84" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="224" y="84" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="272" y="84" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="320" y="84" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="368" y="84" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="104" font-size="12">الرموز t0-t3 كلها تُكتب في الموضع 0 ويمحو اللاحق السابق؛</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="120" font-size="12">فلا يرى الانتباه إلا خانة واحدة</text>
+<g transform="translate(0,16)">
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="13" font-weight="600">صحيح: الـ kernel تقرأ الموضع من مخزن step</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="32" y="169" font-size="13" text-anchor="middle">t0</text>
+<rect class="f-accent" fill="#136d5a" x="58" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="80" y="169" font-size="13" text-anchor="middle">t1</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="128" y="169" font-size="13" text-anchor="middle">t2</text>
+<rect class="f-accent" fill="#136d5a" x="154" y="144" width="44" height="40" rx="5"/><text class="f-on" fill="#ffffff" x="176" y="169" font-size="13" text-anchor="middle">t3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="250" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="298" y="144" width="44" height="40" rx="5"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="346" y="144" width="44" height="40" rx="5"/>
+<text class="f-muted" fill="#5c6d66" x="32" y="200" font-size="12" text-anchor="middle">0</text><text class="f-muted" fill="#5c6d66" x="80" y="200" font-size="12" text-anchor="middle">1</text><text class="f-muted" fill="#5c6d66" x="128" y="200" font-size="12" text-anchor="middle">2</text><text class="f-muted" fill="#5c6d66" x="176" y="200" font-size="12" text-anchor="middle">3</text><text class="f-muted" fill="#5c6d66" x="224" y="200" font-size="12" text-anchor="middle">4</text><text class="f-muted" fill="#5c6d66" x="272" y="200" font-size="12" text-anchor="middle">5</text><text class="f-muted" fill="#5c6d66" x="320" y="200" font-size="12" text-anchor="middle">6</text><text class="f-muted" fill="#5c6d66" x="368" y="200" font-size="12" text-anchor="middle">7</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="224" font-size="12">مخزن step: العنوان ثابت، والمضيف يحدّث المحتوى كل خطوة</text>
+</g>
+</svg><figcaption>الشكل 15-6　graph واحد وطريقتان للكتابة. حين يُجمَّد الموضع معاملًا تتكدس كل الرموز في الخانة 0؛ وحين يوضع الموضع في مخزن ذاكرة فيديو بعنوان ثابت، يتذكر الـ graph العنوان، ويعيد المضيف كتابة المحتوى كل خطوة.</figcaption></figure></div>
+<p>يصف الملف <code>qsa.hpp</code> في Strata عواقب هذا الخطأ بدقة: بعد تجميد الموضع يكتب كل رمز في الخانة 0، ولا يرى التسجيل والاختيار إلا خانة واحدة، فلا يرى الانتباه من التاريخ إلا خانة واحدة دائمًا. وحكم التعليق على الخطأ أنه «أسوأ من الانهيار»: المخرجات أرقام منتهية تبدو معقولة، والعَرَض مطابق تمامًا لقولنا «النموذج لا يعرف كيف يستفيد من السياق»، فيشك الناس في ذاكرة KV المؤقتة أو خوارزمية الاختيار أو الأوزان، ولا يخطر ببالهم الـ graph. <span class="ev ev-code">حقيقة من الشيفرة</span>[S18]</p>
+<p>وإصلاحها «كتلة واحدة من ذاكرة الفيديو، بدل تغيير ستة توقيعات دوال»: توضع الأرقام الأربعة التي تتغير في كل خطوة في <dfn>مخزن step</dfn> صغير:</p>
+<ul>
+<li><code>step[0] = pos</code>: موضع الرمز الجديد؛</li>
+<li><code>step[1] = n_kv = pos + 1</code>: كم خانة في الذاكرة المؤقتة؛</li>
+<li><code>step[2] = n_bid</code>: كم كتلة من 4 خانات امتلأت؛</li>
+<li><code>step[3] = width</code>: كم خانة تختار هذه الخطوة، وتساوي min(n_kv, 2051). [S18]</li>
+</ul>
+<p>تقرأ كل kernel الأرقام التي تحتاجها من كتلة ذاكرة الفيديو هذه، وتبقى قوائم المعاملات كما هي تمامًا من رمز إلى رمز، فيمكن تسجيل مسار QSA كله في graph. ولا يفعل المضيف في كل خطوة إلا نسخة صغيرة واحدة، تعيد كتابة محتوى هذه الكتلة. <span class="ev ev-code">حقيقة من الشيفرة</span>[S18] والأرقام الأربعة يعتمد بعضها على بعض؛ ووضعها في مكان واحد تحسبه شيفرة واحدة يمنع خطأ «غيّرنا pos ونسينا n_kv».</p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذا هو الفرق نفسه في لغة C بين «التمرير بالقيمة» و«التمرير بالمؤشر». ما يسجّله الـ graph قيمةً يبقى تلك القيمة إلى الأبد؛ وما يسجّله مؤشرًا يقرأ محتوى جديدًا في كل مرة يُفكّ فيها المؤشر. بشرط أن تبقى الذاكرة التي يشير إليها المؤشر صالحة، وهذا ما لا يستطيع الـ graph أن يتحقق منه بنفسه.</p>
+<p>والمنطق نفسه ينطبق على أخذ العينات: درجة الحرارة وtop-p وأمثالهما قد تختلف من طلب إلى آخر، لذلك تضع Strata أخذ العينات <strong>خارج</strong> الـ graph المسجَّل، وإلا «طُبعت هذه المعاملات في الـ graph إلى الأبد». <span class="ev ev-code">حقيقة من الشيفرة</span>[S08]</p>
+
+<h2 id="sec-6">15.6 تطبيق عملي: اكتشف بنفسك عنق الزجاجة والتجمّد</h2>
+<p>يمكنك أن تتعامل مع الشكلين التفاعليين في هذا الفصل كأنهما تجربتان صغيرتان.</p>
+<ol>
+<li><strong>الخط الزمني لتكلفة الإطلاق</strong> (الشكل 15-3): شغّله أولًا بالمعاملات الافتراضية، وسجّل الزمن الكلي ونسبة انشغال GPU للطرق الثلاث. ثم زد زمن حساب كل kernel، أي w، ببطء من 5 µs إلى 40 µs، وابحث عن النقطة التي «لا يعود فيها الـ graph أسرع بوضوح». ستجد أنها تظهر تقريبًا حين يقترب w من L: إذا صارت الـ kernel أطول من الإرسال، اختفت تكلفة الإرسال من تلقاء نفسها.</li>
+<li><strong>الموضع المجمَّد</strong> (الشكل 15-6): شغّل 4 رموز بكل طريقة من طريقتي الكتابة. قارن خانات KV و«عدد الخانات التي يراها الانتباه». ثم فكّر: لو فحصنا فقط «هل أبلغ البرنامج عن خطأ، وهل المخرجات أرقام منتهية»، فهل نكتشف الطريقة الخاطئة؟</li>
+</ol>
+<p>وإن أردت التحقق على GPU حقيقي، فاكتب graph صغيرًا لا يفعل إلا <code>state[pos] = token</code>، وأعد تشغيله بقيم pos = 0 و1 و2، ثم تحقق من أن المواضع الثلاثة كلها كُتبت. لا يكفي أن تنظر إلى قيمة الإرجاع الأخيرة «نجاح».</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>يعمل GPU بآلاف الخيوط: تُجمع الخيوط في كتل، وكل 32 خيطًا في الكتلة تشكّل warp. اجعل الخيوط المتجاورة تقرأ عناوين متجاورة، فلا يضيع شيء من النقل.</li>
+<li>لكل إطلاق kernel تكلفة ثابتة. كانت Strata تحتاج في الأصل إلى نحو 2,000 إطلاق لكل رمز. فهي تقلّل عدد الـ kernels بالدمج، وتستعمل CUDA Graph لتخفّض الإرسال إلى مرة لكل طبقة، ثم إلى مرة لكل رمز.</li>
+<li>الـ graph يجمّد معاملات الـ kernel. والقيم التي تتغير في كل خطوة (الموضع وn_kv وعرض الاختيار) يجب أن توضع في مخزن ذاكرة فيديو بعنوان ثابت، تقرؤه الـ kernel في كل مرة.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «CUDA Graph يدمج عدة kernels في kernel كبيرة واحدة».</strong></p>
+<p>غير صحيح. الـ graph يسجّل فقط سلسلة من العمليات وتبعياتها. وعند إعادة التشغيل تبقى كل عقدة kernel مستقلة، وتبقى النتائج الوسيطة تُكتب في ذاكرة الفيديو كما كانت. إنه يوفّر تكلفة الإرسال من جهة CPU. أما الذي يدمج الحساب فعلًا في kernel واحدة فهو دمج العمليات، وهذا يتطلب إعادة كتابة الـ kernel. المشكلتان مختلفتان، وتستعمل Strata الطريقتين معًا. [R01]</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: ثمن الدمج، والتزامات التسجيل الثلاثة، وطريقة القبول</summary>
+<h3>الدمج ليس مجانيًا</h3>
+<p>إذا كتبنا عدة عمليات في kernel واحدة قلّت الإطلاقات، وقلّت مرات كتابة النتائج الوسيطة وقراءتها. والثمن: تبقى متغيرات أكثر حية داخل الـ kernel، فيشغل كل خيط سجلات أكثر؛ ومجموع السجلات ثابت، فكلما شغل كل خيط أكثر، قلّ عدد الخيوط المقيمة معًا، وقلّت «الخيوط الاحتياطية» التي يستعملها GPU لإخفاء انتظار الذاكرة، ويسمى هذا انخفاض الإشغال (occupancy). والتنفيذ أيضًا أعقد وأصعب اختبارًا. لذلك يُقرَّر الدمج بحسب القياس. فمثلًا لدمج قراءة الوصلة المتبقية المختلطة في Strata عدة متغيرات؛ ويشغّل المحرك على كل بطاقة تجربة بأوزان عشوائية أولًا، ولا يعتمد إلا أحدث متغير مطابق بت بت للكتابة المرجعية. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>مثال تعليمي: طبقة فيها 20 إطلاقًا، وكل إطلاق يكلّف المضيف 5 µs، فالإطلاقات وحدها نحو 100 µs. وهذا كثير على عمليات صغيرة لا تحسب كل منها إلا بضع ميكروثوانٍ؛ أما إن كانت كل kernel تحتاج إلى بضع ملّي ثوانٍ، فإن 100 µs نفسها كسر بسيط. كل هذه قيم افتراضية، نستعملها لنحكم «هل يستحق التحسين العناء»، وليست قياسات. <span class="ev ev-est">تقدير تعليمي</span></p>
+<h3>التزامات التسجيل الثلاثة</h3>
+<p>يكتب الملف <code>graph.hpp</code> ثلاثة أمور كشروط مسبقة في الواجهة، وكل شرط منها جاء من تجربة صغيرة خاصة به. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<ol>
+<li><strong>الانتظار يجب أن يستدعي برنامج التشغيل، ولا يكفي أن يقرأ الذاكرة.</strong> في نموذج برنامج تشغيل العرض على ويندوز تُجمَّع أوامر الإرسال في دفعات. حلقة دوران تقرأ الذاكرة فقط ولا تستدعي برنامج التشغيل دارت 5,907,703 دورة في 500 ملّي ثانية ولم تبدأ الـ kernel أصلًا؛ ولم تنقلب البيانات إلا بعد أن استدعت شيفرة ما برنامج التشغيل. لذلك صار الانتظار استعلامًا متكررًا عن حدث، كل استعلام يكلّف نحو 0.021 ملّي ثانية، وهو «استعلام» وليس «مزامنة».</li>
+<li><strong>الـ graph يعيد قراءة المخزن المؤقت للإدخال، ولا يعيد قراءة معاملات الـ kernel.</strong> أُعيد التشغيل 8 مرات، وفي كل مرة بمدخل مختلف في ذاكرة مثبّتة، فتبعت النتائجُ المدخلَ؛ أما المعاملات فتُنسخ إلى العقدة عند التسجيل ولا تُقرأ بعدها أبدًا. وكل قيمة تتغير في كل خطوة (الموضع، وقاعدة جدول الصفحات، ورقم الرمز) يجب أن تكون <strong>بيانات</strong> في ذاكرة الفيديو، لا معاملًا.</li>
+<li><strong>ثبات العنوان مسؤولية من يستدعي.</strong> يمسك الـ graph الـ graph نفسه، لا الذاكرة. وكل مخزن مؤقت تستعمله الشيفرة المسجَّلة يجب أن يُحجز قبل التسجيل، ولا يُعاد حجزه بعد ذلك.</li>
+</ol>
+<p>وثمة دفاعان آخران يستحقان التعلم: إذا خرج التسجيل بـ 0 عقدة وجب الإبلاغ عن خطأ فورًا، لأن «graph لا يفعل شيئًا» سيُعاد تشغيله بهدوء إلى الأبد دون خطأ ودون مخرجات؛ وإذا بقي في جسم التسجيل خطأ من CUDA أُلغي التسجيل ولم تُنشأ نسخة من graph معطوب. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<h3>لا تعتبر مسار تنفيذ واحدًا هو الكل</h3>
+<p>توجد في Strata عدة أنواع من الـ graphs معًا: <code>SessionGraphs</code> بواقع graph أو اثنين لكل طبقة (مقطع قبل التوجيه ومقطع بعد دمج الخبراء) [S13]، وgraph متعدد الرموز لنافذة التحقق في فك الترميز التخميني (الفصل 18) [S08]، و<code>TokenGraph</code> للرمز كله، وgraphs بادئة تُستعمل لقياس الزمن مقطعًا مقطعًا. فإذا قرأتَ في ملف ترويسة «graph واحد لكل طبقة»، فلا يصح أن تستنتج أن المحرك لن يسجّل graphs أكبر أبدًا. كثيرًا ما تتعايش في الشيفرة مسارات مرجعية ومسارات تنقيح ومسارات سريعة وتنفيذات تُختار بحسب قدرة الجهاز؛ وسياق الاستدعاء وشروط التفعيل جزء من الاستنتاج. وهذا مثل «الدالة الواحدة لها عدة نسخ متخصصة» في مقرر المترجمات.</p>
+<h3>القبول: العنوان والقيمة والحالة</h3>
+<p>يجب أن تتحقق في أي تحسين بالـ graph من ثلاثة أمور على الأقل: أن القيم المتغيرة في كل خطوة تتحدث بشكل صحيح في كل دورة؛ وأن العناوين المسجَّلة صالحة طوال إعادات التشغيل؛ وأن الحالة بعد إعادة التشغيل مطابقة للمسار المرجعي بلا graph. ومن فخاخ دورة الحياة المعروفة: أن يُحرَّر المخزن المؤقت عند انتهاء الطلب، ويُترك كائن الـ graph للطلب التالي، فتقرأ إعادة التشغيل التالية ذاكرة محرَّرة وتكتب فيها.</p>
+<p>ويجب أن يكون الاختبار قادرًا على «رؤية» الخطأ. لا يثبت شيئًا أن تكرر الطلب نفسه بالمُطالبة (prompt) نفسها ودرجة الحرارة نفسها. الأفضل أن تثبّت logits، وترسل طلبين متتاليين، أحدهما بالاختيار الجشع والثاني بدرجة حرارة عالية (أو ببذرة عشوائية ثابتة مختلفة)، وتقارن المعاملات المستعملة فعلًا والنتائج بالتنفيذ المرجعي بلا graph؛ ويجب أن يسلك الطلب الثاني فرعًا مختلفًا عن الأول ويمكن التنبؤ به.</p>
+<p>أما أدوات التحليل (profiler) فلا تلزم إلا في واجبات GPU المتقدمة: تسجَّل أزمنة الإطلاق وأزمنة الـ kernel واستهلاك السجلات وأزمنة إعادة التشغيل، ثم تُجرى مقارنة A/B من طرف إلى طرف لتحكم هل قصّر التحسين المحلي المسارَ الحرج فعلًا. وفي تعليقات Strata مثال معاكس: في إحدى الجولات كان قياس الأزمنة المقطّعة في وضع بلا graph أعلى بـ 4 أضعاف من التكلفة الحقيقية للعمل نفسه بعد تسجيله في graph، وكاد يضلّل اتجاه التحسين. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+</details>

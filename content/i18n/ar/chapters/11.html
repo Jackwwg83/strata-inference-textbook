@@ -1,0 +1,261 @@
+<div class="hook"><span class="eyebrow">ربما لاحظتَ</span>
+<p>لوحة مفاتيح هاتفك بارعة في «إكمال الجملة». تكتب «الطقس اليوم» فتقترح لك فورًا «جميل» أو «حار». هي لا تفهم الطقس أصلًا. كل ما في الأمر أنها تتذكّر أي الكلمات تظهر عادةً متجاورة.</p>
+<p>النموذج الذي يشغّله Strata يملك «ذاكرة عبارات» مثلها، وحجمها مخيف: جدول بحجم 28.8 GB يقيم على قرص SSD. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02] وفي كل مرة يولّد النموذج رمزًا (token) يجلب من هذا الجدول 16 صفًا. يجيب هذا الفصل عن ثلاثة أسئلة: كيف تُحسب أرقام الصفوف؟ وكيف نجلبها من القرص بسرعة وبأقل كلفة؟ وكيف نحتفظ بالصفوف التي جلبناها لنستخدمها مرة أخرى؟</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> يطبّق النموذج دالة تجزئة (hash) على آخر رمزين وعلى آخر ثلاثة رموز، فيحصل على 16 رقم صف. حجم كل صف 90 بايت فقط، لكن القرص يُقرأ صفحةً صفحة، وكل صفحة 4 KiB. الصفوف المقروءة تدخل ذاكرة صفوف مؤقتة بترابط المجموعات بثمانية مسارات، وحين تمتلئ المجموعة يختار مؤشر دوّار الصف الذي يُستبدل.</p>
+
+<h2 id="sec-1">11.1 «ذاكرة العبارات» داخل النموذج</h2>
+<p>أولًا، ماذا يخزّن هذا الجدول؟ فهرسه هو <dfn>n-gram</dfn> (أي «n من الرموز المتتالية»). آخر رمزين يشكّلان ثنائية (bigram)، وآخر ثلاثة رموز تشكّل ثلاثية (trigram). إذا كان السياق «سارة تحب القطط» فالثنائية «تحب القطط» والثلاثية «سارة تحب القطط».</p>
+<p>في شيفرة Strata تُسمّى الوحدة التي تستخدم هذا الجدول PLE، وتعمل في الطبقة 1 من النموذج (العدّ يبدأ من 0). <span class="ev ev-code">حقيقة من الشيفرة</span>[S13] يوضّح الشكل 11-1 المسار لكل رمز. للثنائية 8 «رؤوس» وللثلاثية 8 رؤوس، وكل رأس يحسب رقم صف واحدًا، فالمجموع 16. في كل صف 160 قيمة، فإذا ضممنا 16 صفًا حصلنا على 2560 قيمة بالضبط، وهذا هو العرض الرئيسي للنموذج. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>include/strata/kernels/ngram.hpp</code>)</p>
+<figure class="fig"><svg viewBox="0 0 400 388" role="img" aria-label="الشكل 11-1: يُقسَّم آخر ثلاثة رموز إلى ثنائية وثلاثية، ويحسب كل منهما 8 أرقام صفوف بثمانية رؤوس، فالمجموع 16 صفًا، في كل صف 160 قيمة، وتُضمّ في 2560 قيمة تُسلَّم إلى الطبقة 1">
+<rect class="f-soft" fill="#e5f1df" x="40" y="6" width="320" height="52" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="28" font-size="15" font-weight="600" text-anchor="middle">آخر ثلاثة رموز: سارة تحب القطط</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="49" font-size="14" text-anchor="middle">من الأقدم إلى الأحدث</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 58V68H102V80M200 68H298V80"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="82" width="185" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="102" y="104" font-size="15" font-weight="600" text-anchor="middle">ثنائية: تحب القطط</text>
+<text class="f-muted" fill="#5c6d66" x="102" y="125" font-size="14" text-anchor="middle">8 رؤوس، 8 أرقام صفوف</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="205" y="82" width="185" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="298" y="104" font-size="15" font-weight="600" text-anchor="middle">ثلاثية: سارة تحب القطط</text>
+<text class="f-muted" fill="#5c6d66" x="298" y="125" font-size="14" text-anchor="middle">8 رؤوس، 8 أرقام صفوف</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M102 136V148H298V136M200 148V160"/>
+<rect class="f-accent" fill="#136d5a" x="20" y="162" width="360" height="54" rx="9"/>
+<text class="f-on" fill="#ffffff" x="200" y="185" font-size="15" font-weight="600" text-anchor="middle">16 رقم صف، والجدول الكبير على قرص SSD</text>
+<text class="f-on" fill="#ffffff" x="200" y="206" font-size="14" text-anchor="middle">320,001,536 صفًا، كل صف 90 بايت، المجموع 28.8 GB</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 216V240"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="40" y="242" width="320" height="54" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="265" font-size="15" font-weight="600" text-anchor="middle">استرجاع 16 صفًا، في كل صف 160 قيمة</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="286" font-size="14" text-anchor="middle">الضم: 16 × 160 = 2560 قيمة</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 296V320"/>
+<rect class="f-soft" fill="#e5f1df" x="40" y="322" width="320" height="58" rx="9"/>
+<text class="f-text" fill="#182f2b" x="200" y="347" font-size="15" font-weight="600" text-anchor="middle">تُسلَّم إلى وحدة PLE في الطبقة 1</text>
+<text class="f-text" fill="#182f2b" x="200" y="367" font-size="15" font-weight="600" text-anchor="middle">لتُدمج في المسار الرئيسي</text>
+</svg><figcaption>الشكل 11-1  مسار البحث في الجدول لكل رمز. تتفرّع الرموز الثلاثة إلى نوعين من n-gram، ويحسب كل نوع 8 أرقام صفوف. تُضمّ الصفوف الـ 16 المسترجعة في متجه بعرض النموذج نفسه.</figcaption></figure>
+<p>هذا الجدول جزء من معاملات النموذج نفسه. اسمه <code>per_layer_token_embd</code> وفيه 320,001,536 صفًا. بواقع 90 بايت للصف، يبلغ حجم الجدول كله 28.8 GB (أي 26.8 GiB). <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ple_reader.hpp</code>) وهذا أكبر بكثير من 12 GB من ذاكرة الفيديو (VRAM)، ولا يُحمَّل في الذاكرة (RAM) أيضًا. يبقى على قرص SSD.</p>
+<aside class="primer" id="c11-ngram">
+<h3>نموذج n-gram اللغوي</h3>
+<p>أبسط طريقة لتخمين الكلمة التالية أن «ننظر إلى الكلمات القليلة السابقة». لنفترض أن «سارة تحب» تتبعها «القطط» في 30% من النصوص و«الشاي» في 20%. عندئذ نخمّن بهذه النسب. إذا خمّنا الكلمة رقم n بالنظر إلى الكلمات الـ n−1 السابقة فقط، فهذا هو <dfn>نموذج n-gram اللغوي</dfn>. حين تكون n = 2 يُسمّى نموذجًا ثنائيًا، وحين تكون n = 3 يُسمّى نموذجًا ثلاثيًا.</p>
+<p>مشكلته أن التركيبات كثيرة جدًا. إذا كان في المعجم V رمزًا فعدد الثلاثيات V³. خذ V = 100,000 فتصير الثلاثيات 10¹⁵. معظمها لن تصادفه في حياتك ولو مرة، فلا يمكن تخزين نسخة لكل منها.</p>
+<p>يستعير نموذج Strata فكرة n-gram لكنه يعمل بطريقة مختلفة. فهو لا يخزّن «احتمال الكلمة التالية». يخزّن لكل n-gram مقطعًا صغيرًا من الأرقام المدرَّبة، ثم تستخدمه الشبكة العصبية. وهو لا يعطي كل تركيبة صفًا خاصًا بها. يستخدم التجزئة ليضغط تركيبات بعدد فلكي في 320 مليون صف (في القسم التالي). لذلك فهذا الجدول أقرب إلى «دفتر عبارات» منه إلى نموذج لغوي كامل.</p>
+<p class="further">قراءة إضافية: <a href="https://en.wikipedia.org/wiki/N-gram" target="_blank" rel="noopener noreferrer">Wikipedia: N-gram</a> · <a href="https://en.wikipedia.org/wiki/Word_n-gram_language_model" target="_blank" rel="noopener noreferrer">Wikipedia: Word n-gram language model</a></p>
+</aside>
+
+<h2 id="sec-2">11.2 كيف تتحوّل ثلاثة رموز إلى 16 رقم صف</h2>
+<p>لا توجد في الجدول عبارة «سارة تحب القطط». توجد أرقام صفوف فقط. والذي يحوّل الرموز إلى أرقام صفوف هو <dfn>التجزئة (hash)</dfn>: تخلط أي مدخل فتخرج منه قيمة تبدو عشوائية، لكنها تخرج في كل مرة نفسها. تجزئة Strata ثلاث خطوات: <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ngram.hpp</code> و<code>src/kernels/ngram.cpp</code>)</p>
+<ol>
+<li><strong>الضرب</strong>: يُضرب رقم كل رمز في ثابت كبير ثابت، ولكل موضع من المواضع الثلاثة ثابت خاص به.</li>
+<li><strong>XOR</strong>: تُجمع هذه النواتج بعملية XOR (الأو الحصري) بت ببت: إذا تساوى البتّان كانت النتيجة 0، وإذا اختلفا كانت 1. فنحصل على <dfn>قيمة مخلوطة</dfn>. الثنائية تخلط عددين، والثلاثية تخلط ثلاثة أعداد.</li>
+<li><strong>الباقي</strong>: يقسم كل رأس القيمة المخلوطة على المقسوم عليه الخاص به (modulus) ويأخذ الباقي، ثم يضيف إليه نقطة بداية هذا الرأس في الجدول الكبير. مقسوم عليه كل رأس نحو 20 مليون، وليس أي منها من قوى العدد 2، مثل 20000003 و20000023 و20000033.</li>
+</ol>
+<p>هناك تفصيلان يستحقان أن تتذكرهما. الأول: الموضع الذي لا يسبقه سياق يُسجَّل −1، وإذا ظهر رمز «نهاية الحوار» فكل التاريخ قبله يُقطع. يُحفظ تاريخ هذين الرمزين ضمن حالة التسلسل، «الأقدم أولًا». <span class="ev ev-code">حقيقة من الشيفرة</span>[S13] الثاني: تُحسب هذه التجزئة على CPU. فهي تحتاج إلى ضرب الأعداد الصحيحة ذات 64 بت وإلى XOR، وتنقل تعليقات الشيفرة عن التنفيذ المرجعي أن إطار الحوسبة ggml على GPU لا يملك هاتين العمليتين. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ngram.hpp</code>)</p>
+<p>تعيد المحاكاة أدناه الخطوات الثلاث بأرقام صغيرة: المضروبات 31 و17 و7، والمقسوم عليه بين 11 و37، و4 رؤوس فقط لكل نوع من n-gram. القواعد هي قواعد Strata نفسها، لكن الأرقام صغيرة بما يكفي لتحسبها بيدك.</p>
+<div class="viz" data-viz="ngram-hash"><figure class="fig"><svg viewBox="0 0 400 322" role="img" aria-label="الشكل 11-2: تجزئة تجريبية. تُحسب أولًا القيمة المخلوطة للثنائية 626 وللثلاثية 593 من الرموز سارة وتحب والقطط، ثم تُؤخذ البواقي على 8 مقاسم فتنتج 8 أرقام صفوف">
+<text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="14" text-anchor="middle">السياق من الأقدم إلى الأحدث</text>
+<rect class="f-soft" fill="#e5f1df" x="30" y="28" width="100" height="36" rx="7"/><text class="f-text" fill="#182f2b" x="80" y="51" font-size="14" text-anchor="middle">سارة (5)</text>
+<rect class="f-soft" fill="#e5f1df" x="150" y="28" width="100" height="36" rx="7"/><text class="f-text" fill="#182f2b" x="200" y="51" font-size="14" text-anchor="middle">تحب (11)</text>
+<rect class="f-soft" fill="#e5f1df" x="270" y="28" width="100" height="36" rx="7"/><text class="f-text" fill="#182f2b" x="320" y="51" font-size="14" text-anchor="middle">القطط (23)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="78" width="380" height="36" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="101" font-size="14" text-anchor="middle">ثنائية: 23×31 ⊕ 11×17 = 713 ⊕ 187 = 626</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="122" width="380" height="36" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="145" font-size="14" text-anchor="middle">ثلاثية: 713 ⊕ 187 ⊕ 5×7 = 593</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="182" font-size="14">الجدول التجريبي: 8 رؤوس متصلة، 180 صفًا</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="192" width="26" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="192" width="34" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="80" y="192" width="38" height="40"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="118" y="192" width="46" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="164" y="192" width="22" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="186" y="192" width="58" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="244" y="192" width="62" height="40"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="306" y="192" width="74" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="24" y="192" width="3" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="74" y="192" width="3" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="116" y="192" width="3" height="40"/>
+<rect class="f-accent" fill="#136d5a" x="128" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="184" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="212" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="252" y="192" width="3" height="40"/>
+<rect class="f-warn" fill="#9e5d24" x="308" y="192" width="3" height="40"/>
+<text class="f-text" fill="#182f2b" x="33" y="252" font-size="14" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="63" y="252" font-size="14" text-anchor="middle">27</text>
+<text class="f-text" fill="#182f2b" x="99" y="252" font-size="14" text-anchor="middle">48</text>
+<text class="f-text" fill="#182f2b" x="141" y="252" font-size="14" text-anchor="middle">54</text>
+<text class="f-text" fill="#182f2b" x="175" y="252" font-size="14" text-anchor="middle">82</text>
+<text class="f-text" fill="#182f2b" x="215" y="252" font-size="14" text-anchor="middle">96</text>
+<text class="f-text" fill="#182f2b" x="275" y="252" font-size="14" text-anchor="middle">116</text>
+<text class="f-text" fill="#182f2b" x="343" y="252" font-size="14" text-anchor="middle">144</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="282" font-size="14">الرؤوس الأربعة اليسرى تأخذ 626، واليمنى 593</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="306" font-size="14">مثال: 626 مقسومًا على 13 يبقى 2، وبداية الرأس 0، فالصف 2</text>
+</svg><figcaption>الشكل 11-2  تجزئة تجريبية: ضرب، ثم XOR، ثم باقي القسمة. السياق نفسه يقع دائمًا في الصف نفسه، ولا يظهر في رقم الصف أي أثر للكلمات الأصلية.</figcaption></figure></div>
+<p>للتجزئة نتيجة لا مفرّ منها: <dfn>التصادم</dfn>، أي أن يحسب n-gram مختلفان رقم الصف نفسه. لنحسبها بالأرقام. أرقام الرموز في هذا النموذج تبلغ 248,046 على الأقل (رمز نهاية الحوار يستخدم هذا الرقم) <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>src/program/generate.cpp</code>)، فالثنائيات الممكنة أكثر من 248,046² ≈ 61.5 مليار، بينما للرأس الواحد نحو 20 مليون صف فقط. فيحتل كل صف في المتوسط أكثر من 3000 ثنائية. <span class="ev ev-est">تقدير تعليمي</span> قبِل التصميم التصادم منذ البداية.</p>
+<p>فلماذا يظل الجدول نافعًا؟ تفسير معقول: لكل رأس مقسوم عليه مختلف، فإذا تصادم n-gram في رأس واحد فغالبًا يذهب كل منهما في طريق مختلف في الرؤوس الأخرى. لن تكون الصفوف الـ 16 التي يحصل عليها النموذج متطابقة كلها. <span class="ev ev-est">تقدير تعليمي</span> إذا جرّبت في المحاكاة عدة سياقات فسترى ذلك بعينيك.</p>
+<aside class="primer" id="c11-hash">
+<h3>جدول التجزئة ودالة التجزئة</h3>
+<p>في مكتبة مليون كتاب. البحث عن كتاب بعنوانه كتابًا بعد كتاب بطيء جدًا. جرّب طريقة أخرى: جهّز عشرة آلاف رف، و«اخلط» عنوان الكتاب ليصير رقمًا بين 0 و9999، ثم ضع الكتاب على الرف الذي يحمل هذا الرقم. وحين تبحث تخلط العنوان بالطريقة نفسها وتذهب إلى الرف مباشرة. قاعدة «الخلط» هذه تسمى <dfn>دالة التجزئة</dfn>، والبنية التي توزّع العناصر على الخانات بها تسمى <dfn>جدول التجزئة</dfn>، وكل خانة تسمى <dfn>سلة</dfn>.</p>
+<p>في دالة التجزئة الجيدة شرطان: المدخل نفسه يعطي دائمًا السلة نفسها، والمداخل المختلفة تتوزع بالتساوي قدر الإمكان. أشهر صيغة هي «الخلط ثم الباقي»: <code>bucket = h(key) mod buckets</code>. إذا كان عدد السلال عددًا أوليًا تأثّر الباقي بكل بت من المفتاح. وإذا كان قوة للعدد 2 نظر الباقي إلى أدنى بضعة بتات فقط، وضاعت فروق البتات العليا كلها.</p>
+<p>إذا كان عدد الخانات أقل من عدد المفاتيح فلا بد أن يقع مفتاحان في السلة نفسها. هذا هو <dfn>تصادم التجزئة</dfn> (مبدأ برج الحمام: 10 حمامات في 9 أقفاص يعني قفصًا فيه أكثر من حمامة). جدول التجزئة العادي يخزّن المفتاح أيضًا، فإذا حدث تصادم قارن المفاتيح واحدًا واحدًا أو وضع العنصر في مكان آخر، فيبقى البحث دقيقًا. أما جدول n-gram في Strata فلا يخزّن المفاتيح. يترك التصادم يحدث، ويعتمد على تعويض الرؤوس المتعددة بعضها لبعض. وفكرة «تخزين القيم دون المفاتيح، مع عدة دوال تجزئة» تشبه كثيرًا بنية count-min sketch في هياكل البيانات.</p>
+<p>وهناك فخ صغير: لماذا نستخدم XOR في الخلط ولا نستخدم الجمع؟ تقول تعليقات الشيفرة السبب: إذا تساوى ناتجا ضرب، أعطى XOR صفرًا وأعطى الجمع الضعف، فتختلف النتيجة تمامًا، ومع ذلك تُنتج الصيغتان أرقام صفوف «تبدو صحيحة». <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ngram.hpp</code>)</p>
+<p class="further">قراءة إضافية: <a href="https://ar.wikipedia.org/wiki/%D8%AC%D8%AF%D9%88%D9%84_%D8%AA%D9%84%D8%A8%D9%8A%D8%AF" target="_blank" rel="noopener noreferrer">ويكيبيديا: جدول تلبيد</a> · <a href="https://ar.wikipedia.org/wiki/%D8%AF%D8%A7%D9%84%D8%A9_%D8%AA%D9%84%D8%A8%D9%8A%D8%AF" target="_blank" rel="noopener noreferrer">ويكيبيديا: دالة تلبيد</a> · <a href="https://ar.wikipedia.org/wiki/%D9%85%D8%A8%D8%AF%D8%A3_%D8%A8%D8%B1%D8%AC_%D8%A7%D9%84%D8%AD%D9%85%D8%A7%D9%85" target="_blank" rel="noopener noreferrer">ويكيبيديا: مبدأ برج الحمام</a> · <a href="https://en.wikipedia.org/wiki/Count%E2%80%93min_sketch" target="_blank" rel="noopener noreferrer">Wikipedia: Count-min sketch</a></p>
+</aside>
+
+<h2 id="sec-3">11.3 الصف 90 بايت، فلماذا نقرأ 4 KiB؟</h2>
+<p>صارت أرقام الصفوف جاهزة، فنذهب إلى القرص لنجلبها. هنا تظهر المشكلة: القرص لا يُقرأ بايتًا بايتًا، بل <dfn>صفحةً</dfn> صفحة. يقرأ Strata هذا الجدول بقراءة مباشرة «تتجاوز ذاكرة نظام التشغيل المؤقتة»، ويجب في كل قراءة أن يكون موضع البداية والطول وعنوان الذاكرة مضاعفات للعدد 4096 بايت. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>include/strata/platform/direct_file.hpp</code>) فلكي نقرأ صفًا من 90 بايت لا بد أن نقرأ الصفحة كلها، أي 4096 بايت. انظر الشكل 11-3.</p>
+<figure class="fig"><svg viewBox="0 0 400 316" role="img" aria-label="الشكل 11-3: الصف الذي يقع كله في صفحة واحدة يكلّف قراءة صفحة واحدة، والصف الذي يعبر حدّ الصفحة يكلّف صفحتين. يجلب الرمز الواحد 16 صفًا، والمفيد منها 1440 بايت فقط، لكننا نقرأ 64 KiB">
+<text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="14" text-anchor="middle">الملف مقسّم إلى صفحات 4 KiB (رسم توضيحي)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="30" width="180" height="44"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="30" width="180" height="44"/>
+<rect class="f-accent" fill="#136d5a" x="70" y="36" width="30" height="32"/>
+<text class="f-on" fill="#ffffff" x="85" y="57" font-size="14" text-anchor="middle">A</text>
+<rect class="f-warn" fill="#9e5d24" x="186" y="36" width="30" height="32"/>
+<text class="f-on" fill="#ffffff" x="201" y="57" font-size="14" text-anchor="middle">B</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M200 24V82"/>
+<text class="f-muted" fill="#5c6d66" x="110" y="96" font-size="14" text-anchor="middle">الصفحة k (4096 B)</text>
+<text class="f-muted" fill="#5c6d66" x="290" y="96" font-size="14" text-anchor="middle">الصفحة k+1 (4096 B)</text>
+<text class="f-text" fill="#182f2b" x="20" y="124" font-size="14">الصف A يقع كله في صفحة واحدة، فنقرأ صفحة واحدة</text>
+<text class="f-text" fill="#182f2b" x="20" y="148" font-size="14">الصف B يعبر حدّ الصفحة، فنقرأ صفحتين</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="172" font-size="14">يعبر الحدّ كل صف يبدأ في آخر 89 بايتًا، نحو 2.2 بالمئة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="186" width="380" height="122" rx="9"/>
+<text class="f-text" fill="#182f2b" x="24" y="211" font-size="14" font-weight="600">رمز واحد، و16 صفًا كلها غير مخزّنة مؤقتًا</text>
+<text class="f-text" fill="#182f2b" x="24" y="236" font-size="14">البايتات المفيدة: 16 × 90 = 1,440</text>
+<text class="f-text" fill="#182f2b" x="24" y="261" font-size="14">المقروء فعليًا: 16 صفحة × 4,096 = 65,536</text>
+<text class="f-warn" fill="#9e5d24" x="24" y="290" font-size="15" font-weight="600">تضخيم القراءة: 65,536 ÷ 1,440 ≈ 45 ضعفًا</text>
+</svg><figcaption>الشكل 11-3  كلفة القراءة بالصفحات. الصف 90 بايت فقط، لكننا نقرأ صفحة كاملة على الأقل، والصف العابر للحدّ يكلّف صفحتين.</figcaption></figure>
+<p>في الشيفرة لا يأخذ طلب القراءة إلا طولين: صفحة واحدة، أو صفحتان (حين يعبر الصف حدّ الصفحة). <span class="ev ev-code">حقيقة من الشيفرة</span>[S11] ويمكن حساب نسبة العابرة للحدّ بيدك: 4096 = 45 × 90 + 46، فكل صف يبدأ في آخر 89 بايتًا من صفحة يمتد إلى الصفحة التالية. موضع بداية الصف داخل الصفحة موزّع بالتساوي تقريبًا، فيحتاج نحو 89 ÷ 4096 ≈ 2.2% من الصفوف إلى قراءة صفحتين. <span class="ev ev-est">تقدير تعليمي</span></p>
+<p>تقع الصفوف الـ 16 للرمز الواحد في 16 صفحة مختلفة. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ple_reader.hpp</code>) فإذا لم توجد ذاكرة مؤقتة فسنقرأ 16 × 4 KiB = 64 KiB، والمفيد منها 1,440 بايت فقط، أي تضخيم قراءة نحو 45 ضعفًا. <span class="ev ev-est">تقدير تعليمي</span> وعند قراءة مُطالبة (prompt) طويلة قد تتزاحم صفوف كثيرة في الصفحة نفسها، فيدمج Strata طلبات الصفحة الواحدة في قراءة واحدة، ويرتّبها حسب موضعها في الملف ثم يقرأ، ليقترب القرص من القراءة التسلسلية. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>src/ngram/ple_reader.cpp</code>)</p>
+<p>64 KiB لا يبدو كثيرًا. المشكلة الحقيقية هي <dfn>زمن الاستجابة (latency)</dfn>: 16 قراءة صغيرة عشوائية، وكل منها ينتظر استجابة القرص. تسجّل تعليقات الشيفرة قياسات أُجريت أثناء التطوير (دون ذكر العتاد). في الطريقة الأولى، ربط الملف بالذاكرة (mmap)، تتحول الصفوف الـ 16 إلى 16 «خطأ صفحة (page fault)» ينتظر الواحد منها الآخر، فيستغرق كل رمز 2.10-2.61 ms. وبعد التحويل إلى القراءة المباشرة وإرسال الطلبات الـ 16 معًا صار الزمن نحو 311 µs. <span class="ev ev-report">تقرير المصدر الأصلي</span> (تعليق في <code>ngram.hpp</code>) ويحذّر التعليق نفسه من أمر آخر: إذا بقي الملف مربوطًا بالذاكرة في مكان آخر من العملية، فسيتباطأ كل رمز إلى 1,575 µs في القراءة المباشرة.</p>
+
+<h2 id="sec-4">11.4 نحتفظ بنسخة من الصفوف المقروءة: ذاكرة صفوف مؤقتة بثمانية مسارات</h2>
+<p>كثيرًا ما يُستخدم الصف نفسه مرات متكررة. قد تظهر تركيبة مثل «سارة تحب» عدة مرات في حوار واحد. قاس المصدر الأصلي هذا على مجموعة نصوص ثابتة: إذا خُزّن مليون صف مؤقتًا (يذكر التعليق نحو 95 MB) فيمكن أن توفّر الذاكرة المؤقتة حتى نحو 82% من القراءات، وحتى داخل مُطالبة طويلة واحدة يتكرر ظهور 20%-34% من الصفوف. <span class="ev ev-report">تقرير المصدر الأصلي</span> (تعليق في <code>ple_reader.hpp</code>)</p>
+<p>لذلك يضع Strata في الذاكرة <dfn>ذاكرة صفوف مؤقتة (row cache)</dfn> سعتها الافتراضية 1,048,576 صفًا، أي نحو 94 MB بواقع 90 بايت للصف. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ngram.hpp</code>) وبنيتها <dfn>ترابط المجموعات بثمانية مسارات</dfn>: <span class="ev ev-code">حقيقة من الشيفرة</span>[S11]</p>
+<ul>
+<li>تُقسَّم الذاكرة المؤقتة إلى مجموعات كثيرة، وفي كل <strong>مجموعة</strong> 8 مواضع (8 <strong>مسارات</strong>). بالحجم الافتراضي: 1,048,576 ÷ 8 = 131,072 مجموعة.</li>
+<li>يمرّ رقم الصف أولًا بخلط (يُضرب في عدد فردي كبير ثابت، ثم تُجرى إزاحة وXOR)، ثم يُؤخذ باقي قسمته على عدد المجموعات لتحديد مجموعته. ولا يستطيع أن يقيم إلا في المواضع الثمانية لهذه المجموعة.</li>
+<li>عند البحث نقارن مواضع هذه المجموعة الثمانية فقط.</li>
+<li>إذا لم نجده قرأناه من القرص، ثم كتبناه في الموضع الذي يشير إليه <dfn>مؤشر الاستبدال</dfn> في هذه المجموعة، ثم ينتقل المؤشر خانة واحدة. وبعد الخانة 8 يعود إلى الخانة 1.</li>
+</ul>
+<p>«المؤشر الدوّار» اقتصادي جدًا: لكل مجموعة عدّاد صغير واحد، ولا حاجة إلى تسجيل من استُخدم أخيرًا. وثمنه أنه لا ينظر إلى من هو الأكثر استخدامًا، فيستبدل ما وصل إليه المؤشر. متى يخسر هذا؟ تعطيك المحاكاة أدناه أسوأ الأمثلة.</p>
+<div class="viz" data-viz="row-cache"><figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="الشكل 11-4: ذاكرة صفوف مؤقتة من مجموعتين بثمانية مسارات. تتزاحم 9 أرقام صفوف فردية كلها في المجموعة 1، فيستبدل المؤشر الدوّار في كل مرة صفًا سيُطلب بعد لحظة، فتكون نسبة الإصابة 0. أما LRU كامل الترابط بالخانات الـ 16 نفسها فنسبة الإصابة فيه 75%">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="14">مجموعتان × 8 مسارات؛ المجموعة = باقي القسمة على 2</text>
+<text class="f-text" fill="#182f2b" x="12" y="44" font-size="14">المجموعة 0: فارغة</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="59" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="106" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="153" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="247" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="294" y="52" width="44" height="30" rx="3"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="341" y="52" width="44" height="30" rx="3"/>
+<text class="f-text" fill="#182f2b" x="12" y="108" font-size="14">المجموعة 1: تزدحم فيها 9 صفوف فردية</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="34" y="136" font-size="14" text-anchor="middle">#11</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="59" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="81" y="136" font-size="14" text-anchor="middle">#13</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="106" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="128" y="136" font-size="14" text-anchor="middle">#15</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="153" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="175" y="136" font-size="14" text-anchor="middle">#17</text>
+<rect class="f-accent" fill="#136d5a" x="200" y="116" width="44" height="30" rx="3"/><text class="f-on" fill="#ffffff" x="222" y="136" font-size="14" text-anchor="middle">#03</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="247" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="269" y="136" font-size="14" text-anchor="middle">#05</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="294" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="316" y="136" font-size="14" text-anchor="middle">#07</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="341" y="116" width="44" height="30" rx="3"/><text class="f-text" fill="#182f2b" x="363" y="136" font-size="14" text-anchor="middle">#09</text>
+<path class="f-warn" fill="#9e5d24" d="M222 150l6 9h-12z"/>
+<text class="f-warn" fill="#9e5d24" x="222" y="176" font-size="14" text-anchor="middle">مؤشر الاستبدال</text>
+<text class="f-text" fill="#182f2b" x="12" y="204" font-size="14">الوصول: #01 #03 … #17، ويتكرر 4 مرات</text>
+<text class="f-text" fill="#182f2b" x="12" y="228" font-size="14">#01 التالي ليس في المجموعة، فيُستبدل #03 تحت المؤشر</text>
+<text class="f-text" fill="#182f2b" x="12" y="250" font-size="14">مع أن #03 هو الصف المطلوب بعده مباشرة</text>
+<text class="f-warn" fill="#9e5d24" x="12" y="278" font-size="14" font-weight="600">الدوّار: 0 إصابة؛ LRU كامل الترابط: 27 إصابة (75 بالمئة)</text>
+</svg><figcaption>الشكل 11-4  إخفاق التعارض. تتسع الخانات الـ 16 كلها لتسعة صفوف، لكنها دخلت كلها المجموعة نفسها، وفيها 8 خانات فقط.</figcaption></figure></div>
+<p>صُمّم هذا المثال عمدًا. أرقام الصفوف الحقيقية تُخلط أولًا ثم تُوزَّع على المجموعات، فيصعب أن تتكدّس بهذا الانتظام في مجموعة واحدة. وتبيّن لك حالة «النقطة الساخنة» في المحاكاة شيئًا آخر: إذا تركّز الوصول على عدد قليل من الصفوف تقاربت نسبة الإصابة في الدوّار وفي LRU. فاستخدام أبسط سياسة يعني أن كل بحث ينظر إلى 8 خانات فقط، وأن حجم الذاكرة ثابت لا يزيد، وهذه صفقة رابحة. <span class="ev ev-est">تقدير تعليمي</span></p>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> هذه هي بنية ترابط المجموعات في ذاكرة CPU المؤقتة التي تعرفها من مقرر «تنظيم الحاسوب». «رقم الصف ← رقم المجموعة» يقابل بتّات فهرس المجموعة في العنوان، ومقارنة 8 مواضع تقابل مقارنة 8 وسوم (tag). الفرق هنا أن البنية برمجية، وما يُخزَّن مؤقتًا هو صفوف جدول على القرص، وحجم الخانة 90 بايت.</p>
+<aside class="primer" id="c11-set-assoc">
+<h3>التعيين المباشر وترابط المجموعات والترابط الكامل</h3>
+<p>خانات الذاكرة المؤقتة أقل بكثير مما نريد تخزينه، فلا بد أولًا من قاعدة: في أي الخانات يجوز أن يُوضع عنصر ما؟ هناك ثلاثة أجوبة، في الشكل 11-5.</p>
+<ul>
+<li><dfn>التعيين المباشر</dfn>: لكل عنصر خانة واحدة ثابتة. البحث أسرع ما يمكن لأننا ننظر إلى خانة واحدة، لكن إذا تنافس عنصران شائعان على الخانة نفسها طرد كل منهما الآخر بالتناوب.</li>
+<li><dfn>الترابط الكامل</dfn>: يجوز وضع العنصر في أي خانة. هو الأكثر مرونة، لكن كل بحث يقارن كل الخانات، فيبطؤ كثيرًا إذا كثرت الخانات.</li>
+<li><dfn>ترابط المجموعات</dfn>: حل وسط. يُوزَّع العنصر أولًا على مجموعة بحسب قاعدة، ثم يوضع في أي خانة داخل المجموعة. إذا كان في المجموعة W خانة سمّي ذلك ترابط مجموعات بـ W مسارًا.</li>
+</ul>
+<p>وتقابل البنى الثلاث ثلاثة أنواع من الإخفاق. العنصر الذي نراه أول مرة غير موجود حتمًا، وهذا <strong>الإخفاق الإلزامي</strong>. وإذا كانت الذاكرة المؤقتة كلها أصغر من أن تتسع، فهذا <strong>إخفاق السعة</strong>. وإذا كانت السعة الكلية تكفي لكن المجموعة الواحدة لا تتسع، فهذا <strong>إخفاق التعارض</strong>. مثال الشكل 11-4 إخفاق تعارض خالص.</p>
+<figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="الشكل 11-5: ثلاث طرق لتنظيم 8 خانات نفسها. في التعيين المباشر موضع واحد فقط، وفي ترابط المجموعات بمسارين مجموعة من خانتين، وفي الترابط الكامل يُختار أي موضع من الثمانية">
+<text class="f-text" fill="#182f2b" x="66" y="18" font-size="14" font-weight="600" text-anchor="middle">تعيين مباشر</text>
+<text class="f-text" fill="#182f2b" x="200" y="18" font-size="14" font-weight="600" text-anchor="middle">مجموعات بمسارين</text>
+<text class="f-text" fill="#182f2b" x="334" y="18" font-size="14" font-weight="600" text-anchor="middle">ترابط كامل</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="30" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="47" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="64" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="81" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="98" width="40" height="15"/>
+<rect class="f-accent" fill="#136d5a" x="46" y="115" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="132" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="149" width="40" height="15"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="176" y="30" width="23" height="32"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="30" width="23" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="176" y="64" width="23" height="32"/><rect class="f-accent" fill="#136d5a" x="201" y="64" width="23" height="32"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="176" y="98" width="23" height="32"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="98" width="23" height="32"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="176" y="132" width="23" height="32"/><rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="201" y="132" width="23" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="30" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="30" width="42" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="64" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="64" width="42" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="98" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="98" width="42" height="32"/>
+<rect class="f-accent" fill="#136d5a" x="290" y="132" width="42" height="32"/><rect class="f-accent" fill="#136d5a" x="336" y="132" width="42" height="32"/>
+<text class="f-muted" fill="#5c6d66" x="66" y="190" font-size="14" text-anchor="middle">13 mod 8 = 5</text>
+<text class="f-muted" fill="#5c6d66" x="66" y="214" font-size="14" text-anchor="middle">الخانة 5 فقط</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="190" font-size="14" text-anchor="middle">13 mod 4 = 1</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="214" font-size="14" text-anchor="middle">المجموعة 1: خانتان</text>
+<text class="f-muted" fill="#5c6d66" x="334" y="190" font-size="14" text-anchor="middle">لا حاجة للحساب</text>
+<text class="f-muted" fill="#5c6d66" x="334" y="214" font-size="14" text-anchor="middle">أي خانة من الثماني</text>
+</svg><figcaption>الشكل 11-5  8 خانات نفسها بثلاث طرق للتوزيع. المظلَّل هو المواضع التي يجوز أن يقيم فيها الصف رقم 13. الذاكرة المؤقتة للصفوف في Strata فيها 131,072 مجموعة × 8 مسارات.</figcaption></figure>
+<p class="further">قراءة إضافية: <a href="https://ar.wikipedia.org/wiki/CPU_cache" target="_blank" rel="noopener noreferrer">ويكيبيديا: ذاكرة مخبئية</a> · <a href="https://en.wikipedia.org/wiki/CPU_cache" target="_blank" rel="noopener noreferrer">Wikipedia: CPU cache</a> · <a href="https://en.wikipedia.org/wiki/Cache_placement_policies" target="_blank" rel="noopener noreferrer">Wikipedia: Cache placement policies</a> · <a href="https://csapp.cs.cmu.edu/" target="_blank" rel="noopener noreferrer">Computer Systems: A Programmer's Perspective (CS:APP)، الفصل 6</a></p>
+</aside>
+
+<h2 id="sec-5">11.5 لا تترك النموذج ينتظر: أرسل الطلبات مبكرًا، ودع خيطًا آخر يستلمها</h2>
+<p>بقيت مشكلة: حتى لو لم تستغرق القراءة إلا 311 µs، فلا يريد النموذج أن يتوقف وينتظر. لحسن الحظ فإن أرقام الصفوف الـ 16 تتوقف على الرمز نفسه فقط، فبمجرد أن يتحدد الرمز يمكن حسابها، ولا تُستخدم الصفوف إلا في الطبقة 1. وبينهما عملان: تحويل الرمز إلى متجه (التضمين)، وحساب الطبقة 0. وهذه هي النافذة التي يمكن أن «نخفي» فيها زمن القراءة. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ple_reader.hpp</code>)</p>
+<p>لذلك انقسمت واجهة القراءة نصفين: بمجرد ظهور الرمز نستدعي <code>issue</code> (إرسال الطلبات) فتعود فورًا. وقبل أن تحتاج الطبقة 1 إلى الصفوف نستدعي <code>collect</code> (استلام النتائج)، وعندها فقط قد نضطر إلى الانتظار. انظر الشكل 11-6.</p>
+<figure class="fig"><svg viewBox="0 0 400 274" role="img" aria-label="الشكل 11-6: بمجرد أن يتحدد الرمز تُرسل 16 طلب قراءة، ويستمر التضمين والطبقة 0 في الحساب كالمعتاد، ونستلم النتائج قبل الطبقة 1. إذا كانت القراءة سريعة بما يكفي فلا انتظار، وإذا كانت بطيئة انتظرنا الفرق فقط">
+<text class="f-muted" fill="#5c6d66" x="8" y="18" font-size="14">الزمن → (رسم توضيحي، دون مقياس)</text>
+<text class="f-text" fill="#182f2b" x="8" y="52" font-size="14">الحساب</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="56" y="32" width="70" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="91" y="52" font-size="14" text-anchor="middle">التضمين</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="126" y="32" width="110" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="181" y="52" font-size="14" text-anchor="middle">الطبقة 0</text>
+<rect class="f-accent" fill="#136d5a" x="236" y="32" width="156" height="30" rx="4"/>
+<text class="f-on" fill="#ffffff" x="314" y="52" font-size="14" text-anchor="middle">الطبقة 1: 16 صفًا</text>
+<text class="f-text" fill="#182f2b" x="8" y="102" font-size="14">القرص</text>
+<rect class="f-soft" fill="#e5f1df" x="56" y="82" width="164" height="30" rx="4"/>
+<text class="f-text" fill="#182f2b" x="138" y="102" font-size="14" text-anchor="middle">16 طلب قراءة في الطريق</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M56 26V120M236 26V120"/>
+<text class="f-muted" fill="#5c6d66" x="56" y="138" font-size="14" text-anchor="middle">issue</text>
+<text class="f-muted" fill="#5c6d66" x="236" y="138" font-size="14" text-anchor="middle">collect</text>
+<text class="f-text" fill="#182f2b" x="8" y="170" font-size="14" font-weight="600">عندما تكون القراءة بطيئة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="56" y="182" width="70" height="26" rx="4"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="126" y="182" width="110" height="26" rx="4"/>
+<rect class="f-warn" fill="#9e5d24" x="236" y="182" width="56" height="26" rx="4"/>
+<text class="f-on" fill="#ffffff" x="264" y="200" font-size="14" text-anchor="middle">انتظار</text>
+<rect class="f-accent" fill="#136d5a" x="292" y="182" width="100" height="26" rx="4"/>
+<rect class="f-soft" fill="#e5f1df" x="56" y="214" width="236" height="26" rx="4"/>
+<text class="f-text" fill="#182f2b" x="174" y="232" font-size="14" text-anchor="middle">القراءة أبطأ من نافذة الإخفاء</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="264" font-size="14">ما يتجاوز النافذة وحده يصير انتظارًا</text>
+</svg><figcaption>الشكل 11-6  إرسال الطلبات أولًا واستلام النتائج لاحقًا. تجري القراءة والحساب معًا، فيختفي زمن القراءة خلف التضمين والطبقة 0. وإذا كانت القراءة أبطأ من النافذة انتظرنا الفرق فقط.</figcaption></figure>
+<p>من يتعامل مع القرص؟ يوجد افتراضيًا خيط I/O مخصص. هو الذي يرسل طلبات القراءة ويستلم إشعارات «تمت القراءة». أما من يستدعي <code>issue</code> فيضع الطلبات في طابور ويوقظ الخيط فقط. تقول تعليقات الشيفرة إن كلفة استدعاء النظام لكل قراءة ملف، وهي نحو 11 µs، لا تقع بعد ذلك على الحلقة الرئيسية. يحمي قفل تبادلي (mutex) الطابور والحالة. <span class="ev ev-code">حقيقة من الشيفرة</span>[S11] ويبلغ الحد الأقصى الافتراضي لطلبات القراءة الجارية معًا 256 طلبًا. ففي التوليد لا يلزم لكل رمز إلا 16 طلبًا، ولا يمتلئ الحد إلا حين تُقرأ كتلة كبيرة من المُطالبة. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ngram.hpp</code>)</p>
+<p>وهناك تفصيل طريف. بعض أقراص SSD تدخل في وضع توفير الطاقة بعد نحو 250 ms من الخمول، فتنتظر القراءة التالية 50-150 ms إضافية. وإذا أصابت الذاكرة المؤقتة عدة جولات متتالية أثناء التوليد، فقد «ينام» القرص. لذلك يوفّر القارئ ميزة «ابقَ مستيقظًا»: إذا مضى وقت دون طلب قراءة، قرأ صفحة عشوائية من الجدول ليمنع القرص من النوم. يفعّلها برنامج التوليد افتراضيًا. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ple_reader.hpp</code>) وفكرة «أرسل الآن واستلم لاحقًا» هذه نشرحها بالتفصيل في الفصل 14.</p>
+
+<h2 id="sec-6">11.6 تطبيق عملي: اصنع تعارضًا بيديك</h2>
+<p>لكل من المحاكاتين في هذا الفصل دور. محاكاة «تجزئة n-gram» تريك كيف تُحسب أرقام الصفوف وكيف يحدث التصادم. ومحاكاة «ذاكرة الصفوف المؤقتة» تريك كيف يعمل ترابط المجموعات ومؤشر الاستبدال. نقترح أن تشغّل «التعارض» في المحاكاة الثانية أولًا وتسجّل نسبتي الإصابة، ثم تنتقل إلى «النقطة الساخنة» وتقارن.</p>
+<p>ثم افتح مختبر هذا الفصل التفاعلي «مسار الذاكرة المؤقتة والتعارضات». فيه 16 موضعًا و9 مفاتيح فردية تقع في مجموعة واحدة، وتقارن «LRU كامل الترابط» بـ«الدوّار بثمانية مسارات». ويمكنك أيضًا أن تكتب سجل وصول بنفسك: خمّن نسبة الإصابة أولًا ثم شغّله للتحقق. تنبيه: المختبر والمحاكاة يأخذان «باقي قسمة رقم الصف» لتحديد المجموعة، ليسهل صنع التعارض. أما Strata فيخلط رقم الصف أولًا ثم يوزّعه، فلا يتكدس بهذه السهولة.</p>
+<p>وبعد أن تنتهي فكّر في سؤال: إذا حوّلنا 8 مسارات إلى مسار واحد (تعيين مباشر)، فكيف ستتغير نسبة الإصابة في الوصول نفسه «النقطة الساخنة»؟</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>لكل رمز يُجزَّأ آخر رمزين وآخر ثلاثة رموز (ضرب، ثم XOR، ثم باقي القسمة) فنحصل على 16 رقم صف، ونجلب 16 صفًا من جدول حجمه 28.8 GB، ونضمّها في 2560 قيمة. لا تُخزَّن المفاتيح في الجدول، والتصادم مسموح.</li>
+<li>يُقرأ القرص صفحةً صفحة، وكل صفحة 4 KiB: الصف الذي حجمه 90 بايت يستلزم قراءة صفحة كاملة، والصف العابر للحدّ يستلزم صفحتين. الصعوبة الحقيقية هي زمن استجابة 16 قراءة عشوائية، وليست عرض النطاق.</li>
+<li>الصفوف المقروءة تدخل ذاكرة صفوف مؤقتة بترابط المجموعات بثمانية مسارات، وحين تمتلئ المجموعة يستبدل المؤشر الدوّار. وقد تُخفق الذاكرة بسبب التعارض حتى لو كفت سعتها الكلية، لأن الصفوف تزدحم في مجموعة واحدة.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «جدول حجمه 28.8 GB على القرص، فلا بد أن يكون عرض نطاق القرص هو عنق الزجاجة».</strong></p>
+<p>كل رمز يستخدم 1,440 بايت فقط. حتى لو غابت الصفوف الـ 16 كلها عن الذاكرة المؤقتة وقرأنا لكل صف صفحة كاملة، وولّدنا 90 رمزًا في الثانية، فلن نقرأ إلا 64 KiB × 90 ≈ 5.9 MB في الثانية. وهذا أقل بثلاث مراتب عشرية من القراءة التسلسلية المعتادة لأقراص SSD، وهي بضعة GB في الثانية. <span class="ev ev-est">تقدير تعليمي</span> الذي يجب مواجهته حقًا هو زمن الاستجابة: كم ننتظر 16 قراءة صغيرة، وهل نستطيع تداخلها مع الحساب. وتقولها تعليقات الشيفرة صراحة: هذه مشكلة زمن استجابة، وليست مشكلة عرض نطاق. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ngram.hpp</code>)</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: ثلاثة أنواع من «البحث»، وتناقضات بين الوثائق والشيفرة، وفخاخ التجزئة، ومقاييس القبول</summary>
+<h3>ثلاثة أنواع من البحث لا ترسمها في مربع واحد</h3>
+<p>في Strata ثلاثة أشياء على الأقل تحمل اسم «بحث» أو «ذاكرة مؤقتة»، وشروط الصحة فيها مختلفة تمامًا. <strong>الاستعلام في جدول n-gram</strong> جزء من الحساب العددي للنموذج: يعتمد على تاريخ التسلسل، ويقرأ صفوف جدول مدرَّب، وخطأ صف واحد يعني حسابًا خاطئًا. أما <strong>مسودة prompt lookup</strong> فتخمّن الرموز القليلة التالية (حتى 5 رموز) من نص ظهر سابقًا، ثم يتحقق النموذج الكبير في النهاية من صحة التخمين. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02] و<strong>ذاكرة الخبراء المؤقتة</strong> تقرر فقط هل أوزان خبير ما موجودة الآن في ذاكرة الفيديو، ولا تغيّر ما يُحسب (الفصل 12). الأسماء متقاربة لكن عواقب الخطأ مختلفة: إذا تعطّل الأول صار الخرج خاطئًا، وإذا تعطّل الثاني صار أبطأ فقط، وإذا تعطّل الثالث فقد «يبدو صحيحًا وهو خاطئ».</p>
+<p>الرمزان التاريخيان اللذان تستخدمهما PLE جزء من حالة التسلسل، وهناك أيضًا مخزن تاريخ على نمط الالتفاف (convolution). <span class="ev ev-code">حقيقة من الشيفرة</span>[S13] يجب حفظهما واستعادتهما مع الحوار، فهما ليسا سجلًّا يُرمى بسهولة.</p>
+<h3>مواضع لا تتفق فيها التعليقات والوثائق والشيفرة</h3>
+<p>يقول التعليق في أول <code>ple_reader.hpp</code> إن الذاكرة المؤقتة للصفوف تستخدم الإخلاء بطريقة «clock»، لكن <code>ple_reader.cpp</code> فيه مؤشر دوّار لكل مجموعة، ولا يوجد «بت الاستخدام الأخير» الذي تحتاجه خوارزمية clock. <span class="ev ev-code">حقيقة من الشيفرة</span>[S11] وبدون هذا البت تنحدر clock إلى تناوب بالترتيب، فالنتيجتان متشابهتان، لكن عند قراءة الشيفرة يُعتمد على التنفيذ.</p>
+<p>موضع آخر: تقول وثيقة المصدر الأصلي إن الجدول «يُقرأ عبر ذاكرة نظام التشغيل المؤقتة». <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02] أما الشيفرة الحالية فالوضع الافتراضي فيها القراءة المباشرة، ويطلب التعليق صراحة ألا يشغل هذا الجدول ذاكرة، ومنها ذاكرة ملفات نظام التشغيل. ولا يُبقى ربط الملف بالذاكرة (mmap) إلا مجموعة ضابطة للمقارنة، مع خيار آخر لتثبيت الجدول كله في الذاكرة. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ngram.hpp</code> و<code>direct_file.hpp</code>) الوثائق كثيرًا ما تتأخر عن الشيفرة، وعند مثل هذا التناقض ارجع إلى الإعداد الافتراضي ومسار الاستدعاء لتتأكد.</p>
+<h3>كل خطأ في التجزئة «يبدو صحيحًا»</h3>
+<p>تعدّد تعليقات <code>ngram.hpp</code> سلسلة فخاخ: استخدام الجمع بدل XOR؛ واستخدام «AND مع 2 أس n ناقص 1» بدل باقي القسمة (والمقسوم عليه ليس من قوى 2، فهما دالتان مختلفتان)؛ وقطع التاريخ عند رمز «نهاية الحوار» يجب أن يمتد إلى المواضع الأقدم؛ والسياق المفقود هو −1 بينما الرقم 0 رمز حقيقي؛ وإذا كان الرمز الحالي نفسه رمز النهاية فلا يُقطع سياقه هو؛ ومصفوفة السياق «الأقدم أولًا»، وإذا قُرئت بالعكس فستظل تنتج أرقام صفوف مقبولة. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ngram.hpp</code> و<code>src/kernels/ngram.cpp</code>) كل خطأ من هذه الأخطاء ينتج أرقام صفوف داخل المدى المسموح، ولا يكشفها فحص المدى. لا يكشفها إلا مقارنة كل رقم بإجابة معيارية من تنفيذ مستقل.</p>
+<p>وهناك فخ إزاحة أيضًا: بيانات الجدول لا تبدأ من البايت 0 من الملف، فقبلها ترويسة. إذا قرأنا من 0 قرأنا «الترويسة مع صف مزاح»، ويظل فك ترميزه أرقامًا تبدو معقولة. لذلك يأخذ القارئ الإزاحة من ترويسة حُلّلت فعلًا، ويتحقق من أن الجدول يملأ بقية الملف تمامًا. <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ngram.hpp</code>)</p>
+<h3>فتح خيط لا يعني أنه صار أسرع</h3>
+<p>نقل استدعاءات النظام إلى خيط I/O يقصّر «زمن الإرسال» في الحلقة الرئيسية، لكن الطلب نفسه لا يصير بالضرورة أسرع. إذا كان النموذج يحتاج هذه البيانات فورًا، فالانتظار فقط انتقل إلى مكان آخر. لذلك انظر إلى ثلاثة أزمنة: متى أُرسل الطلب، ومتى اكتمل، ومتى استُهلك. لا مكسب حقيقيًا إلا إذا وُجد عمل مستقل بين الإرسال والاستهلاك.</p>
+<h3>أي الأرقام نراقب للقبول</h3>
+<p>في إحصاءات القارئ: عدد الصفوف المطلوبة، وعدد إصابات ذاكرة الصفوف المؤقتة، وعدد الصفوف التي دُمجت لأنها في صفحة واحدة، وعدد طلبات القراءة المرسلة، وعدد البايتات المقروءة، وزمن حجب <code>collect</code>، وزمن استجابة كل قراءة (يحتفظ بآخر 65,536 قراءة لحساب المئينات). <span class="ev ev-code">حقيقة من الشيفرة</span> (<code>ple_reader.hpp</code>) وعند تقييم أي تعديل يجب أن نبلّغ على الأقل عن: نسبة إصابة الصفوف، وعدد الصفحات المقروءة، ونسبة البايتات المفيدة إلى البايتات المقروءة فعليًا، والمئين 50 (p50) والمئين 95 (p95) لزمن الانتظار لكل رمز. أما الاكتفاء بعرض نطاق القراءة التسلسلية فلا يفسّر أداء البحث العشوائي المتفرق في الجدول. ويدعم القارئ أيضًا حقن عطل «تأخير كل قراءة عمدًا»، للتحقق من أن النظام ينتظر على قرص بطيء، ولا يستخدم بيانات لم تكتمل قراءتها.</p>
+</details>
