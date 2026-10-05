@@ -27,7 +27,7 @@
 </svg><figcaption>그림 24-1　「중지」는 층마다 뜻이 달라요. 브라우저 층이 가장 먼저 멈추고 그래픽 카드 층이 가장 나중에 멈춰요. 중간의 모든 층에서 누군가 신호를 아래로 전해 줘야 해요.</figcaption></figure>
 <p>이 이야기를 분명히 하려고 먼저 요청의 <dfn>상태 기계</dfn>를 그려 볼게요. 요청은 어느 순간이든 어떤 상태 하나에 있고, 특정한 이벤트만 그것을 다른 상태로 바꿀 수 있어요. 아래는 이 책의 교육용 버전이에요.</p>
 <ul>
-<li><strong>대기</strong>: 요청이 도착했지만 엔진이 다른 요청을 처리하는 중이에요. Strata는 한 번에 시퀀스 하나만 처리하고, 뒤에 온 요청은 모두 FIFO(선입선출) 대기열에서 기다려요. [S15]</li>
+<li><strong>대기</strong>: 요청이 도착했지만 엔진이 다른 요청을 처리하는 중이에요. Strata는 기본적으로 한 번에 시퀀스 하나만 처리하고, 뒤에 온 요청은 모두 FIFO(선입선출) 대기열에서 기다려요. [S15] v0.1.39는 직접 켜야 하는 <code>"parallel": N</code>을 추가했어요. 대화를 최대 N개까지 엔진 안에서 함께 디코드하고, 넘치는 요청은 빈 슬롯을 기다려요. <span class="ev ev-report">업스트림 보고</span>[S01] 이 장은 기본인 단일 시퀀스 경로만 다뤄요.</li>
 <li><strong>문제 읽기</strong>: 엔진이 질문을 한 청크씩 읽어요(1장에서 배운 프리필).</li>
 <li><strong>생성</strong>: 토큰을 하나씩 써서 답을 만들어요.</li>
 <li><strong>완료 / 취소됨 / 실패</strong>: 종료 상태가 셋이에요. 모든 요청은 결국 이 중 하나로 끝나야 하고, 매달려 있으면 안 돼요.</li>
@@ -71,7 +71,7 @@
 <text class="f-text" fill="#182f2b" x="324" y="67" font-size="13" font-weight="600" text-anchor="middle">읽기 스레드</text>
 <text class="f-muted" fill="#5c6d66" x="324" y="88" font-size="12" text-anchor="middle">엔진 출력을 큐에 담음</text>
 <rect class="f-soft" fill="#e5f1df" x="20" y="116" width="360" height="48" rx="6"/>
-<text class="f-text" fill="#182f2b" x="200" y="145" font-size="13" text-anchor="middle">FIFO 락: 한 순간에 요청 하나만 엔진을 써요</text>
+<text class="f-text" fill="#182f2b" x="200" y="145" font-size="13" text-anchor="middle">FIFO 락: 기본은 한 순간에 요청 하나만 엔진을 써요</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 180V228M250 228V180"/>
 <path class="f-muted" fill="#5c6d66" d="M100 232l-5-8h10z"/>
 <path class="f-muted" fill="#5c6d66" d="M250 176l-5 8h10z"/>
@@ -80,10 +80,10 @@
 <rect class="f-accent" fill="#136d5a" x="10" y="234" width="380" height="56" rx="10"/>
 <text class="f-on" fill="#ffffff" x="200" y="257" font-size="13" font-weight="600" text-anchor="middle">엔진 프로세스: strata --serve</text>
 <text class="f-on" fill="#ffffff" x="200" y="278" font-size="12" text-anchor="middle">가중치, 전문가 캐시, VRAM은 모두 엔진이 관리</text>
-</svg><figcaption>그림 24-3　서버와 엔진은 서로 다른 프로세스이고, 파이프로 텍스트를 한 줄씩 주고받아요. 서버 안의 스레드는 각자 맡은 일이 있고, FIFO 락이 한 순간에 요청 하나만 엔진을 쓰도록 보장해요.</figcaption></figure>
+</svg><figcaption>그림 24-3　서버와 엔진은 서로 다른 프로세스이고, 파이프로 텍스트를 한 줄씩 주고받아요. 서버 안의 스레드는 각자 맡은 일이 있어요. 기본 설정에서는 FIFO 락이 한 순간에 요청 하나만 엔진을 쓰도록 보장해요.</figcaption></figure>
 <p>서버는 Python의 <code>subprocess.Popen</code>으로 <code>strata --serve</code>를 띄우고, 엔진의 표준 입력과 표준 출력을 모두 파이프로 이어요. <span class="ev ev-code">코드 사실</span> 엔진은 가중치를 불러온 뒤 먼저 <code>INFO</code> 줄을 몇 개 쓰고, 이어서 <code>READY</code>와 컨텍스트 길이가 든 한 줄을 써요. 이 줄에 <code>stop</code>도 붙어 있으면 이 엔진 버전이 도중 중지를 지원한다는 뜻이에요. 서버는 <code>READY</code>를 읽어야 엔진이 「살아 있다」고 봐요. 그 뒤 서버가 <code>GEN</code> 명령 한 줄을 써서 요청을 제출하면, 엔진은 <code>T</code>(토큰 하나), <code>PP</code>(문제 읽기 진행 상황), <code>DONE</code>(끝), <code>ERR</code>(오류) 중 하나로 답해요.</p>
 <p>전용 읽기 스레드도 하나 있어서, 엔진이 쓴 모든 줄을 큐에 넣어요. 덕분에 요청을 처리하는 스레드는 다음 줄을 「시간 제한을 두고」 기다릴 수 있어요. 안 오면 먼저 하트비트를 보내고 취소 플래그를 확인할 수 있고, 마냥 멍하니 기다리지 않아요. <span class="ev ev-code">코드 사실</span></p>
-<p>엔진 프로세스가 뜻밖에 끝나기도 해요. 코드에는 <code>EngineDied</code> 예외가 따로 있고, 주석에는 가장 흔한 원인이 적혀 있어요. Linux에서 메모리가 모자라 OOM killer에게 종료당한 경우예요. [S15] 이때 지금 요청은 오류로 끝나고, 다음 요청이 오면 서버가 같은 명령으로 엔진을 다시 시작해요.</p>
+<p>엔진 프로세스가 뜻밖에 끝나기도 해요. 코드에는 <code>EngineDied</code> 예외가 따로 있고, 주석에는 가장 흔한 원인이 적혀 있어요. Linux에서 메모리가 모자라 OOM killer에게 종료당한 경우예요. [S15] 이때 지금 요청은 오류로 끝나고, 다음 요청이 오면 서버가 같은 명령으로 엔진을 다시 시작해요. v0.1.39부터는 새 프로세스가 <code>READY</code>를 알리기 전에 끝나 버리면 서버가 15초 쉬었다가 다시 시도하고, 최대 3번까지 해요. 방금 죽은 엔진이 쥐고 있던 VRAM이 돌아오는 데 시간이 걸릴 수 있기 때문이에요. <span class="ev ev-code">코드 사실</span></p>
 <p>엔진을 정상적으로 닫는 데도 요령이 있어요. 서버는 세 단계로 가고, 단계마다 최대 20초를 기다려요. 그림 24-4를 보세요.</p>
 <figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="그림 24-4: 엔진 프로세스를 닫는 세 단계. 먼저 QUIT를 써서 스스로 종료하게 하고, 안 되면 terminate, 그래도 안 되면 kill. 세 단계 뒤에도 안 끝나면 오류를 보고한다">
 <text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">엔진 프로세스 닫기: 정중한 방법부터</text>
@@ -186,7 +186,7 @@
 <p>비교 자체에도 요령이 있어요. 보통의 문자열 비교는 다른 문자를 만나면 바로 돌아와요. 앞부분을 많이 맞힐수록 비교에 걸리는 시간이 길어져요. 공격자가 시간을 재면 키를 한 자리씩 추측해 낼 수 있어요. 이처럼 소요 시간이나 전력 같은 「부산물」로 정보를 새게 하는 공격이 <dfn>부채널 공격</dfn>이고, 이 경우는 <dfn>타이밍 공격</dfn>이에요. 막는 방법은 <dfn>상수 시간 비교</dfn>예요. 어느 자리에서 달라지든 문자열 전체를 다 비교하고 나서 돌아와요.</p>
 <p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/API_키" target="_blank" rel="noopener noreferrer">위키백과: API 키</a> · <a href="https://ko.wikipedia.org/wiki/부채널_공격" target="_blank" rel="noopener noreferrer">위키백과: 부채널 공격</a> · <a href="https://developer.mozilla.org/ko/docs/Web/HTTP/Reference/Headers/Authorization" target="_blank" rel="noopener noreferrer">MDN: Authorization 헤더</a> · <a href="https://docs.python.org/ko/3/library/hmac.html" target="_blank" rel="noopener noreferrer">Python 문서: hmac.compare_digest</a> · <a href="https://www.rfc-editor.org/rfc/rfc6750" target="_blank" rel="noopener noreferrer">RFC 6750: Bearer 토큰</a></p>
 </aside>
-<p>Strata의 첫 번째 방어선은 <strong>기본적으로 이 컴퓨터만 듣는 것</strong>이에요. 서버는 기본으로 <code>127.0.0.1</code>에서 대기하니까 다른 기기는 아예 연결할 수 없어요. <span class="ev ev-code">코드 사실</span> 이때 README는 앱에 API Key를 아무거나 넣어도 된다고 알려 줘요. [S01] 휴대폰이나 다른 컴퓨터에서 접속하려면 <code>0.0.0.0</code>에서 대기하도록 바꿔야 하고, README의 원문은 「반드시 키를 함께 쓰세요」예요. [S01] 대기 주소를 바꿨는데 키를 설정하지 않으면 서버는 시작할 때 경고를 한 줄 찍어요. API Key가 없으니 네트워크의 누구든 이 모델을 쓸 수 있다는 내용이에요. <span class="ev ev-code">코드 사실</span></p>
+<p>Strata의 첫 번째 방어선은 <strong>기본적으로 이 컴퓨터만 듣는 것</strong>이에요. 서버는 기본으로 <code>127.0.0.1</code>에서 대기하니까 다른 기기는 아예 연결할 수 없어요. <span class="ev ev-code">코드 사실</span> 이때 README는 앱에 API Key를 아무거나 넣어도 된다고 알려 줘요. [S01] 휴대폰이나 다른 컴퓨터에서 접속하려면 <code>0.0.0.0</code>에서 대기하도록 바꿔야 하고, README의 원문은 「반드시 키를 설정하세요」예요. [S01] 대기 주소를 바꿨는데 키를 설정하지 않으면 서버는 시작할 때 경고를 한 줄 찍어요. API Key가 없으니 네트워크의 누구든 이 모델을 쓸 수 있다는 내용이에요. <span class="ev ev-code">코드 사실</span></p>
 <p>키를 설정하면 <code>/v1/*</code>에 접근하는 요청은 반드시 키를 갖고 와야 해요. <code>Authorization: Bearer …</code>로 쓰거나 <code>x-api-key</code> 헤더에 써요(Anthropic 스타일 클라이언트는 이쪽을 써요). 비교에는 <code>hmac.compare_digest</code>를 쓰고, 코드 주석에는 「상수 시간」이라고 적혀 있어요. 비교가 실패하면 401을 돌려주고 종류는 <code>authentication_error</code>예요. <span class="ev ev-code">코드 사실</span> 전체 판단 과정은 그림 24-7이에요.</p>
 <figure class="fig"><svg viewBox="0 0 400 310" role="img" aria-label="그림 24-7: Strata의 API Key 검사 흐름. 키를 설정하지 않았으면 바로 통과시키고, 설정했으면 클라이언트가 보낸 키를 꺼내 상수 시간으로 비교한다. 같으면 처리하고 다르면 401을 돌려준다">
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="8" width="200" height="34" rx="8"/>
