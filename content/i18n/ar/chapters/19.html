@@ -1,0 +1,300 @@
+<div class="hook"><span class="eyebrow">ربما لاحظتَ</span>
+<p>حين تراقب Strata وهو يكتب، قد تشعر أن الكلمات تتدفق «دفعةً واحدة» بدل أن تخرج كلمةً كلمة. يشرح ملف README الأمر هكذا: مساعد صغير يخمّن الكلمات القليلة التالية، ثم يفحص النموذج الكبير هذه التخمينات كلها مرة واحدة، فتصل الإجابة نفسها أسرع بمقدار 1.6-1.8 مرة. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S01]</p>
+<p>وتقول وثائق المصدر الأصلي أيضًا إن طبقة التخمين المدمجة في النموذج تخمّن 3 رموز (tokens) على الأكثر في المرة الواحدة. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02] هنا يأتي السؤال: الرمز المخمَّن الصحيح مكسب مجاني، فلماذا لا نخمّن 10 رموز دفعة واحدة؟ يجيب هذا الفصل عن أمرين: كم تخمينًا يستحق العناء، وكيف يغيّر المحرك رأيه أثناء التشغيل حين يتبدّل معدل القبول باستمرار.</p></div>
+<p class="tldr"><strong>في سطر واحد:</strong> كل رمز إضافي تخمّنه يضيف إلى المتوقع جزءًا أصغر فأصغر، على نمط المتسلسلة الهندسية، بينما يزداد زمن جولة التحقق باستمرار. تقارن Strata «عدد الرموز المتوقع إيداعها لكل ms»، وتحدّث معدل القبول أثناء التشغيل بالمتوسط المتحرك الأسي.</p>
+
+<h2 id="sec-1">19.1 تخمين مرة، وتحقق مرة: كم رمزًا تعطينا الجولة؟</h2>
+<p>لنراجع أولًا <dfn>فك الترميز التخميني</dfn> (speculative decoding) من الفصل 18: نخمّن أولًا بتكلفة قليلة، ثم نترك النموذج الكبير يصحّح. والذي يخمّن هو <dfn>طبقة MTP</dfn> المدمجة في النموذج (multi-token prediction، أي التنبؤ بعدة رموز). وتسمى المرشحات التي تخمّنها <dfn>مسودات</dfn>. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02]</p>
+<p>يصفّ النموذج الكبير «آخر رمز مؤكَّد + k مسودة» في صف واحد، ويمرّ على طبقاته الـ48 مرة واحدة فقط. بهذا المرور الواحد يعطي لكل موضع في الصف جوابه: «أرى أن المكان هنا يناسبه هذا الرمز». يسمى هذا الصف <dfn>نافذة التحقق</dfn>، وطولها k + 1. يمرّ الشكل 19-1 على مثال بـ k = 3.</p>
+<figure class="fig"><svg viewBox="0 0 400 296" role="img" aria-label="الشكل 19-1: جولة واحدة من فك الترميز التخميني. خُمّنت 3 مسودات، الأولى والثانية تطابقان النموذج الكبير والثالثة لا تطابقه، فتودِع الجولة 3 رموز">
+<text class="f-muted" fill="#5c6d66" x="150" y="22" font-size="12" text-anchor="middle">السابق</text>
+<text class="f-muted" fill="#5c6d66" x="210" y="22" font-size="12" text-anchor="middle">مسودة 1</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="22" font-size="12" text-anchor="middle">مسودة 2</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="22" font-size="12" text-anchor="middle">مسودة 3</text>
+<text class="f-text" fill="#182f2b" x="10" y="46" font-size="13" font-weight="600">① تخمين</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="63" font-size="12">MTP يخمّن 3</text>
+<rect class="f-soft" fill="#e5f1df" x="125" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="150" y="55" font-size="15" text-anchor="middle">هيا</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="185" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="210" y="55" font-size="15" text-anchor="middle">بنا</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="245" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="270" y="55" font-size="15" text-anchor="middle">إلى</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="305" y="30" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="55" font-size="15" text-anchor="middle">النهر</text>
+<text class="f-text" fill="#182f2b" x="10" y="106" font-size="13" font-weight="600">② التحقق</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="123" font-size="12">48 طبقة، مرور واحد</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="185" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="210" y="115" font-size="15" text-anchor="middle">بنا</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="245" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="270" y="115" font-size="15" text-anchor="middle">إلى</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="305" y="90" width="50" height="38" rx="6"/>
+<text class="f-text" fill="#182f2b" x="330" y="115" font-size="15" text-anchor="middle">البحر</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="144" font-size="12" text-anchor="middle">ما يراه النموذج الكبير في كل موضع</text>
+<text class="f-text" fill="#182f2b" x="10" y="176" font-size="13" font-weight="600">③ المقارنة</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="193" font-size="12">من اليسار، نتوقف عند الخطأ</text>
+<text class="f-text" fill="#182f2b" x="210" y="184" font-size="13" text-anchor="middle">متطابق</text>
+<text class="f-text" fill="#182f2b" x="270" y="184" font-size="13" text-anchor="middle">متطابق</text>
+<text class="f-warn" fill="#9e5d24" x="330" y="184" font-size="13" font-weight="600" text-anchor="middle">مختلف</text>
+<text class="f-text" fill="#182f2b" x="10" y="232" font-size="13" font-weight="600">④ الإيداع</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="249" font-size="12">قُبلت 2 + واحدة من النموذج</text>
+<rect class="f-accent" fill="#136d5a" x="185" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="210" y="241" font-size="15" text-anchor="middle">بنا</text>
+<rect class="f-accent" fill="#136d5a" x="245" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="270" y="241" font-size="15" text-anchor="middle">إلى</text>
+<rect class="f-accent" fill="#136d5a" x="305" y="216" width="50" height="38" rx="6"/>
+<text class="f-on" fill="#ffffff" x="330" y="241" font-size="15" text-anchor="middle">البحر</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 80H390M10 154H390M10 204H390"/>
+<text class="f-text" fill="#182f2b" x="200" y="284" font-size="12" text-anchor="middle">جولة تحقق واحدة تودِع 3 رموز؛ المسودة «النهر» تُهمَل</text>
+</svg><figcaption>الشكل 19-1　جولة واحدة من فك الترميز التخميني: خُمّنت 3 مسودات، الأولى والثانية تطابقان النموذج الكبير والثالثة لا تطابقه. جواب النموذج الكبير في الموضع الثالث («البحر») يُودَع معهما مجانًا، فتحصل الجولة على 3 رموز.</figcaption></figure>
+<p>القاعدة بسيطة: نقارن من اليسار إلى اليمين، ونتوقف عند أول موضع غير متطابق. كل المسودات المتطابقة قبله <strong>تُقبل</strong>، ونضيف إليها جواب النموذج الكبير نفسه عند موضع التوقف. فإذا قُبلت a مسودة، أودعت الجولة a + 1 رمز. وهكذا تعدّ حلقة التوليد في Strata: تقارن المسودات في النافذة واحدة واحدة بمخرجات النموذج الكبير، ثم تستدعي <code>commit(a + 1)</code>. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>حتى لو لم يصح أي تخمين، تبقى في الجولة رمز واحد من النموذج الكبير نفسه، أي بقدر ما نحصل عليه دون تخمين. والتخمين الخاطئ لا يُفسد الإجابة، لأن كل رمز يقرّره النموذج الكبير. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02] وثمن الخطأ واحد فقط: يُحسب في تحقق الجولة بضعة مواضع إضافية بلا فائدة.</p>
+
+<h2 id="sec-2">19.2 كم رمزًا في الجولة الواحدة في المتوسط؟ تأتي القيمة المتوقعة</h2>
+<p>لا نستطيع أن نعرف مسبقًا كم مسودة ستُقبل في كل جولة. الذي نستطيع حسابه هو <strong>المتوسط</strong>، أي <dfn>القيمة المتوقعة</dfn>.</p>
+<p>ليكن معدل القبول للمسودة رقم i هو pᵢ، وهو <dfn>معدل القبول الشرطي</dfn>: احتمال قبول المسودة رقم i بشرط أن تكون الـ i − 1 مسودة قبلها قد قُبلت. كلمة «بشرط» مهمة هنا: إذا رُفضت مسودة واحدة، فلن يصل الدور إلى مقارنة ما بعدها أصلًا.</p>
+<p>لكي تفيد المسودة رقم i، يجب أن تُقبل الـ i الأولى كلها، واحتمال ذلك p₁ × p₂ × … × pᵢ. نجمع «احتمال الفائدة» لكل موضع، فنحصل على عدد الرموز المتوقع إيداعها في الجولة:</p>
+<div class="equation">E = 1 + p₁ + p₁p₂ + … + p₁p₂…pₖ</div>
+<p>الرقم 1 في البداية هو رمز النموذج الكبير نفسه، وهو مضمون في كل جولة. وشيفرة Strata تحسب هكذا بالضبط: تضرب حدًّا بعد حد، وتجمع حدًّا بعد حد. <span class="ev ev-code">حقيقة من الشيفرة</span>[S09] وإن كان معدل القبول واحدًا في كل المواضع، وليكن p، فالمجموع هو أول k + 1 حدًّا من متتالية هندسية. في الإطار التالي نشرح لماذا «يقلّ المكسب» كلما أضفنا.</p>
+<aside class="primer" id="c19-expected-value">
+<h3>القيمة المتوقعة والمتسلسلة الهندسية</h3>
+<p>الفكرة: القيمة المتوقعة هي «متوسط النتيجة بعد تكرار التجربة مرات كثيرة جدًا». ارمِ نردًا عادلًا: النتيجة في المرة الواحدة أي رقم من 1 إلى 6، ومتوسطها 3.5. وتعريف <dfn>القيمة المتوقعة</dfn>: نضرب كل نتيجة في احتمالها، ثم نجمع الكل.</p>
+<p>عند حساب «كم رمزًا في الجولة» توجد طريقة أسهل: نجمع «احتمال الاستفادة» من كل موضع. الموضع 1 مستخدَم حتمًا، فاحتماله 1؛ والموضع 2 احتماله p؛ والموضع 3 احتماله p²، وهكذا. فتكون E = 1 + p + p² + … + pᵏ. مجموع كل حدّ فيه هو الحدّ السابق مضروبًا في العدد نفسه يسمى <dfn>متسلسلة هندسية</dfn>، وله صيغة جاهزة: E = (1 − pᵏ⁺¹) ÷ (1 − p).</p>
+<figure class="fig"><svg viewBox="0 0 400 216" role="img" aria-label="الشكل 19-2: عند p = 0.86 وتخمين 3 مسودات، المساهمة المتوقعة للمواضع الأربعة هي 1 و0.86 و0.74 و0.64، ومجموعها نحو 3.24">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">كم يساهم كل موضع في المتوسط عند تخمين 3 مسودات (p = 0.86)</text>
+<text class="f-text" fill="#182f2b" x="10" y="52" font-size="12">النموذج الكبير</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="38" width="220" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="326" y="52" font-size="12">1 مضمون</text>
+<text class="f-text" fill="#182f2b" x="10" y="84" font-size="12">مسودة 1</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="70" width="189.2" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="295" y="84" font-size="12">p = 0.86</text>
+<text class="f-text" fill="#182f2b" x="10" y="116" font-size="12">مسودة 2</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="102" width="162.7" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="269" y="116" font-size="12">p² ≈ 0.74</text>
+<text class="f-text" fill="#182f2b" x="10" y="148" font-size="12">مسودة 3</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="134" width="139.9" height="20" rx="3"/>
+<text class="f-text" fill="#182f2b" x="246" y="148" font-size="12">p³ ≈ 0.64</text>
+<text class="f-text" fill="#182f2b" x="10" y="182" font-size="12" font-weight="600">المجموع E = 1 + 0.86 + 0.74 + 0.64 ≈ 3.24 رمز</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">حتى مع عدد لا نهائي من المسودات: E → 1 ÷ (1 − p) ≈ 7.1</text>
+</svg><figcaption>الشكل 19-2　كل مسودة إضافية تُضرب مساهمتها في p مرة أخرى، فيقصر العمود تلو العمود. عند تخمين 3 مسودات نحصل في المتوسط على 3.24 رمز؛ وحتى مع عدد لا نهائي من المسودات لا نتجاوز 7.1.</figcaption></figure>
+<p>إذن المكسب من كل تخمين إضافي يتناقص: عند p = 0.86 لا تساهم المسودة الثامنة إلا بنحو 0.86⁸ ≈ 0.30 رمز. وللمتتالية الهندسية سقف أيضًا: حين يؤول عدد الحدود إلى ما لا نهاية يؤول المجموع إلى 1 ÷ (1 − p). وعند p = 0.86 يكون متوسط الجولة نحو 7.1 رموز فقط، حتى لو خمّنّا عددًا لا نهائيًا.</p>
+<p class="further">قراءة إضافية: <a href="https://ar.wikipedia.org/wiki/%D9%82%D9%8A%D9%85%D8%A9_%D9%85%D8%AA%D9%88%D9%82%D8%B9%D8%A9" target="_blank" rel="noopener noreferrer">ويكيبيديا: قيمة متوقعة</a> · <a href="https://ar.wikipedia.org/wiki/%D9%85%D8%AA%D8%B3%D9%84%D8%B3%D9%84%D8%A9_%D9%87%D9%86%D8%AF%D8%B3%D9%8A%D8%A9" target="_blank" rel="noopener noreferrer">ويكيبيديا: متسلسلة هندسية</a> · <a href="https://ar.wikipedia.org/wiki/%D8%A7%D8%AD%D8%AA%D9%85%D8%A7%D9%84_%D8%B4%D8%B1%D8%B7%D9%8A" target="_blank" rel="noopener noreferrer">ويكيبيديا: احتمال شرطي</a></p>
+</aside>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> إذا رمزنا إلى «عدد الرموز المودَعة في الجولة» بالمتغير العشوائي N، فهذه الطريقة هي صيغة المجموع الذيلي في نظرية الاحتمال: E[N] = Σ P(N ≥ i). وهي صحيحة لأي توزيع، فلا نحتاج في الاشتقاق إلى افتراض استقلال المواضع، بل نضرب الاحتمالات الشرطية فقط.</p>
+<p>لنعوّض بأرقام Strata. تعطي الشيفرة كل موضع في MTP معدل قبول ابتدائيًا هو 0.86، ويقول التعليق إنه جاء من قياس على النموذج نفسه. <span class="ev ev-code">حقيقة من الشيفرة</span>[S09] فعند تخمين 3 مسودات: E = 1 + 0.86 + 0.74 + 0.64 ≈ 3.24. وتذكر الوثائق الأصلية أن التحقق الواحد يودِع في الواقع 2.4-3.2 رمز في المتوسط. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02] الرقمان من مرتبة واحدة، وهذا يعني أن 0.86 نقطة بداية معقولة. أما المعدل الحقيقي فيتغير مع النص، وهو موضوع القسم 19.4. <span class="ev ev-est">تقدير تعليمي</span></p>
+
+<h2 id="sec-3">19.3 النصف الآخر من الحساب: كلما اتسعت النافذة غلا التحقق</h2>
+<p>لو كان التحقق بلا زمن، فكلما خمّنّا أكثر كان أفضل. لكن التحقق يأخذ وقتًا. ويقسّم نموذج التكلفة <code>step_ms</code> في Strata زمن الجولة إلى أربعة أجزاء: <span class="ev ev-code">حقيقة من الشيفرة</span>[S09]</p>
+<ul>
+<li><strong>الجزء الكثيف (dense)</strong>: ما يحتاجه كل رمز من انتباه وغيره. كلما اتسعت النافذة بطؤ هذا الجزء، والشيفرة تستعمل لذلك جدول معاملات يُبحث فيه بطول النافذة.</li>
+<li><strong>خبراء يحسبهم CPU</strong>: الخبراء غير المخزّنين مؤقتًا على بطاقة الرسوميات يحسبهم CPU (شرحنا ذلك في الفصل 10). وكلما زادت الرموز في النافذة زاد عدد الخبراء <strong>المختلفين</strong> المستعمَلين، فينشغل CPU أكثر.</li>
+<li><strong>المزامنة</strong>: كلفة تنسيق ثابتة في كل جولة.</li>
+<li><strong>صياغة المسودات</strong>: طبقة MTP تحتاج وقتًا لتخمين كل مسودة.</li>
+</ul>
+<p>قيم هذه الأجزاء الافتراضية مكتوبة في ملف الترويسة: الجزء الكثيف 11 ms، وحساب الخبراء الـ480 كلهم على CPU يأخذ 15.8 ms، ومعدل إصابة ذاكرة الفيديو (VRAM) 55%، والمزامنة 2.4 ms، وكل مسودة MTP 1.2 ms. ويقول التعليق إن القيم الافتراضية من هذا النوع، مثل جدول المعاملات، جاءت من قياسات 23 سبتمبر، وإن 11 ms قيمة مستهدفة في الخطة ينبغي استبدالها في المحرك بقيمة مقيسة. <span class="ev ev-code">حقيقة من الشيفرة</span> يعوّض الشكل 19-3 هذه القيم في الصيغة، لنرى كيف تتغير الأجزاء الأربعة مع اتساع النافذة.</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="الشكل 19-3: بحسب معاملات Strata الافتراضية يرتفع زمن الجولة من 20.5 ميلي ثانية دون تخمين إلى 92.0 ميلي ثانية عند تخمين 8 مسودات">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">زمن الجولة من أربعة أجزاء (ms، طول الشريط بالتناسب)</text>
+<text class="f-text" fill="#182f2b" x="10" y="54" font-size="12">k = 0</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="40" width="34.7" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="90.7" y="40" width="22.4" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="113.1" y="40" width="7.6" height="20"/>
+<text class="f-text" fill="#182f2b" x="127" y="55" font-size="12">20.5</text>
+<text class="f-text" fill="#182f2b" x="10" y="94" font-size="12">k = 1</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="80" width="36.4" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="92.4" y="80" width="39.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="132.2" y="80" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="139.8" y="80" width="3.8" height="20"/>
+<text class="f-text" fill="#182f2b" x="150" y="95" font-size="12">27.8</text>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="12">k = 3</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="120" width="50.3" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="106.3" y="120" width="70.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="177.1" y="120" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="184.7" y="120" width="11.3" height="20"/>
+<text class="f-text" fill="#182f2b" x="202" y="135" font-size="12">44.4</text>
+<text class="f-text" fill="#182f2b" x="10" y="174" font-size="12">k = 8</text>
+<rect class="f-accent" fill="#136d5a" x="56" y="160" width="114.4" height="20"/>
+<rect class="f-warn" fill="#9e5d24" x="170.4" y="160" width="137.8" height="20"/>
+<rect class="f-muted" fill="#5c6d66" x="308.2" y="160" width="7.6" height="20"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="315.8" y="160" width="30.2" height="20"/>
+<text class="f-text" fill="#182f2b" x="352" y="175" font-size="12">92.0</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="24" y="205" font-size="12">الجزء الكثيف</text>
+<rect class="f-warn" fill="#9e5d24" x="200" y="196" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="214" y="205" font-size="12">خبراء يحسبهم CPU</text>
+<rect class="f-muted" fill="#5c6d66" x="10" y="216" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="24" y="225" font-size="12">المزامنة</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="200" y="216" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="214" y="225" font-size="12">صياغة المسودات</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="246" font-size="12">كلما خمّنّا أكثر حسب CPU خبراء أكثر، لكن بوتيرة أبطأ من عدد الرموز</text>
+</svg><figcaption>الشكل 19-3　حين تتسع النافذة من رمز واحد إلى 9 رموز، لا يزيد زمن الجولة إلا إلى نحو 4.5 أضعاف. السبب أن الرموز في النافذة الواحدة كثيرًا ما تختار مجموعة الخبراء نفسها، فقراءة الأوزان مرة واحدة تكفي لحساب عدة رموز. <span class="ev ev-est">تقدير تعليمي</span></figcaption></figure>
+<p>انتبه إلى جزء CPU. لو استعمل كل رمز من الرموز التسعة مجموعة خبراء مختلفة تمامًا، لصار عمل CPU 9 أضعاف عمله مع رمز واحد. لكن جدول المعاملات في الشيفرة يصل إلى 5.2 ضعف فقط، ويقول التعليق إن هذا الجدول جاء من قياس مسارات الموجِّه (router). <span class="ev ev-code">حقيقة من الشيفرة</span> فالرموز في النافذة الواحدة كثيرًا ما تختار الخبراء نفسهم، وهذا هو أثر «الخبراء الساخنين» الذي ذكرناه في الفصل 10.</p>
+<p>صار البسط والمقام معلومين، فالهدف واضح: <strong>السرعة = عدد الرموز المتوقع إيداعها في الجولة ÷ زمن الجولة</strong>. يحسبها المتحكّم لكل k، ثم يختار k ذا السرعة الأكبر. <span class="ev ev-code">حقيقة من الشيفرة</span>[S09] والشكل التفاعلي التالي يبسط لك هذا الحساب.</p>
+<div class="viz" data-viz="draft-window"><figure class="fig"><svg viewBox="0 0 400 282" role="img" aria-label="الشكل 19-4: بحسب معاملات Strata الافتراضية وعند p = 0.86، سرعة k من 0 إلى 8؛ أسرعها k = 3 بنحو 72.8 رمز في الثانية">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">السرعة لكل نافذة، token/s (p = 0.86)</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="46" y="102.4" width="26" height="97.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="85" y="66" width="26" height="134"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="124" y="58.6" width="26" height="141.4"/>
+<rect class="f-accent" fill="#136d5a" x="163" y="54.4" width="26" height="145.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="61.4" width="26" height="138.6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="241" y="67.2" width="26" height="132.8"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="280" y="73.8" width="26" height="126.2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="319" y="80.2" width="26" height="119.8"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="358" y="84.8" width="26" height="115.2"/>
+<text class="f-text" fill="#182f2b" x="59" y="118" font-size="12" text-anchor="middle">49</text>
+<text class="f-text" fill="#182f2b" x="98" y="61" font-size="12" text-anchor="middle">67</text>
+<text class="f-text" fill="#182f2b" x="137" y="53" font-size="12" text-anchor="middle">71</text>
+<text class="f-text" fill="#182f2b" x="176" y="49" font-size="12" font-weight="600" text-anchor="middle">73</text>
+<text class="f-text" fill="#182f2b" x="215" y="56" font-size="12" text-anchor="middle">69</text>
+<text class="f-text" fill="#182f2b" x="254" y="62" font-size="12" text-anchor="middle">66</text>
+<text class="f-text" fill="#182f2b" x="293" y="68" font-size="12" text-anchor="middle">63</text>
+<text class="f-text" fill="#182f2b" x="332" y="75" font-size="12" text-anchor="middle">60</text>
+<text class="f-text" fill="#182f2b" x="371" y="79" font-size="12" text-anchor="middle">58</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="5 4" d="M40 97.6H390"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M40 200H390"/>
+<text class="f-muted" fill="#5c6d66" x="59" y="216" font-size="12" text-anchor="middle">k=0</text>
+<text class="f-muted" fill="#5c6d66" x="98" y="216" font-size="12" text-anchor="middle">k=1</text>
+<text class="f-muted" fill="#5c6d66" x="137" y="216" font-size="12" text-anchor="middle">k=2</text>
+<text class="f-text" fill="#182f2b" x="176" y="216" font-size="12" font-weight="600" text-anchor="middle">k=3</text>
+<text class="f-muted" fill="#5c6d66" x="215" y="216" font-size="12" text-anchor="middle">k=4</text>
+<text class="f-muted" fill="#5c6d66" x="254" y="216" font-size="12" text-anchor="middle">k=5</text>
+<text class="f-muted" fill="#5c6d66" x="293" y="216" font-size="12" text-anchor="middle">k=6</text>
+<text class="f-muted" fill="#5c6d66" x="332" y="216" font-size="12" text-anchor="middle">k=7</text>
+<text class="f-muted" fill="#5c6d66" x="371" y="216" font-size="12" text-anchor="middle">k=8</text>
+<text class="f-text" fill="#182f2b" x="10" y="238" font-size="12">الأسرع: k = 3 بسرعة 72.8 token/s</text>
+<text class="f-text" fill="#182f2b" x="10" y="256" font-size="12">أي 1.49 ضعف عدم التخمين (48.8)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="274" font-size="12">الخط المتقطع: عدم التخمين × 1.05 (العتبة)</text>
+</svg><figcaption>الشكل 19-4　ترتفع السرعة ثم تنخفض. أفضل نتيجة عند تخمين 3 مسودات؛ وبعدها تساهم كل مسودة إضافية بأقل فأقل، ويغلو التحقق أكثر فأكثر. <span class="ev ev-est">تقدير تعليمي</span></figcaption></figure></div>
+<p>أرقام هذا الشكل حُسبت بتعويض القيم الافتراضية في الصيغة، وهي ليست قياسًا: دون تخمين تستغرق الجولة 20.5 ms وتبلغ السرعة 48.8 رمز في الثانية؛ وعند تخمين 3 مسودات تستغرق 44.4 ms، والمتوقع 3.24 رمز، والسرعة 72.8 رمز في الثانية. <span class="ev ev-est">تقدير تعليمي</span> الذي يوضّحه الشكل هو الهيئة: للمنحنى قمة، وموضع القمة يتبع معدل القبول والتكلفة.</p>
+<p>وهناك عتبة أخرى. لا يستعمل المتحكّم أفضل نافذة إلا إذا كانت أسرع من عدم التخمين بأكثر من 5%؛ وإلا فالأفضل ألا يخمّن. <span class="ev ev-code">حقيقة من الشيفرة</span>[S09] ويكتب تعليق ملف الترويسة هذه الـ5% على أنها إعداد من الخطة. <span class="ev ev-code">حقيقة من الشيفرة</span> وفائدة ذلك أن تقدير معدل القبول فيه خطأ أصلًا، و«مكسب» بنسبة واحد أو اثنين في المئة قد يكون وهمًا ناتجًا عن الخطأ.</p>
+
+<h2 id="sec-4">19.4 معدل القبول يتغير: نتعلم أثناء التشغيل</h2>
+<p>القيمة 0.86 مجرد نقطة بداية. حين تكتب شيفرة برمجية يسهل غالبًا تخمين ما بعدها من السياق؛ وحين تكتب قصيدة جديدة يصعب التخمين كثيرًا. وتذكر الوثائق الأصلية أيضًا أن المُطالبة (prompt) نفسها قد تعطي إجابة أخرى فتختلف سرعة الإخراج بعدة نقاط مئوية، لأن عدد المسودات المقبولة تغيّر. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03] ولهذا يجب تقدير معدل القبول أثناء التشغيل. والأداة التي تستعملها Strata اسمها المتوسط المتحرك الأسي.</p>
+<aside class="primer" id="c19-ema">
+<h3>المتوسط المتحرك الأسي (EMA)</h3>
+<p>الفكرة: تريد أن تعرف متوسط درجة الحرارة حديثًا، لكنك لا تريد حفظ سجل كل يوم. الحل أن تحفظ رقمًا واحدًا هو «التقدير»، وكلما جاءت درجة حرارة جديدة تحرّك التقدير خطوة صغيرة نحوها:</p>
+<div class="equation">التقدير الجديد = التقدير القديم + α × (البيانات الجديدة − التقدير القديم)</div>
+<p>هذا هو <dfn>المتوسط المتحرك الأسي</dfn>، ويسمى α (بين 0 و1) وزن التحديث. وإذا فككنا العبارة: وزن أحدث بيانات α، ووزن التي قبلها α(1 − α)، ثم α(1 − α)²، وهكذا. كلما قدمت البيانات قلّ وزنها، ويتناقص بصورة أسية، ومن هنا جاء الاسم. لا يحتاج إلى أكثر من رقم واحد في الذاكرة، وفي كل تحديث ضربة واحدة وعمليتا جمع أو طرح.</p>
+<p>α هو الذي يحدّد المفاضلة. إذا كان α كبيرًا تتبع التقديرات التغير بسرعة، لكن نتيجة عابرة أو اثنتين تجرّها بسهولة؛ وإذا كان α صغيرًا فالتقدير ثابت، لكنه يتأخر طويلًا في ملاحظة التغير. وهناك مقدار مفيد هو <strong>عمر النصف</strong>: عدد التحديثات اللازمة ليهبط وزن البيانات القديمة إلى النصف، ويساوي ln 0.5 ÷ ln(1 − α). عند α = 0.05 نحو 13.5 تحديثًا، وعند α = 0.3 أقل من تحديثين.</p>
+<p>ومتحكّم Strata يحدّث معدل القبول لكل موضع بهذه الصيغة نفسها: القبول يُسجَّل 1 والرفض 0. <span class="ev ev-code">حقيقة من الشيفرة</span>[S09] والقيمة الافتراضية لـ α في ملف الترويسة 0.05. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p class="further">قراءة إضافية: <a href="https://en.wikipedia.org/wiki/Moving_average" target="_blank" rel="noopener noreferrer">Wikipedia: Moving average</a> · <a href="https://en.wikipedia.org/wiki/Exponential_smoothing" target="_blank" rel="noopener noreferrer">Wikipedia: Exponential smoothing</a> · <a href="https://www.rfc-editor.org/rfc/rfc6298" target="_blank" rel="noopener noreferrer">RFC 6298: مؤقّت إعادة الإرسال في TCP</a></p>
+</aside>
+<p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> في مقرر «شبكات الحاسوب» يقدّر TCP زمن الذهاب والإياب (RTT) بالمتوسط المتحرك الأسي نفسه: SRTT ← (1 − 1/8) × SRTT + 1/8 × عينة RTT الجديدة، انظر RFC 6298. تقدير معدل القبول وتقدير زمن الاستجابة في الشبكة مسألتان من نوع واحد: بيانات فيها ضجيج، وبيئة تتغير، وذاكرة ينبغي توفيرها.</p>
+<p>وفي التسجيل فخ. افترض أن الجولة خمّنت 3 مسودات ورُفضت الأولى. كيف نسجّل الثانية والثالثة؟ لم تُقارَن أصلًا، فهي <strong>غير مرصودة</strong> وليست «فاشلة». وتسمي الإحصاءات هذه الحالة، حين لا نرى النتيجة، <dfn>الحجب</dfn> (censoring).</p>
+<figure class="fig"><svg viewBox="0 0 400 254" role="img" aria-label="الشكل 19-5: بعد رفض المسودة الأولى يسجّل التسجيل الصحيح فشلًا في الموضع 1 فقط، بينما يسجّل التسجيل الخاطئ فشلًا أيضًا للموضعين 2 و3 اللذين لم يُتحقق منهما">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">3 مسودات والأولى رُفضت: ماذا نسجّل للباقي؟</text>
+<text class="f-text" fill="#182f2b" x="10" y="58" font-size="13" font-weight="600">هذه الجولة</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="130" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="167.5" y="49" font-size="12" text-anchor="middle">الموضع 1</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="66" font-size="12" font-weight="600" text-anchor="middle">مرفوضة</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="215" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="49" font-size="12" text-anchor="middle">الموضع 2</text>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="66" font-size="12" text-anchor="middle">لم تُقارَن</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="300" y="32" width="75" height="42" rx="6"/>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="49" font-size="12" text-anchor="middle">الموضع 3</text>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="66" font-size="12" text-anchor="middle">لم تُقارَن</text>
+<text class="f-text" fill="#182f2b" x="10" y="112" font-size="13" font-weight="600">التسجيل الصحيح</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="129" font-size="12">طريقة Strata</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="120" font-size="12" text-anchor="middle">فشل</text>
+<text class="f-muted" fill="#5c6d66" x="252.5" y="120" font-size="12" text-anchor="middle">لا يُسجَّل</text>
+<text class="f-muted" fill="#5c6d66" x="337.5" y="120" font-size="12" text-anchor="middle">لا يُسجَّل</text>
+<text class="f-text" fill="#182f2b" x="10" y="172" font-size="13" font-weight="600">التسجيل الخاطئ</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="189" font-size="12">غير المرئي = فشل</text>
+<text class="f-warn" fill="#9e5d24" x="167.5" y="180" font-size="12" text-anchor="middle">فشل</text>
+<text class="f-warn" fill="#9e5d24" x="252.5" y="180" font-size="12" text-anchor="middle">فشل</text>
+<text class="f-warn" fill="#9e5d24" x="337.5" y="180" font-size="12" text-anchor="middle">فشل</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M10 88H390M10 146H390M10 204H390"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="226" font-size="12">في التسجيل الخاطئ ينزلق تقدير p₃ نحو 0.86³ ≈ 0.64</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="244" font-size="12">بينما قيمته الحقيقية 0.86</text>
+</svg><figcaption>الشكل 19-5　سجّل فقط المواضع التي قورنت فعلًا. إذا سجّلت «لم نرَ» على أنه «فشل»، فكلما ابتعد الموضع زاد الظلم الواقع عليه، ويظن المتحكّم أن النافذة الطويلة لا تستحق.</figcaption></figure>
+<p>تحدّث الدالة <code>observe</code> في Strata المواضع المقبولة فقط، إضافةً إلى أول موضع مرفوض؛ وكل ما بعده لا تلمسه. <span class="ev ev-code">حقيقة من الشيفرة</span>[S09] وهناك حالة في الاتجاه المعاكس: حين تُقبل كل مسودات الجولة، فإن المواضع خارج النافذة لم تُجرَّب أيضًا. ولو لم نحدّثها أبدًا فلن تكبر النافذة بعدها. وحيلة الشيفرة أن تحرّك تقدير هذه المواضع خطوة صغيرة نحو تقدير «أعمق موضع رُصد». <span class="ev ev-code">حقيقة من الشيفرة</span>[S09]</p>
+<p>يتيح لك المتتبّع التالي أن تجرّب الأمرين بنفسك: مفاضلة α، وأثر طريقة التسجيل.</p>
+<div class="viz" data-viz="draft-ema"><figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="الشكل 19-6: يهبط معدل القبول الحقيقي من 0.86 إلى 0.55 في الجولة 150؛ تقدير α = 0.05 سلس لكنه بطيء، وتقدير α = 0.3 سريع التتبع لكنه متقلب">
+<text class="f-muted" fill="#5c6d66" x="10" y="16" font-size="12">ينخفض القبول من 0.86 إلى 0.55: كيف يلحق به كل α</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="44" font-size="12" text-anchor="end">1.0</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="119" font-size="12" text-anchor="end">0.5</text>
+<text class="f-muted" fill="#5c6d66" x="34" y="194" font-size="12" text-anchor="end">0</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width=".6" d="M40 40H380M40 115H380M40 190H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="2 3" d="M210 30V190"/>
+<text class="f-muted" fill="#5c6d66" x="214" y="36" font-size="12">تغيّر الموضوع</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M40.0 61.0L43.4 47.2L46.8 42.5L50.2 40.8L53.6 40.3L57.0 62.1L60.4 47.6L63.8 87.6L67.2 101.3L70.6 92.5L74.0 111.6L77.4 86.6L80.8 56.0L84.2 45.5L87.6 73.4L91.0 51.4L94.4 75.4L97.8 52.2L101.2 44.2L104.6 117.9L108.0 66.7L111.4 49.2L114.8 88.1L118.2 56.5L121.6 45.7L125.0 41.9L128.4 85.7L131.8 55.7L135.2 45.4L138.6 41.8L142.0 72.1L145.4 51.0L148.8 120.3L152.2 112.5L155.6 64.9L159.0 48.5L162.4 42.9L165.8 41.0L169.2 62.4L172.6 92.7L176.0 89.6L179.4 57.0L182.8 45.8L186.2 64.1L189.6 48.2L193.0 42.8L196.4 41.0L199.8 40.3L203.2 40.1L206.6 40.0L210.0 62.1L213.4 124.1L216.8 167.4L220.2 160.2L223.6 179.8L227.0 186.5L230.4 143.8L233.8 75.6L237.2 128.7L240.6 101.9L244.0 83.3L247.4 86.3L250.8 87.4L254.2 56.3L257.6 90.6L261.0 155.9L264.4 79.8L267.8 53.6L271.2 111.7L274.6 131.7L278.0 170.0L281.4 106.6L284.8 94.4L288.2 80.7L291.6 130.5L295.0 124.6L298.4 136.1L301.8 104.4L305.2 93.6L308.6 156.9L312.0 133.7L315.4 139.2L318.8 105.5L322.2 107.5L325.6 116.7L329.0 66.3L332.4 80.5L335.8 98.9L339.2 82.3L342.6 131.0L346.0 124.8L349.4 145.6L352.8 121.2L356.2 99.4L359.6 127.4L363.0 101.5L366.4 114.6L369.8 132.7L373.2 148.3L376.6 130.7L380.0 71.1"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M40.0 61.0L43.4 58.0L46.8 55.4L50.2 53.2L53.6 51.3L57.0 56.5L60.4 54.1L63.8 59.6L67.2 64.3L70.6 68.0L74.0 77.9L77.4 79.3L80.8 73.7L84.2 68.9L87.6 71.9L91.0 67.3L94.4 70.5L97.8 66.2L101.2 62.5L104.6 73.9L108.0 69.0L111.4 64.9L114.8 68.9L118.2 64.7L121.6 61.2L125.0 58.2L128.4 63.1L131.8 59.8L135.2 57.0L138.6 54.6L142.0 59.6L145.4 56.8L148.8 69.0L152.2 72.4L155.6 67.8L159.0 63.8L162.4 60.4L165.8 57.5L169.2 61.8L172.6 66.2L176.0 69.6L179.4 65.3L182.8 61.7L186.2 65.4L189.6 61.8L193.0 58.7L196.4 56.0L199.8 53.7L203.2 51.8L206.6 50.1L210.0 55.4L213.4 67.8L216.8 85.3L220.2 93.4L223.6 107.2L227.0 119.0L230.4 121.6L233.8 110.0L237.2 114.6L240.6 111.1L244.0 107.7L247.4 105.2L250.8 103.0L254.2 94.0L257.6 93.8L261.0 107.5L264.4 97.9L267.8 89.7L271.2 96.8L274.6 103.0L278.0 115.4L281.4 111.4L284.8 108.4L288.2 105.4L291.6 110.7L295.0 114.5L298.4 118.1L301.8 114.1L305.2 110.7L308.6 122.0L312.0 124.2L315.4 126.4L318.8 121.2L322.2 117.2L325.6 120.0L329.0 108.6L332.4 106.0L335.8 104.1L339.2 101.7L342.6 107.5L346.0 111.8L349.4 116.2L352.8 112.8L356.2 109.5L359.6 113.9L363.0 110.5L366.4 114.3L369.8 118.0L373.2 121.5L376.6 123.8L380.0 111.8"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="6 4" d="M40 61H210V107.5H380"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3" d="M10 210H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="214" font-size="12">سميك: α = 0.05، سلس لكن يتأخر عشر جولات تقريبًا</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M10 230H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="234" font-size="12">رفيع: α = 0.3، سريع التتبع لكنه متقلب</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" stroke-dasharray="6 4" d="M10 250H40"/>
+<text class="f-text" fill="#182f2b" x="48" y="254" font-size="12">متقطع: المعدل الحقيقي (لا يراه المتحكّم)</text>
+</svg><figcaption>الشكل 19-6　المحور الأفقي هو رقم الجولة (300 جولة)، والعمودي تقدير معدل القبول للمسودة الأولى. α الصغير يعطي تقديرًا ثابتًا لكنه متأخر بنصف خطوة؛ وα الكبير يستجيب بسرعة لكن الضجيج يجرّه. القبول والرفض هنا أرقام عشوائية مُحاكاة. <span class="ev ev-est">تقدير تعليمي</span></figcaption></figure></div>
+<p>كلما ابتعد الموضع قلّت فرص مقارنته: المسودة الثالثة لا تُسجَّل إلا إذا قُبلت الأولى والثانية. ولهذا تتحدّث تقديرات المواضع العميقة أبطأ من الضحلة. وفي المتتبّع، بعد تغيّر الموضوع، ترى منحنى p₃ أبطأ استجابة بوضوح من p₁، وهذا هو السبب. <span class="ev ev-est">تقدير تعليمي</span></p>
+
+<h2 id="sec-5">19.5 أيّ متحكّم تشغّله Strata فعلًا؟</h2>
+<p>المتحكّم الذي شرحناه حتى الآن موجود في <code>src/spec/controller.cpp</code>. يُترجَم ضمن المكتبة <code>strata_spec</code>، وله اختبار وحدة خاص به هو <code>controller_test</code>. <span class="ev ev-code">حقيقة من الشيفرة</span> لكن حين نفتح البرنامج الرئيسي للتوليد <code>generate.cpp</code> (وهو مصدر الملف التنفيذي <code>strata</code>)، نجده يضمّن ملف ترويسة آخر هو <code>draft_policy.hpp</code>، وحلقة التوليد تستدعي <code>DraftPolicy</code>. وفي شيفرة المحرك التي فحصها هذا الكتاب لم نجد أي استدعاء لـ <code>Controller</code>. <span class="ev ev-code">حقيقة من الشيفرة</span> يضع الشكل 19-7 الاثنين جنبًا إلى جنب.</p>
+<figure class="fig"><svg viewBox="0 0 400 268" role="img" aria-label="الشكل 19-7: يقدّر Controller التكلفة بنموذج صيغ ويقرر نافذة MTP ولا يُستدعى إلا في اختبارات الوحدة؛ أما DraftPolicy فيستعمل الأزمنة المقيسة ويقرر فقط هل نبدّل إلى مسودات البحث، وتستدعيه حلقة التوليد الرئيسية">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="185" height="200" rx="8"/>
+<text class="f-text" fill="#182f2b" x="22" y="32" font-size="13" font-weight="600">Controller</text>
+<text class="f-muted" fill="#5c6d66" x="22" y="50" font-size="12">src/spec/controller.cpp</text>
+<text class="f-text" fill="#182f2b" x="22" y="76" font-size="12">يقرر عدد مسودات MTP</text>
+<text class="f-text" fill="#182f2b" x="22" y="100" font-size="12">ويقارن مسودات البحث أيضًا</text>
+<text class="f-text" fill="#182f2b" x="22" y="124" font-size="12">التكلفة: نموذج بالصيغ</text>
+<text class="f-text" fill="#182f2b" x="22" y="148" font-size="12">القبول: EMA (α = 0.05)</text>
+<text class="f-text" fill="#182f2b" x="22" y="172" font-size="12">العتبة: أسرع 5% لنخمّن</text>
+<text class="f-warn" fill="#9e5d24" x="22" y="196" font-size="12">المستدعي: اختبارات الوحدة</text>
+<rect class="f-soft" fill="#e5f1df" x="205" y="10" width="185" height="200" rx="8"/>
+<text class="f-text" fill="#182f2b" x="217" y="32" font-size="13" font-weight="600">DraftPolicy</text>
+<text class="f-muted" fill="#5c6d66" x="217" y="50" font-size="12">src/spec/draft_policy.cpp</text>
+<text class="f-text" fill="#182f2b" x="217" y="76" font-size="12">نافذة MTP من وسيط spec</text>
+<text class="f-text" fill="#182f2b" x="217" y="100" font-size="12">يقرر فقط: التبديل للبحث؟</text>
+<text class="f-text" fill="#182f2b" x="217" y="124" font-size="12">التكلفة: زمن مقيس لكل جولة</text>
+<text class="f-text" fill="#182f2b" x="217" y="148" font-size="12">ناتج MTP: متوسط مقيس</text>
+<text class="f-text" fill="#182f2b" x="217" y="172" font-size="12">العتبة: أسرع 3% للتبديل</text>
+<text class="f-text" fill="#182f2b" x="217" y="196" font-size="12" font-weight="600">المستدعي: حلقة التوليد</text>
+<text class="f-text" fill="#182f2b" x="200" y="236" font-size="12" text-anchor="middle">الهدف واحد: الرموز المتوقع إيداعها لكل ms</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="256" font-size="12" text-anchor="middle">الفرق في المقام: صيغة تقدّر مقابل ساعة إيقاف تقيس</text>
+</svg><figcaption>الشكل 19-7　دالة هدف واحدة وتنفيذان. الذي يقرر فعلًا في حلقة التوليد هو الأيمن: لا يخمّن التكلفة بصيغة، بل يسجّل كم استغرق كل طول من النافذة فعلًا.</figcaption></figure>
+<p>نبدأ بجهة MTP. في حلقة التوليد يأتي طول نافذة MTP من وسيط التشغيل <code>--spec</code>، وهو ثابت في كل جولة عدا الأولى؛ ولا يقصر إلا إذا ضُبط <code>--spec-min-p</code>: إذا كانت ثقة طبقة المسودات في مسودة ما أقل من هذه العتبة، توقفنا عن إضافتها إلى النافذة. <span class="ev ev-code">حقيقة من الشيفرة</span> وتقول الوثائق الأصلية إن MTP يخمّن 3 على الأكثر في المرة الواحدة. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02]</p>
+<p>أما <code>DraftPolicy</code> فيتولى أمرًا آخر: <dfn>البحث في المُطالبة</dfn> (prompt lookup). إذا كرّر ما نكتبه مقطعًا موجودًا في السياق، كأن ننسخ بضعة أسطر قديمة أثناء تعديل شيفرة، فالأرجح أن يتبع المقطع هذه المرة ما تبعه في المرة السابقة، فنأخذه مباشرة مسودةً. تصل مسودات البحث إلى 5 على الأكثر، ولا تُستعمل إلا حين يقول كلٌّ من معدل القبول المقيس والتكلفة إنها تستحق. وتذكر التقارير الأصلية أن النتيجة: تعديل الشيفرة أسرع بنسبة 6-11%، والنص العادي لا يتغير. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S02] وفي حلقة التوليد شرط إضافي: عند تفعيل MTP يجب أن يطابق أول رمز في مسودة البحث أول مسودة من MTP نفسه، قبل أن تُعرض على <code>DraftPolicy</code> لتقرر. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>وخوارزمية <code>DraftPolicy</code> هي صيغة هذا الفصل نفسها: في جهة البحث E(k) = 1 + q + q² + … + qᵏ، حيث q معدل القبول المحسوب في سلال بحسب «طول المطابقة»؛ وفي جهة MTP تُستعمل مباشرة النواتج المتوسطة المقيسة لكل جولة. والمقام لم يعد صيغة، بل زمن الجولة المقيس لكل طول نافذة، ويُنعَّم بمتوسط متحرك أسي α = 0.1؛ أما الأطوال التي لم تُقَس فتُستنتج من الأطوال المقيسة بمنحنى شكل مسبق. ولا تُختار نافذة البحث إلا إذا كانت أسرع من نافذة MTP بأكثر من 3%. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>وهذا درس هندسي جيد: مهما دقّقنا في نموذج التكلفة فلن يبلغ دقة القياس المباشر. يتغير زمن الجولة باختلاف الجهاز وطول السياق، والقيمة المقيسة تتبع الجهاز بطبيعتها.</p>
+
+<h2 id="sec-6">19.6 تطبيق عملي: اعثر بنفسك على أفضل نافذة</h2>
+<p>افتح المختبر التفاعلي لهذا الفصل «إلى أي طول يستحق تخمين المسودة». يستعمل صيغة تكلفة أبسط: زمن أساسي مضافًا إليه كلفة ثابتة للتحقق والصياغة لكل مسودة، ومعدل قبول p واحد في كل المواضع، ويقارن k من 0 إلى 5 في عدد الرموز المتوقع والزمن والمكسب الصافي.</p>
+<ol>
+<li>اضبط p على 0: القيمة المتوقعة تساوي 1 لكل k، والمسودات لا تزيد إلا الزمن. ينبغي أن يكون الجواب الأفضل k = 0.</li>
+<li>اضبط p على 1: القيمة المتوقعة تساوي k + 1 تمامًا. انظر هل تكسب أطول نافذة دائمًا في هذه الحالة.</li>
+<li>أبقِ p كما هي وارفع كلفة المسودة: اعثر على النقطة التي يرجع عندها أفضل k إلى 0.</li>
+</ol>
+<p>بعد ذلك ارجع إلى الشكلين التفاعليين في هذا الفصل وقارن. التكلفة في المختبر خط مستقيم؛ أما في نموذج تكلفة Strata فمشاركة الخبراء تجعل جزء CPU يزيد أبطأ من الخط المستقيم، وأما معامل الجزء الكثيف فيقفز قفزة كبيرة عند بلوغ النافذة 5 رموز. وحين يختلف شكل منحنى التكلفة تنتقل القمة إلى موضع آخر.</p>
+
+<div class="recap"><h3>تذكّر هذه الثلاث</h3><ol>
+<li>المتوقع إيداعه في الجولة E = 1 + p₁ + p₁p₂ + …: كل تخمين إضافي تُضرب مساهمته في معدل القبول مرة أخرى، فيتناقص المكسب. عند p = 0.86 لا نتجاوز 7.1 حتى مع عدد لا نهائي من المسودات.</li>
+<li>ما ينبغي تحسينه هو السرعة = E ÷ زمن الجولة. كلما اتسعت النافذة غلا التحقق، ولذلك للمنحنى قمة؛ ويجب أيضًا أن تتفوق على عدم التخمين بفارق واضح لكي يستحق التخمين.</li>
+<li>نقدّر معدل القبول أثناء التشغيل بالمتوسط المتحرك الأسي: α الكبير يستجيب بسرعة لكنه يتذبذب، وα الصغير ثابت لكنه بطيء. والموضع الذي لم يُقارَن «لم نره»، فلا يجوز تسجيله فشلًا.</li>
+</ol></div>
+<div class="myth"><p><strong>فهم خاطئ شائع: «كلما ارتفع معدل القبول زادت السرعة حتمًا».</strong></p>
+<p>معدل القبول جزء من البسط فقط. افترض أننا بدّلنا طريقة المسودات بأخرى أذكى لكنها أبطأ، فارتفع المتوقع في الجولة من 2 إلى 2.5، لكن زمن الجولة ارتفع من 10 ms إلى 15 ms: فتنخفض السرعة من 200 رمز في الثانية إلى نحو 167. <span class="ev ev-est">تقدير تعليمي</span> للحكم على طريقة مسودات يجب أن نرى كم رمزًا يُودَع لكل ms، لا أن ننظر إلى نسبة الصحيح من التخمين فقط.</p></div>
+
+<details class="deep"><summary>تعمّق أكثر: الاحتمال الشرطي، والحجب، والاستكشاف، ومعايير القبول</summary>
+<h3>صيغة القيمة المتوقعة لا تحتاج إلى افتراض الاستقلال</h3>
+<p>عُرّف pᵢ بأنه «احتمال شرطي لقبول المسودة رقم i بشرط قبول الـ i − 1 قبلها». تساهم المسودة رقم i إذا وفقط إذا قُبلت الـ i الأولى كلها، واحتمال ذلك يأتي مباشرة من قاعدة الضرب في الاحتمال الشرطي: p₁p₂…pᵢ، دون ادعاء أن المواضع مستقلة. مثال: p = [0.8, 0.6, 0.5]، E = 1 + 0.8 + 0.48 + 0.24 = 2.52. فإذا كانت الصياغة والتحقق في جولة تأخذ 18 ms فالسرعة نحو 140 token/s؛ ودون تخمين تأخذ الجولة 8 ms والسرعة 125 token/s، فالمكسب الصافي نحو 12%. هذه أمثلة تعليمية، وليست قياسات أداء من Strata. <span class="ev ev-est">تقدير تعليمي</span></p>
+<p>وللدالة <code>expected</code> في الشيفرة استعمالان: MTP يستعمل مصفوفة لكل موضع؛ ومسودات البحث تستعمل q واحدة لكل موضع، أي متتالية هندسية. <span class="ev ev-code">حقيقة من الشيفرة</span>[S09]</p>
+<h3>نموذج التكلفة بندًا بندًا</h3>
+<p>في <code>step_ms(k)</code> يكون n = k + 1، مقصوصًا بين 1 وK_MAX + 1. الجزء الكثيف = <code>dense_ms × dense_ratio[n−1]</code>. وجزء CPU = (1 − معدل الإصابة) × <code>cpu_all_miss_ms</code> × U × (1 + <code>extra_use_cost</code> × (n ÷ U − 1))، حيث U هو عدد الخبراء المختلفين في النافذة مقارنةً برمز واحد، وn ÷ U هو متوسط عدد الرموز التي تستعمل الخبير الواحد. وجزء الصياغة = k × زمن المسودة الواحدة. <span class="ev ev-code">حقيقة من الشيفرة</span>[S09] والقيم الافتراضية في ملف الترويسة: K_MAX = 8؛ و<code>extra_use_cost</code> = 0.25، أي أن كل رمز إضافي يستعمل الخبير نفسه يكلّف 25% فقط من قراءة إضافية؛ وكل مسودة بحث 0.01 ms، أي شبه مجانية. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<p>إذا طبّقنا حالة «الأوزان تُقرأ مرة واحدة» المثالية على كل المسودات دون شرط، بالغنا في تقدير المكسب؛ وإذا أهملنا إعادة استعمال الخبراء كليًا، بخسنا. وقيمة U الفعلية تعتمد على التوجيه، ولا بد من قياسها.</p>
+<h3>المعطيات المسبقة ليست ثوابت فيزيائية</h3>
+<p>معدل القبول الابتدائي 0.86 في MTP، والمعطيات المسبقة لمسودات البحث بحسب طول المطابقة {0.35, 0.6, 0.8, 0.92}، كلاها مجرد نقطة بداية. يقول التعليق إن الأول جاء من قياس على النموذج نفسه، والثاني من إعادة تشغيل غير متصلة، وبعدهما يتعلم كل شيء حسب الجلسة. <span class="ev ev-code">حقيقة من الشيفرة</span>[S09] وعند تغيير اللغة أو التكميم أو المهمة تتغير جودة المسودات وإعادة استعمال الخبراء. ولبحث <code>DraftPolicy</code> معطيات مسبقة منفصلة: {0.75, 0.88, 0.93, 0.96}، وكل واحدة تعادل 4 ملاحظات، فتكفي بضع جولات حقيقية لتتغلب عليها؛ والملاحظات القديمة تُضرب في 0.97 في كل جولة فتتناقص. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<h3>الحجب، والمواضع خارج النافذة، و«الاستكشاف»</h3>
+<p>بعد رفض المسودة الأولى لا تقع المواضع التالية تحت شرط «كل ما قبلها مقبول»، فهي غير مرصودة. وتسجيلها 0 يصنع حلقة تعزّز نفسها: كلما قصرت النافذة بدت المواضع العميقة أسوأ، فيقل ميل المتحكّم إلى تجربة نافذة أطول. وفي حالة قبول الكل يحدث العكس: المواضع خارج النافذة لم تُختبر أبدًا، فتسحبها الشيفرة نحو تقدير أعمق موضع رُصد، وإلا لن تكبر النافذة أبدًا. <span class="ev ev-code">حقيقة من الشيفرة</span>[S09]</p>
+<p>وإذا نظرنا إلى دالتي <code>Controller</code> وحدهما، وجدنا حدًّا آخر يستحق الانتباه: بعد اختيار «لا تخمّن»، تعود <code>observe</code> مباشرة، ولا يتحدّث التقدير بعد ذلك. <span class="ev ev-code">حقيقة من الشيفرة</span>[S09] فإذا ضغط الضجيج التقدير مرة تحت العتبة، فلن يتعافى بهاتين الدالتين وحدهما، ويحتاج المستدعي إلى استكشاف من عنده. (في وحدة هذا الفصل اختبار يُظهر هذا تحديدًا.) أما <code>DraftPolicy</code> ففيه استكشاف صريح: نافذة بحث لم يُقَس زمنها قط، إذا كان تقدير قبولها لا يقل عن 0.85، تُجرَّب مباشرة في أول 3 مرات؛ ويقول التعليق إن التحقق يضمن ثبات المخرجات، وإن الرهان لا يخسر إلا سرعة هذه الجولة. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+<h3>هل تتغير المخرجات بسبب المسودات؟</h3>
+<p>من حيث المبدأ لا، لأن كل رمز مودَع هو اختيار النموذج الكبير نفسه. لكن الوثائق الأصلية تشير إلى استثناء على مستوى الفاصلة العائمة: مع النماذج المكمَّمة بصيغة IQ، يستعمل CPU نوى (kernels) مختلفة لحساب خبراء رمز واحد وخبراء عدة رموز، فيختلف التقريب قليلًا؛ ومشاركة الخبير بين عدة رموز تعتمد على المسودات في نافذة التحقق. لذلك قد تحصل مع درجة حرارة 0 على إجابة أخرى معقولة بالقدر نفسه للمُطالبة نفسها. وإذا ضبطتَ <code>STRATA_IQ_MT_MIN=1</code> استعملت كل المجموعات نواة الرموز المتعددة، ولم تعد الإجابة تعتمد على المسودات. <span class="ev ev-report">تقرير المصدر الأصلي</span>[S03]</p>
+<h3>معايير القبول</h3>
+<p>عند اختبار متحكّم للنافذة، تقنع الحدود أكثر من منحنى جميل:</p>
+<ul>
+<li>إذا كانت تكلفة المسودة عالية جدًا، فعليه أن يرجع إلى k = 0.</li>
+<li>عند p = 0، لا تنتج المسودات الإضافية أي مكسب وهمي.</li>
+<li>عند p = 1، تساوي E بالضبط k + 1.</li>
+<li>المواضع غير المرصودة لا تُحسب فشلًا؛ وعند قبول الكل، تُرفع تقديرات المواضع خارج النافذة.</li>
+<li>إذا لم يتفوّق على عدم التخمين بأكثر من العتبة، يبقى دون تخمين.</li>
+</ul>
+<p>كُتبت اختبارات لوحدة الحساب في الشكلين التفاعليين لهذا الفصل بحسب هذه الحدود، ودُقّقت دالة التكلفة بندًا بندًا مقابل القيم الافتراضية في الشيفرة. أما <code>controller_test</code> في المصدر الأصلي فيختبر خصائص من النوع نفسه: اختيار 2 إلى 5 مسودات تحت المعطيات المسبقة، وإيقاف التخمين بعد رفض متواصل، واتساع النافذة بعد إصابات متواصلة. <span class="ev ev-code">حقيقة من الشيفرة</span></p>
+</details>
