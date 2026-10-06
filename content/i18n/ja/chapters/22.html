@@ -54,7 +54,7 @@
 <text class="f-text" fill="#182f2b" x="200" y="202" font-size="12" text-anchor="middle">コンパイルの前に、選ばれなかった分岐を消す</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="222" font-size="12" text-anchor="middle">だから 1 つのソースから、道が 1 本だけの別々のプログラムができる</text>
 </svg><figcaption>図 22-2　条件付きコンパイル：1 つのソースファイルにすべての分岐を書いておき、コンパイルのたびにターゲットに合う 1 つだけを残します。コンパイラはほかの分岐を目にすることがありません。</figcaption></figure>
-<p>これがまさに、Strata が AMD カードで「4 バイト内積」を書くやり方です。RDNA3 と RDNA4 のカードは sudot4 命令を 1 つ使います。RDNA2 にはこの命令がないので、古い sdot4 を使います。RDNA1（gfx1012）には sdot4 もないので、短いアセンブリを使い、4 回の乗算と 2 回の 3 数加算で同じ結果を組み立てます。それ以外の場合は、バイトごとに掛けて足すループに戻ります。4 つの道が出す整数はまったく同じで、速さだけが違います。<span class="ev ev-code">コード上の事実</span> 22.3 節で、実際にコンパイルして確かめます。</p>
+<p>これがまさに、Strata が AMD カードで「4 バイト内積」を書くやり方です。RDNA3 と RDNA4 のカード（v0.1.40 からは、RDNA3.5 の gfx1150 と gfx1151 も）は sudot4 命令を 1 つ使います。RDNA2 にはこの命令がないので、古い sdot4 を使います。RDNA1（gfx1012）には sdot4 もないので、短いアセンブリを使い、4 回の乗算と 2 回の 3 数加算で同じ結果を組み立てます。それ以外の場合は、バイトごとに掛けて足すループに戻ります。4 つの道が出す整数はまったく同じで、速さだけが違います。<span class="ev ev-code">コード上の事実</span> 22.3 節で、実際にコンパイルして確かめます。</p>
 <p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E3%82%B3%E3%83%B3%E3%83%91%E3%82%A4%E3%83%A9" target="_blank" rel="noopener noreferrer">Wikipedia：コンパイラ</a> · <a href="https://ja.wikipedia.org/wiki/%E5%91%BD%E4%BB%A4%E3%82%BB%E3%83%83%E3%83%88" target="_blank" rel="noopener noreferrer">Wikipedia：命令セット</a> · <a href="https://en.wikipedia.org/wiki/C_preprocessor" target="_blank" rel="noopener noreferrer">Wikipedia：C プリプロセッサ（英語）</a> · <a href="https://en.cppreference.com/w/cpp/preprocessor/conditional" target="_blank" rel="noopener noreferrer">cppreference：条件付きコンパイル（英語）</a></p>
 </aside>
 <p class="bridge"><strong>CS を学んだ人へ：</strong>「コンパイラ」の授業で習うのは、字句解析、構文解析、コード生成という本筋です。プリプロセスはそのすべてより前に行われる純粋なテキスト加工で、文法を理解しません。だからマクロ置換が間違っていると、エラーの位置がとても奇妙になることがよくあります。コンパイラが見ているのは、すでに置き換えられた後のコードだからです。</p>
@@ -115,7 +115,7 @@
 <ul>
 <li><strong>AVX2 がなければ、既成のエンジンは起動しません。</strong>Strata 自前の CPU エキスパートのカーネルは、最低でも AVX2、FMA、F16C が必要で、リリース版の ggml-cpu も AVX2 でコンパイルされています。エンジンは CPU の型番を表示し、Intel Haswell（2013 年）、AMD Zen（2017 年）、またはそれ以降の CPU が必要だと伝えます。v0.1.39 からは、メッセージにもう 1 文あります。もっと古い CPU では、setup にそのマシン上で実験版のエンジンをビルドさせられます（<code>STRATA_ISA_FLOOR=avx</code> または <code>none</code>）。このバージョンの ggml-cpu は AVX または SSE4.2 でコンパイルされ、CPU 側のエキスパートの計算はすべてそれが担当します。<span class="ev ev-code">コード上の事実</span> 上流のインストール文書によると、このバージョンで動くのは i-quant モデルだけで、しかも遅くなります。Ryzen 5 7600 + RTX 5070 でこの道を強制し、エキスパートキャッシュを 1500 スロットに固定したとき、デコードは毎秒 26 token から、AVX 版で 11–17 token、SSE4.2 版で 3.5–3.8 token に下がりました。<span class="ev ev-report">上流レポート</span></li>
 <li><strong>標準 Q2_0 パッケージには AVX-512 カーネルしかありません。</strong>上流のインストールドキュメントによると、setup は AVX-512 CPU でだけ、Q2_0 用に約 40 GB のエキスパートのコピーを追加で書き出し、この高速カーネルに使わせます。<span class="ev ev-report">上流レポート</span> 起動時にすぐ拒否する理由は、ヘッダのコメントがはっきり書いています。古い CPU のユーザーに、0 秒目で原因を知らせるためです。4000 個目のトークンで不正命令にぶつかるよりずっとましです。</li>
-<li><strong>環境変数でも道を変えられます。</strong><code>STRATA_NO_IQ512</code> を付けると、AVX-512 CPU が AVX2 カーネルに回ります。<code>STRATA_NO_IQ256</code> を足すと AVX2 カーネルも止まり、ggml だけが残ります。同じマシン、同じプログラムでも、環境変数を変えるだけで計算の道が変わります。</li>
+<li><strong>環境変数でも道を変えられます。</strong><code>STRATA_NO_IQ512</code> を付けると、AVX-512 CPU が AVX2 カーネルに回ります。<code>STRATA_NO_IQ256</code> を足すと AVX2 カーネルも止まり、ggml だけが残ります。同じマシン、同じプログラムでも、環境変数を変えるだけで計算の道が変わります。v0.1.40 からは、AVX2 カーネルが Alder Lake、Sapphire Rapids とそれ以降の CPU で AVX-VNNI 命令に切り替わることもあります。整数の和は変わりません。<code>STRATA_NO_AVXVNNI=1</code> で止められます。上流は、結果がビット単位で同じで、行の計算が 4%〜25% 速いと述べています。<span class="ev ev-report">上流レポート</span></li>
 </ul>
 <p class="bridge"><strong>CS を学んだ人へ：</strong>これは「実行時ディスパッチ」で、オブジェクト指向の仮想関数と同じ発想です。呼び出し側は変わらず、実際にどのコードが動くかは実行時に決まります。違いは、決め手がオブジェクトの型ではなく、CPUID が返す機能ビットだという点です。</p>
 
@@ -129,11 +129,11 @@
 <p>この章との関係：Strata は、ツールでソースを書き換えるのではなく、「名前の置き換え表」をコンパイル時にすべてのソースファイルへ自動で差し込みます。その仕組みをこれから見ます。</p>
 <p class="further">さらに読む：<a href="https://rocm.docs.amd.com/projects/HIP/en/latest/what_is_hip.html" target="_blank" rel="noopener noreferrer">ROCm ドキュメント：What is HIP（英語）</a> · <a href="https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_porting_guide.html" target="_blank" rel="noopener noreferrer">ROCm ドキュメント：CUDA から HIP への移植（英語）</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA：CUDA プログラミングガイド（英語）</a> · <a href="https://ja.wikipedia.org/wiki/CUDA" target="_blank" rel="noopener noreferrer">Wikipedia：CUDA</a> · <a href="https://en.wikipedia.org/wiki/ROCm" target="_blank" rel="noopener noreferrer">Wikipedia：ROCm（英語）</a></p>
 </aside>
-<p>Strata の GPU コードは CUDA 流の書き方で、<code>.cu</code> ファイルに入っています。<code>src</code> ディレクトリには 55 個あります。HIP ビルドのスイッチを入れると、3 つのことが起こります。<span class="ev ev-code">コード上の事実</span></p>
+<p>Strata の GPU コードは CUDA 流の書き方で、<code>.cu</code> ファイルに入っています。<code>src</code> ディレクトリには 56 個あります。そのうち v0.1.40 で加わった 1 つは、RDNA3 カード向けの行列コアカーネルで、AMD ビルドでだけコンパイルされます。HIP ビルドのスイッチを入れると、3 つのことが起こります。<span class="ev ev-code">コード上の事実</span></p>
 <ol>
 <li>ビルドスクリプトが、すべての <code>.cu</code> ファイルを HIP 言語としてマークし、AMD のコンパイラに渡します。</li>
 <li>コンパイルオプションに <code>-include hip_compat/cuda_runtime.h</code> を足し、このシムのヘッダを、すべてのソースファイルの先頭に強制的に差し込みます。ここで<dfn>シム</dfn>（shim）とは、2 つの層の間に挟まって違いをならすための、薄いコードの層のことです。</li>
-<li>シムの中には、<code>#define cudaMalloc hipMalloc</code> の形のマクロが 88 行あります。そのうちいくつかの名前は、HIP のバージョンやプラットフォームに応じて 2 通りの書き方があり、コンパイルのたびに 1 つだけが残ります。別の <code>cublas_v2.h</code> のシムが、行列ライブラリの名前を受け持ちます。新しい hipBLAS では 17 行、古いバージョン（0.x）ではさらに 15 行で、より低レベルの rocBLAS の名前に直接置き換えます。プリプロセッサが置き換えると、CUDA の名前が HIP の名前に変わります。</li>
+<li>シムの中には、<code>#define cudaMalloc hipMalloc</code> の形のマクロが 89 行あります。そのうちいくつかの名前は、HIP のバージョンやプラットフォームに応じて 2 通りの書き方があり、コンパイルのたびに 1 つだけが残ります。別の <code>cublas_v2.h</code> のシムが、行列ライブラリの名前を受け持ちます。新しい hipBLAS では 17 行、古いバージョン（0.x）ではさらに 15 行で、より低レベルの rocBLAS の名前に直接置き換えます。プリプロセッサが置き換えると、CUDA の名前が HIP の名前に変わります。</li>
 </ol>
 <p>ビルドスクリプトは、CUDA と HIP の 2 つのスイッチを同時に入れられないことも定めています。1 回のビルドで作るバックエンドは 1 つだけです。<span class="ev ev-code">コード上の事実</span></p>
 <p>名前を変えるだけでは足りません。CUDA の GPU 組み込み関数の中には、HIP が RDNA カード向けに用意していないものがあり、シムが自分で実装するしかありません。たとえば 4 バイト内積 <code>__dp4a</code> です。2 つの 32 ビット整数をそれぞれ 4 つの符号付きバイトに分け、対応するもの同士を掛けて、アキュムレータに足します。シムは、カードのアーキテクチャによって 4 つの道に分けます（22.1 節のコラムを見てください）。もう 1 つは、warp 内でデータを交換する <code>__shfl_xor_sync</code> です。シムはまず「32 レーンすべてが参加しているか」を調べ、そうでなければすぐに中断します。この意味づけをこっそり落としたりはしません。<span class="ev ev-code">コード上の事実</span></p>
@@ -155,11 +155,11 @@
 <text class="f-text" fill="#182f2b" x="216" y="184" font-size="12">STRATA_DP4A → sudot4</text>
 <text class="f-muted" fill="#5c6d66" x="216" y="208" font-size="12">RDNA3 の v_dot4 命令</text>
 <text class="f-text" fill="#182f2b" x="200" y="252" font-size="12" text-anchor="middle">名前の置き換えは hip_compat/cuda_runtime.h の</text>
-<text class="f-text" fill="#182f2b" x="200" y="270" font-size="12" text-anchor="middle">88 行の #define が受け持つ</text>
+<text class="f-text" fill="#182f2b" x="200" y="270" font-size="12" text-anchor="middle">89 行の #define が受け持つ</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="292" font-size="12" text-anchor="middle">例題の dp4a はどちらも 95：整数演算は 1 ビットまで同じ</text>
 </svg><figcaption>図 22-5　ソースは 1 文字も変えません。NVIDIA ビルドは CUDA の名前をそのまま使います。AMD ビルドでは、シムが名前を HIP の言い方に置き換え、内積を AMD 自前の命令に差し替えます。</figcaption></figure></div>
 <p>できあがったエンジンは、自分がどのアーキテクチャ向けに作られたかを覚えています。起動時に、エンジンはカードの実際のアーキテクチャをこのリストと照合し、wave32 であることも求めます。合わなければ、カードの名前とリストを添えてエラーで終了します。実行の途中で、意味の分からない「invalid device function」が出るのを待つことはしません。<span class="ev ev-code">コード上の事実</span></p>
-<p>NVIDIA 側でも、古いカードのために条件付きコンパイルを使っています。<code>__dp4a</code> は compute capability 6.1 からあります。6.0 の古いカード向けにコンパイルするときは、<code>#if</code> が等価なソフトウェアのループに切り替えます。この道は実験スイッチ <code>STRATA_EXPERIMENTAL_SM60</code> を手動で入れる必要があり、CUDA 12 も要ります。CUDA 13 はもうこれらの古いカード向けにコンパイルできないからです。<span class="ev ev-code">コード上の事実</span> v0.1.39 からは、上流が CUDA 12.9 でビルドしたこうした実験エンジンも、Pascal や Volta の古いカード向けに公開しています。ただしメンテナーはこれらのカードを持っておらず、コンパイルできることと単体テストが通ることしか確認していません。これらのカードでは 1 度も動かしていません。<span class="ev ev-report">上流レポート</span> ところがビルドスクリプトのエラーメッセージには、いまも「上流は非サポート」と書かれています。メッセージの文面は、コードより遅れがちです。もう 1 つの例：CUDA 12.8 で RTX 50 シリーズ向けにコンパイルすると、ビルドスクリプトが警告を出します。そうして作ったエンジンが、長いプロンプトでクラッシュしたというユーザー報告があるからです。<span class="ev ev-code">コード上の事実</span> コンパイラのバージョンそのものも変数だと分かります。</p>
+<p>NVIDIA 側でも、古いカードのために条件付きコンパイルを使っています。<code>__dp4a</code> は compute capability 6.1 からあります。6.0 の古いカード向けにコンパイルするときは、<code>#if</code> が等価なソフトウェアのループに切り替えます。この道は実験スイッチ <code>STRATA_EXPERIMENTAL_SM60</code> を手動で入れる必要があり、CUDA 12 も要ります。CUDA 13 はもうこれらの古いカード向けにコンパイルできないからです。<span class="ev ev-code">コード上の事実</span> v0.1.39 からは、上流が CUDA 12.9 でビルドしたこうした実験エンジンも、Pascal や Volta の古いカード向けに公開しています。そのときメンテナーはこれらのカードを持っておらず、コンパイルできることと単体テストが通ることしか確認していませんでした。v0.1.40 からは、メンテナーが P100（sm_60）を 1 枚持っていて、3 種類の量子化で 10/10 一致を確認しています。Volta は今も実機で確認していません。<span class="ev ev-report">上流レポート</span> ところがビルドスクリプトのエラーメッセージには、いまも「上流は非サポート」と書かれています。メッセージの文面は、コードより遅れがちです。もう 1 つの例：CUDA 12.8 で RTX 50 シリーズ向けにコンパイルすると、ビルドスクリプトが警告を出します。そうして作ったエンジンが、長いプロンプトでクラッシュしたというユーザー報告があるからです。<span class="ev ev-code">コード上の事実</span> コンパイラのバージョンそのものも変数だと分かります。</p>
 
 <h2 id="sec-4">22.4 「コンパイルできる」から「サポート」までは、どれくらい遠いか</h2>
 <p>あなたのカードのアーキテクチャがリストにあり、エンジンもコンパイルできたとします。これは「サポート」でしょうか。Strata 自身のビルドスクリプトは、とても細かく答えています。AMD のアーキテクチャを 3 段に分け、CMake は設定時に段ごとに違う態度をとります。<span class="ev ev-code">コード上の事実</span></p>
@@ -176,7 +176,7 @@
 <text class="f-muted" fill="#5c6d66" x="80" y="197" font-size="12">gfx1102：ctest に合格</text>
 <rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="220" width="200" height="46" rx="8"/>
 <text class="f-text" fill="#182f2b" x="20" y="239" font-size="13" font-weight="600">① コンパイルできる</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="257" font-size="12">未検証の 4 種：警告つき</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="257" font-size="12">未検証の 6 種：警告つき</text>
 <text class="f-muted" fill="#5c6d66" x="220" y="247" font-size="12">← コンパイラが受け付けただけ</text>
 <text class="f-muted" fill="#5c6d66" x="280" y="181" font-size="12">← 落ちない、</text>
 <text class="f-muted" fill="#5c6d66" x="280" y="197" font-size="12">　結果も正しい</text>
@@ -187,15 +187,15 @@
 <ul>
 <li><strong>メンテナが検証</strong>：gfx1100（RX 7900 XT / XTX）と gfx1201（RX 9070 シリーズ、Radeon AI PRO R9700）。メンテナが実機で動かしています。</li>
 <li><strong>ユーザーが検証</strong>：gfx1101 と gfx1200。カードの持ち主が動かして報告しました。設定時には 1 行のメッセージを出すだけです。</li>
-<li><strong>未検証</strong>：gfx1012、gfx1102、gfx1030、gfx1031 はコンパイルでき、設定時に警告が出て、結果の報告をお願いされます。gfx1102 は付属テストに通りましたが、モデルを丸ごと動かした報告はまだありません。gfx1030 はコミュニティのマシンで動きましたが、メンテナはまだ自分では検証していません。gfx1012（RX 5500 XT、RDNA1）と gfx1031（RX 6700 XT）は v0.1.39 で新しく加わり、それぞれ 1 人のユーザーが自分のカードで動かしました。<span class="ev ev-report">上流レポート</span></li>
+<li><strong>未検証</strong>：gfx1012、gfx1102、gfx1030、gfx1031、gfx1034、gfx1151 はコンパイルでき、設定時に警告が出て、結果の報告をお願いされます。gfx1102 は付属テストに通りましたが、モデルを丸ごと動かした報告はまだありません。gfx1030 はコミュニティのマシンで動きましたが、メンテナはまだ自分では検証していません。gfx1012（RX 5500 XT、RDNA1）と gfx1031（RX 6700 XT）は v0.1.39 で新しく加わり、それぞれ 1 人のユーザーが自分のカードで動かしました。gfx1034 と gfx1151 は v0.1.40 で新しく加わりました。gfx1151 は、Ryzen AI Max（Strix Halo）チップに入っている Radeon 8060S / 8050S の内蔵 GPU（RDNA3.5）です。上流は実験的なものとして扱っています。リリースノートには Linux での実測がありますが、ビルドスクリプトは今も未検証に分類していて、Windows の実機ではまだ動かしていません。<span class="ev ev-report">上流レポート</span></li>
 </ul>
 <p>2 つ目の落とし穴は数値です。図 22-5 の dp4a は整数演算なので、どの道も 1 ビットまで同じです。浮動小数点演算は違います。足し算の順序が変わると、下の数桁が変わることがあります（第 4 章で浮動小数点の丸めを説明しました）。Strata の AMD ドキュメントは、2 つのバックエンドが 1 ビットまで同じ答えを出すとは約束しない、と明記しています。<span class="ev ev-report">上流レポート</span> 同じマシンでもこれは起こります。IQ 系のモデルでは、CPU は 1 トークンずつ計算するときに ggml の内積を使い、まとめて計算するときは Strata のマルチトークンカーネルを使います。両者は丸めが少し違います。そして 1 グループに何トークン入るかは、ドラフトによって変わります。だから温度が 0 でも、同じプロンプトから、もう 1 つの同じくらいもっともらしい答えが返ることがあります。エンジン 0.1.30 以降は <code>STRATA_IQ_MT_MIN=1</code> を設定してこの差をなくせますが、上流が Ryzen 7600（AVX-512）で測ったところ、IQ3_S のデコードが 1〜3% 遅くなります。<span class="ev ev-report">上流レポート</span>[S03]</p>
 <p>つまり<strong>ビルド設定は実験条件</strong>であり、ハードウェアと同じようにレポートに書く必要があります。同じコミットでも、<code>STRATA_PORTABLE</code> を入れるかどうかで、ggml の CPU 部分は「AVX2 のある任意の CPU」向けか「このマシンの CPU」向けかが変わります。環境変数を 1 つ変えれば、計算の道も変わります。<span class="ev ev-code">コード上の事実</span> README の速度表も見てみましょう。Q2_0 モデルの書き出し速度は、RTX 5070 のマシンで毎秒 94 トークン、RX 9070 XT のマシンで毎秒 60 トークンです。<span class="ev ev-report">上流レポート</span>[S01] 表の下の注記に書かれているのは、NVIDIA のマシンの条件だけです。Q2_0 はエンジン 0.1.36 で、残りの行は 0.1.26 で測り、答えの書き出しは 4K、プロンプトの読み込みは 32K で測っています。AMD のマシンにはエンジンのバージョンが書かれていません。v0.1.39 のリリースノートは、この表は今回は測り直していない、とわざわざ断っています。2 台の CPU も違います。1 台は AVX-512 のある Ryzen 5 7600、もう 1 台は AVX2 しかない Ryzen 9 3900X（Zen 2）です。この数字から言えるのは「どちらのマシンでも動く」ということまでで、NVIDIA と AMD のどちらが速いかの比較には使えません。</p>
 <p>確かめるべき組み合わせはいくつあるでしょうか。ざっと計算してみましょう（図 22-7）。<span class="ev ev-est">教育用の試算</span></p>
-<figure class="fig"><svg viewBox="0 0 400 184" role="img" aria-label="図 22-7：10 種類の GPU アーキテクチャ × 3 本の CPU 経路 × 2 種類の OS × 5 種類のモデルパッケージで、合計 300 通りの組み合わせ">
+<figure class="fig"><svg viewBox="0 0 400 184" role="img" aria-label="図 22-7：11 種類の GPU アーキテクチャ × 3 本の CPU 経路 × 2 種類の OS × 5 種類のモデルパッケージで、合計 330 通りの組み合わせ">
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="10" width="78" height="58" rx="8"/>
 <text class="f-text" fill="#182f2b" x="47" y="32" font-size="13" font-weight="600" text-anchor="middle">GPU アーキ</text>
-<text class="f-text" fill="#182f2b" x="47" y="56" font-size="14" text-anchor="middle">10</text>
+<text class="f-text" fill="#182f2b" x="47" y="56" font-size="14" text-anchor="middle">11</text>
 <text class="f-muted" fill="#5c6d66" x="98" y="44" font-size="14" text-anchor="middle">×</text>
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="10" width="78" height="58" rx="8"/>
 <text class="f-text" fill="#182f2b" x="149" y="32" font-size="13" font-weight="600" text-anchor="middle">CPU 経路</text>
@@ -209,12 +209,12 @@
 <text class="f-text" fill="#182f2b" x="353" y="32" font-size="13" font-weight="600" text-anchor="middle">モデル</text>
 <text class="f-text" fill="#182f2b" x="353" y="56" font-size="14" text-anchor="middle">5</text>
 <rect class="f-accent" fill="#136d5a" x="100" y="90" width="200" height="40" rx="9"/>
-<text class="f-on" fill="#ffffff" x="200" y="115" font-size="14" font-weight="600" text-anchor="middle">合計 300 通り</text>
+<text class="f-on" fill="#ffffff" x="200" y="115" font-size="14" font-weight="600" text-anchor="middle">合計 330 通り</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 68V88"/>
 <text class="f-muted" fill="#5c6d66" x="200" y="152" font-size="12" text-anchor="middle">さらにコンテキスト長、マルチ GPU、KV 形式を掛けると、</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="172" font-size="12" text-anchor="middle">組み合わせは何倍にも増えます</text>
-</svg><figcaption>図 22-7　ざっと計算しても 300 通りあり、1 台のマシンで確かめられるのはそのうちの 1 マスだけです。試していないマスは、空欄のままにしておくべきです。最初からチェックを付けてはいけません。</figcaption></figure>
-<p>計算式：GPU アーキテクチャは 10 種類（NVIDIA はビルドスクリプトに載っている RTX 20/30/40/50 の 4 世代、AMD は Windows 版エンジンに組み込まれる 6 種類）、CPU 経路は 3 本（AVX-512、AVX2、ggml）、OS は 2 種類、README に載っているモデルパッケージは 5 種類です。10 × 3 × 2 × 5 = 300。全部を試せる人はいません。現実的なのは層に分けるやり方です。純粋な数学の小さなサンプルでアルゴリズムをカバーする。フォーマットのテストで量子化のデコードをカバーする。バックエンドごとに代表的なカーネルを選んで比較テストをする。エンドツーエンドは、いちばん重要な数通りの組み合わせだけにする。</p>
+</svg><figcaption>図 22-7　ざっと計算しても 330 通りあり、1 台のマシンで確かめられるのはそのうちの 1 マスだけです。試していないマスは、空欄のままにしておくべきです。最初からチェックを付けてはいけません。</figcaption></figure>
+<p>計算式：GPU アーキテクチャは 11 種類（NVIDIA はビルドスクリプトに載っている RTX 20/30/40/50 の 4 世代、AMD は Windows 版エンジンに組み込まれる 7 種類）、CPU 経路は 3 本（AVX-512、AVX2、ggml）、OS は 2 種類、README に載っているモデルパッケージは 5 種類です。11 × 3 × 2 × 5 = 330。全部を試せる人はいません。現実的なのは層に分けるやり方です。純粋な数学の小さなサンプルでアルゴリズムをカバーする。フォーマットのテストで量子化のデコードをカバーする。バックエンドごとに代表的なカーネルを選んで比較テストをする。エンドツーエンドは、いちばん重要な数通りの組み合わせだけにする。</p>
 
 <h2 id="sec-5">22.5 手を動かす：1 行のソースを 2 つのバックエンドに渡す</h2>
 <p>この章には独立したインタラクティブ実験がありません。2 つのシミュレータが実験台です。次の順で遊ぶのがおすすめです。</p>
