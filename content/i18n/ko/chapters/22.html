@@ -54,7 +54,7 @@
 <text class="f-text" fill="#182f2b" x="200" y="202" font-size="12" text-anchor="middle">전처리기가 컴파일 전에 고르지 않은 분기를 지워요</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="222" font-size="12" text-anchor="middle">그래서 소스 한 벌로 길이 하나뿐인 프로그램을 여럿 만들 수 있어요</text>
 </svg><figcaption>그림 22-2　조건부 컴파일: 소스 파일 하나에 모든 분기를 써 두면, 컴파일할 때마다 대상에 맞는 분기 하나만 남아요. 컴파일러는 다른 분기를 아예 보지 못해요.</figcaption></figure>
-<p>Strata가 AMD 그래픽 카드에서 「4바이트 내적」을 구현하는 방식이 바로 이래요. RDNA3, RDNA4 카드는 sudot4 명령 하나를 써요. RDNA2에는 이 명령이 없어서 더 오래된 sdot4를 써요. RDNA1(gfx1012)에는 sdot4마저 없어서 짧은 어셈블리로 곱셈 4번과 3항 덧셈 2번을 이어 붙여 같은 결과를 만들어요. 그 밖의 경우에는 바이트마다 곱해서 더하는 루프로 돌아가요. 네 길이 계산하는 정수는 똑같고, 속도만 달라요. <span class="ev ev-code">코드 사실</span> 22.3절에서 직접 컴파일해 볼 거예요.</p>
+<p>Strata가 AMD 그래픽 카드에서 「4바이트 내적」을 구현하는 방식이 바로 이래요. RDNA3, RDNA4 카드(v0.1.40부터는 RDNA3.5의 gfx1150, gfx1151도)는 sudot4 명령 하나를 써요. RDNA2에는 이 명령이 없어서 더 오래된 sdot4를 써요. RDNA1(gfx1012)에는 sdot4마저 없어서 짧은 어셈블리로 곱셈 4번과 3항 덧셈 2번을 이어 붙여 같은 결과를 만들어요. 그 밖의 경우에는 바이트마다 곱해서 더하는 루프로 돌아가요. 네 길이 계산하는 정수는 똑같고, 속도만 달라요. <span class="ev ev-code">코드 사실</span> 22.3절에서 직접 컴파일해 볼 거예요.</p>
 <p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/컴파일러" target="_blank" rel="noopener noreferrer">위키백과: 컴파일러</a> · <a href="https://ko.wikipedia.org/wiki/명령어_집합_구조" target="_blank" rel="noopener noreferrer">위키백과: 명령어 집합 구조</a> · <a href="https://ko.wikipedia.org/wiki/C_전처리기" target="_blank" rel="noopener noreferrer">위키백과: C 전처리기</a> · <a href="https://en.cppreference.com/w/cpp/preprocessor/conditional" target="_blank" rel="noopener noreferrer">cppreference: 조건부 컴파일 (영문)</a></p>
 </aside>
 <p class="bridge"><strong>CS를 배운 분께:</strong> 《컴파일러》 수업은 어휘 분석, 구문 분석, 코드 생성이라는 주된 흐름을 가르쳐요. 전처리는 그 모든 것보다 앞서 일어나는 순수한 텍스트 가공이라서 문법을 몰라요. 그래서 매크로 치환이 잘못되면 오류 위치가 이상하게 나오는 일이 많아요. 컴파일러가 보는 것은 이미 치환이 끝난 코드이기 때문이에요.</p>
@@ -112,7 +112,7 @@
 <ul>
 <li><strong>AVX2가 없으면 배포판 엔진은 시작하지 않아요.</strong> Strata 자신의 CPU 전문가 커널은 모두 최소한 AVX2, FMA, F16C가 필요하고, 배포판의 ggml-cpu도 AVX2로 컴파일돼 있어요. 엔진은 CPU 모델명을 알려 주고, Intel Haswell(2013년), AMD Zen(2017년) 또는 더 새로운 CPU가 필요하다고 설명해요. v0.1.39부터는 안내가 한 마디 더 붙어요. 더 오래된 CPU는 setup이 이 컴퓨터에서 실험용 엔진을 직접 빌드하게 할 수 있어요(<code>STRATA_ISA_FLOOR=avx</code> 또는 <code>none</code>). 이 버전의 ggml-cpu는 AVX나 SSE4.2로 컴파일되고, CPU 몫의 전문가를 전부 이것이 계산해요. <span class="ev ev-code">코드 사실</span> 업스트림 설치 문서에 따르면 이 버전은 i-quant 모델만 돌릴 수 있고 매우 느려요. Ryzen 5 7600 + RTX 5070에서 이 경로를 강제하고 전문가 캐시를 슬롯 1500개로 고정하면, 디코드가 초당 토큰 26개에서 11–17개(AVX 버전), 3.5–3.8개(SSE4.2 버전)로 떨어져요. <span class="ev ev-report">업스트림 보고</span></li>
 <li><strong>표준 Q2_0 팩에는 AVX-512 커널뿐이에요.</strong> 업스트림 설치 문서에 따르면, setup은 AVX-512 CPU에서만 이 빠른 커널을 위해 Q2_0용 전문가 사본(약 40 GB)을 추가로 만들어요. <span class="ev ev-report">업스트림 보고</span> 헤더 주석은 왜 시작할 때 바로 거부하는지 솔직하게 적어 놓았어요. 오래된 CPU 사용자가 4000번째 토큰에서 잘못된 명령을 만나지 않고, 0초에 이유를 알게 하려는 거예요.</li>
-<li><strong>환경 변수로도 길을 바꿀 수 있어요.</strong> <code>STRATA_NO_IQ512</code>는 AVX-512 CPU가 AVX2 커널로 가게 해요. <code>STRATA_NO_IQ256</code>은 AVX2 커널까지 꺼서 ggml만 남겨요. 같은 머신, 같은 프로그램인데 환경 변수 하나로 계산 경로가 바뀌어요.</li>
+<li><strong>환경 변수로도 길을 바꿀 수 있어요.</strong> <code>STRATA_NO_IQ512</code>는 AVX-512 CPU가 AVX2 커널로 가게 해요. <code>STRATA_NO_IQ256</code>은 AVX2 커널까지 꺼서 ggml만 남겨요. 같은 머신, 같은 프로그램인데 환경 변수 하나로 계산 경로가 바뀌어요. v0.1.40부터 AVX2 커널은 Alder Lake, Sapphire Rapids 및 더 새로운 CPU에서 AVX-VNNI 명령을 대신 쓰기도 해요. 정수 합은 그대로예요. <code>STRATA_NO_AVXVNNI=1</code>로 끌 수 있어요. 업스트림은 결과가 비트까지 같고 행 계산이 4%~25% 빨라진다고 해요.<span class="ev ev-report">업스트림 보고</span></li>
 </ul>
 <p class="bridge"><strong>CS를 배운 분께:</strong> 「런타임 디스패치」예요. 객체지향의 가상 함수와 같은 발상이에요. 호출하는 자리는 그대로고, 실제로 어떤 코드가 실행될지는 실행 시점에 정해져요. 다른 점은 판단 근거가 객체 타입이 아니라 CPUID가 돌려준 기능 비트라는 것뿐이에요.</p>
 
@@ -126,11 +126,11 @@
 <p>이 장과의 관계는 이래요. Strata는 도구로 소스를 고쳐 쓰지 않아요. 대신 「이름 변환표」 하나를 컴파일할 때 모든 소스 파일에 자동으로 끼워 넣어요. 바로 아래에서 그 방법을 볼게요.</p>
 <p class="further">더 읽을거리: <a href="https://rocm.docs.amd.com/projects/HIP/en/latest/what_is_hip.html" target="_blank" rel="noopener noreferrer">ROCm 문서: What is HIP</a> · <a href="https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_porting_guide.html" target="_blank" rel="noopener noreferrer">ROCm 문서: CUDA에서 HIP로 이식하기</a> · <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/" target="_blank" rel="noopener noreferrer">NVIDIA: CUDA 프로그래밍 가이드</a> · <a href="https://ko.wikipedia.org/wiki/CUDA" target="_blank" rel="noopener noreferrer">위키백과: CUDA</a> · <a href="https://ko.wikipedia.org/wiki/ROCm" target="_blank" rel="noopener noreferrer">위키백과: ROCm</a></p>
 </aside>
-<p>Strata의 GPU 코드는 CUDA 방식으로 쓰여 있고 <code>.cu</code> 파일에 들어 있어요. <code>src</code> 디렉터리에 55개가 있어요. HIP 빌드 스위치를 켜면 세 가지 일이 벌어져요. <span class="ev ev-code">코드 사실</span></p>
+<p>Strata의 GPU 코드는 CUDA 방식으로 쓰여 있고 <code>.cu</code> 파일에 들어 있어요. <code>src</code> 디렉터리에 56개가 있어요. 그중 v0.1.40에서 새로 들어온 하나는 RDNA3 카드용 행렬 코어 커널이고, AMD 빌드에서만 컴파일돼요. HIP 빌드 스위치를 켜면 세 가지 일이 벌어져요. <span class="ev ev-code">코드 사실</span></p>
 <ol>
 <li>빌드 스크립트가 모든 <code>.cu</code> 파일을 HIP 언어로 표시하고 AMD의 컴파일러에 넘겨요.</li>
 <li>컴파일 인자에 <code>-include hip_compat/cuda_runtime.h</code>를 더해, 이 shim 헤더를 모든 소스 파일 맨 앞에 강제로 끼워 넣어요. 여기서 <dfn>shim(심)</dfn>은 두 층 사이에 끼어 차이를 메워 주는 얇은 코드 층을 말해요.</li>
-<li>shim 안에는 <code>#define cudaMalloc hipMalloc</code> 꼴의 매크로가 88줄 있어요. 그중 몇 개는 HIP 버전이나 플랫폼에 따라 두 가지로 적혀 있고, 컴파일할 때마다 하나만 남아요. 또 다른 <code>cublas_v2.h</code> shim이 행렬 라이브러리 이름을 맡아요. 새 hipBLAS에는 17줄을 쓰고, 오래된 버전(0.x)에는 15줄을 따로 써서 더 낮은 수준의 rocBLAS 이름으로 바로 바꿔요. 전처리기가 치환하면 CUDA 이름이 HIP 이름으로 바뀌어요.</li>
+<li>shim 안에는 <code>#define cudaMalloc hipMalloc</code> 꼴의 매크로가 89줄 있어요. 그중 몇 개는 HIP 버전이나 플랫폼에 따라 두 가지로 적혀 있고, 컴파일할 때마다 하나만 남아요. 또 다른 <code>cublas_v2.h</code> shim이 행렬 라이브러리 이름을 맡아요. 새 hipBLAS에는 17줄을 쓰고, 오래된 버전(0.x)에는 15줄을 따로 써서 더 낮은 수준의 rocBLAS 이름으로 바로 바꿔요. 전처리기가 치환하면 CUDA 이름이 HIP 이름으로 바뀌어요.</li>
 </ol>
 <p>빌드 스크립트는 CUDA 스위치와 HIP 스위치를 동시에 켤 수 없게 막아요. 한 번의 빌드에는 백엔드 하나만 컴파일해요. <span class="ev ev-code">코드 사실</span></p>
 <p>이름만 바꿔서는 부족해요. CUDA의 일부 GPU 내장 함수는 RDNA 그래픽 카드의 HIP에 기성품이 없어서, shim이 직접 구현해요. 예를 들어 4바이트 내적 <code>__dp4a</code>는 32비트 정수 두 개를 각각 부호 있는 바이트 4개로 쪼개서 짝끼리 곱한 뒤 누산기에 더해요. shim은 이것을 그래픽 카드 아키텍처에 따라 네 길로 나눠요(22.1절의 칼럼 참고). 또 warp 안에서 데이터를 맞바꾸는 <code>__shfl_xor_sync</code>도 있어요. shim은 먼저 「32개 레인이 모두 참여하는가」를 확인하고, 아니면 슬그머니 그 의미를 버리는 대신 바로 중단해요. <span class="ev ev-code">코드 사실</span></p>
@@ -151,11 +151,11 @@
 <text class="f-text" fill="#182f2b" x="216" y="160" font-size="12">cudaMalloc → hipMalloc</text>
 <text class="f-text" fill="#182f2b" x="216" y="184" font-size="12">STRATA_DP4A → sudot4</text>
 <text class="f-muted" fill="#5c6d66" x="216" y="208" font-size="12">RDNA3의 v_dot4 명령</text>
-<text class="f-text" fill="#182f2b" x="200" y="258" font-size="12" text-anchor="middle">이름 변경은 hip_compat/cuda_runtime.h의 #define 88줄이 해요</text>
+<text class="f-text" fill="#182f2b" x="200" y="258" font-size="12" text-anchor="middle">이름 변경은 hip_compat/cuda_runtime.h의 #define 89줄이 해요</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="282" font-size="12" text-anchor="middle">예제 dp4a는 양쪽 모두 95: 정수 연산은 비트까지 같아요</text>
 </svg><figcaption>그림 22-5　소스는 한 글자도 바꾸지 않아요. NVIDIA 빌드는 CUDA 이름을 그대로 쓰고, AMD 빌드는 shim이 이름을 HIP식으로 바꾸고 내적을 AMD 자체 명령으로 바꿔요.</figcaption></figure></div>
 <p>만들어진 엔진은 자기가 어떤 아키텍처용으로 컴파일됐는지 기억해요. 시작할 때 엔진은 그래픽 카드의 실제 아키텍처를 이 목록과 대조하고 wave32인지도 확인해요. 맞지 않으면 카드 이름과 목록을 함께 보여 주며 오류로 종료해요. 실행 중에 알 수 없는 「invalid device function」이 튀어나오기를 기다리지 않아요. <span class="ev ev-code">코드 사실</span></p>
-<p>NVIDIA 쪽도 조건부 컴파일로 구형 카드를 챙겨요. <code>__dp4a</code>는 컴퓨트 능력 6.1부터 있어요. 6.0 구형 카드용으로 컴파일하면 <code>#if</code>가 동등한 소프트웨어 루프로 바꿔 줘요. 이 길은 실험 스위치 <code>STRATA_EXPERIMENTAL_SM60</code>을 직접 켜야 하고 CUDA 12도 써야 해요. CUDA 13은 이 구형 카드용으로는 컴파일할 수 없기 때문이에요. <span class="ev ev-code">코드 사실</span> v0.1.39부터 업스트림은 CUDA 12.9로 컴파일한 이런 실험용 엔진도 배포해요. Pascal, Volta 구형 카드용이에요. 다만 관리자에게는 이런 카드가 없어서, 컴파일되는지와 단위 테스트가 통과하는지만 확인했고 이 카드들에서는 한 번도 돌려 보지 못했어요. <span class="ev ev-report">업스트림 보고</span> 그런데 빌드 스크립트의 오류 메시지에는 아직 「업스트림은 지원하지 않는다」고 적혀 있어요. 안내 문구는 코드보다 뒤처지기 일쑤예요. 또 다른 예로, CUDA 12.8로 RTX 50 시리즈용을 컴파일하면 빌드 스크립트가 경고를 내요. 이렇게 만든 엔진이 긴 프롬프트에서 죽었다는 사용자 보고가 있었기 때문이에요. <span class="ev ev-code">코드 사실</span> 컴파일러 버전 자체도 변수라는 걸 알 수 있어요.</p>
+<p>NVIDIA 쪽도 조건부 컴파일로 구형 카드를 챙겨요. <code>__dp4a</code>는 컴퓨트 능력 6.1부터 있어요. 6.0 구형 카드용으로 컴파일하면 <code>#if</code>가 동등한 소프트웨어 루프로 바꿔 줘요. 이 길은 실험 스위치 <code>STRATA_EXPERIMENTAL_SM60</code>을 직접 켜야 하고 CUDA 12도 써야 해요. CUDA 13은 이 구형 카드용으로는 컴파일할 수 없기 때문이에요. <span class="ev ev-code">코드 사실</span> v0.1.39부터 업스트림은 CUDA 12.9로 컴파일한 이런 실험용 엔진도 배포해요. Pascal, Volta 구형 카드용이에요. 당시 관리자에게는 이런 카드가 없어서, 컴파일되는지와 단위 테스트가 통과하는지만 확인했어요. v0.1.40부터 관리자에게 P100(sm_60)이 한 장 생겼고, 양자화 3종에서 10/10 일치를 얻었어요. Volta는 여전히 실물 카드로 검증하지 못했어요. <span class="ev ev-report">업스트림 보고</span> 그런데 빌드 스크립트의 오류 메시지에는 아직 「업스트림은 지원하지 않는다」고 적혀 있어요. 안내 문구는 코드보다 뒤처지기 일쑤예요. 또 다른 예로, CUDA 12.8로 RTX 50 시리즈용을 컴파일하면 빌드 스크립트가 경고를 내요. 이렇게 만든 엔진이 긴 프롬프트에서 죽었다는 사용자 보고가 있었기 때문이에요. <span class="ev ev-code">코드 사실</span> 컴파일러 버전 자체도 변수라는 걸 알 수 있어요.</p>
 
 <h2 id="sec-4">22.4 「컴파일된다」와 「지원한다」 사이의 거리</h2>
 <p>내 그래픽 카드 아키텍처가 목록에 있고 엔진도 컴파일됐다고 해 볼게요. 이것이 「지원」일까요? Strata의 빌드 스크립트가 아주 세밀한 답을 줘요. AMD 아키텍처를 세 단계로 나누고, CMake 설정 때 단계마다 태도가 달라요. <span class="ev ev-code">코드 사실</span></p>
@@ -172,7 +172,7 @@
 <text class="f-muted" fill="#5c6d66" x="80" y="197" font-size="12">gfx1102: ctest 통과</text>
 <rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="220" width="200" height="46" rx="8"/>
 <text class="f-text" fill="#182f2b" x="20" y="239" font-size="13" font-weight="600">① 컴파일됨</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="257" font-size="12">미검증 4종: 컴파일 시 경고</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="257" font-size="12">미검증 6종: 컴파일 시 경고</text>
 <text class="f-muted" fill="#5c6d66" x="222" y="247" font-size="12">← 컴파일 통과일 뿐</text>
 <text class="f-muted" fill="#5c6d66" x="282" y="187" font-size="12">← 안 죽고 맞게 계산</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="127" font-size="12">실제 부하 통과 →</text>
@@ -182,15 +182,15 @@
 <ul>
 <li><strong>메인테이너 검증</strong>: gfx1100(RX 7900 XT / XTX)과 gfx1201(RX 9070 시리즈, Radeon AI PRO R9700). 메인테이너가 실제 카드에서 돌려 봤어요.</li>
 <li><strong>사용자 검증</strong>: gfx1101과 gfx1200. 카드 주인이 돌려 보고 알려 줬어요. 설정 때 안내 한 줄만 나와요.</li>
-<li><strong>미검증</strong>: gfx1012, gfx1102, gfx1030, gfx1031은 컴파일은 되고, 설정 때 경고를 내며 사용자에게 결과를 알려 달라고 해요. gfx1102는 자체 테스트를 통과했지만 전체 모델을 돌렸다는 보고는 아직 없어요. gfx1030은 커뮤니티 머신 한 대에서 동작했지만 메인테이너가 직접 검증하지는 않았어요. gfx1012(RX 5500 XT, RDNA1)와 gfx1031(RX 6700 XT)은 v0.1.39에서 새로 들어왔고, 각각 사용자 한 명이 자기 카드에서 돌려 봤어요. <span class="ev ev-report">업스트림 보고</span></li>
+<li><strong>미검증</strong>: gfx1012, gfx1102, gfx1030, gfx1031, gfx1034, gfx1151은 컴파일은 되고, 설정 때 경고를 내며 사용자에게 결과를 알려 달라고 해요. gfx1102는 자체 테스트를 통과했지만 전체 모델을 돌렸다는 보고는 아직 없어요. gfx1030은 커뮤니티 머신 한 대에서 동작했지만 메인테이너가 직접 검증하지는 않았어요. gfx1012(RX 5500 XT, RDNA1)와 gfx1031(RX 6700 XT)은 v0.1.39에서 새로 들어왔고, 각각 사용자 한 명이 자기 카드에서 돌려 봤어요. gfx1034와 gfx1151은 v0.1.40에서 새로 들어왔어요. gfx1151은 Ryzen AI Max(Strix Halo) 칩 안의 Radeon 8060S / 8050S 내장 GPU(RDNA3.5)예요. 업스트림은 실험적이라고 표시해요. 릴리스 노트에는 Linux에서 잰 결과가 있지만, 빌드 스크립트는 여전히 미검증으로 분류하고, Windows 실물 머신에서는 아직 돌려 보지 않았어요. <span class="ev ev-report">업스트림 보고</span></li>
 </ul>
 <p>두 번째 함정은 수치예요. 그림 22-5의 dp4a는 정수 연산이라 어느 길이든 비트까지 같아요. 부동소수점은 달라요. 덧셈 순서가 바뀌면 마지막 몇 자리가 달라질 수 있어요(4장에서 부동소수점 반올림을 다뤘어요). Strata의 AMD 문서는 두 백엔드가 비트까지 같은 답을 낸다고 약속하지 않는다고 분명히 밝혀요. <span class="ev ev-report">업스트림 보고</span> 같은 머신에서도 그래요. IQ 계열 모델을 쓸 때 CPU는 토큰 하나를 계산할 때는 ggml의 내적을, 묶음으로 계산할 때는 Strata의 다중 토큰 커널을 써요. 둘은 반올림이 조금 달라요. 한 묶음에 토큰이 몇 개인지는 다시 드래프트에 따라 달라지고요. 그래서 온도가 0이어도 같은 프롬프트에서 똑같이 그럴듯한 다른 답이 나올 수 있어요. 엔진 0.1.30부터는 <code>STRATA_IQ_MT_MIN=1</code>을 설정해서 이 차이를 없앨 수 있어요. 대가로 업스트림은 Ryzen 7600(AVX-512)에서 IQ3_S 디코드가 1~3% 느려진다고 측정했어요. <span class="ev ev-report">업스트림 보고</span>[S03]</p>
 <p>그래서 <strong>빌드 설정은 실험 조건</strong>이고, 하드웨어처럼 보고서에 적어야 해요. 같은 커밋이라도 <code>STRATA_PORTABLE</code>을 켰는지에 따라 ggml의 CPU 부분이 「AVX2를 가진 아무 CPU」 기준으로 컴파일될지 「이 머신의 CPU」 기준으로 컴파일될지 달라져요. 환경 변수 하나만 바꿔도 계산 경로가 바뀌어요. <span class="ev ev-code">코드 사실</span> README의 속도 표도 보세요. Q2_0 모델은 RTX 5070 머신에서 초당 토큰 94개를, RX 9070 XT 머신에서 초당 60개를 써요. <span class="ev ev-report">업스트림 보고</span>[S01] 표 아래의 설명은 NVIDIA 머신의 조건만 적어 놓았어요. Q2_0은 엔진 0.1.36으로, 나머지 행은 0.1.26으로 쟀고, 답 쓰기는 4K로, 문제 읽기는 32K로 쟀어요. AMD 머신은 엔진 버전을 적지 않았어요. v0.1.39의 릴리스 노트는 이번에 이 표를 다시 측정하지 않았다고도 따로 밝혔어요. 두 머신의 CPU도 달라요. 한쪽은 AVX-512가 있는 Ryzen 5 7600이고, 다른 쪽은 AVX2만 있는 Ryzen 9 3900X(Zen 2)예요. 이 숫자는 「두 머신 모두 돌아간다」는 것을 보여 줄 뿐이에요. NVIDIA와 AMD 중 어느 쪽이 빠른지 비교하는 데 쓸 수는 없어요.</p>
 <p>검증해야 할 조합은 얼마나 될까요? 대충 세어 봐요. 그림 22-7을 보세요. <span class="ev ev-est">교육용 추정</span></p>
-<figure class="fig"><svg viewBox="0 0 400 172" role="img" aria-label="그림 22-7: GPU 아키텍처 10종 × CPU 경로 3개 × 운영체제 2종 × 모델 팩 5종 = 모두 300가지 조합">
+<figure class="fig"><svg viewBox="0 0 400 172" role="img" aria-label="그림 22-7: GPU 아키텍처 11종 × CPU 경로 3개 × 운영체제 2종 × 모델 팩 5종 = 모두 330가지 조합">
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="10" width="76" height="58" rx="8"/>
 <text class="f-text" fill="#182f2b" x="46" y="32" font-size="13" font-weight="600" text-anchor="middle">GPU 아키텍처</text>
-<text class="f-text" fill="#182f2b" x="46" y="56" font-size="14" text-anchor="middle">10</text>
+<text class="f-text" fill="#182f2b" x="46" y="56" font-size="14" text-anchor="middle">11</text>
 <text class="f-muted" fill="#5c6d66" x="93" y="44" font-size="14" text-anchor="middle">×</text>
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="102" y="10" width="76" height="58" rx="8"/>
 <text class="f-text" fill="#182f2b" x="140" y="32" font-size="13" font-weight="600" text-anchor="middle">CPU 경로</text>
@@ -204,11 +204,11 @@
 <text class="f-text" fill="#182f2b" x="328" y="32" font-size="13" font-weight="600" text-anchor="middle">모델 팩</text>
 <text class="f-text" fill="#182f2b" x="328" y="56" font-size="14" text-anchor="middle">5</text>
 <rect class="f-accent" fill="#136d5a" x="100" y="90" width="200" height="40" rx="9"/>
-<text class="f-on" fill="#ffffff" x="200" y="115" font-size="14" font-weight="600" text-anchor="middle">모두 300가지 조합</text>
+<text class="f-on" fill="#ffffff" x="200" y="115" font-size="14" font-weight="600" text-anchor="middle">모두 330가지 조합</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 68V88"/>
 <text class="f-muted" fill="#5c6d66" x="200" y="160" font-size="12" text-anchor="middle">컨텍스트 길이, 멀티 GPU, KV 형식까지 곱하면 수가 몇 배로 늘어요</text>
-</svg><figcaption>그림 22-7　대충 세어도 300가지 조합이에요. 머신 한 대로 켤 수 있는 칸은 그중 하나뿐이에요. 테스트하지 않은 칸은 기본으로 체크하지 말고 비워 두어야 해요.</figcaption></figure>
-<p>계산식: GPU 아키텍처 10종(NVIDIA는 빌드 스크립트가 나열한 RTX 20/30/40/50 네 세대, AMD는 Windows 판 엔진에 들어간 6종), CPU 경로 3개(AVX-512, AVX2, ggml), 운영체제 2종, README에 나열된 모델 팩 5종. 10 × 3 × 2 × 5 = 300. 아무도 전부 테스트할 수 없어요. 현실적인 방법은 층을 나누는 거예요. 순수 수학의 작은 표본이 알고리즘을 덮고, 형식 테스트가 양자화 디코딩을 덮어요. 백엔드마다 대표 커널을 골라 비교 테스트를 하고, 엔드투엔드는 가장 중요한 조합 몇 가지만 덮어요.</p>
+</svg><figcaption>그림 22-7　대충 세어도 330가지 조합이에요. 머신 한 대로 켤 수 있는 칸은 그중 하나뿐이에요. 테스트하지 않은 칸은 기본으로 체크하지 말고 비워 두어야 해요.</figcaption></figure>
+<p>계산식: GPU 아키텍처 11종(NVIDIA는 빌드 스크립트가 나열한 RTX 20/30/40/50 네 세대, AMD는 Windows 판 엔진에 들어간 7종), CPU 경로 3개(AVX-512, AVX2, ggml), 운영체제 2종, README에 나열된 모델 팩 5종. 11 × 3 × 2 × 5 = 330. 아무도 전부 테스트할 수 없어요. 현실적인 방법은 층을 나누는 거예요. 순수 수학의 작은 표본이 알고리즘을 덮고, 형식 테스트가 양자화 디코딩을 덮어요. 백엔드마다 대표 커널을 골라 비교 테스트를 하고, 엔드투엔드는 가장 중요한 조합 몇 가지만 덮어요.</p>
 
 <h2 id="sec-5">22.5 직접 해 보기: 소스 한 줄을 두 백엔드에 넘겨 보기</h2>
 <p>이 장에는 따로 떼어 놓은 상호작용 실험이 없어요. 시뮬레이터 두 개가 곧 실험대예요. 이 순서로 해 보세요.</p>
