@@ -30,7 +30,7 @@
 </svg><figcaption>图 23-1　Strata 的服务层。HTTP 服务和文本前端只处理文字，所以不装显卡也能测试；真正的计算在最下面的常驻进程里。</figcaption></figure>
 <p><code>serve/server.py</code> 开头就写明了它的职责：在“把 token 编号映射成 token 的任何引擎”之上，提供 OpenAI 和 Anthropic 两种风格的接口。端点包括 <code>POST /v1/chat/completions</code>（OpenAI 风格，支持流式和非流式）、<code>POST /v1/messages</code>（Anthropic 风格）、<code>GET /v1/models</code>、<code>GET /health</code> 等。<span class="ev ev-code">代码事实</span>[S15] v0.1.39 又加了 OpenAI 的 Responses 接口 <code>POST /v1/responses</code>，给 Codex CLI 用。它是无状态的：服务器不保存回答，客户端每次都把整段对话发过来。文件开头的端点清单还没写上它：注释落后于代码。<span class="ev ev-code">代码事实</span></p>
 <p>它和引擎之间的约定只有一个函数：<code>Engine.generate(prompt_ids, max_new, sampling, cancel)</code>，返回一个逐个产出 token 编号的迭代器。真实的 <code>StrataEngine</code> 让一个 <code>strata --serve</code> 进程常驻，通过标准输入输出和它对话；<code>MockEngine</code> 则按剧本吐 token，让每条接口路径都能在没有显卡的机器上测试。[S15]</p>
-<p><code>serve/frontend.py</code> 开头的第一句话是：“这里的一切都是文本：没有模型，没有 GPU。”它做三件事：把 OpenAI 和 Anthropic 两种请求格式统一成聊天模板要的消息列表；用模型自带的 Jinja 模板渲染提示词，并用 10 个样例核对过和 Hugging Face 的结果一致；把流式输出增量地拆成思考、正文和工具调用，<strong>从不发出半个标签</strong>。<span class="ev ev-code">代码事实</span>[S16]</p>
+<p><code>serve/frontend.py</code> 开头的第一句话是：“这里的一切都是文本：没有模型，没有 GPU。”它做三件事：把 OpenAI 和 Anthropic 两种请求格式统一成聊天模板要的消息列表；用模型自带的 Jinja 模板渲染提示词，并用 10 个样例核对过和 Hugging Face 的结果一致；把流式输出增量地拆成思考、正文和工具调用，<strong>从不发出半个标签</strong>。<span class="ev ev-code">代码事实</span>[S16] v0.1.40 起，渲染之前还会去掉历史里空的助手回合（没有文字、图片和工具调用），最后一条消息除外，免得客户端的历史教模型“什么也不答”；设 <code>STRATA_KEEP_EMPTY_TURNS=1</code> 可以恢复旧做法。<span class="ev ev-code">代码事实</span></p>
 <p class="bridge"><strong>学过计算机的同学：</strong>这就是《计算机网络》里分层思想的一个小号版本：每层只和上下两层打交道，接口约定好了，层内实现可以随意替换。<code>MockEngine</code> 能顶替真引擎，正是因为边界只有 <code>generate</code> 这一个函数。</p>
 
 <h2 id="sec-2">23.2 回答为什么能边写边送</h2>
