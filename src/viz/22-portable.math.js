@@ -1,5 +1,5 @@
 /* Pure logic behind the chapter 22 widgets. Teaching model, not Strata code.
-   The branch rules mirror files at the pinned commit 6f32ec0 (v0.1.39):
+   The branch rules mirror files at the pinned commit 1735d64 (v0.1.40):
    include/strata/kernels/dp4a.hpp, include/strata/hip_compat/intrinsics.hpp, cmake/hip_backend.cmake,
    CMakeLists.txt (CUDA guard), src/program/generate.cpp and src/kernels/cpu/native_expert.cpp. */
 (function (root) {
@@ -50,7 +50,7 @@
     return (c + x[0] * y[0] + x[1] * y[1] + x[2] * y[2] + x[3] * y[3]) | 0;
   }
 
-  const SUDOT4 = ['gfx1100', 'gfx1101', 'gfx1102', 'gfx1200', 'gfx1201'];
+  const SUDOT4 = ['gfx1100', 'gfx1101', 'gfx1102', 'gfx1150', 'gfx1151', 'gfx1200', 'gfx1201'];
   const SDOT4 = ['gfx1030', 'gfx1031', 'gfx1032'];
   // Which #if branch a call to STRATA_DP4A / __dp4a compiles to for one target.
   function dp4aBranch(t) {
@@ -69,15 +69,15 @@
     throw new Error('未知后端');
   }
 
-  // cmake/hip_backend.cmake lines 12-33.
+  // cmake/hip_backend.cmake lines 13-36.
   function hipTier(arch) {
     const base = String(arch).replace(/:.*$/, '');
     if (['gfx1100', 'gfx1201'].includes(base)) return 'validated';
     if (['gfx1101', 'gfx1200'].includes(base)) return 'community';
-    if (['gfx1012', 'gfx1102', 'gfx1030', 'gfx1031'].includes(base)) return 'unvalidated';
+    if (['gfx1012', 'gfx1102', 'gfx1030', 'gfx1031', 'gfx1034', 'gfx1151'].includes(base)) return 'unvalidated';
     return 'refused';
   }
-  // CMakeLists.txt lines 156-165: below 7.5 only with STRATA_EXPERIMENTAL_SM60, below 6.0 never.
+  // CMakeLists.txt lines 169-178: below 7.5 only with STRATA_EXPERIMENTAL_SM60, below 6.0 never.
   function cudaTier(sm, experimental) {
     if (sm < 60) return 'refused';
     if (sm < 75) return experimental ? 'experimental' : 'refused';

@@ -45,11 +45,12 @@ test('dp4a branch follows the #if chains in dp4a.hpp and hip_compat/intrinsics.h
   assert.equal(m.dp4aBranch({ backend: 'cuda', sm: 120 }).id, 'cuda-hw');
   assert.equal(m.dp4aBranch({ backend: 'cuda', sm: 61 }).id, 'cuda-hw');
   assert.equal(m.dp4aBranch({ backend: 'cuda', sm: 60 }).id, 'cuda-sw');
-  for (const arch of ['gfx1100', 'gfx1101', 'gfx1102', 'gfx1200', 'gfx1201']) assert.equal(m.dp4aBranch({ backend: 'hip', arch }).id, 'hip-sudot4');
+  for (const arch of ['gfx1100', 'gfx1101', 'gfx1102', 'gfx1150', 'gfx1151', 'gfx1200', 'gfx1201']) assert.equal(m.dp4aBranch({ backend: 'hip', arch }).id, 'hip-sudot4', arch + ' (v0.1.40 adds gfx1150 and gfx1151)');
   for (const arch of ['gfx1030', 'gfx1031', 'gfx1032']) assert.equal(m.dp4aBranch({ backend: 'hip', arch }).id, 'hip-sdot4');
   assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1012' }).id, 'hip-sdwa', 'v0.1.39: RDNA1 SDWA sequence');
   assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1012', portableDot: true }).id, 'hip-loop', 'STRATA_GFX1012_PORTABLE_DOT');
-  assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1150' }).id, 'hip-loop');
+  assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1103' }).id, 'hip-loop');
+  assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1034' }).id, 'hip-loop', 'gfx1034 is not in the sdot4 list');
   assert.throws(() => m.dp4aBranch({ backend: 'metal' }));
 });
 
@@ -62,6 +63,9 @@ test('HIP architecture tiers match cmake/hip_backend.cmake', () => {
   assert.equal(m.hipTier('gfx1030'), 'unvalidated');
   assert.equal(m.hipTier('gfx1012'), 'unvalidated', 'v0.1.39 adds gfx1012');
   assert.equal(m.hipTier('gfx1031'), 'unvalidated', 'v0.1.39 adds gfx1031');
+  assert.equal(m.hipTier('gfx1034'), 'unvalidated', 'v0.1.40 adds gfx1034');
+  assert.equal(m.hipTier('gfx1151'), 'unvalidated', 'v0.1.40 adds gfx1151 (Strix Halo, experimental)');
+  assert.equal(m.hipTier('gfx1150'), 'refused');
   assert.equal(m.hipTier('gfx1100:xnack-'), 'validated', 'feature suffix is stripped');
   assert.equal(m.hipTier('gfx906'), 'refused');
 });
@@ -101,7 +105,7 @@ test('vector width: AVX2 holds 32 int8 lanes, AVX-512 holds 64', () => {
 
 test('support matrix size is the product of its dimensions', () => {
   assert.equal(m.combos([2, 3, 2, 2]), 24);
-  assert.equal(m.combos([10, 3, 2, 5]), 300);
+  assert.equal(m.combos([11, 3, 2, 5]), 330, 'figure 22-7 at v0.1.40: 4 NVIDIA generations + 7 AMD archs in the Windows HIP zip');
   assert.equal(m.combos([]), 1);
   assert.throws(() => m.combos([2, 0]));
 });

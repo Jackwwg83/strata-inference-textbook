@@ -25,7 +25,7 @@
         'hip-sdot4': 'v_dot4_i32_i8（sdot4）', 'hip-sdwa': 'RDNA1 的 SDWA 汇编（v_mul_i32_i24 + v_add3_u32）', 'hip-loop': '可移植的逐字节循环',
       },
       tier: {
-        ok: '正常构建', experimental: '实验构建：维护者没有这类卡，只验证了能编译', validated: '维护者在真卡上验证过', community: '用户在真卡上验证过',
+        ok: '正常构建', experimental: '实验构建：上游不正式支持；维护者只在一块 P100 上测过', validated: '维护者在真卡上验证过', community: '用户在真卡上验证过',
         unvalidated: '能编译，但给出警告：还没在真卡上验证', refused: '直接报错，拒绝配置',
       },
       try: [
@@ -110,7 +110,7 @@
         'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-sdwa': 'RDNA1 SDWA assembly (v_mul_i32_i24 + v_add3_u32)', 'hip-loop': 'portable byte-by-byte loop',
       },
       tier: {
-        ok: 'normal build', experimental: 'experimental build: the maintainer has no such card and only checked that it compiles', validated: 'verified on real cards by the maintainer', community: 'verified on real cards by users',
+        ok: 'normal build', experimental: 'experimental build: not officially supported upstream; the maintainer tested it on one P100 only', validated: 'verified on real cards by the maintainer', community: 'verified on real cards by users',
         unvalidated: 'compiles, but warns: not yet verified on a real card', refused: 'error: configure refused',
       },
       try: [
@@ -195,7 +195,7 @@
         'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-sdwa': 'تجميع SDWA في RDNA1 (v_mul_i32_i24 + v_add3_u32)', 'hip-loop': 'حلقة قابلة للنقل بايتًا بايتًا',
       },
       tier: {
-        ok: 'بناء عادي', experimental: 'بناء تجريبي: لا يملك المشرف هذه البطاقة، وتحقق فقط من أنها تُترجَم', validated: 'تحقق منها المشرف على بطاقات حقيقية', community: 'تحقق منها مستخدمون على بطاقات حقيقية',
+        ok: 'بناء عادي', experimental: 'بناء تجريبي: غير مدعوم رسميًا من المصدر الأصلي؛ اختبره المشرف على بطاقة P100 واحدة فقط', validated: 'تحقق منها المشرف على بطاقات حقيقية', community: 'تحقق منها مستخدمون على بطاقات حقيقية',
         unvalidated: 'تُترجَم، لكن مع تحذير: لم يُتحقَّق منها بعد على بطاقة حقيقية', refused: 'خطأ: يُرفَض الإعداد',
       },
       try: [
@@ -281,7 +281,7 @@
         'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-sdwa': 'ensamblador SDWA de RDNA1 (v_mul_i32_i24 + v_add3_u32)', 'hip-loop': 'bucle portable byte a byte',
       },
       tier: {
-        ok: 'compilación normal', experimental: 'compilación experimental: el mantenedor no tiene esa tarjeta y solo comprobó que compila', validated: 'verificada en tarjetas reales por el mantenedor', community: 'verificada en tarjetas reales por usuarios',
+        ok: 'compilación normal', experimental: 'compilación experimental: upstream no la soporta oficialmente; el mantenedor solo la probó en una P100', validated: 'verificada en tarjetas reales por el mantenedor', community: 'verificada en tarjetas reales por usuarios',
         unvalidated: 'compila, pero avisa: aún sin verificar en una tarjeta real', refused: 'error: se rechaza la configuración',
       },
       try: [
@@ -366,7 +366,7 @@
         'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-sdwa': 'RDNA1의 SDWA 어셈블리 (v_mul_i32_i24 + v_add3_u32)', 'hip-loop': '이식 가능한 바이트 단위 루프',
       },
       tier: {
-        ok: '일반 빌드', experimental: '실험 빌드: 메인테이너에게 이런 카드가 없어 컴파일만 확인함', validated: '메인테이너가 실제 카드에서 검증함', community: '사용자가 실제 카드에서 검증함',
+        ok: '일반 빌드', experimental: '실험 빌드: 업스트림이 공식 지원하지 않음. 메인테이너는 P100 한 장에서만 테스트함', validated: '메인테이너가 실제 카드에서 검증함', community: '사용자가 실제 카드에서 검증함',
         unvalidated: '컴파일은 되지만 경고를 냄: 아직 실제 카드에서 검증하지 않음', refused: '오류: 설정을 거부함',
       },
       try: [
@@ -451,7 +451,7 @@
         'hip-sdot4': 'v_dot4_i32_i8（sdot4）', 'hip-sdwa': 'RDNA1 の SDWA アセンブリ（v_mul_i32_i24 + v_add3_u32）', 'hip-loop': 'ポータブルなバイトごとのループ',
       },
       tier: {
-        ok: '通常のビルド', experimental: '実験ビルド：メンテナはこの種のカードを持っておらず、コンパイルできることだけ確認', validated: 'メンテナが実機で検証済み', community: 'ユーザーが実機で検証済み',
+        ok: '通常のビルド', experimental: '実験ビルド：上流は公式にサポートしておらず、メンテナは P100 1 枚でのみテスト', validated: 'メンテナが実機で検証済み', community: 'ユーザーが実機で検証済み',
         unvalidated: 'コンパイルできるが警告あり：実機ではまだ未検証', refused: 'エラーで設定を拒否',
       },
       try: [
