@@ -56,7 +56,7 @@
 <text class="f-text" fill="#182f2b" x="10" y="236" font-size="14">锁页之后：系统保证搬完之前不挪这些页，</text>
 <text class="f-text" fill="#182f2b" x="10" y="258" font-size="14">DMA 照着开工时的号码读写才安全。</text>
 </svg><figcaption>图 14-2　DMA 不看页表。被它使用的内存一旦被操作系统挪动，它读到的就是别人的数据。</figcaption></figure></div>
-<p>Strata 的专家权重全部放在锁页内存里。<span class="ev ev-report">上游报告</span>[S02] 源码的说法更直白：这块“专家区”才是引擎真正的工作集，必须锁页，拷贝引擎才能跑满带宽。<span class="ev ev-code">代码事实</span>（<code>pinned.hpp</code>）具体做法是：先保留一大块内存，在碰它任何一页之前，就把整块注册成 CUDA 的锁页内存，并且映射到显卡的地址空间；整块注册失败时，就一段一段地注册，剩下的部分改用操作系统的“常驻”锁定，至少保证它不被换出。<span class="ev ev-code">代码事实</span>（<code>src/core/pinned.cu</code>）上游的排错表也写着：在 Windows 上，日志里出现整块注册“内存不足”是正常的，引擎会改为按层分段锁定。</p>
+<p>Strata 的专家权重全部放在锁页内存里。<span class="ev ev-report">上游报告</span>[S02] 源码的说法更直白：这块“专家区”才是引擎真正的工作集，必须锁页，拷贝引擎才能跑满带宽。<span class="ev ev-code">代码事实</span>（<code>pinned.hpp</code>）具体做法是：先保留一大块内存，在碰它任何一页之前，就把整块注册成 CUDA 的锁页内存，并且映射到显卡的地址空间；整块注册失败时，就一段一段地注册，剩下的部分改用操作系统的“常驻”锁定，至少保证它不被换出。v0.1.40 起，如果这块内存用的是大页，就省掉这一步：大页本来就不会被换出。<span class="ev ev-code">代码事实</span>（<code>src/core/pinned.cu</code>）上游的排错表也写着：在 Windows 上，日志里出现整块注册“内存不足”是正常的，引擎会改为按层分段锁定。</p>
 <p>锁页之后，数据有三条路可以上显卡，见图 14-3。</p>
 <figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="图 14-3：三条上显卡的路。普通内存要先由 CPU 拷进中转区再 DMA；锁页内存可直接 DMA；映射到显卡地址空间的锁页内存可以被 GPU 内核经 PCIe 直接读">
 <text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">① 普通内存</text>
@@ -150,7 +150,7 @@
 
 <h2 id="sec-5">14.5 锁页不是免费的</h2>
 <p>既然锁页这么好，把内存全锁上行不行？不行。锁住的页，操作系统就不能再挪、不能换出，也不能在内存紧张时收回。锁得越多，留给系统、其他程序和文件缓存的弹性就越小。[R02]</p>
-<p>Strata 在这件事上很小心。低内存的“驻留”模式会给系统留出 4 GB 空闲内存。<span class="ev ev-report">上游报告</span>[S03] 在 Windows 上，显卡映射的锁页内存还要计入一块“共享显存”预算：源码记录过一台 63 GB 的电脑，一段段锁到驱动拒绝为止，锁了 28 GiB，结果那块预算被占满，之后每一次显存分配都报“内存不足”。为此引擎提供了可选的上限设置；但它不是默认值，因为一台 64 GB 的电脑实测多锁了也没事，而设上限会让读提示词慢约 20%。<span class="ev ev-code">代码事实</span>（<code>pinned.cu</code>）这种取舍没有放之四海而皆准的答案，只能按机器量。</p>
+<p>Strata 在这件事上很小心。低内存的“驻留”模式会给系统留出 4 GiB 空闲内存。<span class="ev ev-report">上游报告</span>[S03] 如果用 <code>--resident-budget-gib</code> 给它设了内存预算，在 Windows 上这个预算还要受“可提交内存”（commit limit）的限制，超出时引擎会把预算压低，并给出提示。<span class="ev ev-code">代码事实</span>（<code>src/core/expert_source.cpp</code>） 在 Windows 上，显卡映射的锁页内存还要计入一块“共享显存”预算：源码记录过一台 63 GB 的电脑，一段段锁到驱动拒绝为止，锁了 28 GiB，结果那块预算被占满，之后每一次显存分配都报“内存不足”。为此引擎提供了可选的上限设置；但它不是默认值，因为一台 64 GB 的电脑实测多锁了也没事，而设上限会让读提示词慢约 20%。<span class="ev ev-code">代码事实</span>（<code>pinned.cu</code>）这种取舍没有放之四海而皆准的答案，只能按机器量。</p>
 <p>还有一个有趣的对照：长上下文的 KV 页缓存（第 12 章提过），完整的 KV 数据放在锁页、并映射给显卡的内存里，显存里只放一部分页，再用一张“页号 → 显存槽位”的表记录谁在显存。<span class="ev ev-code">代码事实</span>（<code>include/strata/kernels/kv_stream.hpp</code>）这几乎就是一套迷你的虚拟内存：页表、缺页、替换，全由 GPU 自己完成。</p>
 
 <h2 id="sec-6">14.6 动手：把竞态变成必现</h2>

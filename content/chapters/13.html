@@ -69,7 +69,7 @@
 <text class="f-muted" fill="#5c6d66" x="200" y="284" font-size="14" text-anchor="middle">专家的 1.38 MB 留在原地，由 CPU 读</text>
 </svg><figcaption>图 13-3　搬数据还是搬计算。专家不动、输入和结果来回跑，过 PCIe 的字节少了一百多倍。<span class="ev ev-est">教学推演</span></figcaption></figure>
 <p>接口是这样约定的：每一层，GPU 把归一化后的输入、选中的 10 个专家编号和它们的权重交给 CPU 这一侧，等着拿回 10 × 2560 个数。<span class="ev ev-code">代码事实</span>[S06] 一个数 4 字节，输入约 10 KB，结果约 100 KB，比 13.8 MB 小了一百多倍。<span class="ev ev-est">教学推演</span></p>
-<p>CPU 这一侧是一个<dfn>专家池</dfn>：每个物理核心一个工作线程，第一个核心留给主循环。每层的 10 个专家分给这些线程同时算；主机要把 10 份结果都收齐、加起来，下一层才能开始，所以每一层都是一道“栅栏”。<span class="ev ev-code">代码事实</span>（<code>pool.hpp</code>）</p>
+<p>CPU 这一侧是一个<dfn>专家池</dfn>：每个物理核心一个工作线程，第一个核心默认留给主循环。v0.1.40 起，可以用 <code>--host-core last</code> 把主循环挪到最后一个物理核心，这是为 Windows 准备的：它通常把显卡的中断送到第一个核心，在那里空转等待的主循环会被打断。每层的 10 个专家分给这些线程同时算；主机要把 10 份结果都收齐、加起来，下一层才能开始，所以每一层都是一道“栅栏”。<span class="ev ev-code">代码事实</span>（<code>pool.hpp</code>）</p>
 <p class="bridge"><strong>学过操作系统的同学：</strong>线程绑在物理核心上，而不是绑在逻辑处理器上。一个物理核心的两个超线程共享同一套执行单元和缓存，两个读内存的线程挤在一起，带宽会减半。源码注释还记录了一次实测：主循环线程没有固定在自己的核心上时，专家池从 36.32 GB/s 掉到 26.9 GB/s。<span class="ev ev-report">上游报告</span>（<code>pool.hpp</code> 注释）</p>
 <p>按上游开发期的测量，在专家缓存出现之前，CPU 每个 token 要读 663.6 MB 专家数据，按约 40 GB/s 算要 16.2 毫秒，而当时一个 token 约 53 毫秒。<span class="ev ev-report">上游报告</span>[S05] CPU 这一份，是整台机器上最大的一笔开销。</p>
 
