@@ -167,3 +167,17 @@ test('a lab experiment asks one question, lets the reader guess, and runs a real
     if(e.extra!==undefined)assert.ok(typeof e.extra==='string'&&e.extra.length>4,l.id+' extra section title');
   }
 });
+
+test('every source window shows the same lines as its link', () => {
+  const list = require('../content/sources.json');
+  for (const s of (list.sources || list).filter(x => /github\.com\/Niko1221\/Strata\/blob\//.test(x.url || ''))) {
+    const m = /#L(\d+)-L(\d+)$/.exec(s.url);
+    assert.ok(m, s.id + ' link has a line range');
+    assert.deepEqual([s.start, s.end], [+m[1], +m[2]], s.id + ' start/end match the link');
+  }
+});
+
+test('source links and the provenance name the same pinned commit', () => {
+  const list = require('../content/sources.json'), prov = require('../content/provenance.json');
+  for (const s of (list.sources || list).filter(x => /github\.com\/Niko1221\/Strata\/blob\//.test(x.url || ''))) assert.ok(s.url.includes('/blob/' + prov.commit + '/'), s.id);
+});
