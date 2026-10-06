@@ -100,7 +100,7 @@ test('expected distinct experts per layer for a batch, and the memory budget', (
   assert.equal(m.budget(1), 26);
 });
 
-test('the scheduler widget calls one request at a time the default, not the only mode (Strata v0.1.39)', () => {
+test('the scheduler widget calls one request at a time the default, not the only mode (Strata v0.1.40)', () => {
   require('../src/viz/core.js');
   require('../src/viz/25-sched.js');
   const t = globalThis.Viz.tables.find(x => x.zh && x.zh.code === 'SCHED_RACE');
