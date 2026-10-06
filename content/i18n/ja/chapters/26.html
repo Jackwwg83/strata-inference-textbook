@@ -48,7 +48,7 @@
 <text class="f-muted" fill="#5c6d66" x="200" y="157" font-size="13" text-anchor="middle">モデル読み込み時に、各テンソルの形状を検査</text>
 <rect class="f-soft" fill="#e5f1df" x="20" y="172" width="360" height="48" rx="8"/>
 <text class="f-text" fill="#182f2b" x="200" y="193" font-size="15" font-weight="600" text-anchor="middle">1 つの演算子：参照実装と照合</text>
-<text class="f-muted" fill="#5c6d66" x="200" y="211" font-size="13" text-anchor="middle">src/kernels/ に照合テストが 37 個</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="211" font-size="13" text-anchor="middle">src/kernels/ に照合テストが 44 個</text>
 <rect class="f-soft" fill="#e5f1df" x="10" y="226" width="380" height="48" rx="8"/>
 <text class="f-text" fill="#182f2b" x="200" y="247" font-size="15" font-weight="600" text-anchor="middle">純関数</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="265" font-size="13" text-anchor="middle">例：FP32→BF16 変換、2³² 通りの全入力を走査</text>
@@ -58,8 +58,8 @@
 <text class="f-muted" fill="#5c6d66" x="200" y="356" font-size="13" text-anchor="middle">カバーする範囲は狭い</text>
 </svg><figcaption>図 26-2　テストの階段。各層が捕まえる間違いは違い、どの層も別の層の代わりにはなれません。下の層がすべて通っても、上の層が通るとは限りません。</figcaption></figure>
 <p>いくつかの層で、Strata が実際にどうしているかを見てみましょう。</p>
-<p><strong>いちばん下は純関数です。</strong>32 ビット浮動小数点数を 16 ビットの BF16 形式に変換する関数の入力は、2³² 通り、およそ 43 億通りしかありません。Strata のテストは、思い切ってその全部を試します。入力のすべてを、ggml（llama.cpp の裏にある計算ライブラリ）の変換規則と比べ、数秒で走り終えます。このテストは本物のバグを捕まえたことがあります。古い丸めの書き方は、NaN（「数ではない」）に出会うと繰り上がりが起こり、NaN を −0 や無限大に変えてしまいました。上流から来た NaN が、こうして静かに隠されていたのです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/src/kernels/bf16_bits_test.cpp#L1-L13" target="_blank" rel="noopener noreferrer">bf16_bits_test.cpp</a>）</p>
-<p><strong>2 層目は、1 つの演算子です。</strong>どの GPU カーネルにも照合テストがあり、信頼できる参照実装と比べます。ビルドスクリプトのコメントがはっきり書いています。参照実装自身が、まず ggml と照合済みであること。「あるカーネルを、自分自身の別のコピーと比べても、何も証明できない」ということです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/CMakeLists.txt#L286-L288" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）</p>
+<p><strong>いちばん下は純関数です。</strong>32 ビット浮動小数点数を 16 ビットの BF16 形式に変換する関数の入力は、2³² 通り、およそ 43 億通りしかありません。Strata のテストは、思い切ってその全部を試します。入力のすべてを、ggml（llama.cpp の裏にある計算ライブラリ）の変換規則と比べ、数秒で走り終えます。このテストは本物のバグを捕まえたことがあります。古い丸めの書き方は、NaN（「数ではない」）に出会うと繰り上がりが起こり、NaN を −0 や無限大に変えてしまいました。上流から来た NaN が、こうして静かに隠されていたのです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/src/kernels/bf16_bits_test.cpp#L1-L13" target="_blank" rel="noopener noreferrer">bf16_bits_test.cpp</a>）</p>
+<p><strong>2 層目は、1 つの演算子です。</strong>どの GPU カーネルにも照合テストがあり、信頼できる参照実装と比べます。ビルドスクリプトのコメントがはっきり書いています。参照実装自身が、まず ggml と照合済みであること。「あるカーネルを、自分自身の別のコピーと比べても、何も証明できない」ということです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/CMakeLists.txt#L305-L307" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）</p>
 <p><strong>3 層目は、組み合わせと契約です。</strong><code>layout.hpp</code> は、モデルを読み込む時点で、各テンソルの形状がカーネルの前提に合っているかを検査します。合っていなければ、テンソルの名前、実際の形状、求められる形状を報告します。コメントの原文は、エラーにするのは読み込み時であって、4000 個目のトークンで行列積の中の間違った数になってからではない、というものです。[S04] 同じコメントには、実際にあった教訓も記されています。ある開発の 1 周で、indexer の key キャッシュを「4 ヘッド」としてサイズ計算していましたが、実際には共有ヘッドが 1 つだけで、4 倍大きかったのです。この間違いは、予算をより保守的にするだけだったので、誰もどこかおかしいとは思わず、コードの中で 1 周生き延びました。[S04]</p>
 <p><strong>上の 2 層</strong>は、モデル全体を走らせる必要があります。26.4 節で詳しく説明します。</p>
 <p>階段のどの層も省けません。Strata には、ちょうどよい悪い例があります。モデルには PLE というモジュールがあります（第 11 章で説明したテーブル引きのモジュールです）。部品はすべて書かれ、どれも単独で照合テストに通っていました。ところが、モデルのコードのどこも、それを実際に呼び出していなかったのです。その結果、モデル全体の検収の関門（コード名 C1）は通りませんでした。<span class="ev ev-code">コード上の事実</span>[S13] 部品がすべて緑でも、システムは間違ったままです。</p>
@@ -73,7 +73,7 @@
 <p class="bridge"><strong>CS を学んだ人へ：</strong>これは「ソフトウェア工学」で習うテストピラミッドと V モデルそのものです。推論エンジンに特有なのは、中間に「参照実装との照合」という層が 1 つ多いことです。ほとんどの演算子は、正しい答えを手計算できません。独立した、信頼できる実装を見つけて比べるしかないのです。</p>
 
 <h2 id="sec-3">26.3 浮動小数点の「等しい」は、まず定義する</h2>
-<p>冒頭の実験に戻りましょう。GPU と CPU が計算しているのは同じ量子化エキスパートで、データは 1 バイトも違わないのに、結果は小数点以下の下の数桁で違っていました。作者の説明はこうです。両者は浮動小数点演算の順序が違い、どちらもモデルにとって同じくらい良い近似である。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity レポート</a>）</p>
+<p>冒頭の実験に戻りましょう。GPU と CPU が計算しているのは同じ量子化エキスパートで、データは 1 バイトも違わないのに、結果は小数点以下の下の数桁で違っていました。作者の説明はこうです。両者は浮動小数点演算の順序が違い、どちらもモデルにとって同じくらい良い近似である。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity レポート</a>）</p>
 <p>順序はなぜ結果に影響するのでしょうか。コンピュータの浮動小数点数は桁数が限られていて、足し算のたびに 1 回ずつ四捨五入するからです。極端な例を挙げます。32 ビット浮動小数点数（FP32）では、1 億の付近で表せる隣り合う 2 つの数は 8 離れています。だから 1 億に 1 を足しても結果は 1 億のままで、その 1 は「食われて」しまいます。同じ 4 つの数でも、足す順序を変えると答えが変わります（図 26-3）。</p>
 <div class="viz" data-viz="tolerance-lab"><figure class="fig"><svg viewBox="0 0 400 298" role="img" aria-label="図 26-3：4 つの数 1 億、1、−1 億、1 を FP32 で 2 通りの順序で足すと、それぞれ 1 と 0 になる。正しい答えは 2">
 <text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="14" text-anchor="middle">4 つの数 [1億, 1, −1億, 1] を FP32 で足す</text>
@@ -128,7 +128,7 @@
 <text class="f-muted" fill="#5c6d66" x="380" y="206" font-size="13" text-anchor="end">10³</text>
 <text class="f-text" fill="#182f2b" x="210" y="230" font-size="13" text-anchor="middle">比べる数 |b| の大きさ（対数目盛り）</text>
 </svg><figcaption>図 26-4　許される誤差 = max(rtol × |b|, atol)。数が大きいときは相対許容差、数が 0 に近いときは絶対許容差が決め手です。図の rtol = 10⁻⁵、atol = 10⁻⁸ は、あくまで目安です。</figcaption></figure>
-<p>では、いつ 1 ビットまで同じであることにこだわるべきでしょうか。答えは、両側が<strong>まったく同じ演算を、まったく同じ順序で</strong>行っているときです。たとえば、量子化データをある保存形式から別の形式へ変えるときは、バイトを並べ替えるだけなので、デコードした値は 1 ビットも違ってはいけません。Strata の <code>canonical_xcheck.py</code> は、まさにそう求めています。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/tools/canonical_xcheck.py#L1-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>）逆に、コンパイラの最適化でさえ順序を変えることがあります。Strata は、AMD の GPU で、2 つのファイルの「積和融合」（FMA）をわざと切っています。掛け算と足し算を 1 つの命令にまとめると、丸めが 1 回で済み、「ちょうど真ん中」のときの取捨の結果が変わるからです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/CMakeLists.txt#L380-L384" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）</p>
+<p>では、いつ 1 ビットまで同じであることにこだわるべきでしょうか。答えは、両側が<strong>まったく同じ演算を、まったく同じ順序で</strong>行っているときです。たとえば、量子化データをある保存形式から別の形式へ変えるときは、バイトを並べ替えるだけなので、デコードした値は 1 ビットも違ってはいけません。Strata の <code>canonical_xcheck.py</code> は、まさにそう求めています。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/tools/canonical_xcheck.py#L1-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>）逆に、コンパイラの最適化でさえ順序を変えることがあります。Strata は、AMD の GPU で、2 つのファイルの「積和融合」（FMA）をわざと切っています。掛け算と足し算を 1 つの命令にまとめると、丸めが 1 回で済み、「ちょうど真ん中」のときの取捨の結果が変わるからです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/CMakeLists.txt#L399-L403" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）</p>
 <p class="bridge"><strong>CS を学んだ人へ：</strong>「数値解析」で習ったとおり、浮動小数点の足し算は交換法則は満たしますが、結合法則は満たしません。(a + b) + c と a + (b + c) は違うことがあります。GPU では何千ものスレッドが縮約を行い、足し算のグループ分けはスレッドの配置で決まります。だから「同じ式」でも、CPU と GPU で 1 ビットまで同じになることを、もともと期待してはいけません。</p>
 
 <h2 id="sec-4">26.4 ほんの少しの差で、単語が変わる</h2>
@@ -182,7 +182,7 @@
 <tr><td>長文ドキュメント（1,024 トークン）</td><td>96.2%</td><td>29.844</td><td>29.843</td></tr>
 <tr><td>チャット（1,024 トークン）</td><td>95.0%</td><td>18.380</td><td>18.301</td></tr>
 </tbody></table></div>
-<p>表の<dfn>パープレキシティ</dfn>（perplexity、困惑度）は、モデルがその本物の文章にどれだけ「意外」を感じるかを測るもので、低いほど予測が正確です。レポートの結論は 3 つあります。キャッシュは、2%〜5% の位置で「ほぼ同点の 2 つの候補のどちらが勝つか」を変える。順位の入れ替わりの大半は、上位 2 つのスコア差が 0.5 に満たないところで起きる。両者のパープレキシティは標準誤差 1 つの範囲で同じで、どちらが正確ということはない。GPU と CPU は同じエキスパートを違う浮動小数点の順序で計算するが、どちらも同じくらい良い近似である。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity レポート</a>）</p>
+<p>表の<dfn>パープレキシティ</dfn>（perplexity、困惑度）は、モデルがその本物の文章にどれだけ「意外」を感じるかを測るもので、低いほど予測が正確です。レポートの結論は 3 つあります。キャッシュは、2%〜5% の位置で「ほぼ同点の 2 つの候補のどちらが勝つか」を変える。順位の入れ替わりの大半は、上位 2 つのスコア差が 0.5 に満たないところで起きる。両者のパープレキシティは標準誤差 1 つの範囲で同じで、どちらが正確ということはない。GPU と CPU は同じエキスパートを違う浮動小数点の順序で計算するが、どちらも同じくらい良い近似である。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity レポート</a>）</p>
 <p>この表は、良い比較がどうあるべきかを示しています。離散的な判断（最有力の単語が同じか）も、連続的な品質（パープレキシティ）も見て、順位の入れ替わりがどこで起きたかも説明すること。「96% の単語が同じ」とだけ報告すれば、読者は 4% の箇所が間違っていると思うでしょう。「パープレキシティが同じ」とだけ報告すれば、ごく一部の位置だけで間違うバグを隠してしまうかもしれません。</p>
 
 <h2 id="sec-5">26.5 テストをまず 1 回失敗させる：基準の答えと反例</h2>
@@ -248,7 +248,7 @@
 <text class="f-muted" fill="#5c6d66" x="200" y="262" font-size="13" text-anchor="middle">反例：2 つのツールがどちらも mins を探し、</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="280" font-size="13" text-anchor="middle">同じデータをそろって取りこぼした</text>
 </svg><figcaption>図 26-7　差分テスト：独立した 2 つの実装に同じ入力を食べさせ、結果を、あらかじめ決めた規則で比べます。規則は、1 ビットまで一致でも、許容差つきでもかまいません。</figcaption></figure>
-<p>差分テストは、Strata の本物のバグも捕まえています。Q2_0 量子化形式では、2 ビットのコード値 0〜3 をデコードするとき、まず 1 を引く必要があり、表せる値は {−d, 0, d, 2d} であって、{0, d, 2d, 3d} ではありません。この「1 を引く」を忘れると、ほとんどの値は正しく見えますが、実際にはどれも 1 目盛りずれます。そこで変換ツールは、ggml のデコード式をそのまま書き写し、1 ビットずつ照合しています。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/tools/canonical_xcheck.py#L7-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>）同じファイルには、Q8_0 形式の本物の失敗も記録されています。コード値が符号付きの数として保存されていて、自分自身のデコーダとは完全に一致していました。本物のモデルをパッキングしてはじめて、その 2 つのテンソルが、デコード後に全体でコード値 128 個ぶんずれていることが分かりました。ほかの 12 種類の型は正常でした。</p>
+<p>差分テストは、Strata の本物のバグも捕まえています。Q2_0 量子化形式では、2 ビットのコード値 0〜3 をデコードするとき、まず 1 を引く必要があり、表せる値は {−d, 0, d, 2d} であって、{0, d, 2d, 3d} ではありません。この「1 を引く」を忘れると、ほとんどの値は正しく見えますが、実際にはどれも 1 目盛りずれます。そこで変換ツールは、ggml のデコード式をそのまま書き写し、1 ビットずつ照合しています。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/tools/canonical_xcheck.py#L7-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>）同じファイルには、Q8_0 形式の本物の失敗も記録されています。コード値が符号付きの数として保存されていて、自分自身のデコーダとは完全に一致していました。本物のモデルをパッキングしてはじめて、その 2 つのテンソルが、デコード後に全体でコード値 128 個ぶんずれていることが分かりました。ほかの 12 種類の型は正常でした。</p>
 <p class="bridge"><strong>CS を学んだ人へ：</strong>コンパイラの授業にある古典的な手法に、同じプログラムを 2 つのコンパイラに渡して実行結果を比べる、というものがあります。競技プログラミングで、力ずくの解法を書いて、最適化した解法と突き合わせるのも、同じ発想です。</p>
 
 <h2 id="sec-6">26.6 手を動かす：小さなエンジンにテストを書く</h2>
@@ -280,7 +280,7 @@
 <h3>わざと注入する反例のリスト</h3>
 <p>テストに、次の間違いをわざと注入します。ヘッドの対応を剰余から整数除算に変える。L2 正規化の代わりに RMS 正規化を使う。各層のアクティベーションキャッシュをポインタだけで判断する。ルーティングの重みを二重に掛ける。位置カウンタを凍結する。セッションの復元で PLE の履歴を落とす。テストは安定して失敗し、最初に破られた契約を指さなければなりません。注入しても通ってしまうなら、それはたぶん「プロセスが落ちなかった」ことしか見ていません。参照実装は、テスト対象のコードと同じ誤った前提を共有してはいけません。<code>layer.cpp</code> にある、2 つのツールがどちらもフィールド名を間違えて探した事例は、授業で議論するのに向いています。[S14]</p>
 <h3>公開リポジトリで走らせられるテスト</h3>
-<p>Strata の <code>CMakeLists.txt</code> のコメントには、完全なテストスイートとマイクロベンチマークは <code>tests/</code> と <code>bench/micro/</code> にあり、公開ソースには含まれていないので、テストをビルドするスイッチは既定でオフだ、と書かれています。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/6f32ec070f23ced9f50e704d854d775da52591ab/CMakeLists.txt#L87-L92" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）同じように、<code>gdn.hpp</code> のコメントで触れている参照実装 <code>ref/gdn.py</code> も、公開リポジトリの <code>ref/</code> ディレクトリには見当たらず、そこにあるのは <code>load.py</code> だけです。この章が引用する照合テストと実測は、公開されたソースのコメント、テストファイル、レポートによるものです。この本は、それらを GPU で再実行してはいません。</p>
+<p>Strata の <code>CMakeLists.txt</code> のコメントには、完全なテストスイートとマイクロベンチマークは <code>tests/</code> と <code>bench/micro/</code> にあり、公開ソースには含まれていないので、テストをビルドするスイッチは既定でオフだ、と書かれています。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/CMakeLists.txt#L94-L99" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）同じように、<code>gdn.hpp</code> のコメントで触れている参照実装 <code>ref/gdn.py</code> も、公開リポジトリの <code>ref/</code> ディレクトリには見当たらず、そこにあるのは <code>load.py</code> だけです。この章が引用する照合テストと実測は、公開されたソースのコメント、テストファイル、レポートによるものです。この本は、それらを GPU で再実行してはいません。</p>
 <h3>この本に付属するテストが証明するもの</h3>
 <p><code>labs/tiny_inference.py</code> のテストが確かめるのは、分割処理、保存と復元、参照の再生、制御されたドラフトの受理です。証明しているのはこの本の教育用コードであって、上流 Strata の GPU 実装では<strong>ありません</strong>。Strata のディスパッチ、量子化、非同期実行、本物の重みは、それぞれの環境で独立に検証する必要があります。</p>
 </details>
