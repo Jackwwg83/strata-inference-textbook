@@ -31,12 +31,11 @@
       vBase: (gb, gib, pct) => `同一段 KV：<b>${gb} GB</b>，也就是 <b>${gib} GiB</b>。GiB 的数字小了约 ${pct}%，因为 1 GiB 比 1 GB 多 7.4%。`,
       vStream: '<br>流式已生效：显存只放 32,768 格，完整历史在内存里，没有被删掉。',
       vShort: '<br>上下文不到 64K，流式不会启动：整段 KV 都在显存里。',
-      vBlocked: '<br><b>注意：</b>K8V4 不走 KV 流式（上游文档写明），所以这里整段 KV 都留在显存。两个“省内存”开关不能叠加。',
       vPark: (n, gib) => `<br>另外 ${n} 段停放的对话占内存 ${gib} GiB；上游示例给停放缓存设的上限是 8 GiB。`,
       try: [
         '选 <b>FP16</b>、32K：一段对话的 KV 是 805,306,368 字节，也就是 805.3 MB 或 768 MiB。Strata 源码注释把它写成了“805 MiB”，单位标错了。',
         '把上下文从 32K 拉到 128K：KV 正好翻 4 倍；再打开流式，显存那条立刻变短，内存那条变长。历史没少，只是换了地方。',
-        '选 <b>K8V4</b> 再拉到 256K：流式开关不起作用。“比 INT8 少 23%”和“只在显存留 32K”这两个好处不能同时拿到。',
+        '选 <b>K8V4</b>、256K，再打开流式：显存只留 32,768 格，每格又比 INT8 少 23%，两个好处叠在一起。这是 v0.1.40 才有的；v0.1.39 的引擎会拒绝这个组合。',
       ],
 
       pCode: 'KV_PAGING', pTitle: '页表与换页', pTag: '教学推演 · 12 个块、4 个显存槽',
@@ -84,12 +83,11 @@
       vBase: (gb, gib, pct) => `The same KV: <b>${gb} GB</b>, that is, <b>${gib} GiB</b>. The GiB number is about ${pct}% smaller, because 1 GiB is 7.4% more than 1 GB.`,
       vStream: '<br>Streaming is active: VRAM holds only 32,768 cells, and the full history is in RAM, not deleted.',
       vShort: '<br>The context is under 64K, so streaming does not start: the whole KV is in VRAM.',
-      vBlocked: '<br><b>Note:</b> K8V4 does not use KV streaming (the upstream docs say so), so the whole KV stays in VRAM here. The two "save memory" switches do not stack.',
       vPark: (n, gib) => `<br>The ${n} other parked conversation(s) take ${gib} GiB of RAM; the upstream example caps the parking cache at 8 GiB.`,
       try: [
         'Pick <b>FP16</b> and 32K: one conversation\'s KV is 805,306,368 bytes, that is, 805.3 MB or 768 MiB. A comment in Strata\'s source calls it "805 MiB", with the wrong unit.',
         'Drag the context from 32K to 128K: the KV grows exactly 4 times. Then turn on streaming: the VRAM bar shrinks at once and the RAM bar grows. No history is lost; it only moved.',
-        'Pick <b>K8V4</b> and drag to 256K: the streaming switch does nothing. You cannot have both "23% less than INT8" and "keep only 32K in VRAM".',
+        'Pick <b>K8V4</b> and 256K, then turn on streaming: VRAM keeps only 32,768 cells, and each cell is 23% smaller than INT8. The two benefits stack. This is new in v0.1.40; the v0.1.39 engine refuses this combination.',
       ],
 
       pCode: 'KV_PAGING', pTitle: 'Page table and paging', pTag: 'Teaching estimate · 12 blocks, 4 VRAM slots',
@@ -137,12 +135,11 @@
       vBase: (gb, gib, pct) => `KV نفسها: <b>${gb} GB</b>، أي <b>${gib} GiB</b>. رقم GiB أصغر بنحو ${pct}%، لأن 1 GiB أكبر من 1 GB بنسبة 7.4%.`,
       vStream: '<br>البث فعّال: لا تضع VRAM إلا 32,768 خلية، والتاريخ الكامل في RAM، ولم يُحذف.',
       vShort: '<br>السياق أقل من 64K، فلا يبدأ البث: كل KV في VRAM.',
-      vBlocked: '<br><b>تنبيه:</b> لا تعمل K8V4 مع بث KV (كما تنص وثائق المصدر الأصلي)، لذلك تبقى كل KV هنا في VRAM. مفتاحا «توفير الذاكرة» لا يجتمعان.',
       vPark: (n, gib) => `<br>المحادثات الموقوفة الأخرى (${n}) تأخذ ${gib} GiB من RAM؛ وفي مثال المصدر الأصلي الحد الأقصى للذاكرة المؤقتة للإيقاف 8 GiB.`,
       try: [
         'اختر <b>FP16</b> و 32K: KV لمحادثة واحدة هي 805,306,368 بايت، أي 805.3 MB أو 768 MiB. وقد كتب تعليق في شيفرة Strata «805 MiB»، فجاءت الوحدة خاطئة.',
         'اسحب السياق من 32K إلى 128K: تتضاعف KV أربع مرات بالضبط. ثم فعّل البث: يقصر شريط VRAM فورًا ويطول شريط RAM. لم يضِع شيء من التاريخ، بل انتقل فقط.',
-        'اختر <b>K8V4</b> ثم اسحب إلى 256K: مفتاح البث لا يؤثر. فلا يمكنك أن تجمع «أقل من INT8 بنسبة 23%» مع «الاحتفاظ بـ 32K فقط في VRAM».',
+        'اختر <b>K8V4</b> و 256K، ثم فعّل البث: لا تحتفظ VRAM إلا بـ 32,768 خلية، وكل خلية أصغر من INT8 بنسبة 23%. تجتمع الميزتان معًا. هذا جديد في v0.1.40؛ أما محرك v0.1.39 فيرفض هذا الجمع.',
       ],
 
       pCode: 'KV_PAGING', pTitle: 'جدول الصفحات والتبديل', pTag: 'تقدير تعليمي · 12 كتلة، 4 فتحات في VRAM',
@@ -190,12 +187,11 @@
       vBase: (gb, gib, pct) => `같은 KV인데 <b>${gb} GB</b>이고, <b>${gib} GiB</b>이기도 해요. GiB 숫자가 약 ${pct}% 작은 이유는 1 GiB가 1 GB보다 7.4% 크기 때문이에요.`,
       vStream: '<br>스트리밍이 적용됐어요. VRAM에는 32,768칸만 두고, 완전한 히스토리는 RAM에 있어서 지워지지 않아요.',
       vShort: '<br>컨텍스트가 64K 미만이라 스트리밍이 시작되지 않아요. KV 전체가 VRAM에 있어요.',
-      vBlocked: '<br><b>주의:</b> K8V4는 KV 스트리밍을 쓰지 않아요(업스트림 문서에 적혀 있어요). 그래서 여기서는 KV 전체가 VRAM에 남아요. "메모리를 아끼는" 스위치 두 개는 겹칠 수 없어요.',
       vPark: (n, gib) => `<br>이 밖에 파킹한 대화 ${n}개가 RAM ${gib} GiB를 차지해요. 업스트림 예시에서 파킹 캐시의 상한은 8 GiB예요.`,
       try: [
         '<b>FP16</b>과 32K를 고르세요. 대화 하나의 KV는 805,306,368바이트, 즉 805.3 MB이고 768 MiB예요. Strata 소스 주석은 이걸 "805 MiB"라고 적어서 단위가 틀렸어요.',
         '컨텍스트를 32K에서 128K로 끌어 보세요. KV가 정확히 4배가 돼요. 스트리밍을 켜면 VRAM 막대는 바로 짧아지고 RAM 막대는 길어져요. 히스토리는 줄지 않고 자리만 옮겨요.',
-        '<b>K8V4</b>를 고르고 256K까지 끌어 보세요. 스트리밍 스위치가 동작하지 않아요. "INT8보다 23% 적다"와 "VRAM에는 32K만 둔다"는 두 가지 이점을 동시에 얻을 수는 없어요.',
+        '<b>K8V4</b>와 256K를 고르고 스트리밍을 켜 보세요. VRAM에는 32,768칸만 남고, 칸마다 INT8보다 23% 작아요. 두 가지 이점이 겹쳐요. 이건 v0.1.40부터예요. v0.1.39 엔진은 이 조합을 거부해요.',
       ],
 
       pCode: 'KV_PAGING', pTitle: '페이지 테이블과 페이지 교체', pTag: '교육용 추정 · 블록 12개, VRAM 슬롯 4개',
@@ -243,12 +239,11 @@
       vBase: (gb, gib, pct) => `同じ KV：<b>${gb} GB</b>、つまり <b>${gib} GiB</b>。1 GiB は 1 GB より 7.4% 大きいので、GiB の数字は約 ${pct}% 小さくなります。`,
       vStream: '<br>ストリーミングが有効：VRAM には 32,768 マスだけを置き、完全な履歴は RAM にあります。削除はされていません。',
       vShort: '<br>コンテキストが 64K 未満なので、ストリーミングは始まりません。KV 全体が VRAM にあります。',
-      vBlocked: '<br><b>注意：</b>K8V4 は KV ストリーミングを使いません（上流のドキュメントに明記）。そのため、ここでは KV 全体が VRAM に残ります。2 つの「メモリ節約」スイッチは重ねられません。',
       vPark: (n, gib) => `<br>ほかに駐車した ${n} 件の会話が RAM を ${gib} GiB 使います。上流の例では、駐車キャッシュの上限は 8 GiB です。`,
       try: [
         '<b>FP16</b> と 32K を選びます。会話 1 件の KV は 805,306,368 バイト、つまり 805.3 MB または 768 MiB です。Strata のソースのコメントは「805 MiB」と書いていて、単位が間違っています。',
         'コンテキストを 32K から 128K に動かします。KV はちょうど 4 倍になります。次にストリーミングをオンにすると、VRAM のバーがすぐ短くなり、RAM のバーが長くなります。履歴は減っていません。置き場所が変わっただけです。',
-        '<b>K8V4</b> を選んで 256K まで動かします。ストリーミングのスイッチは効きません。「INT8 より 23% 少ない」と「VRAM には 32K だけ置く」の両方は同時に得られません。',
+        '<b>K8V4</b> と 256K を選び、ストリーミングをオンにします。VRAM には 32,768 セルだけが残り、1 セルは INT8 より 23% 小さくなります。2 つの利点が重なります。これは v0.1.40 からです。v0.1.39 のエンジンはこの組み合わせを拒否します。',
       ],
 
       pCode: 'KV_PAGING', pTitle: 'ページテーブルとページング', pTag: '教育用の試算 · 12 ブロック、VRAM スロット 4 つ',
@@ -296,12 +291,11 @@
       vBase: (gb, gib, pct) => `La misma KV: <b>${gb} GB</b>, es decir, <b>${gib} GiB</b>. El número en GiB es un ${pct}% menor, porque 1 GiB es un 7,4% más que 1 GB.`,
       vStream: '<br>El streaming está activo: la VRAM guarda solo 32.768 celdas, y el historial completo está en la RAM, no borrado.',
       vShort: '<br>El contexto es menor de 64K, así que el streaming no arranca: toda la KV está en la VRAM.',
-      vBlocked: '<br><b>Ojo:</b> K8V4 no usa el streaming de KV (lo dice la documentación de upstream), así que aquí toda la KV permanece en la VRAM. Los dos interruptores de «ahorrar memoria» no se acumulan.',
       vPark: (n, gib) => `<br>Las otras ${n} conversación(es) aparcada(s) ocupan ${gib} GiB de RAM; el ejemplo de upstream limita la caché de aparcamiento a 8 GiB.`,
       try: [
         'Elige <b>FP16</b> y 32K: la KV de una conversación son 805.306.368 bytes, es decir, 805,3 MB o 768 MiB. Un comentario del código de Strata la llama «805 MiB», con la unidad equivocada.',
         'Arrastra el contexto de 32K a 128K: la KV crece exactamente 4 veces. Luego activa el streaming: la barra de VRAM se encoge de inmediato y la de RAM crece. No se pierde historial; solo se movió.',
-        'Elige <b>K8V4</b> y arrastra a 256K: el interruptor de streaming no hace nada. No puedes tener a la vez «23% menos que INT8» y «guardar solo 32K en la VRAM».',
+        'Elige <b>K8V4</b> y 256K, y luego activa el streaming: la VRAM guarda solo 32.768 celdas, y cada celda es 23% más pequeña que en INT8. Las dos ventajas se suman. Esto es nuevo en v0.1.40; el motor v0.1.39 rechaza esta combinación.',
       ],
 
       pCode: 'KV_PAGING', pTitle: 'Tabla de páginas y paginación', pTag: 'Estimación didáctica · 12 bloques, 4 ranuras de VRAM',
@@ -385,7 +379,7 @@
           row.t.textContent = T.barText(f2(tot.gib), f2(tot.gb));
         });
         let v = T.vBase(f2(one.gb), f2(one.gib), (100 - 1e9 / 2 ** 30 * 100).toFixed(1));
-        v += b.blocked ? T.vBlocked : b.streams ? T.vStream : streaming ? T.vShort : '';
+        v += b.streams ? T.vStream : streaming ? T.vShort : '';
         if (b.parked > 0) v += T.vPark(sessions - 1, f2(M.units(b.parked).gib));
         $('.viz-verdict').innerHTML = v;
         if (log) term.log(T.tChange(Viz.fmt(ctx), Viz.fmt(b.perToken), Viz.fmt(b.kvOne), f2(one.gb), f2(one.gib)));

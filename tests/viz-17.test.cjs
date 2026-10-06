@@ -31,7 +31,7 @@ test('GDN state is fixed per conversation', () => {
   assert.equal(m.units(m.GDN_STATE_BYTES).mib.toFixed(1), '112.2');
 });
 
-test('budget splits VRAM and RAM; streaming only from 64K and never with K8V4', () => {
+test('budget splits VRAM and RAM; streaming from 64K, K8V4 included (v0.1.40, #711)', () => {
   const short = m.budget({ ctx: 32768, sessions: 1, fmt: 'int8', streaming: true });
   assert.equal(short.streams, false);
   assert.equal(short.vramKv, 12672 * 32768);
@@ -41,9 +41,11 @@ test('budget splits VRAM and RAM; streaming only from 64K and never with K8V4', 
   assert.equal(long.vramKv, 12672 * 32768);
   assert.equal(long.ramKv, 12672 * 262144);
   assert.equal(long.vram, long.vramKv + m.GDN_STATE_BYTES);
-  const hybrid = m.budget({ ctx: 262144, sessions: 1, fmt: 'k8v4', streaming: true });
-  assert.equal(hybrid.streams, false);
-  assert.equal(hybrid.blocked, true);
+  const hybrid = m.budget({ ctx: 262144, sessions: 1, fmt: 'k8v4', streaming: true });   // DETAILS.md: K8V4 streams too
+  assert.equal(hybrid.streams, true);
+  assert.equal(hybrid.vramKv, 9792 * 32768);
+  assert.equal(hybrid.ramKv, 9792 * 262144);
+  assert.equal('blocked' in hybrid, false);
   const parked = m.budget({ ctx: 131072, sessions: 3, fmt: 'int8', streaming: false });
   assert.equal(parked.parked, 2 * (12672 * 131072 + m.GDN_STATE_BYTES));
   assert.equal(parked.ram, parked.parked);

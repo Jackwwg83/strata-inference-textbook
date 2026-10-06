@@ -30,12 +30,10 @@
     if (!Number.isInteger(ctx) || ctx < 1) throw new Error('上下文长度必须是正整数');
     if (!Number.isInteger(sessions) || sessions < 1) throw new Error('对话数至少为 1');
     const pt = perToken(fmt), kvOne = pt * ctx;
-    const wants = streaming && ctx >= STREAM_FROM;
-    const blocked = wants && fmt === 'k8v4';
-    const streams = wants && !blocked;
+    const streams = streaming && ctx >= STREAM_FROM;        // every format streams, K8V4 too (v0.1.40, #711)
     const vramKv = pt * (streams ? RESIDENT_CELLS : ctx), ramKv = streams ? kvOne : 0;
     const parked = (sessions - 1) * (kvOne + GDN_STATE_BYTES);
-    return { perToken: pt, kvOne, streams, blocked, vramKv, ramKv, gdn: GDN_STATE_BYTES, parked,
+    return { perToken: pt, kvOne, streams, vramKv, ramKv, gdn: GDN_STATE_BYTES, parked,
       vram: vramKv + GDN_STATE_BYTES, ram: ramKv + parked };
   }
 
