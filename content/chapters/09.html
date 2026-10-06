@@ -29,7 +29,7 @@
 <p>和本章的关系：Strata 的 36 个 GDN 层，每层都有自己的一份状态，一个 token 接一个 token 地往前推。</p>
 <p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/循环神经网络" target="_blank" rel="noopener noreferrer">维基百科：循环神经网络</a> · <a href="https://zh.wikipedia.org/zh-cn/有限状态机" target="_blank" rel="noopener noreferrer">维基百科：有限状态机</a> · <a href="https://en.wikipedia.org/wiki/Recurrent_neural_network" target="_blank" rel="noopener noreferrer">Wikipedia: Recurrent neural network</a></p>
 </aside>
-<p>在 Strata 里，48 层中 36 层是 GDN。<span class="ev ev-code">代码事实</span>[S04] 会话状态为每个 GDN 层单独保存一份递归状态和卷积历史；中间计算用的临时缓冲区 36 层共用一套，状态却必须一层一份，因为“递归”就是全部意义所在。[S13]（<code>session.cpp</code> 第 38–44 行）一段新对话开始时，所有状态清零。[S13] GDN 层甚至没有“位置”这个参数：它每个 token 的输入只有那串数，在 token 之间往前推进的，就是这块状态（<code>layer.hpp</code> 第 516–518 行）。</p>
+<p>在 Strata 里，48 层中 36 层是 GDN。<span class="ev ev-code">代码事实</span>[S04] 会话状态为每个 GDN 层单独保存一份递归状态和卷积历史；中间计算用的临时缓冲区 36 层共用一套，状态却必须一层一份，因为“递归”就是全部意义所在。[S13]（<code>session.cpp</code> 第 38–44 行）一段新对话开始时，所有状态清零。[S13] GDN 层甚至没有“位置”这个参数：它每个 token 的输入只有那串数，在 token 之间往前推进的，就是这块状态（<code>layer.hpp</code> 第 535–537 行）。</p>
 <p class="bridge"><strong>学过计算机的同学：</strong>把一个 GDN 层看成一台状态机：状态是 48 个 128 × 128 的浮点矩阵，输入是当前 token 的向量，转移函数就是本章的递推公式。它和《数字逻辑》里的时序电路是同一个抽象：组合逻辑算下一状态，寄存器保存当前状态。</p>
 
 <h2 id="sec-2">9.2 外积：一次改写整张表</h2>
@@ -155,7 +155,7 @@
 <li>找一组参数，让两种顺序结果相同；再解释为什么一般情况下它们不同。</li>
 <li>回到本章的「顺序真的重要」，把 α 拉到 1：两种顺序还会不同吗？用公式解释为什么。</li>
 </ol>
-<p>状态只能往前走，这在投机解码（第 18、19 章）里会变成实际问题：引擎先用便宜的办法猜几个词（Strata 用模型自带的 MTP 层），再让完整的 48 层一次性核对，猜错的要退回去。[S02]KV 缓存好办：猜错位置上的键值留在那里也没关系，下次处理这些位置时直接覆盖。GDN 的状态却已经被猜错的词改写过，不能简单“退回计数器”。Strata 的做法是：核对窗口<strong>不碰</strong> GDN 状态；确定接受前 n 个词之后，再用窗口里存下的输入，把这 n 个词重放一遍，推进卷积历史和递归状态。<span class="ev ev-code">代码事实</span>[S08] 见图 9-6。</p>
+<p>状态只能往前走，这在投机解码（第 18、19 章）里会变成实际问题：引擎先用便宜的办法猜几个词（Strata 用模型自带的 MTP 层），再让完整的 48 层一次性核对，猜错的要退回去。[S02]KV 缓存好办：猜错位置上的键值留在那里也没关系，下次处理这些位置时直接覆盖。GDN 的状态却已经被猜错的词改写过，不能简单“退回计数器”。Strata 的做法是：核对窗口<strong>不碰</strong> GDN 状态；确定接受前 n 个词之后，再用窗口里存下的输入，把这 n 个词重放一遍，推进卷积历史和递归状态。<span class="ev ev-code">代码事实</span>[S08] 见图 9-6。只有一种窗口例外：没有草稿、只有 1 个 token 的窗口，它的结果一定被接受，不存在“退回”。所以 v0.1.40 起，在 CUDA 上这种窗口的图直接推进 GDN 状态，省掉之后那次提交（<code>verify.cpp</code> 第 115–117 行）。</p>
 <figure class="fig"><svg viewBox="0 0 400 238" role="img" aria-label="图 9-6：拒绝草稿时，KV 缓存只要以后覆盖错误位置；GDN 状态则要保持不动，用存下的输入重放被接受的词">
 <text class="f-text" fill="#182f2b" x="20" y="16" font-size="12" font-weight="600">核对 3 个草稿词，接受前 2 个</text>
 <text class="f-text" fill="#182f2b" x="20" y="42" font-size="12">KV 缓存（按位置存）</text>

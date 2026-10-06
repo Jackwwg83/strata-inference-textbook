@@ -64,7 +64,7 @@
 <text class="f-text" fill="#182f2b" x="20" y="172" font-size="12">浅底：GDN 层，共 36 层</text>
 <text class="f-muted" fill="#5c6d66" x="20" y="190" font-size="12">规则：层号 % 4 == 3 → QSA，否则 GDN</text>
 </svg><figcaption>图 7-3　每 4 层的最后一层是 QSA。注意零基编号 3 是人类数法的“第 4 层”，规则是“每 4 层一次”，不是“每 3 层一次”。</figcaption></figure>
-<p>不管前半段用哪种混合器，一层的骨架都一样。源码把一层的操作顺序写成两行 <span class="ev ev-code">代码事实</span>（<code>layer.hpp</code> 第 511–518 行）：</p>
+<p>不管前半段用哪种混合器，一层的骨架都一样。源码把一层的操作顺序写成两行 <span class="ev ev-code">代码事实</span>（<code>layer.hpp</code> 第 530–537 行）：</p>
 <ul>
 <li>前半层：读残差 → 混合器（GDN 或 QSA）→ 写回残差</li>
 <li>后半层：读残差 → MoE（第 10 章的专家）→ 写回残差</li>
@@ -93,7 +93,7 @@
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="4 3" d="M320 339H346V25H320"/>
 <text class="f-muted" fill="#5c6d66" x="352" y="186" font-size="12">× 48</text>
 </svg><figcaption>图 7-1　一层的骨架：两个“读 → 算 → 写回”的半层。混合器负责“看前文”，MoE 负责“加工当前这个 token”。48 层都是这个骨架。</figcaption></figure>
-<p>还有一个容易忽略的差别：QSA 层要知道当前 token 的位置，GDN 层根本没有位置参数。GDN 每个 token 的全部输入就是那串数，在 token 之间往前推进的，是它的白板状态。<span class="ev ev-code">代码事实</span>（<code>layer.hpp</code> 第 516–518 行）</p>
+<p>还有一个容易忽略的差别：QSA 层要知道当前 token 的位置，GDN 层根本没有位置参数。GDN 每个 token 的全部输入就是那串数，在 token 之间往前推进的，是它的白板状态。<span class="ev ev-code">代码事实</span>（<code>layer.hpp</code> 第 535–537 行）</p>
 
 <h2 id="sec-3">7.3 归一化：先把音量调一致</h2>
 <p>数字在 48 层里一路加加减减，有的会越变越大，有的越变越小。如果不管，下一层的矩阵乘法一会儿收到“耳语”，一会儿收到“吼叫”，很难学好。所以几乎每次计算前，都要先把向量“调到标准音量”。</p>
@@ -141,7 +141,7 @@
 <p>和本章的关系：Strata 的模型把这条直通车道扩成了 4 条，加回去时还带着可学习的权重。</p>
 <p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/残差神经网络" target="_blank" rel="noopener noreferrer">维基百科：残差神经网络</a> · <a href="https://arxiv.org/abs/1512.03385" target="_blank" rel="noopener noreferrer">ResNet 原始论文</a> · <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener noreferrer">The Illustrated Transformer（图解，含残差与归一化）</a></p>
 </aside>
-<p>Strata 的残差是 4 条并行的车道，每条 2560 个数。<span class="ev ev-code">代码事实</span>[S04][S13] 读的时候，4 条车道各自归一化，再合成一个向量交给混合器或 MoE；写回的时候，同一个修正加到<strong>每一条</strong>车道上，只是每条车道乘的权重不同。权重是 w = 2 × sigmoid(inject ÷ 4)，其中 inject 是读残差时顺便算出的一个数。（<code>gr.hpp</code> 第 6–8、114–120 行）</p>
+<p>Strata 的残差是 4 条并行的车道，每条 2560 个数。<span class="ev ev-code">代码事实</span>[S04][S13] 读的时候，4 条车道各自归一化，再合成一个向量交给混合器或 MoE；写回的时候，同一个修正加到<strong>每一条</strong>车道上，只是每条车道乘的权重不同。权重是 w = 2 × sigmoid(inject ÷ 4)，其中 inject 是读残差时顺便算出的一个数。（<code>gr.hpp</code> 第 6–8、119–125 行）</p>
 <p>这个“2 倍 sigmoid”的设计很巧：sigmoid(0) = 0.5，所以 inject = 0 时 w 正好是 1，写回就退化成普通的残差相加。源码注释也特别指出了这一点，测试里还专门断言了它。权重可以在 0 到 2 之间变化，让模型自己决定每条车道“多听一点”还是“少听一点”。见图 7-4。</p>
 <div class="viz" data-viz="layer-walk"><figure class="fig"><svg viewBox="0 0 400 266" role="img" aria-label="图 7-4：从 4 条残差车道读出一个向量，计算修正 Δ，再把 Δ 乘以各自的权重加回每条车道">
 <text class="f-text" fill="#182f2b" x="8" y="43" font-size="12">车道 0</text>
@@ -213,7 +213,7 @@
 <li><strong>β 要先过 sigmoid，而且由层负责。</strong>GDN 的单步内核不做这一步，它的契约是“收到的 β 已经是 0 到 1 之间的分数”。头文件用大写写着：内核不做，层必须做。[S17]</li>
 <li><strong>输出门是 sigmoid，不是 SiLU。</strong>qwen3.5 模型在这里用 SiLU，这个模型不是。[S17] 两个函数的名字都和“门”有关，形状一样，数值完全不同。</li>
 <li><strong>路由权重只乘一次。</strong>专家池<strong>不</strong>乘路由权重，乘权重由显卡上的合并步骤统一完成。如果两边都乘，单看一层几乎发现不了，叠加 48 层后误差越滚越大。[S06]</li>
-<li><strong>专家输出要配本层的权重。</strong>为了让 CPU 算专家和 GPU 干活同时进行，早期版本把第 l 层的专家结果交给第 l+1 层去合并，于是用了第 l+1 层的权重。注释称它产出的是“一个有限、流畅、确定，但不属于这个模型的 token”。修复办法是把一层拆成两段图：路由完先让 CPU 算，算完再用本层的权重合并。<span class="ev ev-code">代码事实</span>（<code>layer.hpp</code> 第 146–165、177–179 行）</li>
+<li><strong>专家输出要配本层的权重。</strong>为了让 CPU 算专家和 GPU 干活同时进行，早期版本把第 l 层的专家结果交给第 l+1 层去合并，于是用了第 l+1 层的权重。注释称它产出的是“一个有限、流畅、确定，但不属于这个模型的 token”。修复办法是把一层拆成两段图：路由完先让 CPU 算，算完再用本层的权重合并。<span class="ev ev-code">代码事实</span>（<code>layer.hpp</code> 第 149–168、180–182 行）</li>
 </ul>
 <p class="bridge"><strong>学过计算机的同学：</strong>这是《软件工程》里“接口契约”和“集成测试”的活教材。每个函数的单元测试都通过，不代表组合起来对。契约要写清楚“谁负责做什么”（谁过 sigmoid、谁乘权重），集成测试要拿整层、整个 token 的输出去和参考实现比。</p>
 
@@ -237,12 +237,12 @@
 <h3>教学式 x′ = x + f(norm(x)) 不是 Strata 的逐项等式</h3>
 <p>本章正文用单向量的残差公式建立直觉。真实的模型几何里有 <code>hc = 4</code>，会话状态里的残差 R 是 4 × 2560 的多车道结构。[S04][S13] 把它换成普通的单向量残差，模型就变了。</p>
 <p>读残差（<code>gr_read</code>）的完整步骤是：每条车道各自做 RMS 归一化得到 xn（归一化系数在存储时就写成了 1 + w 的形式）；把 4 条车道拼起来，经过一个 320 维的“瓶颈”：lo = SiLU((xn 的 BF16 版本 × w_down) ÷ hc)；注意除以 hc 是在 SiLU <strong>里面</strong>，很容易看漏，而且会实质改变结果。然后 mixed = 各车道上 xn × sigmoid(lo × w_up) 的平均；inject = xn × w_inject。最后一层之后的“最终混合”没有 inject，因为后面没有写回了。（<code>gr.hpp</code> 第 79–91 行）</p>
-<p>写回（<code>gr_write</code>）是 R_out[c] = R[c] + block_out × w[c]，w[c] = 2 × sigmoid(inject[c] ÷ hc)。（<code>gr.hpp</code> 第 114–120 行）</p>
+<p>写回（<code>gr_write</code>）是 R_out[c] = R[c] + block_out × w[c]，w[c] = 2 × sigmoid(inject[c] ÷ hc)。（<code>gr.hpp</code> 第 119–125 行）</p>
 <p>这些车道权重都是 BF16 格式。打包文件为了解码简单，把它们放大成 32 位存储；引擎加载时再收回 16 位，不损失任何精度，却省下 5.305 GiB 稠密权重中的 1.374 GiB。注释说，这正是“稠密权重能和专家缓存一起放进显存”与“放不下”的区别。（<code>gr.hpp</code> 第 10–14 行）</p>
 <h3>激活格式跟着张量类型走，不跟着名字走</h3>
 <p>量化权重在做矩阵乘法前，要把输入向量也转换成匹配的格式。<code>layer.cpp</code> 记录了一个教训：同一个名字的张量，在不同层用的量化类型可能不同。比如 36 个 GDN 层的 <code>attn_qkv</code>，有 13 层是 IQ4_XS、18 层是 Q3_K、4 层是 Q4_K、1 层是 Q2_0。规则是按<strong>类型</strong>定的：2 位编码配 Q8_0 格式的输入，其他量化类型配 Q8_K。选错格式会让矩阵乘法偏差 0.6%–1.4%，得到的是一个“看起来合理”的向量，而不是坏掉的向量。[S14]</p>
 <h3>怎样知道是哪一层、哪一步错了</h3>
-<p>Strata 准备了两级“对账单”。逐层的残差记录（residual ladder）告诉你<strong>从哪一层开始</strong>和参考实现分道扬镳；半层级的记录再把每层拆成“注意力半层的输出”“MoE 半层的输出”和两组 inject，告诉你<strong>是哪一步</strong>。这些拷贝本身被录进每层的 CUDA 图里，随层一起重放；不开启时没有任何开销。（<code>layer.hpp</code> 第 448–456 行）</p>
+<p>Strata 准备了两级“对账单”。逐层的残差记录（residual ladder）告诉你<strong>从哪一层开始</strong>和参考实现分道扬镳；半层级的记录再把每层拆成“注意力半层的输出”“MoE 半层的输出”和两组 inject，告诉你<strong>是哪一步</strong>。这些拷贝本身被录进每层的 CUDA 图里，随层一起重放；不开启时没有任何开销。（<code>layer.hpp</code> 第 467–475 行）</p>
 <p>还有一个调试开关 <code>--sync-every-layer</code>：每层之后插一次同步和错误检查。它能抓住“某个内核读了一块后面的层才会写的缓冲区”这类错误，平时看不见；代价是正好违反了快速路径“不许同步”的要求，所以它是运行时参数，而不是默认行为。[S13]</p>
 <h3>为什么组合测试必不可少</h3>
 <p>模块之间可能传错层的激活、重复归一化、重复加权、用错布局或错的状态。每一种都能通过各自的单元测试。正确的做法是：固定输入和历史，拿整层输出、半层输出这些中间检查点，去和独立的参考实现逐项比较。只比最后一个 token 对不对，往往太晚，也太粗。</p>

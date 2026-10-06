@@ -123,7 +123,7 @@
 
 <h2 id="sec-4">11.4 读过的行留一份：8 路组相联的行缓存</h2>
 <p>同一行常常会被反复用到。“我 喜欢”这样的组合，一段对话里可能出现好多次。上游在一组固定语料上测过：如果缓存 100 万行（注释写约 95 MB），最多能省掉约 82% 的读取；一段长提示词内部，也有 20%–34% 的行会重复出现。<span class="ev ev-report">上游报告</span>（<code>ple_reader.hpp</code> 注释）</p>
-<p>所以 Strata 在内存里放了一个<dfn>行缓存</dfn>，默认 1,048,576 行，按每行 90 字节算约 94 MB。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>）它的结构是 <dfn>8 路组相联</dfn>：<span class="ev ev-code">代码事实</span>[S11]</p>
+<p>所以 Strata 在内存里放了一个<dfn>行缓存</dfn>，默认 1,048,576 行，按每行 90 字节算约 94 MB。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>）本章的字节数都按默认的 IQ4_NL 表算。v0.1.40 起，引擎也能读 Q4_0、Q5_1、Q8_0、BF16 等格式的表，每行 90 到 320 字节。行数不变，行变宽，同样 1,048,576 行的缓存就更大，BF16 表约 335 MB。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>）行缓存的结构是 <dfn>8 路组相联</dfn>：<span class="ev ev-code">代码事实</span>[S11]</p>
 <ul>
 <li>缓存分成很多<strong>组</strong>，每组 8 个位置（8 <strong>路</strong>）。默认大小下有 1,048,576 ÷ 8 = 131,072 组。</li>
 <li>一个行号先经过一次搅拌（乘一个固定的大奇数，再做一次移位异或），然后对组数取余，决定它属于哪一组。它只能住在这一组的 8 个位置里。</li>
