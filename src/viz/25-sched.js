@@ -1,6 +1,6 @@
 /* Chapter 25 widgets: FIFO / SJF / round-robin on the same arrivals, and the M/M/1 waiting-time curve.
    A design exercise: by default upstream Strata serves one sequence at a time behind a FIFO; since v0.1.39 it has
-   opt-in batch slots ("parallel": N, docs/BATCHING.md; checked at v0.1.40, 1735d64). No widget here models those slots.
+   opt-in batch slots ("parallel": N, docs/BATCHING.md; checked at v0.1.40.2, e8ca9af). No widget here models those slots.
    All visible text lives in the T tables below, keyed by language (zh is the master). */
 (function (root) {
   'use strict';

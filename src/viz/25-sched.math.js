@@ -1,6 +1,6 @@
 /* Pure functions behind the chapter 25 widgets: FIFO / SJF / round-robin on the same arrivals, M/M/1 queueing,
    and two teaching estimates for multi-sequence serving. A design exercise: by default upstream Strata serves one
-   sequence at a time behind a FIFO (serve/server.py); its opt-in batch slots (since v0.1.39; checked at v0.1.40, docs/BATCHING.md) are not
+   sequence at a time behind a FIFO (serve/server.py); its opt-in batch slots (since v0.1.39; checked at v0.1.40.2, e8ca9af, docs/BATCHING.md) are not
    modelled here, and nothing here describes an upstream scheduler. */
 (function (root) {
   'use strict';
