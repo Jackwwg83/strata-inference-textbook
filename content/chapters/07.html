@@ -109,7 +109,7 @@
 <p>和本章的关系：Strata 里两种都用，而且用在不同地方。用错一个，不会报错，只会差 √d 倍。</p>
 <p class="further">延伸阅读：<a href="https://en.wikipedia.org/wiki/Normalization_(machine_learning)" target="_blank" rel="noopener noreferrer">Wikipedia: Normalization (machine learning)</a> · <a href="https://arxiv.org/abs/1910.07467" target="_blank" rel="noopener noreferrer">RMSNorm 原始论文</a> · <a href="https://pytorch.org/docs/stable/generated/torch.nn.RMSNorm.html" target="_blank" rel="noopener noreferrer">PyTorch 文档：RMSNorm</a> · <a href="https://oi-wiki.org/math/linear-algebra/vector/" target="_blank" rel="noopener noreferrer">OI Wiki：向量</a></p>
 </aside>
-<p>在 Strata 里：残差每次被读出时，每条车道各自做 RMS 归一化；GDN 层对 q 和 k 做的是 L2 归一化，v 不做。<span class="ev ev-code">代码事实</span>（<code>gr.hpp</code> 第 81 行；<code>layer.hpp</code> 第 12、23 行）GDN 的头文件专门提醒：ε 是加在<strong>平方和</strong>上的下限，不是加在平均数上，所以不能除以宽度；如果误读成“均方”，每个头 128 维，结果会差 √128 ≈ 11.3 倍。[S17] 这个模型的 RMS 归一化 ε 取 10<sup>−6</sup>。[S14][S18]</p>
+<p>在 Strata 里：残差每次被读出时，每条车道各自做 RMS 归一化；GDN 层对 q 和 k 做的是 L2 归一化，v 不做。<span class="ev ev-code">代码事实</span>（<code>gr.hpp</code> 第 83 行；<code>layer.hpp</code> 第 12、23 行）GDN 的头文件专门提醒：ε 是加在<strong>平方和</strong>上的下限，不是加在平均数上，所以不能除以宽度；如果误读成“均方”，每个头 128 维，结果会差 √128 ≈ 11.3 倍。[S17] 这个模型的 RMS 归一化 ε 取 10<sup>−6</sup>。[S14][S18]</p>
 <p>下面的小工具算给你看。选不同的输入，比较两种归一化：</p>
 <div class="viz" data-viz="norm-compare"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 7-5：输入 3 和 4，L2 归一化得 0.6 和 0.8，RMS 归一化得 0.85 和 1.13，两者相差根号 2 倍">
 <text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">输入 x</text>
@@ -141,7 +141,7 @@
 <p>和本章的关系：Strata 的模型把这条直通车道扩成了 4 条，加回去时还带着可学习的权重。</p>
 <p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/残差神经网络" target="_blank" rel="noopener noreferrer">维基百科：残差神经网络</a> · <a href="https://arxiv.org/abs/1512.03385" target="_blank" rel="noopener noreferrer">ResNet 原始论文</a> · <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener noreferrer">The Illustrated Transformer（图解，含残差与归一化）</a></p>
 </aside>
-<p>Strata 的残差是 4 条并行的车道，每条 2560 个数。<span class="ev ev-code">代码事实</span>[S04][S13] 读的时候，4 条车道各自归一化，再合成一个向量交给混合器或 MoE；写回的时候，同一个修正加到<strong>每一条</strong>车道上，只是每条车道乘的权重不同。权重是 w = 2 × sigmoid(inject ÷ 4)，其中 inject 是读残差时顺便算出的一个数。（<code>gr.hpp</code> 第 6–8、119–125 行）</p>
+<p>Strata 的残差是 4 条并行的车道，每条 2560 个数。<span class="ev ev-code">代码事实</span>[S04][S13] 读的时候，4 条车道各自归一化，再合成一个向量交给混合器或 MoE；写回的时候，同一个修正加到<strong>每一条</strong>车道上，只是每条车道乘的权重不同。权重是 w = 2 × sigmoid(inject ÷ 4)，其中 inject 是读残差时顺便算出的一个数。（<code>gr.hpp</code> 第 6–8、121–127 行）</p>
 <p>这个“2 倍 sigmoid”的设计很巧：sigmoid(0) = 0.5，所以 inject = 0 时 w 正好是 1，写回就退化成普通的残差相加。源码注释也特别指出了这一点，测试里还专门断言了它。权重可以在 0 到 2 之间变化，让模型自己决定每条车道“多听一点”还是“少听一点”。见图 7-4。</p>
 <div class="viz" data-viz="layer-walk"><figure class="fig"><svg viewBox="0 0 400 266" role="img" aria-label="图 7-4：从 4 条残差车道读出一个向量，计算修正 Δ，再把 Δ 乘以各自的权重加回每条车道">
 <text class="f-text" fill="#182f2b" x="8" y="43" font-size="12">车道 0</text>
@@ -236,8 +236,8 @@
 <details class="deep"><summary>深入一层：多车道残差的真实公式、按类型选激活格式、怎样定位是哪一层错了</summary>
 <h3>教学式 x′ = x + f(norm(x)) 不是 Strata 的逐项等式</h3>
 <p>本章正文用单向量的残差公式建立直觉。真实的模型几何里有 <code>hc = 4</code>，会话状态里的残差 R 是 4 × 2560 的多车道结构。[S04][S13] 把它换成普通的单向量残差，模型就变了。</p>
-<p>读残差（<code>gr_read</code>）的完整步骤是：每条车道各自做 RMS 归一化得到 xn（归一化系数在存储时就写成了 1 + w 的形式）；把 4 条车道拼起来，经过一个 320 维的“瓶颈”：lo = SiLU((xn 的 BF16 版本 × w_down) ÷ hc)；注意除以 hc 是在 SiLU <strong>里面</strong>，很容易看漏，而且会实质改变结果。然后 mixed = 各车道上 xn × sigmoid(lo × w_up) 的平均；inject = xn × w_inject。最后一层之后的“最终混合”没有 inject，因为后面没有写回了。（<code>gr.hpp</code> 第 79–91 行）</p>
-<p>写回（<code>gr_write</code>）是 R_out[c] = R[c] + block_out × w[c]，w[c] = 2 × sigmoid(inject[c] ÷ hc)。（<code>gr.hpp</code> 第 119–125 行）</p>
+<p>读残差（<code>gr_read</code>）的完整步骤是：每条车道各自做 RMS 归一化得到 xn（归一化系数在存储时就写成了 1 + w 的形式）；把 4 条车道拼起来，经过一个 320 维的“瓶颈”：lo = SiLU((xn 的 BF16 版本 × w_down) ÷ hc)；注意除以 hc 是在 SiLU <strong>里面</strong>，很容易看漏，而且会实质改变结果。然后 mixed = 各车道上 xn × sigmoid(lo × w_up) 的平均；inject = xn × w_inject。最后一层之后的“最终混合”没有 inject，因为后面没有写回了。（<code>gr.hpp</code> 第 81–93 行）</p>
+<p>写回（<code>gr_write</code>）是 R_out[c] = R[c] + block_out × w[c]，w[c] = 2 × sigmoid(inject[c] ÷ hc)。（<code>gr.hpp</code> 第 121–127 行）</p>
 <p>这些车道权重都是 BF16 格式。打包文件为了解码简单，把它们放大成 32 位存储；引擎加载时再收回 16 位，不损失任何精度，却省下 5.305 GiB 稠密权重中的 1.374 GiB。注释说，这正是“稠密权重能和专家缓存一起放进显存”与“放不下”的区别。（<code>gr.hpp</code> 第 10–14 行）</p>
 <h3>激活格式跟着张量类型走，不跟着名字走</h3>
 <p>量化权重在做矩阵乘法前，要把输入向量也转换成匹配的格式。<code>layer.cpp</code> 记录了一个教训：同一个名字的张量，在不同层用的量化类型可能不同。比如 36 个 GDN 层的 <code>attn_qkv</code>，有 13 层是 IQ4_XS、18 层是 Q3_K、4 层是 Q4_K、1 层是 Q2_0。规则是按<strong>类型</strong>定的：2 位编码配 Q8_0 格式的输入，其他量化类型配 Q8_K。选错格式会让矩阵乘法偏差 0.6%–1.4%，得到的是一个“看起来合理”的向量，而不是坏掉的向量。[S14]</p>

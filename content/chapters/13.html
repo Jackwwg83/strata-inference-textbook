@@ -77,7 +77,7 @@
 <p>有了专家缓存，一层里的 10 个专家分成三拨：<span class="ev ev-code">代码事实</span>（<code>src/core/expert_source.cpp</code>、<code>src/program/generate.cpp</code>）</p>
 <ol>
 <li>在显存里的（命中），GPU 直接算。</li>
-<li>没命中的里，按一个比例挑出一部分，GPU 经 PCIe 从锁页内存读过去算。这个比例默认是：Q2_0 模型 0.2，其他原生格式 0.55。</li>
+<li>没命中的里，按一个比例挑出一部分，GPU 经 PCIe 从锁页内存读过去算。在 NVIDIA 卡上，这个比例默认是：Q2_0 模型 0.2，其他原生格式 0.55。原生格式的引擎启动时还会实测一次 PCIe 带宽，不到 20 GB/s 就按带宽成比例调小。</li>
 <li>剩下没命中的，CPU 就地算。</li>
 </ol>
 <p>顺序很讲究：GPU 那一份先决定、先发布，让 GPU 先动起来，CPU 再开始自己的那份。<span class="ev ev-code">代码事实</span>（<code>expert_source.cpp</code> 注释）上游文档提到，把 PCIe 份额设成 0，所有未命中都回到 CPU，生成速度会变慢。<span class="ev ev-report">上游报告</span>[S03]</p>
@@ -165,7 +165,7 @@
 <div class="equation">T(f) ≈ max((1 − f)·D / Bc, f·D / Bp) ＋ T合并</div>
 <p>两条分支一样长时最快，解得 f = Bp ÷ (Bc ＋ Bp)。若 Bc = 40、Bp = 20，f = 1/3，而不是“一人一半”。<span class="ev ev-est">教学推演</span> 这里的 Bp 不是 PCIe 的标称带宽，而是包含这条分支全部代价的有效速率。</p>
 <h3>为什么真实的最优点不在这里</h3>
-<p>公式假设两条分支各用各的资源，可真实机器上它们会抢：CPU 读专家和 GPU 经 PCIe 读锁页内存，走的是同一组内存通道；PCIe 还可能同时在传长上下文的 KV 页；专家大小、同一专家在一个验证窗口里被几个 token 复用、GPU 启动开销、主机线程绑核，都会改变两边的有效速率。所以 Strata 的默认份额（Q2_0 为 0.2，其他原生格式为 0.55）来自实测，而不是这个公式。<span class="ev ev-code">代码事实</span>（<code>generate.cpp</code>）公式适合用来提出假设；调参要记录每条分支的完成时间、搬运字节和总时间，并在另一组任务上复验。</p>
+<p>公式假设两条分支各用各的资源，可真实机器上它们会抢：CPU 读专家和 GPU 经 PCIe 读锁页内存，走的是同一组内存通道；PCIe 还可能同时在传长上下文的 KV 页；专家大小、同一专家在一个验证窗口里被几个 token 复用、GPU 启动开销、主机线程绑核，都会改变两边的有效速率。所以 Strata 在 NVIDIA 卡上的默认份额（Q2_0 为 0.2，其他原生格式为 0.55）来自实测，而不是这个公式。<span class="ev ev-code">代码事实</span>（<code>generate.cpp</code>）Intel Arc 版还有一条硬规则：在 xe 驱动上、没开 <code>--stream-experts</code> 时，GPU 读普通的可换页内存会出页错误，任务会超时，所以默认份额直接设成 0，未命中全交给 CPU。<span class="ev ev-code">代码事实</span>（<code>sycl/src/program/generate.cpp</code>）公式适合用来提出假设；调参要记录每条分支的完成时间、搬运字节和总时间，并在另一组任务上复验。</p>
 <h3>计算对了吗：时间对得上，结果却错了</h3>
 <p><code>hit_hook.hpp</code> 记录了一个教科书级的并发错误。第一版的“GPU 先算命中”这一步，读的是专家池回调里才决定的命中名单，而那个回调在它之后才运行。于是它读到的是<strong>上一层</strong>的名单，把上一层的专家算进了这一层的位置。程序照常产出 token，耗时也正常，可和标准答案比，平均 KL 散度从 9.69×10⁻² 涨到 1.03，最可能的 token 的一致率从 0.867 掉到 0.333。修法是让这一步直接接收本层路由器发布的编号。<span class="ev ev-code">代码事实</span>（<code>hit_hook.hpp</code>）</p>
 <h3>线程池里的一场竞态</h3>

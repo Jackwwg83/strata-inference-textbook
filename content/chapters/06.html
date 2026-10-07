@@ -58,7 +58,7 @@
 </svg><figcaption>图 6-2　mmap 只发“借阅证”，不搬书。字节在第一次被访问时才从硬盘读入，之后留在页缓存里，直到内存紧张被回收。</figcaption></figure>
 <p>Strata 的 GGUF 读取器在 Linux 上用 <code>mmap</code> 以只读方式映射整个文件，在 Windows 上用对应的 <code>MapViewOfFile</code>，然后在映射出来的地址上解析文件头。<span class="ev ev-code">代码事实</span>（<code>gguf_reader.hpp</code> 第 376–408 行）</p>
 <p class="bridge"><strong>学过计算机的同学：</strong>这就是《操作系统》里的按需调页（demand paging）。mmap 把“文件 I/O”变成了“访问内存”，缺页处理程序替你做了 <code>read</code>。虚拟内存和页表的细节在第 14 章展开。</p>
-<p>页缓存是好帮手，但它按自己的规则决定留谁、丢谁。规则和你的访问方式不合拍，会发生什么？Strata 的源码里记着一次真实的教训。<span class="ev ev-code">代码事实</span> 早期版本在 Windows 上打开专家文件时，给操作系统加了一个“随机访问”提示。这个提示让系统关掉预读，并且尽快丢弃读过的页，理由是“大文件随机访问，读过的不会再读”。可专家文件恰恰相反：每个 token 选的专家看似随机，读过的字节下一个 token 几乎都会再读。结果是速度只剩 1.93 GB/s，每个 token 要 344 ms，跑了 25 个 token 也没热起来，因为页被淘汰得和读进来一样快。注释的结论是：正确的提示就是不加提示，能不能留住页才是关键（<code>expert_source.cpp</code> 第 508–518 行）。</p>
+<p>页缓存是好帮手，但它按自己的规则决定留谁、丢谁。规则和你的访问方式不合拍，会发生什么？Strata 的源码里记着一次真实的教训。<span class="ev ev-code">代码事实</span> 早期版本在 Windows 上打开专家文件时，给操作系统加了一个“随机访问”提示。这个提示让系统关掉预读，并且尽快丢弃读过的页，理由是“大文件随机访问，读过的不会再读”。可专家文件恰恰相反：每个 token 选的专家看似随机，读过的字节下一个 token 几乎都会再读。结果是速度只剩 1.93 GB/s，每个 token 要 344 ms，跑了 25 个 token 也没热起来，因为页被淘汰得和读进来一样快。注释的结论是：正确的提示就是不加提示，能不能留住页才是关键（<code>expert_source.cpp</code> 第 817–827 行）。</p>
 <p>下面的模拟器把这件事缩小到 16 段文件。每个 token 都按顺序读同样的 W 段，页缓存按“最久没用的先淘汰”（LRU）腾位置：</p>
 <div class="viz" data-viz="page-cache"><figure class="fig"><svg viewBox="0 0 400 180" role="img" aria-label="图 6-3：每个 token 按顺序读 6 段。页缓存有 8 个槽位时只有第一个 token 缺页；只有 5 个槽位时每次都缺页">
 <text class="f-text" fill="#182f2b" x="10" y="16" font-size="12" font-weight="600">每个 token 按顺序读 6 段（W = 6），LRU 淘汰</text>
@@ -111,7 +111,7 @@
 <text class="f-warn" fill="#9e5d24" x="331" y="187" font-size="12" text-anchor="middle">每 token 读 16 行</text>
 </svg><figcaption>图 6-4　三种放法，三种代价。反复要读、内存装得下的，拷进来锁住；装不下的，交给页缓存代管；很大、每次只读几行的，干脆不进内存。</figcaption></figure>
 <p><strong>常规模式：拷进来，锁住。</strong>内存够大时，全部专家（23–50 GB，视量化版本而定）被拷进内存并<dfn>锁页</dfn>。<span class="ev ev-report">上游报告</span>[S03] 锁页的意思是告诉操作系统：这些页不许换出到硬盘。锁住之后，显卡可以通过 DMA 直接从这块内存取数据，不用 CPU 先倒一手。[S06] 平台层的锁页函数在 Linux 上调用 <code>mlock</code>，在 Windows 上调用 <code>VirtualLock</code>，只锁住一部分时会如实报告，而不是假装成功。<span class="ev ev-code">代码事实</span>（<code>platform/memory.hpp</code> 第 1–24 行）</p>
-<p><strong>低内存模式：映射，让页缓存代管。</strong>内存放不下全部专家时（引擎 0.1.26 起），安装程序改为映射模型目录里的 <code>experts.bin</code>。显卡没缓存的专家由操作系统的文件缓存代管，内存紧张时可以还回去。如果可用内存连这些字节都留不住，引擎就不再走映射，改为绕过页缓存、直接从硬盘读专家。Windows 早就这样做；v0.1.40 起 Linux 也按同一条规则判断，用的是 <code>O_DIRECT</code>。<span class="ev ev-code">代码事实</span>（<code>expert_source.cpp</code> 第 377–381 行）上游报告，Coder 版本的引擎已提交内存从 36 GB 降到约 13 GB，回答不变；但显卡小的话，多数专家要从硬盘读，会慢很多。<span class="ev ev-report">上游报告</span>[S03]</p>
+<p><strong>低内存模式：映射，让页缓存代管。</strong>内存放不下全部专家时（引擎 0.1.26 起），安装程序改为映射模型目录里的 <code>experts.bin</code>。显卡没缓存的专家由操作系统的文件缓存代管，内存紧张时可以还回去。设了内存预算（<code>--resident-budget-gib</code>）时，最热的专家拷进内存，其余的从文件读。如果剩下的内存连这些要读的字节都留不住，引擎就不再走映射，改为绕过页缓存、直接从硬盘读专家。Windows 的规则是：页缓存必须留得住全部要读的字节。Linux 从 v0.1.40 起也会这样直读，用的是 <code>O_DIRECT</code>，但条件宽松得多：页缓存只要留得住其中约 1/20（至少 1.5 GiB），就继续走映射。原因是这些读取很偏：最热的专家已经在显卡和内存里，剩下的读取里，总是同一小批专家反复出现，缓存一小部分就能接住大部分重复读取。设 <code>STRATA_UNBUFFERED_LOAD=1</code> 或 <code>0</code> 可以强制选一边。<span class="ev ev-code">代码事实</span>（<code>expert_source.cpp</code> 第 417–421、437–441 行；<code>platform/memory.hpp</code> 第 35–54 行）上游报告，Coder 版本的引擎已提交内存从 36 GB 降到约 13 GB，回答不变；但显卡小的话，多数专家要从硬盘读，会慢很多。<span class="ev ev-report">上游报告</span>[S03]</p>
 <p><strong>n-gram 表：不进内存，直接读硬盘。</strong>这张表有 320,001,536 行，默认的表按 IQ4_NL 格式每行 90 字节，合计约 28.8 GB（26.8 GiB）。<span class="ev ev-code">代码事实</span> v0.1.40 起，读取器也接受 Q4_0、Q5_1、Q8_0、BF16 等格式的表，每行 90 到 320 字节（<code>ngram.hpp</code> 第 44–58 行）。读取器的设计要求它<strong>永远不占内存</strong>，连页缓存也不占：每一行都用不经缓冲的 4 KiB 读取直接从硬盘取，每个 token 要读 16 行，分布在 16 个不同的页上（<code>ple_reader.hpp</code> 第 1–5 行）。底层的直读模块写明了原因：内存映射做不到“不进页缓存”的承诺，不经缓冲的读取可以；代价是偏移、长度和缓冲区地址都必须是 4096 的倍数（<code>direct_file.hpp</code> 第 3–9 行）。这张表是做什么用的，第 11 章细讲。</p>
 
 <h2 id="sec-4">6.4 每个张量都要过安检</h2>
@@ -139,7 +139,7 @@
 </svg><figcaption>图 6-5　同一个越界张量，两种检查写法给出相反的结论。先查偏移、再做减法的写法不会溢出，所以不会被骗。</figcaption></figure></div>
 <p class="bridge"><strong>学过计算机的同学：</strong>在 C/C++ 里，无符号整数溢出是“定义良好”的：按 2<sup>64</sup> 取模，不报错，不崩溃。正因为它安静，才危险。有符号整数溢出则是未定义行为，编译器甚至可能把你的检查优化掉。</p>
 <p>算字节数时的乘法也会溢出。一个张量的元素个数是各维长度相乘，四个维度相乘很容易超过 64 位。Strata 每乘一个维度 d 之前，先检查“当前积 ≤ 上限 ÷ d”，不满足就返回 0，表示“这个形状算不出合法大小”。<span class="ev ev-code">代码事实</span>（<code>gguf_reader.hpp</code> 第 475–488 行）</p>
-<p>这只是安检的一部分。同一个读取器还会拒绝这些文件：两个张量重名（否则查找时谁排前面谁赢，悄悄用错张量）；维度数是 0 或超过 4；元数据数组长度超过 2<sup>24</sup>；数据区起点落在文件末尾之后。<span class="ev ev-code">代码事实</span>（<code>gguf_reader.hpp</code> 第 326、437–446、458 行）映射专家文件之前，引擎还会核对文件大小是否<strong>正好</strong>等于专家布局要求的字节数，差一个字节都拒绝（<code>expert_source.cpp</code> 第 563–573 行）。</p>
+<p>这只是安检的一部分。同一个读取器还会拒绝这些文件：两个张量重名（否则查找时谁排前面谁赢，悄悄用错张量）；维度数是 0 或超过 4；元数据数组长度超过 2<sup>24</sup>；数据区起点落在文件末尾之后。<span class="ev ev-code">代码事实</span>（<code>gguf_reader.hpp</code> 第 326、437–446、458 行）映射专家文件之前，引擎还会核对文件大小是否<strong>正好</strong>等于专家布局要求的字节数，差一个字节都拒绝（<code>expert_source.cpp</code> 第 872–882 行）。</p>
 <p>字节范围对了，形状也要对。<code>layout.hpp</code> 在加载时逐层核对每个张量的形状：名字对应的张量是不是内核以为的那个形状。头文件里写着它的目标：在<strong>加载时</strong>报出张量名、实际形状和要求的形状，而不是在第 4000 个 token 时变成矩阵乘法里的一个错数。<span class="ev ev-code">代码事实</span>[S04]</p>
 
 <h2 id="sec-5">6.5 字节对不对：校验和与哈希</h2>
@@ -167,7 +167,7 @@
 <text class="f-warn" fill="#9e5d24" x="20" y="134" font-size="12">字节和：两次都是 131，看不出数据变了</text>
 <text class="f-text" fill="#182f2b" x="20" y="156" font-size="12">SHA-256：只差两个字节的顺序，摘要已面目全非</text>
 </svg><figcaption>图 6-6　朴素校验和对“换位置”视而不见；密码学哈希对任何改动都极其敏感。</figcaption></figure>
-<p>Strata 的安装脚本对 Unsloth 的两种模型文件做了完整的哈希核对：实验性的 UD-Q4_K_XL（4 个分片），以及从 v0.1.39 起转为常规选项的 UD-IQ4_XS（3 个分片）。<span class="ev ev-code">代码事实</span> 每个分片的字节数和 SHA-256 都写死在脚本里。下载完成后，先比字节数，不对就直接报错；再以每次 16 MiB 的块读完整个文件，算 SHA-256。不一致就删掉文件，提示重新下载。算一遍 111 GB 的 UD-Q4_K_XL 大约要 5 分钟，所以结果会记在一个“完成标记”文件里，下次启动不再重算（<code>setup.py</code> 第 155–175、220、1316–1338 行）。其他模型文件不做哈希，安装脚本会读一遍它们的张量目录来核对（第 155–156 行的注释）。</p>
+<p>Strata 的安装脚本对 Unsloth 的两种模型文件做了完整的哈希核对：实验性的 UD-Q4_K_XL（4 个分片），以及从 v0.1.39 起转为常规选项的 UD-IQ4_XS（3 个分片）。<span class="ev ev-code">代码事实</span> 每个分片的字节数和 SHA-256 都写死在脚本里。下载完成后，先比字节数，不对就直接报错；再以每次 16 MiB 的块读完整个文件，算 SHA-256。不一致就删掉文件，提示重新下载。算一遍 111 GB 的 UD-Q4_K_XL 大约要 5 分钟，所以结果会记在一个“完成标记”文件里，下次启动不再重算（<code>setup.py</code> 第 234–254、299、1453–1475 行）。其他模型文件不做哈希，安装脚本会读一遍它们的张量目录来核对（第 234–235 行的注释）。</p>
 <p>哈希管的是“文件对不对”。字节从内存搬到显存之后，还要再确认一次。专家缓存有一个 <code>verify_slot</code> 函数：把显存里某个槽位的字节读回来，和内存里的原件逐字节比较。注释说，这是“唯一能证明缓存里装的就是它声称的那个专家”的东西，因为槽位编号对、字节错，产出的是一个看起来合理的错 token。[S05] 它还真的抓到过问题：第一版启动填充用了异步拷贝，与读回检查不在同一个执行顺序里，检查直接拒绝了整次运行，报“slot 0 differs from the arena at byte 0”。注释的评价是：这正是检查在尽它的职责。<span class="ev ev-code">代码事实</span>[S05]</p>
 
 <h2 id="sec-6">6.6 动手：不下载模型也能练加载器</h2>
