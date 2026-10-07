@@ -48,7 +48,7 @@
 <text class="f-muted" fill="#5c6d66" x="70" y="182" font-size="12">范围同 FP32，精度最粗</text>
 <text class="f-text" fill="#182f2b" x="200" y="210" font-size="12" text-anchor="middle">BF16 = FP32 的前 16 位：范围不变，精度变粗</text>
 </svg><figcaption>图 4-2　三种浮点格式。指数位决定能表示多大多小，尾数位决定能表示多细。</figcaption></figure></div>
-<p>BF16 有个巧妙之处：它就是 FP32 砍掉后 16 位。所以 BF16 转回 FP32 只要补 16 个 0，一点不损失；FP32 转 BF16 则要对砍掉的部分做舍入。Strata 的转换函数照抄了 ggml 的做法：按“就近舍入，平局取偶”，判断平局时看的是第 16 位。注释特意提醒，错用第 15 位只会在“恰好平局”时出错，真实数据里几乎碰不到，所以任何端到端测试都发现不了。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/include/strata/kernels/bf16_bits.hpp#L1-L16" target="_blank" rel="noopener noreferrer">bf16_bits.hpp</a> 同一段注释还强调：FP16 和 BF16 不是同一个东西的两种写法，给一个写的转换函数拿去用在另一个上，会产出“看起来合理”的错数。</p>
+<p>BF16 有个巧妙之处：它就是 FP32 砍掉后 16 位。所以 BF16 转回 FP32 只要补 16 个 0，一点不损失；FP32 转 BF16 则要对砍掉的部分做舍入。Strata 的转换函数照抄了 ggml 的做法：按“就近舍入，平局取偶”，判断平局时看的是第 16 位。注释特意提醒，错用第 15 位只会在“恰好平局”时出错，真实数据里几乎碰不到，所以任何端到端测试都发现不了。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/include/strata/kernels/bf16_bits.hpp#L1-L16" target="_blank" rel="noopener noreferrer">bf16_bits.hpp</a> 同一段注释还强调：FP16 和 BF16 不是同一个东西的两种写法，给一个写的转换函数拿去用在另一个上，会产出“看起来合理”的错数。</p>
 <p class="further">延伸阅读：<a href="https://docs.python.org/zh-cn/3/tutorial/floatingpoint.html" target="_blank" rel="noopener noreferrer">Python 文档：浮点算术的问题与限制</a> · <a href="https://zh.wikipedia.org/zh-cn/IEEE_754" target="_blank" rel="noopener noreferrer">维基百科：IEEE 754</a> · <a href="https://zh.wikipedia.org/zh-cn/半精度浮点数" target="_blank" rel="noopener noreferrer">维基百科：半精度浮点数</a> · <a href="https://en.wikipedia.org/wiki/Bfloat16_floating-point_format" target="_blank" rel="noopener noreferrer">Wikipedia: bfloat16</a></p>
 </aside>
 <p class="bridge"><strong>学过计算机的同学：</strong>这是《计算机组成原理》和 CS:APP 第 2 章的内容：偏置指数、隐含的最高位 1、非规格化数、舍入模式。模型推理里最常见的坑，恰好就是这几个细节：FP16 的上溢、非规格化数的精度损失，以及“就近舍入”和“四舍五入”在平局时的差别。</p>
@@ -128,7 +128,7 @@
 <p>所以“4 位量化”这个说法只是名义位数。真实成本要把缩放系数（有的格式还有偏移量）一起算进去。旋转、非均匀的码本、给敏感的层多留几位，也是对付离群值的办法，但每种都有自己的解码成本，要一起评估。</p>
 
 <h2 id="sec-4">4.4 Strata 的 Q2_0：每个权重 2.25 位</h2>
-<p>Strata 用的模型里，全部路由专家都是一种叫 Q2_0 的格式，占了 38 GiB 模型包里的 31.64 GiB。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/include/strata/kernels/quantize_act.hpp#L8-L10" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a> 它的一个块长这样，见图 4-5：64 个权重共用一个 FP16 的缩放 d（2 字节），每个权重是一个 2 位编码，16 字节装下 64 个，合计 18 字节。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/include/strata/artifact/dequant.hpp#L8-L13" target="_blank" rel="noopener noreferrer">dequant.hpp</a></p>
+<p>Strata 用的模型里，全部路由专家都是一种叫 Q2_0 的格式，占了 38 GiB 模型包里的 31.64 GiB。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/include/strata/kernels/quantize_act.hpp#L8-L10" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a> 它的一个块长这样，见图 4-5：64 个权重共用一个 FP16 的缩放 d（2 字节），每个权重是一个 2 位编码，16 字节装下 64 个，合计 18 字节。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/include/strata/artifact/dequant.hpp#L8-L13" target="_blank" rel="noopener noreferrer">dequant.hpp</a></p>
 <figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="图 4-5：Q2_0 的一个块有 18 字节，前 2 字节是 FP16 缩放，后 16 字节装 64 个 2 位编码，编码 0、1、2、3 分别还原成负 d、0、d、2d">
 <text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">Q2_0 的一个块：64 个权重，18 字节</text>
 <rect class="f-warn" fill="#9e5d24" x="20" y="32" width="40" height="32"/><text class="f-on" fill="#ffffff" x="40" y="53" font-size="13" text-anchor="middle">d</text>
@@ -152,7 +152,7 @@
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="246" y="224" width="66" height="24"/><text class="f-text" fill="#182f2b" x="279" y="241" font-size="12" text-anchor="middle">+d</text>
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="314" y="224" width="66" height="24"/><text class="f-text" fill="#182f2b" x="347" y="241" font-size="12" text-anchor="middle">+2d</text>
 </svg><figcaption>图 4-5　Q2_0 的块：还原公式是 (编码 − 1) × d。它只有四档，而且不对称：负的一档，正的两档。</figcaption></figure>
-<p>还原公式是 (编码 − 1) × d：编码 0、1、2、3 分别变成 −d、0、+d、+2d。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/include/strata/artifact/dequant.hpp#L68-L78" target="_blank" rel="noopener noreferrer">dequant.hpp</a> 和上一节的对称量化相比，它不对称，而且只有四档。注释还说，块大小 64 是从模型文件自己的偏移量里<strong>证实</strong>出来的，不是假定的：最早引入这个格式的 llama.cpp 版本用的是 128。</p>
+<p>还原公式是 (编码 − 1) × d：编码 0、1、2、3 分别变成 −d、0、+d、+2d。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/include/strata/artifact/dequant.hpp#L68-L78" target="_blank" rel="noopener noreferrer">dequant.hpp</a> 和上一节的对称量化相比，它不对称，而且只有四档。注释还说，块大小 64 是从模型文件自己的偏移量里<strong>证实</strong>出来的，不是假定的：最早引入这个格式的 llama.cpp 版本用的是 128。</p>
 <p>现在可以核对第 10 章的那个数了。每个块 18 字节装 64 个权重，平均 18 × 8 ÷ 64 = <strong>2.25 位</strong>。一个专家有 4,915,200 个参数，分成 76,800 块，乘以 18 字节，正好 1,382,400 字节，和源码里规定的专家大小一字不差。<span class="ev ev-est">教学推演</span>[S06] 其中 76,800 × 2 = 153,600 字节是缩放系数：名义 2 位，实际 2.25 位，多出的就是它。</p>
 <p>Strata 的头文件里还出现了几种别的块格式，同样可以算出真实位数：</p>
 <div class="table-wrap"><table><thead><tr><th>格式</th><th>一块</th><th>每个权重实际占</th><th>在 Strata 里用在哪</th></tr></thead><tbody>
@@ -161,7 +161,7 @@
 <tr><td>Q8_0</td><td>32 个，34 字节</td><td>8.5 位</td><td>和 Q2_0 权重相乘的激活</td></tr>
 <tr><td>Q8_K</td><td>256 个，292 字节</td><td>9.125 位</td><td>和其他量化权重相乘的激活</td></tr>
 </tbody></table></div>
-<p>表里的块大小来自 <code>dequant.hpp</code> 和 <code>quantize_act.hpp</code> 的注释。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/include/strata/kernels/quantize_act.hpp#L20-L36" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a> 后两行是<strong>激活</strong>的格式：做乘法之前，输入的那串数也会被临时量化成 8 位，和权重的格式配对。同一份模型包里，同一个名字的张量在不同层可能用不同的格式；Strata 的规则是：配哪种激活格式，由张量的<strong>类型</strong>决定，不由它的名字决定。<span class="ev ev-code">代码事实</span>[S14]</p>
+<p>表里的块大小来自 <code>dequant.hpp</code> 和 <code>quantize_act.hpp</code> 的注释。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/include/strata/kernels/quantize_act.hpp#L20-L36" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a> 后两行是<strong>激活</strong>的格式：做乘法之前，输入的那串数也会被临时量化成 8 位，和权重的格式配对。同一份模型包里，同一个名字的张量在不同层可能用不同的格式；Strata 的规则是：配哪种激活格式，由张量的<strong>类型</strong>决定，不由它的名字决定。<span class="ev ev-code">代码事实</span>[S14]</p>
 <p>还有一个细节：同一种格式，硬盘上和内存里的字节数可能不同。Strata 的加载器会把一部分张量的 FP16 缩放系数展宽成 FP32 再放进内存，并把展宽后的大小记下来，后面的代码只读记录、不再自己推算。<span class="ev ev-code">代码事实</span>[S14] 所以估算显存时，不能只拿文件大小除一除。</p>
 
 <h2 id="sec-5">4.5 同一个算式，不同的小数</h2>
@@ -180,8 +180,8 @@
 <text class="f-muted" fill="#5c6d66" x="200" y="170" font-size="12" text-anchor="middle">FP32 在 10⁸ 附近，相邻两个数相差 8</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="190" font-size="12" text-anchor="middle">同一个算式，换个计算顺序，结果就不同</text>
 </svg><figcaption>图 4-6　浮点加法不满足结合律。并行计算会改变求和顺序，所以 CPU 和 GPU 算同一个式子，最后几位可能不同。</figcaption></figure>
-<p>这在推理引擎里天天发生。Strata 的同一个专家，命中显卡缓存时在 GPU 上算，没命中时在 CPU 上算。源码记录过一次真实的对账：CPU 那边激活的缩放系数用 FP32 存，GPU 那边按格式用 FP16 存，两者在 80 个数据块上<strong>全部</strong>相差约 4.761 × 10⁻⁴（相对误差）。为此专门加了一个让 GPU 用 CPU 缩放系数的版本。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/include/strata/kernels/quantize_act.hpp#L24-L30" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a> 同一个文件还记着：如果让 FP16 的激活直接乘量化权重，和参考答案差 0.6%–0.9%，是允许误差的 6 到 9 倍。</p>
-<p>舍入规则也是一样。Strata 把 8 位激活的舍入写成“就近舍入，平局取偶”，而不是 C 语言 <code>roundf</code> 的“平局远离 0”。两者只在恰好平局时不同，真实数据里几乎碰不到，所以错用了也能通过任何端到端测试。它的对照测试因此<strong>故意构造平局</strong>的输入。<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/include/strata/kernels/quantize_act.hpp#L49-L53" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a></p>
+<p>这在推理引擎里天天发生。Strata 的同一个专家，命中显卡缓存时在 GPU 上算，没命中时在 CPU 上算。源码记录过一次真实的对账：CPU 那边激活的缩放系数用 FP32 存，GPU 那边按格式用 FP16 存，两者在 80 个数据块上<strong>全部</strong>相差约 4.761 × 10⁻⁴（相对误差）。为此专门加了一个让 GPU 用 CPU 缩放系数的版本。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/include/strata/kernels/quantize_act.hpp#L24-L30" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a> 同一个文件还记着：如果让 FP16 的激活直接乘量化权重，和参考答案差 0.6%–0.9%，是允许误差的 6 到 9 倍。</p>
+<p>舍入规则也是一样。Strata 把 8 位激活的舍入写成“就近舍入，平局取偶”，而不是 C 语言 <code>roundf</code> 的“平局远离 0”。两者只在恰好平局时不同，真实数据里几乎碰不到，所以错用了也能通过任何端到端测试。它的对照测试因此<strong>故意构造平局</strong>的输入。<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/include/strata/kernels/quantize_act.hpp#L49-L53" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a></p>
 <p>对话历史也能量化。Strata 默认把 KV 缓存存成 8 位；引擎 0.1.8 起可选的 4 位 KV 让这部分内存减半，在 128K 上下文时快约 4%，但长文档上明显变不准：困惑度（衡量模型“有多意外”的指标，越低越好）上升 8%–12%，“大海捞针”测试仍能通过。<span class="ev ev-report">上游报告</span>[S03] 省一半内存，换来可测量的质量损失，这就是量化的典型取舍。</p>
 
 <h2 id="sec-6">4.6 动手：给误差记账</h2>
@@ -213,5 +213,5 @@
 <h3>格式跟着类型走，不跟着名字走</h3>
 <p>开发中曾假设“名字决定格式”：比如 <code>attn_qkv</code> 一定是某种 K 系列量化。实际上同一个名字在不同层的格式分布很散，36 个 GDN 层的 <code>attn_qkv</code> 里，IQ4_XS 13 个、Q3_K 18 个、Q2_0 1 个、Q4_K 4 个。规则因此改成按类型：2 位编码的配 Q8_0 激活，其他量化格式配 Q8_K。配错了，GEMV 的结果差 0.6%–1.4%：一个“看起来合理”的向量，而不是明显坏掉的向量。[S14]</p>
 <h3>8 位激活量化里“像错误但不是错误”的细节</h3>
-<p>Q8_K 的激活量化照抄了 ggml 的参考实现，包括两处看着像笔误的地方：缩放用 −127 ÷ max 而不是 −128 ÷ max；max 取的是“绝对值最大那个元素的带符号值”，所以正的最大值会被映射到 −127。注释说，把 −127 写成 −128 会带来 0.79% 的缩放误差，和量化步长同一个量级，于是得到一个“看起来能用”的激活。<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/include/strata/kernels/quantize_act.hpp#L35-L48" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a></p>
+<p>Q8_K 的激活量化照抄了 ggml 的参考实现，包括两处看着像笔误的地方：缩放用 −127 ÷ max 而不是 −128 ÷ max；max 取的是“绝对值最大那个元素的带符号值”，所以正的最大值会被映射到 −127。注释说，把 −127 写成 −128 会带来 0.79% 的缩放误差，和量化步长同一个量级，于是得到一个“看起来能用”的激活。<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/include/strata/kernels/quantize_act.hpp#L35-L48" target="_blank" rel="noopener noreferrer">quantize_act.hpp</a></p>
 </details>

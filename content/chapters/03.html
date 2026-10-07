@@ -200,7 +200,7 @@
 <h3>KV 缓存的分页地址</h3>
 <p>注意力层的 KV 缓存按页存放。逻辑上第 t 个位置、第 h 个头的那一行，物理位置是：<code>page = table[t / page_size]</code>，<code>row = (page × n_head_kv + h) × page_size + (t mod page_size)</code>。也就是说，同一个头的连续位置在一页里挨在一起，这是注意力计算最想要的性质。[S18] 测试用三种页大小和打乱的页表，要求输出完全相同：排法的选择不能泄漏到结果里。</p>
 <h3>类型系统的第二层含义</h3>
-<p>C++ 的 <code>float*</code> 只说明“这里指向一些浮点数”。它没说这是归一化之前还是之后的激活、是哪一层的输出、专家的结果是否已经乘过路由权重，甚至没说它在 CPU 内存还是显存。Strata 的采样接口就专门写了一段大写的警告：<code>logits</code> 和 <code>out</code> 是<strong>显存指针</strong>，参数名和类型都看不出来；传错了，报错会出现在下一个同步调用里，指向一个毫不相干的缓冲区。<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/include/strata/kernels/sampler.hpp#L30-L43" target="_blank" rel="noopener noreferrer">sampler.hpp</a></p>
+<p>C++ 的 <code>float*</code> 只说明“这里指向一些浮点数”。它没说这是归一化之前还是之后的激活、是哪一层的输出、专家的结果是否已经乘过路由权重，甚至没说它在 CPU 内存还是显存。Strata 的采样接口就专门写了一段大写的警告：<code>logits</code> 和 <code>out</code> 是<strong>显存指针</strong>，参数名和类型都看不出来；传错了，报错会出现在下一个同步调用里，指向一个毫不相干的缓冲区。<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/include/strata/kernels/sampler.hpp#L31-L44" target="_blank" rel="noopener noreferrer">sampler.hpp</a></p>
 <p>可以在设计上加语义类型，例如 <code>NormalizedActivation</code>、<code>ExpertOutputUnweighted</code>。即使不真的改类型，也应该在接口注释和测试里写清五件事：<strong>形状、排法（步长）、是否已归一化、路由权重是否已乘、缓冲区归谁所有以及能用多久</strong>。第 10 章“深入一层”里 <code>expert_source.hpp</code> 的几条契约，就是这五件事的实例。</p>
 <h3>GEMV 与 GEMM：同一个变换，不同的复用</h3>
 <p>推理里的 GEMV 是矩阵乘一个向量；多个输入并成 X 后就是 GEMM。两者做的是同一种线性变换，但权重的复用机会完全不同，所以不能只靠“总共多少次浮点运算”来比较它们的速度。第 5 章用 roofline 模型把这件事量化。</p>

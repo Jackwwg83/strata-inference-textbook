@@ -4,7 +4,7 @@
 <p class="tldr"><strong>一句话：</strong>模型每一步只做一道选择题：根据前文，给词表里每个 token 打分；softmax 把分数变成概率，再用一个随机数按概率挑一个。温度、top-k、top-p 这些参数，都是在“挑”之前修改这张概率表。</p>
 
 <h2 id="sec-1">2.1 模型读到的不是字，是一串编号</h2>
-<p>第 1 章说过，<dfn>分词器</dfn>把文字切成 token，再换成整数编号。Strata 用的分词器有 248,320 个 token，切法叫<dfn>字节级 BPE</dfn>：先把文字拆成最小的字节，再把训练语料里经常挨在一起的片段反复合并成一个 token。常见的词合成一个 token，生僻的字就拆成几块。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/tools/strata_tokenizer.py#L3-L14" target="_blank" rel="noopener noreferrer">strata_tokenizer.py</a></p>
+<p>第 1 章说过，<dfn>分词器</dfn>把文字切成 token，再换成整数编号。Strata 用的分词器有 248,320 个 token，切法叫<dfn>字节级 BPE</dfn>：先把文字拆成最小的字节，再把训练语料里经常挨在一起的片段反复合并成一个 token。常见的词合成一个 token，生僻的字就拆成几块。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/tools/strata_tokenizer.py#L3-L14" target="_blank" rel="noopener noreferrer">strata_tokenizer.py</a></p>
 <p>因为最底层是字节，任何文字都能被表示，不会出现“这个字不认识”。这个分词器的说明里还写了它最看重的检查：把一段文字编码再解码，必须一个字节不差地变回原文。表情符号、多字节的汉字、连续空格，都在检查范围里。</p>
 <p>所以，一个 token 不等于一个字。Strata 的 README 说“一个 token 大约是 ¾ 个英文单词”。[S01] 这是英文的经验值，中文、代码、表格的比例都不一样。要算一段话占多少 token，唯一可靠的办法是真的用这个分词器切一遍。</p>
 <p>还有一件容易忽略的事：你打的那句话，并不是模型读到的全部。第 ② 步的<dfn>聊天模板</dfn>会在前后加上角色标记、系统提示、工具说明，见图 2-1。</p>
@@ -108,7 +108,7 @@
 <h3>softmax 与浮点溢出</h3>
 <p>计算机里的小数用<dfn>浮点数</dfn>存，位数有限，能表示的最大值也有限。最常用的 32 位浮点数（FP32），最大约 3.4 × 10³⁸。听上去很大，可 e<sup>89</sup> 就已经超过它了。超过上限的结果会变成“无穷大”（∞），这叫<dfn>上溢</dfn>。一旦分子分母都是 ∞，∞ ÷ ∞ 在浮点数里是 <dfn>NaN</dfn>（Not a Number），整张概率表就坏了。</p>
 <p>化解的办法只要一行：取指数之前，让每个分数先减去它们当中的最大值 m。因为 e<sup>z−m</sup> = e<sup>z</sup> ÷ e<sup>m</sup>，分子分母同时除以同一个 e<sup>m</sup>，比值一点不变。但减完之后，最大的数变成 0，e<sup>0</sup> = 1，其余都小于 1，再也不会上溢。数学上等价，数值上安全，这叫<dfn>数值稳定</dfn>的写法。</p>
-<p>举个例子：分数 [1000, 999] 直接取指数，两项都是 ∞；先减去 1000，变成 [0, −1]，指数是 [1, 0.3679]，概率是 [0.7311, 0.2689]。Strata 的采样内核正是这样做的：每一项都先减去最大值，再用双精度算指数和累计概率。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/src/kernels/cuda/sampler.cu#L366-L408" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p>举个例子：分数 [1000, 999] 直接取指数，两项都是 ∞；先减去 1000，变成 [0, −1]，指数是 [1, 0.3679]，概率是 [0.7311, 0.2689]。Strata 的采样内核（<code>sampler.cu</code>）正是这样做的：每一项都先减去最大值，再用双精度算指数和累计概率。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/src/kernels/cuda/sampler.cu#L383-L434" target="_blank" rel="noopener noreferrer">sampler.cu</a> Intel Arc 显卡上的版本默认改用单精度累加，因为 Arc 没有硬件双精度，模拟出来太慢；编译时设 <code>STRATA_SYCL_SAMPLER_FP64=1</code> 可以换回双精度。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/sycl/include/strata/sycl_math.hpp#L18-L26" target="_blank" rel="noopener noreferrer">sycl_math.hpp</a></p>
 <p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/Softmax函数" target="_blank" rel="noopener noreferrer">维基百科：Softmax 函数</a> · <a href="https://docs.python.org/zh-cn/3/tutorial/floatingpoint.html" target="_blank" rel="noopener noreferrer">Python 文档：浮点算术的问题与限制</a> · <a href="https://en.wikipedia.org/wiki/Softmax_function" target="_blank" rel="noopener noreferrer">Wikipedia: Softmax function</a></p>
 </aside>
 <p>浮点数为什么有上限、FP32 和 FP16 有什么不同，第 4 章细讲。</p>
@@ -138,8 +138,8 @@
 <text class="f-muted" fill="#5c6d66" x="200" y="156" font-size="12" text-anchor="middle">u 是 [0, 1) 里均匀分布的随机数；贪心则永远选第一段</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="176" font-size="12" text-anchor="middle">温度 T = 1，分数同图 2-3</text>
 </svg><figcaption>图 2-4　按概率挑一个 token：概率决定每段多长，随机数 u 决定针扎在哪。分布和抽样是两件事。</figcaption></figure></div>
-<p>这个方法叫<dfn>逆变换采样</dfn>：先算出累计概率（0.62、0.85、0.94……），再找第一个大于 u 的位置。Strata 的采样内核就是这样挑的：累计概率一项项往上加，第一次超过 u 的那一项就是结果。<span class="ev ev-code">代码事实</span>[S07]</p>
-<p>另一种做法是<dfn>贪心</dfn>：不掷骰子，永远选概率最高的那个。贪心的输出完全确定，适合需要稳定答案的场合，比如做题、测试。Strata 的采样参数里约定，温度小于等于 0 就走贪心；请求里不写温度时，服务层说明引擎默认也是贪心。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/include/strata/kernels/sampler.hpp#L15-L28" target="_blank" rel="noopener noreferrer">sampler.hpp</a> · <a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/serve/server.py#L535-L540" target="_blank" rel="noopener noreferrer">server.py</a></p>
+<p>这个方法叫<dfn>逆变换采样</dfn>：先算出累计概率（0.62、0.85、0.94……），再找第一个大于 u 的位置。Strata 的采样内核默认就是这样挑的：累计概率一项项往上加，第一次超过 u 的那一项就是结果。<span class="ev ev-code">代码事实</span>[S07] 它还有一种可选的挑法，默认关闭，设 <code>STRATA_SPEC_GUMBEL=1</code> 才打开：给每个候选配一个随机噪声 E，E 由（种子, 位置, token 编号）算出，然后选 p ÷ E 最大的那个。这叫 Gumbel-max 技巧。抽样的分布完全不变，但同一个种子挑中的 token 可能和默认挑法不同。它是为投机解码准备的：噪声跟着 token 走，草稿和目标模型的候选名单差一个词，也不会让其余的挑选全部错开（第 18 章）。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/src/kernels/cuda/sampler.cu#L66-L80" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p>另一种做法是<dfn>贪心</dfn>：不掷骰子，永远选概率最高的那个。贪心的输出完全确定，适合需要稳定答案的场合，比如做题、测试。Strata 的采样参数里约定，温度小于等于 0 就走贪心；请求里不写温度时，服务层说明引擎默认也是贪心。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/include/strata/kernels/sampler.hpp#L15-L29" target="_blank" rel="noopener noreferrer">sampler.hpp</a> · <a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/serve/server.py#L557-L562" target="_blank" rel="noopener noreferrer">server.py</a></p>
 <p>剩下一个问题：计算机怎么“随机”扔针？它其实是在<strong>算</strong>一个看起来随机的数。</p>
 <aside class="primer" id="c02-prng">
 <h3>伪随机数与种子</h3>
@@ -162,7 +162,7 @@
 <text class="f-text" fill="#182f2b" x="330" y="182" font-size="12" text-anchor="middle">↓ u₂</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">每个位置互不依赖，可以按任意顺序、同时算。Strata 用的就是这种</text>
 </svg><figcaption>图 2-5　两种伪随机数生成器。计数器式的结果只取决于（种子, 位置），所以并行算、跳着算都能重现。</figcaption></figure>
-<p>Strata 的采样用的是一种叫 Philox 的计数器式生成器：第 t 个 token 用的随机数只由（种子, 位置 t）决定。源码注释点明了这样选的原因：一批 token 可以按任意顺序采样，结果仍然可以重现。生成的 u 取 24 个二进制位，严格落在 [0, 1) 之内，不会被舍入成 1。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/src/kernels/cuda/sampler.cu#L38-L63" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p>Strata 的采样默认用一种叫 Philox 的计数器式生成器：第 t 个 token 用的随机数只由（种子, 位置 t）决定。源码注释点明了这样选的原因：一批 token 可以按任意顺序采样，结果仍然可以重现。生成的 u 取 24 个二进制位，严格落在 [0, 1) 之内，不会被舍入成 1。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/src/kernels/cuda/sampler.cu#L39-L64" target="_blank" rel="noopener noreferrer">sampler.cu</a> 前面说的 Gumbel-max 挑法不用 Philox：它的噪声由另一个哈希函数算出，输入多了 token 编号，同样和之前抽过几次无关。</p>
 <p class="further">延伸阅读：<a href="https://oi-wiki.org/misc/random/" target="_blank" rel="noopener noreferrer">OI Wiki：随机函数</a> · <a href="https://docs.python.org/zh-cn/3/library/random.html" target="_blank" rel="noopener noreferrer">Python 文档：random 模块</a> · <a href="https://zh.wikipedia.org/zh-cn/伪随机数生成器" target="_blank" rel="noopener noreferrer">维基百科：伪随机数生成器</a> · <a href="https://en.wikipedia.org/wiki/Counter-based_random_number_generator" target="_blank" rel="noopener noreferrer">Wikipedia: Counter-based RNG</a></p>
 </aside>
 <p class="bridge"><strong>学过计算机的同学：</strong>逆变换采样就是在累计分布函数（CDF）上做查找：把 [0, 1) 上的均匀分布，映射成任意离散分布。候选很多时，累计数组是有序的，可以用二分查找把一次采样降到 O(log n)。</p>
@@ -199,13 +199,13 @@
 </svg><figcaption>图 2-6　Strata 的采样链。温度排在截断之后：top-k、top-p 先按原始分布砍掉候选，温度只能在剩下的候选里调整。默认值来自采样参数的定义。</figcaption></figure>
 <ul>
 <li><strong>重复惩罚</strong>：最近出现过的 token，分数被调低，防止模型车轱辘话来回说。</li>
-<li><strong>top-k</strong>：只保留分数最高的 k 个。Strata 采样参数的默认值是 20；服务层把 top-k 限制在 1 到 64，因为引擎的采样路径最多只保留 64 个候选。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/serve/server.py#L826-L829" target="_blank" rel="noopener noreferrer">server.py</a></li>
+<li><strong>top-k</strong>：只保留分数最高的 k 个。Strata 采样参数的默认值是 20；服务层把 top-k 限制在 1 到 64，因为引擎的采样路径最多只保留 64 个候选。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/serve/server.py#L908-L911" target="_blank" rel="noopener noreferrer">server.py</a></li>
 <li><strong>top-p</strong>：按概率从高到低累加，加到 p 就停，后面的全砍掉。默认 p = 0.95。</li>
 <li><strong>min-p</strong>：去掉概率不到第一名 min_p 倍的候选。默认 0，也就是关闭。</li>
 <li><strong>温度</strong>和<strong>挑选</strong>：前面讲过。</li>
 </ul>
 <p>为什么顺序要紧？看温度的位置：它排在截断之后。所以 top-p 那一刀，是按温度为 1 时的概率砍的。温度再高，也救不回已经被砍掉的候选。反过来，如果把温度挪到最前面，同样的参数会砍出另一批候选。</p>
-<p>Strata 自己就踩过这个坑。源码注释记录了一次修复：早先的版本把重复惩罚做了两遍（温度之后又做一遍），还把 min-p 放到了 top-p 前面。注释说得很直白：<strong>每一种顺序都能产出一个“合法”的 token</strong>，所以只看输出根本发现不了，必须在概率分布这一层和独立算出的结果逐项比对。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/src/kernels/cuda/sampler.cu#L1-L11" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p>Strata 自己就踩过这个坑。源码注释记录了一次修复：早先的版本把重复惩罚做了两遍（温度之后又做一遍），还把 min-p 放到了 top-p 前面。注释说得很直白：<strong>每一种顺序都能产出一个“合法”的 token</strong>，所以只看输出根本发现不了，必须在概率分布这一层和独立算出的结果逐项比对。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/src/kernels/cuda/sampler.cu#L1-L11" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
 <p>这给我们一个重要的习惯：<strong>判断两个采样实现是否一致，要比概率表，不要只比最后的文字。</strong>文字一样，分布可能不同；分布只差一点点，文字也可能在某一步分叉。</p>
 
 <h2 id="sec-6">2.6 动手：把“分布”和“抽样”分开看</h2>
@@ -233,11 +233,11 @@
 <h3>手算 softmax 和一次采样</h3>
 <p>取 z = [2, 1, 0]，T = 1。减去最大值 2，得到 [0, −1, −2]，指数约为 [1, 0.3679, 0.1353]，总和 1.5032，归一化得到 <strong>[0.6652, 0.2447, 0.0900]</strong>。累计概率约为 [0.6652, 0.9100, 1]。若 u = 0.8，第一个超过它的累计值是 0.9100，选第二项；u = 0.5 选第一项；u = 0.95 选第三项。贪心永远选第一项。</p>
 <h3>温度趋于 0，和贪心不是同一回事</h3>
-<p>数学上，T 趋于 0 时 softmax 趋向“最高分的那项概率为 1”。但程序里不能真的去算 z ÷ 0，所以工程实现都把贪心写成一个单独的分支。另一个细节是<strong>并列</strong>：两个分数完全相等时选谁，必须有固定规则。Strata 的贪心内核规定编号小的胜出，并行版本也保持了这条规则，注释称它是“整个正确性论证的核心”。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/src/kernels/cuda/sampler.cu#L98-L99" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p>数学上，T 趋于 0 时 softmax 趋向“最高分的那项概率为 1”。但程序里不能真的去算 z ÷ 0，所以工程实现都把贪心写成一个单独的分支。另一个细节是<strong>并列</strong>：两个分数完全相等时选谁，必须有固定规则。Strata 的贪心内核规定编号小的胜出，并行版本也保持了这条规则，注释称它是“整个正确性论证的核心”。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/src/kernels/cuda/sampler.cu#L115-L116" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
 <h3>重复惩罚的符号陷阱</h3>
-<p>重复惩罚“把分数调低”，听上去就是除以一个大于 1 的数。可分数可能是负的：负数除以 1.1，反而变大了。Strata 照搬了 llama.cpp 的规则：分数为正时除以惩罚系数，分数小于等于 0 时乘以惩罚系数。注释提醒，无条件相除是读论文时最自然的写法，却会在一半词表上把惩罚变成奖励。另一个细节：“出现过”惩罚（presence）只看出现没出现，是个 0/1 开关，不看出现了几次。<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/src/kernels/cuda/sampler.cu#L65-L80" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
+<p>重复惩罚“把分数调低”，听上去就是除以一个大于 1 的数。可分数可能是负的：负数除以 1.1，反而变大了。Strata 照搬了 llama.cpp 的规则：分数为正时除以惩罚系数，分数小于等于 0 时乘以惩罚系数。注释提醒，无条件相除是读论文时最自然的写法，却会在一半词表上把惩罚变成奖励。另一个细节：“出现过”惩罚（presence）只看出现没出现，是个 0/1 开关，不看出现了几次。<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/src/kernels/cuda/sampler.cu#L82-L97" target="_blank" rel="noopener noreferrer">sampler.cu</a></p>
 <h3>种子相同，不等于输出相同</h3>
-<p>假设候选 A 原本分数最高，但它在历史里重复了很多次。先做 top-k 再惩罚，和先惩罚再做 top-k，候选集合可能完全不同。所以“种子相同”远不足以证明输出相同。还要固定：历史、采样参数、处理顺序，以及算出 logits 的那条数值路径。Strata 的耦合草稿接口就把这些写进了契约：验证窗口第 t 行用 Philox(种子, pos₀ + t) 抽样，草稿只有在<strong>等于</strong>这一行的抽样结果时才被接受，所以输出只是种子的函数，草稿只决定一轮能产出几个 token。这个模式默认关闭。<span class="ev ev-code">代码事实</span>[S07]</p>
+<p>假设候选 A 原本分数最高，但它在历史里重复了很多次。先做 top-k 再惩罚，和先惩罚再做 top-k，候选集合可能完全不同。所以“种子相同”远不足以证明输出相同。还要固定：历史、采样参数、处理顺序，以及算出 logits 的那条数值路径。Strata 的耦合草稿接口就把这些写进了契约：验证窗口第 t 行用 Philox(种子, pos₀ + t) 抽样，草稿只有在<strong>等于</strong>这一行的抽样结果时才被接受，所以输出只是种子的函数，草稿只决定一轮能产出几个 token。这个模式默认关闭。<span class="ev ev-code">代码事实</span>[S07] 另一个可选模式 <code>STRATA_SPEC_PROB=1</code> 换了接受规则：草稿 d 以 min(1, p(d) ÷ q(d)) 的概率被接受，其中 p 是目标模型的分布，q 是草稿的分布。这就是经典的拒绝采样，也默认关闭。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/include/strata/core/spec_prob.hpp#L1-L9" target="_blank" rel="noopener noreferrer">spec_prob.hpp</a> 上游文档写明：这样每个 token 的分布仍和不用草稿时一样，但同一个种子写出的文字会随草稿变化。<span class="ev ev-report">上游报告</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/docs/DETAILS.md#L1075" target="_blank" rel="noopener noreferrer">DETAILS.md</a></p>
 <h3>服务层的契约：拒绝，而不是悄悄截断</h3>
 <p>读 <code>serve/frontend.py</code> 时，先看 <code>ChatTemplate.render</code> 怎样传入 messages、tools 和 generation prompt，再看 <code>effort_kwargs</code> 怎样把各种写法的“思考档位”归一成模板认识的四档。[S16] 然后看 <code>serve/server.py</code> 的文件头：提示加上最大输出长度超过上下文时，请求被拒绝并返回 400，<strong>从不截断</strong>；最大输出不填、填 0 或填 −1，都表示“上下文剩多少就能写多少”。[S15] 核算时还留了 <code>CTX_SLACK = 8</code> 个位置的余量，和引擎那边的检查保持一致。[S15] 这 8 个位置不是模型的数学常数，而是前后端之间的约定。</p>
 <h3>怎样验收一个采样实现</h3>
