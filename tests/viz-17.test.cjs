@@ -69,3 +69,14 @@ test('CLOCK resolve: hits set the reference bit, misses take a second-chance vic
   assert.notEqual(r.misses[0].slot, 0);
   assert.throws(() => m.resolve(s, [0, 1, 2, 4]));   // more blocks than slots
 });
+
+test('the K8V4 streaming tip names the v0.1.40 token loss and its v0.1.40.2 fix (#1188)', () => {
+  require('../src/viz/core.js');
+  require('../src/viz/17-kv.js');
+  const t = globalThis.Viz.tables.find(x => x.zh && x.zh.code === 'KV_BUDGET');
+  assert.ok(t, 'the KV_BUDGET table is registered');
+  const tip = t.zh.try.find(s => s.includes('K8V4'));
+  assert.ok(tip, 'a zh tip covers K8V4 with streaming');
+  assert.match(tip, /v0\.1\.40\.2/);
+  assert.match(tip, /丢 token/);
+});

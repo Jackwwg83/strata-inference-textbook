@@ -35,7 +35,7 @@
       try: [
         '选 <b>FP16</b>、32K：一段对话的 KV 是 805,306,368 字节，也就是 805.3 MB 或 768 MiB。Strata 源码注释把它写成了“805 MiB”，单位标错了。',
         '把上下文从 32K 拉到 128K：KV 正好翻 4 倍；再打开流式，显存那条立刻变短，内存那条变长。历史没少，只是换了地方。',
-        '选 <b>K8V4</b>、256K，再打开流式：显存只留 32,768 格，每格又比 INT8 少 23%，两个好处叠在一起。这是 v0.1.40 才有的；v0.1.39 的引擎会拒绝这个组合。',
+        '选 <b>K8V4</b>、256K，再打开流式：显存只留 32,768 格，每格又比 INT8 少 23%，两个好处叠在一起。这个组合 v0.1.40 起才能用，v0.1.39 的引擎会拒绝它；v0.1.40 的这条路径还会丢 token，v0.1.40.2 才修好。',
       ],
 
       pCode: 'KV_PAGING', pTitle: '页表与换页', pTag: '教学推演 · 12 个块、4 个显存槽',
@@ -87,7 +87,7 @@
       try: [
         'Pick <b>FP16</b> and 32K: one conversation\'s KV is 805,306,368 bytes, that is, 805.3 MB or 768 MiB. A comment in Strata\'s source calls it "805 MiB", with the wrong unit.',
         'Drag the context from 32K to 128K: the KV grows exactly 4 times. Then turn on streaming: the VRAM bar shrinks at once and the RAM bar grows. No history is lost; it only moved.',
-        'Pick <b>K8V4</b> and 256K, then turn on streaming: VRAM keeps only 32,768 cells, and each cell is 23% smaller than INT8. The two benefits stack. This is new in v0.1.40; the v0.1.39 engine refuses this combination.',
+        'Pick <b>K8V4</b> and 256K, then turn on streaming: VRAM keeps only 32,768 cells, and each cell is 23% smaller than INT8. The two benefits stack. This combination works only from v0.1.40 on, and the v0.1.39 engine refuses it. On v0.1.40 this path also drops tokens; v0.1.40.2 fixed it.',
       ],
 
       pCode: 'KV_PAGING', pTitle: 'Page table and paging', pTag: 'Teaching estimate · 12 blocks, 4 VRAM slots',
@@ -139,7 +139,7 @@
       try: [
         'اختر <b>FP16</b> و 32K: KV لمحادثة واحدة هي 805,306,368 بايت، أي 805.3 MB أو 768 MiB. وقد كتب تعليق في شيفرة Strata «805 MiB»، فجاءت الوحدة خاطئة.',
         'اسحب السياق من 32K إلى 128K: تتضاعف KV أربع مرات بالضبط. ثم فعّل البث: يقصر شريط VRAM فورًا ويطول شريط RAM. لم يضِع شيء من التاريخ، بل انتقل فقط.',
-        'اختر <b>K8V4</b> و 256K، ثم فعّل البث: لا تحتفظ VRAM إلا بـ 32,768 خلية، وكل خلية أصغر من INT8 بنسبة 23%. تجتمع الميزتان معًا. هذا جديد في v0.1.40؛ أما محرك v0.1.39 فيرفض هذا الجمع.',
+        'اختر <b>K8V4</b> و 256K، ثم فعّل البث: لا تحتفظ VRAM إلا بـ 32,768 خلية، وكل خلية أصغر من INT8 بنسبة 23%. تجتمع الميزتان معًا. هذا الجمع لا يعمل إلا من v0.1.40 فصاعدًا، ومحرك v0.1.39 يرفضه. وفي v0.1.40 يُسقط هذا المسار بعض الـ token أيضًا؛ وقد أصلحه v0.1.40.2.',
       ],
 
       pCode: 'KV_PAGING', pTitle: 'جدول الصفحات والتبديل', pTag: 'تقدير تعليمي · 12 كتلة، 4 فتحات في VRAM',
@@ -191,7 +191,7 @@
       try: [
         '<b>FP16</b>과 32K를 고르세요. 대화 하나의 KV는 805,306,368바이트, 즉 805.3 MB이고 768 MiB예요. Strata 소스 주석은 이걸 "805 MiB"라고 적어서 단위가 틀렸어요.',
         '컨텍스트를 32K에서 128K로 끌어 보세요. KV가 정확히 4배가 돼요. 스트리밍을 켜면 VRAM 막대는 바로 짧아지고 RAM 막대는 길어져요. 히스토리는 줄지 않고 자리만 옮겨요.',
-        '<b>K8V4</b>와 256K를 고르고 스트리밍을 켜 보세요. VRAM에는 32,768칸만 남고, 칸마다 INT8보다 23% 작아요. 두 가지 이점이 겹쳐요. 이건 v0.1.40부터예요. v0.1.39 엔진은 이 조합을 거부해요.',
+        '<b>K8V4</b>와 256K를 고르고 스트리밍을 켜 보세요. VRAM에는 32,768칸만 남고, 칸마다 INT8보다 23% 작아요. 두 가지 이점이 겹쳐요. 이 조합은 v0.1.40부터 쓸 수 있고, v0.1.39 엔진은 거부해요. v0.1.40에서는 이 경로가 token도 빠뜨렸고, v0.1.40.2에서 고쳐졌어요.',
       ],
 
       pCode: 'KV_PAGING', pTitle: '페이지 테이블과 페이지 교체', pTag: '교육용 추정 · 블록 12개, VRAM 슬롯 4개',
@@ -243,7 +243,7 @@
       try: [
         '<b>FP16</b> と 32K を選びます。会話 1 件の KV は 805,306,368 バイト、つまり 805.3 MB または 768 MiB です。Strata のソースのコメントは「805 MiB」と書いていて、単位が間違っています。',
         'コンテキストを 32K から 128K に動かします。KV はちょうど 4 倍になります。次にストリーミングをオンにすると、VRAM のバーがすぐ短くなり、RAM のバーが長くなります。履歴は減っていません。置き場所が変わっただけです。',
-        '<b>K8V4</b> と 256K を選び、ストリーミングをオンにします。VRAM には 32,768 セルだけが残り、1 セルは INT8 より 23% 小さくなります。2 つの利点が重なります。これは v0.1.40 からです。v0.1.39 のエンジンはこの組み合わせを拒否します。',
+        '<b>K8V4</b> と 256K を選び、ストリーミングをオンにします。VRAM には 32,768 セルだけが残り、1 セルは INT8 より 23% 小さくなります。2 つの利点が重なります。この組み合わせは v0.1.40 から使え、v0.1.39 のエンジンは拒否します。v0.1.40 ではこの経路で token が抜け落ちることがあり、v0.1.40.2 で修正されました。',
       ],
 
       pCode: 'KV_PAGING', pTitle: 'ページテーブルとページング', pTag: '教育用の試算 · 12 ブロック、VRAM スロット 4 つ',
@@ -295,7 +295,7 @@
       try: [
         'Elige <b>FP16</b> y 32K: la KV de una conversación son 805.306.368 bytes, es decir, 805,3 MB o 768 MiB. Un comentario del código de Strata la llama «805 MiB», con la unidad equivocada.',
         'Arrastra el contexto de 32K a 128K: la KV crece exactamente 4 veces. Luego activa el streaming: la barra de VRAM se encoge de inmediato y la de RAM crece. No se pierde historial; solo se movió.',
-        'Elige <b>K8V4</b> y 256K, y luego activa el streaming: la VRAM guarda solo 32.768 celdas, y cada celda es 23% más pequeña que en INT8. Las dos ventajas se suman. Esto es nuevo en v0.1.40; el motor v0.1.39 rechaza esta combinación.',
+        'Elige <b>K8V4</b> y 256K, y luego activa el streaming: la VRAM guarda solo 32.768 celdas, y cada celda es 23% más pequeña que en INT8. Las dos ventajas se suman. Esta combinación solo funciona desde v0.1.40, y el motor v0.1.39 la rechaza. En v0.1.40 esta ruta además pierde tokens; v0.1.40.2 lo corrigió.',
       ],
 
       pCode: 'KV_PAGING', pTitle: 'Tabla de páginas y paginación', pTag: 'Estimación didáctica · 12 bloques, 4 ranuras de VRAM',
