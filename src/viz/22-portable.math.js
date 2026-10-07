@@ -1,5 +1,5 @@
 /* Pure logic behind the chapter 22 widgets. Teaching model, not Strata code.
-   The branch rules mirror files at the pinned commit 1735d64 (v0.1.40):
+   The branch rules mirror files at the pinned commit e8ca9af (v0.1.40.2):
    include/strata/kernels/dp4a.hpp, include/strata/hip_compat/intrinsics.hpp, cmake/hip_backend.cmake,
    CMakeLists.txt (CUDA guard), src/program/generate.cpp and src/kernels/cpu/native_expert.cpp. */
 (function (root) {
@@ -44,7 +44,8 @@
     acc = (acc + ((x[2] * y[2]) >>> 0) + ((x[3] * y[3]) >>> 0)) >>> 0;
     return acc | 0;
   }
-  // The CUDA sm_60 fallback: read the operands as int8 arrays, add in int32.
+  // The CUDA sm_60 fallback: four PTX vmad byte-select multiply-adds (signed bytes) into an int32 accumulator.
+  // Same integer as the byte-wise C form it replaced in v0.1.40.2 (upstream: tools/sm60_dp4a_check.cu).
   function dp4aSm60(a, b, c) {
     const x = unpack(a), y = unpack(b);
     return (c + x[0] * y[0] + x[1] * y[1] + x[2] * y[2] + x[3] * y[3]) | 0;
@@ -74,7 +75,7 @@
     const base = String(arch).replace(/:.*$/, '');
     if (['gfx1100', 'gfx1201'].includes(base)) return 'validated';
     if (['gfx1101', 'gfx1200'].includes(base)) return 'community';
-    if (['gfx1012', 'gfx1102', 'gfx1030', 'gfx1031', 'gfx1034', 'gfx1151'].includes(base)) return 'unvalidated';
+    if (['gfx1010', 'gfx1011', 'gfx1012', 'gfx1102', 'gfx1103', 'gfx1030', 'gfx1031', 'gfx1034', 'gfx1150', 'gfx1151'].includes(base)) return 'unvalidated';
     return 'refused';
   }
   // CMakeLists.txt lines 169-178: below 7.5 only with STRATA_EXPERIMENTAL_SM60, below 6.0 never.

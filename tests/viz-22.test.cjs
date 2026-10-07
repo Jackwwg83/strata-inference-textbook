@@ -49,7 +49,8 @@ test('dp4a branch follows the #if chains in dp4a.hpp and hip_compat/intrinsics.h
   for (const arch of ['gfx1030', 'gfx1031', 'gfx1032']) assert.equal(m.dp4aBranch({ backend: 'hip', arch }).id, 'hip-sdot4');
   assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1012' }).id, 'hip-sdwa', 'v0.1.39: RDNA1 SDWA sequence');
   assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1012', portableDot: true }).id, 'hip-loop', 'STRATA_GFX1012_PORTABLE_DOT');
-  assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1103' }).id, 'hip-loop');
+  assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1103' }).id, 'hip-loop', 'v0.1.40.2: gfx1103 (780M) takes the portable kernels');
+  for (const arch of ['gfx1010', 'gfx1011']) assert.equal(m.dp4aBranch({ backend: 'hip', arch }).id, 'hip-loop', arch + ' (RDNA1, v0.1.40.2): only gfx1012 has the SDWA sequence');
   assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1034' }).id, 'hip-loop', 'gfx1034 is not in the sdot4 list');
   assert.throws(() => m.dp4aBranch({ backend: 'metal' }));
 });
@@ -65,7 +66,8 @@ test('HIP architecture tiers match cmake/hip_backend.cmake', () => {
   assert.equal(m.hipTier('gfx1031'), 'unvalidated', 'v0.1.39 adds gfx1031');
   assert.equal(m.hipTier('gfx1034'), 'unvalidated', 'v0.1.40 adds gfx1034');
   assert.equal(m.hipTier('gfx1151'), 'unvalidated', 'v0.1.40 adds gfx1151 (Strix Halo, experimental)');
-  assert.equal(m.hipTier('gfx1150'), 'refused');
+  for (const arch of ['gfx1010', 'gfx1011', 'gfx1103', 'gfx1150']) assert.equal(m.hipTier(arch), 'unvalidated', 'v0.1.40.2 adds ' + arch);
+  assert.equal(m.hipTier('gfx1032'), 'refused', 'gfx1032 has an sdot4 branch but is not in the CMake list');
   assert.equal(m.hipTier('gfx1100:xnack-'), 'validated', 'feature suffix is stripped');
   assert.equal(m.hipTier('gfx906'), 'refused');
 });
@@ -105,7 +107,7 @@ test('vector width: AVX2 holds 32 int8 lanes, AVX-512 holds 64', () => {
 
 test('support matrix size is the product of its dimensions', () => {
   assert.equal(m.combos([2, 3, 2, 2]), 24);
-  assert.equal(m.combos([11, 3, 2, 5]), 330, 'figure 22-7 at v0.1.40: 4 NVIDIA generations + 7 AMD archs in the Windows HIP zip');
+  assert.equal(m.combos([12, 3, 2, 5]), 360, 'figure 22-7 at v0.1.40.2: 4 NVIDIA generations + 8 AMD archs in the Windows HIP zip');
   assert.equal(m.combos([]), 1);
   assert.throws(() => m.combos([2, 0]));
 });

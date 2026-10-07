@@ -21,7 +21,7 @@
       sBranchK: 'dp4a 落到哪个分支', sBranchF: (file) => `由 <b>${file}</b> 里的 #if 链决定`,
       sFlagK: '这次配置用的开关', sTierK: 'CMake 对这个架构的态度',
       branch: {
-        'cuda-hw': '硬件 __dp4a 指令', 'cuda-sw': '软件循环 strata_dp4a', 'hip-sudot4': 'v_dot4_i32_iu8（sudot4）',
+        'cuda-hw': '硬件 __dp4a 指令', 'cuda-sw': '4 条 PTX vmad 指令（strata_dp4a）', 'hip-sudot4': 'v_dot4_i32_iu8（sudot4）',
         'hip-sdot4': 'v_dot4_i32_i8（sdot4）', 'hip-sdwa': 'RDNA1 的 SDWA 汇编（v_mul_i32_i24 + v_add3_u32）', 'hip-loop': '可移植的逐字节循环',
       },
       tier: {
@@ -106,7 +106,7 @@
       sBranchK: 'Which branch dp4a lands in', sBranchF: (file) => `decided by the #if chain in <b>${file}</b>`,
       sFlagK: 'Switches used in this configure', sTierK: 'How CMake treats this architecture',
       branch: {
-        'cuda-hw': 'hardware __dp4a instruction', 'cuda-sw': 'software loop strata_dp4a', 'hip-sudot4': 'v_dot4_i32_iu8 (sudot4)',
+        'cuda-hw': 'hardware __dp4a instruction', 'cuda-sw': '4 PTX vmad instructions (strata_dp4a)', 'hip-sudot4': 'v_dot4_i32_iu8 (sudot4)',
         'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-sdwa': 'RDNA1 SDWA assembly (v_mul_i32_i24 + v_add3_u32)', 'hip-loop': 'portable byte-by-byte loop',
       },
       tier: {
@@ -191,7 +191,7 @@
       sBranchK: 'في أي فرع يقع dp4a', sBranchF: (file) => `تحدده سلسلة #if في <b>${file}</b>`,
       sFlagK: 'المفاتيح المستخدمة في هذا الإعداد', sTierK: 'كيف يعامل CMake هذه المعمارية',
       branch: {
-        'cuda-hw': 'تعليمة __dp4a العتادية', 'cuda-sw': 'حلقة برمجية strata_dp4a', 'hip-sudot4': 'v_dot4_i32_iu8 (sudot4)',
+        'cuda-hw': 'تعليمة __dp4a العتادية', 'cuda-sw': '4 تعليمات PTX من نوع vmad (strata_dp4a)', 'hip-sudot4': 'v_dot4_i32_iu8 (sudot4)',
         'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-sdwa': 'تجميع SDWA في RDNA1 (v_mul_i32_i24 + v_add3_u32)', 'hip-loop': 'حلقة قابلة للنقل بايتًا بايتًا',
       },
       tier: {
@@ -277,7 +277,7 @@
       sBranchK: 'En qué rama cae dp4a', sBranchF: (file) => `lo decide la cadena de #if de <b>${file}</b>`,
       sFlagK: 'Interruptores de esta configuración', sTierK: 'Cómo trata CMake esta arquitectura',
       branch: {
-        'cuda-hw': 'instrucción __dp4a de hardware', 'cuda-sw': 'bucle de software strata_dp4a', 'hip-sudot4': 'v_dot4_i32_iu8 (sudot4)',
+        'cuda-hw': 'instrucción __dp4a de hardware', 'cuda-sw': '4 instrucciones PTX vmad (strata_dp4a)', 'hip-sudot4': 'v_dot4_i32_iu8 (sudot4)',
         'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-sdwa': 'ensamblador SDWA de RDNA1 (v_mul_i32_i24 + v_add3_u32)', 'hip-loop': 'bucle portable byte a byte',
       },
       tier: {
@@ -362,7 +362,7 @@
       sBranchK: 'dp4a가 들어가는 분기', sBranchF: (file) => `<b>${file}</b>의 #if 체인이 결정해요`,
       sFlagK: '이번 설정에 쓴 스위치', sTierK: '이 아키텍처에 대한 CMake의 태도',
       branch: {
-        'cuda-hw': '하드웨어 __dp4a 명령', 'cuda-sw': '소프트웨어 루프 strata_dp4a', 'hip-sudot4': 'v_dot4_i32_iu8 (sudot4)',
+        'cuda-hw': '하드웨어 __dp4a 명령', 'cuda-sw': 'PTX vmad 명령 4개 (strata_dp4a)', 'hip-sudot4': 'v_dot4_i32_iu8 (sudot4)',
         'hip-sdot4': 'v_dot4_i32_i8 (sdot4)', 'hip-sdwa': 'RDNA1의 SDWA 어셈블리 (v_mul_i32_i24 + v_add3_u32)', 'hip-loop': '이식 가능한 바이트 단위 루프',
       },
       tier: {
@@ -447,7 +447,7 @@
       sBranchK: 'dp4a が落ちる分岐', sBranchF: (file) => `<b>${file}</b> の #if の連なりで決まります`,
       sFlagK: 'この設定で使うスイッチ', sTierK: 'このアーキテクチャへの CMake の態度',
       branch: {
-        'cuda-hw': 'ハードウェアの __dp4a 命令', 'cuda-sw': 'ソフトウェアのループ strata_dp4a', 'hip-sudot4': 'v_dot4_i32_iu8（sudot4）',
+        'cuda-hw': 'ハードウェアの __dp4a 命令', 'cuda-sw': 'PTX vmad 命令 4 つ（strata_dp4a）', 'hip-sudot4': 'v_dot4_i32_iu8（sudot4）',
         'hip-sdot4': 'v_dot4_i32_i8（sdot4）', 'hip-sdwa': 'RDNA1 の SDWA アセンブリ（v_mul_i32_i24 + v_add3_u32）', 'hip-loop': 'ポータブルなバイトごとのループ',
       },
       tier: {
