@@ -110,7 +110,7 @@
 <p>이 장과의 관계: Strata는 둘 다 쓰고, 쓰는 자리가 서로 달라요. 하나를 잘못 쓰면 오류는 나지 않고 √d배만큼 어긋나요.</p>
 <p class="further">더 읽을거리: <a href="https://en.wikipedia.org/wiki/Normalization_(machine_learning)" target="_blank" rel="noopener noreferrer">Wikipedia: Normalization (machine learning)</a> · <a href="https://arxiv.org/abs/1910.07467" target="_blank" rel="noopener noreferrer">RMSNorm 원 논문</a> · <a href="https://pytorch.org/docs/stable/generated/torch.nn.RMSNorm.html" target="_blank" rel="noopener noreferrer">PyTorch 문서: RMSNorm</a> · <a href="https://ko.wikipedia.org/wiki/%EB%B2%A1%ED%84%B0" target="_blank" rel="noopener noreferrer">위키백과: 벡터</a></p>
 </aside>
-<p>Strata에서는 잔차를 읽을 때마다 차선 각각에 RMS 정규화를 해요. GDN 층은 q와 k에 L2 정규화를 하고, v에는 하지 않아요. <span class="ev ev-code">코드 사실</span>(<code>gr.hpp</code> 81행, <code>layer.hpp</code> 12, 23행) GDN의 헤더 파일은 특별히 이렇게 알려 줘요. ε는 <strong>제곱합</strong>에 붙는 하한이지 평균에 붙는 것이 아니므로 너비로 나누면 안 돼요. "평균 제곱"으로 잘못 읽으면 헤드마다 128차원이라 결과가 √128 ≈ 11.3배 어긋나요.[S17] 이 모델의 RMS 정규화 ε는 10<sup>−6</sup>이에요.[S14][S18]</p>
+<p>Strata에서는 잔차를 읽을 때마다 차선 각각에 RMS 정규화를 해요. GDN 층은 q와 k에 L2 정규화를 하고, v에는 하지 않아요. <span class="ev ev-code">코드 사실</span>(<code>gr.hpp</code> 83행, <code>layer.hpp</code> 12, 23행) GDN의 헤더 파일은 특별히 이렇게 알려 줘요. ε는 <strong>제곱합</strong>에 붙는 하한이지 평균에 붙는 것이 아니므로 너비로 나누면 안 돼요. "평균 제곱"으로 잘못 읽으면 헤드마다 128차원이라 결과가 √128 ≈ 11.3배 어긋나요.[S17] 이 모델의 RMS 정규화 ε는 10<sup>−6</sup>이에요.[S14][S18]</p>
 <p>아래 작은 도구가 계산해 줘요. 입력을 바꿔 가며 두 정규화를 비교해 보세요.</p>
 <div class="viz" data-viz="norm-compare"><figure class="fig"><svg viewBox="0 0 400 270" role="img" aria-label="그림 7-5: 입력 3과 4에서 L2 정규화는 0.6과 0.8, RMS 정규화는 0.85와 1.13이 된다. 두 결과는 루트 2배 차이가 난다">
 <text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">입력 x</text>
@@ -144,7 +144,7 @@
 <p>이 장과의 관계: Strata의 모델은 이 직통 차선을 4개로 늘렸어요. 더할 때는 배워 둔 가중치도 함께 곱해요.</p>
 <p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/%EC%9E%94%EC%B0%A8_%EC%8B%A0%EA%B2%BD%EB%A7%9D" target="_blank" rel="noopener noreferrer">위키백과: 잔차 신경망</a> · <a href="https://arxiv.org/abs/1512.03385" target="_blank" rel="noopener noreferrer">ResNet 원 논문</a> · <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener noreferrer">The Illustrated Transformer(그림 해설, 잔차와 정규화 포함)</a></p>
 </aside>
-<p>Strata의 잔차는 나란히 달리는 차선 4개이고, 차선마다 숫자 2560개예요. <span class="ev ev-code">코드 사실</span>[S04][S13] 읽을 때는 차선 4개가 각자 정규화된 뒤, 벡터 하나로 합쳐져 믹서나 MoE에 전달돼요. 다시 쓸 때는 같은 수정값을 <strong>모든</strong> 차선에 더하고, 차선마다 곱하는 가중치만 달라요. 가중치는 w = 2 × sigmoid(inject ÷ 4)예요. inject는 잔차를 읽을 때 덤으로 계산되는 숫자예요.(<code>gr.hpp</code> 6–8, 119–125행)</p>
+<p>Strata의 잔차는 나란히 달리는 차선 4개이고, 차선마다 숫자 2560개예요. <span class="ev ev-code">코드 사실</span>[S04][S13] 읽을 때는 차선 4개가 각자 정규화된 뒤, 벡터 하나로 합쳐져 믹서나 MoE에 전달돼요. 다시 쓸 때는 같은 수정값을 <strong>모든</strong> 차선에 더하고, 차선마다 곱하는 가중치만 달라요. 가중치는 w = 2 × sigmoid(inject ÷ 4)예요. inject는 잔차를 읽을 때 덤으로 계산되는 숫자예요.(<code>gr.hpp</code> 6–8, 121–127행)</p>
 <p>이 "2배 sigmoid" 설계는 꽤 영리해요. sigmoid(0) = 0.5라서 inject = 0이면 w가 정확히 1이 되고, 다시 쓰기는 평범한 잔차 덧셈으로 돌아가요. 소스 코드 주석도 이 점을 짚고 있고, 테스트에서도 따로 단언해요. 가중치는 0에서 2 사이에서 움직여서, 모델이 차선마다 "더 귀 기울일지" "덜 귀 기울일지"를 스스로 정해요. 그림 7-4를 보세요.</p>
 <div class="viz" data-viz="layer-walk"><figure class="fig"><svg viewBox="0 0 400 266" role="img" aria-label="그림 7-4: 잔차 차선 4개에서 벡터 하나를 읽어 수정값 Δ를 계산하고, Δ에 각자의 가중치를 곱해 모든 차선에 다시 더한다">
 <text class="f-text" fill="#182f2b" x="8" y="43" font-size="12">차선 0</text>
@@ -248,8 +248,8 @@
 <details class="deep"><summary>한 걸음 더: 다중 차선 잔차의 실제 공식, 타입에 따라 고르는 활성값 형식, 어느 층이 틀렸는지 찾는 법</summary>
 <h3>교육용 식 x′ = x + f(norm(x))는 Strata의 항별 등식이 아니에요</h3>
 <p>본문에서는 직관을 위해 벡터 하나짜리 잔차 공식을 썼어요. 실제 모델의 기하 구조에는 <code>hc = 4</code>가 있고, 세션 상태 속 잔차 R은 4 × 2560의 다중 차선 구조예요.[S04][S13] 이것을 평범한 단일 벡터 잔차로 바꾸면 모델이 달라져요.</p>
-<p>잔차 읽기(<code>gr_read</code>)의 전체 단계는 다음과 같아요. 차선마다 따로 RMS 정규화를 해서 xn을 얻어요(정규화 계수는 저장할 때부터 1 + w 형태로 적어 둬요). 차선 4개를 이어 붙여 320차원의 "병목"을 통과시켜요. lo = SiLU((xn의 BF16 버전 × w_down) ÷ hc)예요. hc로 나누는 것이 SiLU <strong>안쪽</strong>에 있다는 점을 놓치기 쉬운데, 결과를 실질적으로 바꿔요. 그다음 mixed = 각 차선에서 xn × sigmoid(lo × w_up)의 평균이고, inject = xn × w_inject예요. 마지막 층 뒤의 "최종 합치기"에는 inject가 없어요. 그 뒤에 다시 쓸 곳이 없기 때문이에요.(<code>gr.hpp</code> 79–91행)</p>
-<p>다시 쓰기(<code>gr_write</code>)는 R_out[c] = R[c] + block_out × w[c]이고, w[c] = 2 × sigmoid(inject[c] ÷ hc)예요.(<code>gr.hpp</code> 119–125행)</p>
+<p>잔차 읽기(<code>gr_read</code>)의 전체 단계는 다음과 같아요. 차선마다 따로 RMS 정규화를 해서 xn을 얻어요(정규화 계수는 저장할 때부터 1 + w 형태로 적어 둬요). 차선 4개를 이어 붙여 320차원의 "병목"을 통과시켜요. lo = SiLU((xn의 BF16 버전 × w_down) ÷ hc)예요. hc로 나누는 것이 SiLU <strong>안쪽</strong>에 있다는 점을 놓치기 쉬운데, 결과를 실질적으로 바꿔요. 그다음 mixed = 각 차선에서 xn × sigmoid(lo × w_up)의 평균이고, inject = xn × w_inject예요. 마지막 층 뒤의 "최종 합치기"에는 inject가 없어요. 그 뒤에 다시 쓸 곳이 없기 때문이에요.(<code>gr.hpp</code> 81–93행)</p>
+<p>다시 쓰기(<code>gr_write</code>)는 R_out[c] = R[c] + block_out × w[c]이고, w[c] = 2 × sigmoid(inject[c] ÷ hc)예요.(<code>gr.hpp</code> 121–127행)</p>
 <p>이 차선 가중치는 모두 BF16 형식이에요. 패킹 파일은 디코딩을 쉽게 하려고 이것을 32비트로 넓혀 저장해요. 엔진이 로드할 때 다시 16비트로 줄이면 정밀도는 하나도 잃지 않고, 밀집(dense) 가중치 5.305 GiB 중 1.374 GiB를 아껴요. 주석은 이것이 "밀집 가중치가 전문가 캐시와 함께 VRAM에 들어가느냐, 못 들어가느냐"의 차이라고 해요.(<code>gr.hpp</code> 10–14행)</p>
 <h3>활성값 형식은 이름이 아니라 텐서 타입을 따라가요</h3>
 <p>양자화된 가중치는 행렬 곱 전에 입력 벡터도 맞는 형식으로 바꿔야 해요. <code>layer.cpp</code>에는 교훈 하나가 적혀 있어요. 이름이 같은 텐서라도 층마다 양자화 타입이 다를 수 있어요. 예를 들어 GDN 층 36개의 <code>attn_qkv</code>는 13개 층이 IQ4_XS, 18개 층이 Q3_K, 4개 층이 Q4_K, 1개 층이 Q2_0이에요. 규칙은 <strong>타입</strong>으로 정해요. 2비트 인코딩에는 Q8_0 형식의 입력을, 다른 양자화 타입에는 Q8_K를 짝지어요. 형식을 잘못 고르면 행렬 곱이 0.6%–1.4% 어긋나고, 망가진 벡터가 아니라 "그럴듯해 보이는" 벡터가 나와요.[S14]</p>
