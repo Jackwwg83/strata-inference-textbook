@@ -53,8 +53,8 @@
 <text class="f-muted" fill="#5c6d66" x="200" y="320" font-size="14" text-anchor="middle">越往下：越快、越能指出是哪一行，覆盖面越窄</text>
 </svg><figcaption>图 26-2　测试阶梯。每一层抓不同的错误，谁也替代不了谁。下层全过，不等于上层一定过。</figcaption></figure>
 <p>挑几层看看 Strata 实际怎么做。</p>
-<p><strong>最底层是纯函数。</strong>把一个 32 位浮点数转成 16 位的 BF16 格式，输入只有 2³² 种，大约 43 亿种。Strata 的测试干脆全部试一遍：每一种输入都和 ggml（llama.cpp 背后的计算库）的转换规则比，几秒钟跑完。这个测试抓到过一个真 bug：旧的舍入写法遇到 NaN（“不是一个数”）时会进位，把 NaN 变成了 −0 或无穷大，上游传来的 NaN 就这样被悄悄掩盖了。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/src/kernels/bf16_bits_test.cpp#L1-L13" target="_blank" rel="noopener noreferrer">bf16_bits_test.cpp</a>）</p>
-<p><strong>第二层是单个算子。</strong>每个 GPU 内核都有一个对照测试，把它和一份可信的参照实现比。构建脚本里的注释说得很直白：参照实现本身先和 ggml 核对过；“拿一个内核去和它自己的另一份拷贝比，什么也证明不了”。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/CMakeLists.txt#L305-L307" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）</p>
+<p><strong>最底层是纯函数。</strong>把一个 32 位浮点数转成 16 位的 BF16 格式，输入只有 2³² 种，大约 43 亿种。Strata 的测试干脆全部试一遍：每一种输入都和 ggml（llama.cpp 背后的计算库）的转换规则比，几秒钟跑完。这个测试抓到过一个真 bug：旧的舍入写法遇到 NaN（“不是一个数”）时会进位，把 NaN 变成了 −0 或无穷大，上游传来的 NaN 就这样被悄悄掩盖了。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/src/kernels/bf16_bits_test.cpp#L1-L13" target="_blank" rel="noopener noreferrer">bf16_bits_test.cpp</a>）</p>
+<p><strong>第二层是单个算子。</strong>每个 GPU 内核都有一个对照测试，把它和一份可信的参照实现比。构建脚本里的注释说得很直白：参照实现本身先和 ggml 核对过；“拿一个内核去和它自己的另一份拷贝比，什么也证明不了”。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/CMakeLists.txt#L305-L307" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）</p>
 <p><strong>第三层是组合与契约。</strong><code>layout.hpp</code> 在加载模型时就检查每个张量的形状是否符合内核的假设，发现不符就报出张量名、实际形状和要求的形状。注释里的原话是：要在加载时报错，而不是在第 4000 个 token 时变成矩阵乘法里一个错误的数。[S04] 同一段注释还记了一个真实教训：有一轮开发把索引器的键缓存按“4 个头”算了大小，实际只有 1 个共享的头，大了 4 倍。这个错误在代码里活过了一轮，因为它让预算变得更保守，没人觉得哪里不对。[S04]</p>
 <p><strong>上面两层</strong>要跑整个模型。第 26.4 节专门讲。</p>
 <p>阶梯的每一层都不能省。Strata 有一个现成的反面例子：模型里有一个叫 PLE 的模块（第 11 章讲过的查表模块），它的每个零件都写好了，也都单独通过了对照测试，可是没有任何一处模型代码真正调用它。结果整模型的一道验收关（代号 C1）没有通过。<span class="ev ev-code">代码事实</span>[S13] 零件全绿，系统照样是错的。</p>
@@ -68,7 +68,7 @@
 <p class="bridge"><strong>学过计算机的同学：</strong>这就是《软件工程》里的测试金字塔和 V 模型。推理引擎的特别之处在于中间多了一层“对照参照实现”：因为大部分算子的正确答案没法手算，只能找一个独立的、可信的实现来比。</p>
 
 <h2 id="sec-3">26.3 浮点数的“相等”，要先定义</h2>
-<p>回到开头那个实验。显卡和 CPU 算的是同一个量化专家，数据一字节不差，结果却在最后几位小数上不一样。作者的解释是：两边做浮点运算的顺序不同，两者都是对模型同样好的近似。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity 报告</a>）</p>
+<p>回到开头那个实验。显卡和 CPU 算的是同一个量化专家，数据一字节不差，结果却在最后几位小数上不一样。作者的解释是：两边做浮点运算的顺序不同，两者都是对模型同样好的近似。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity 报告</a>）</p>
 <p>顺序为什么会影响结果？因为计算机里的浮点数位数有限，每做一次加法都要四舍五入一次。举个极端的例子：在 32 位浮点数（FP32）里，1 亿附近能表示的相邻两个数相差 8。所以 1 亿加 1，结果还是 1 亿，那个 1 被“吃掉”了。同样四个数，换个顺序加，答案就不同，见图 26-3。</p>
 <div class="viz" data-viz="tolerance-lab"><figure class="fig"><svg viewBox="0 0 400 282" role="img" aria-label="图 26-3：四个数一亿、一、负一亿、一，在 FP32 里按两种顺序相加，分别得到 1 和 0，正确答案是 2">
 <text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="14" text-anchor="middle">四个数 [1亿, 1, −1亿, 1]，用 FP32 相加</text>
@@ -122,7 +122,7 @@
 <text class="f-muted" fill="#5c6d66" x="380" y="206" font-size="14" text-anchor="end">10³</text>
 <text class="f-text" fill="#182f2b" x="210" y="230" font-size="14" text-anchor="middle">被比较的数 |b| 有多大（对数刻度）</text>
 </svg><figcaption>图 26-4　允许误差 = max(rtol × |b|, atol)。数大时看相对容差，数接近 0 时看绝对容差。图中 rtol = 10⁻⁵、atol = 10⁻⁸，只是示意。</figcaption></figure>
-<p>那什么时候应该坚持逐位相同？答案是：两边做的是<strong>完全相同的运算、完全相同的顺序</strong>时。比如把量化数据从一种存储格式换成另一种，只是重新排列字节，解码出来的值就必须一位不差。Strata 的 <code>canonical_xcheck.py</code> 正是这样要求的。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/tools/canonical_xcheck.py#L1-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>）反过来，连编译器的优化都可能改变顺序。Strata 在 AMD 显卡上特意关掉了两个文件的“乘加合并”（FMA）：把乘法和加法合成一条指令只舍入一次，会改变“正好在中间”时的取舍结果。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/CMakeLists.txt#L399-L403" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）</p>
+<p>那什么时候应该坚持逐位相同？答案是：两边做的是<strong>完全相同的运算、完全相同的顺序</strong>时。比如把量化数据从一种存储格式换成另一种，只是重新排列字节，解码出来的值就必须一位不差。Strata 的 <code>canonical_xcheck.py</code> 正是这样要求的。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/tools/canonical_xcheck.py#L1-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>）反过来，连编译器的优化都可能改变顺序。Strata 在 AMD 显卡上特意关掉了两个文件的“乘加合并”（FMA）：把乘法和加法合成一条指令只舍入一次，会改变“正好在中间”时的取舍结果。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/CMakeLists.txt#L409-L413" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）</p>
 <p class="bridge"><strong>学过计算机的同学：</strong>《数值分析》讲过：浮点加法满足交换律，但不满足结合律，(a + b) + c 和 a + (b + c) 可能不同。GPU 上成千上万个线程做归约，求和的分组方式由线程布局决定，所以“同一个公式”在 CPU 和 GPU 上本来就不该期望逐位相同。</p>
 
 <h2 id="sec-4">26.4 差一点点，就换了一个词</h2>
@@ -174,7 +174,7 @@
 <tr><td>长文档（1,024 个 token）</td><td>96.2%</td><td>29.844</td><td>29.843</td></tr>
 <tr><td>聊天（1,024 个 token）</td><td>95.0%</td><td>18.380</td><td>18.301</td></tr>
 </tbody></table></div>
-<p>表里的<dfn>困惑度</dfn>衡量模型对这段真实文字有多“意外”，越低说明预测得越准。报告的结论有三条：缓存会在 2%–5% 的位置上改变“两个几乎同分的候选谁赢”，大多数翻转发生在前两名分数差不到 0.5 的地方；两边的困惑度在 1 个标准误差之内相同，没有谁更准；显卡和 CPU 用不同的浮点顺序计算同一个专家，是同样好的近似。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity 报告</a>）</p>
+<p>表里的<dfn>困惑度</dfn>衡量模型对这段真实文字有多“意外”，越低说明预测得越准。报告的结论有三条：缓存会在 2%–5% 的位置上改变“两个几乎同分的候选谁赢”，大多数翻转发生在前两名分数差不到 0.5 的地方；两边的困惑度在 1 个标准误差之内相同，没有谁更准；显卡和 CPU 用不同的浮点顺序计算同一个专家，是同样好的近似。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/bench/results/2026-09-27-cache-parity/README.md" target="_blank" rel="noopener noreferrer">cache-parity 报告</a>）</p>
 <p>这张表演示了一个好的比较该怎么做：既看离散的决策（首选词是否相同），也看连续的质量（困惑度），还要说明翻转发生在什么地方。只报告“96% 的词相同”，读者会以为 4% 的地方出了错；只报告“困惑度相同”，又可能掩盖一个只在少数位置出错的 bug。</p>
 
 <h2 id="sec-5">26.5 让测试先失败一次：参照答案与负例</h2>
@@ -218,7 +218,7 @@
 <h3>差分测试与变形测试</h3>
 <p>很多计算没有能手算的标准答案：一个 2560 维的矩阵乘法，谁也没法在纸上验算。<dfn>差分测试</dfn>的思路是：找一个独立实现的版本当参照，两边吃同样的输入，比较输出。参照可以慢、可以笨，只要可信就行。Strata 的对照测试就是这样：GPU 内核对一条已经验证过的标量参照路径，而这条参照路径本身先和 ggml 核对过。</p>
 <p>参照的关键是<strong>独立</strong>。Strata 的 <code>layer.cpp</code> 里记着一个教训：两个打包工具都按字段名 <code>mins</code> 去找某种量化数据的偏移量平面，可这个平面真正的名字是 <code>offsets</code>。两个工具“一致同意”，于是一起漏掉了 54 个张量的偏移量，共 136 MiB。注释的结论是：两个工具意见一致，只有在它们不共享那个错误假设时才算证据。<span class="ev ev-code">代码事实</span>[S14]</p>
-<p>当连参照都不好找时，还可以用<dfn>变形测试</dfn>：不知道正确答案是多少，但知道“输入这样变，输出应该怎样变”。比如 Strata 的 KV 缓存按页存放，测试用同一份数据，分别按每页 1、4、512 个格子存放，并把页表打乱，要求注意力的输出完全相同。[S18] 再比如投机解码的验证窗口，设计上要求每个位置选出的词和逐个 token 生成时逐位相同。[S08] 这些“应该不变”的规律，就是不需要标准答案的参照。</p>
+<p>当连参照都不好找时，还可以用<dfn>变形测试</dfn>：不知道正确答案是多少，但知道“输入这样变，输出应该怎样变”。比如 Strata 的 KV 缓存按页存放，测试用同一份数据，分别按每页 1、4、512 个格子存放，并把页表打乱，要求注意力的输出完全相同。[S18] 再比如投机解码的验证窗口，设计上要求每个位置选出的词和逐个 token 生成时逐位相同。[S08] 这是默认的规则。v0.1.40.2 加了一个默认关闭的“概率接受”（<code>STRATA_SPEC_PROB=1</code>）：对采样请求，它只保证每个位置的词服从同一个分布，不再保证逐位相同。<span class="ev ev-code">代码事实</span> 这些“应该不变”的规律，就是不需要标准答案的参照。</p>
 <p class="further">延伸阅读：<a href="https://en.wikipedia.org/wiki/Differential_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Differential testing</a> · <a href="https://en.wikipedia.org/wiki/Metamorphic_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Metamorphic testing</a> · <a href="https://en.wikipedia.org/wiki/Test_oracle" target="_blank" rel="noopener noreferrer">Wikipedia: Test oracle</a> · <a href="https://en.wikipedia.org/wiki/Mutation_testing" target="_blank" rel="noopener noreferrer">Wikipedia: Mutation testing</a></p>
 </aside>
 <figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="图 26-7：差分测试的流程。同一批输入分别交给被测实现和独立参照，再按规则比较">
@@ -238,7 +238,7 @@
 <text class="f-text" fill="#182f2b" x="200" y="222" font-size="14" text-anchor="middle">参照必须独立：共享同一个错误假设，比较就失去意义</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="242" font-size="14" text-anchor="middle">反例：两个工具都找 mins 字段，一起漏掉了同一批数据</text>
 </svg><figcaption>图 26-7　差分测试：两份独立的实现吃同样的输入，结果按事先定好的规则比较。规则可以是逐位相同，也可以是带容差。</figcaption></figure>
-<p>差分测试也抓到过 Strata 的真 bug。Q2_0 量化格式里，2 位编码 0–3 解码时要先减 1，可表示的值是 {−d, 0, d, 2d}，而不是 {0, d, 2d, 3d}。漏掉这个减 1，大多数值看起来都对，其实每个都偏了一格。所以转换工具逐字照抄 ggml 的解码表达式，再逐位对照。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/tools/canonical_xcheck.py#L7-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>）同一个文件还记录了 Q8_0 格式的一次真实失误：编码曾被当成有符号数存放，自己和自己的解码器完全一致；直到用真实模型打包，才发现那两个张量解码后整体偏了 128 个编码，而其他 12 种类型都正常。</p>
+<p>差分测试也抓到过 Strata 的真 bug。Q2_0 量化格式里，2 位编码 0–3 解码时要先减 1，可表示的值是 {−d, 0, d, 2d}，而不是 {0, d, 2d, 3d}。漏掉这个减 1，大多数值看起来都对，其实每个都偏了一格。所以转换工具逐字照抄 ggml 的解码表达式，再逐位对照。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/tools/canonical_xcheck.py#L7-L18" target="_blank" rel="noopener noreferrer">canonical_xcheck.py</a>）同一个文件还记录了 Q8_0 格式的一次真实失误：编码曾被当成有符号数存放，自己和自己的解码器完全一致；直到用真实模型打包，才发现那两个张量解码后整体偏了 128 个编码，而其他 12 种类型都正常。</p>
 <p class="bridge"><strong>学过计算机的同学：</strong>编译器课上有一种经典做法，叫“对拍”：同一份程序交给两个编译器，比较运行结果。ACM 竞赛里写暴力解法去对拍优化解法，也是同一个思路。</p>
 
 <h2 id="sec-6">26.6 动手：给微型引擎写测试</h2>
@@ -266,11 +266,11 @@
 <h3>可以直接拿来用的变形关系</h3>
 <p>页表和数据一起做同样的置换，逻辑上的注意力结果应当不变；同一段输入切成不同的块，分块之间的状态交接应当等价；保存后恢复再继续，应当和从未离开一样；关掉草稿，应当和对应的目标路径语义一致。[S08][S18] 这些关系能生成大量强测试，但要写明容差和数值路径：跨 CPU / GPU、换矩阵乘法实现、换量化路径时，不保证逐位相同，既不能把所有差异直接放行，也不能无视已知的舍入边界。</p>
 <h3>“逐位相同”的承诺有边界</h3>
-<p>Strata 的验证窗口在头文件里承诺：每个位置的选词和逐个生成时逐位相同。[S08] 可上游文档同时记录：使用 IQ 系列量化时，CPU 计算一个 token 和计算多个 token 用的是两套舍入略有不同的内核，所以温度为 0 的同一个提示，可能因为草稿、缓存状态或会话恢复的不同，得出另一个同样好的答案（issue #152）。设置 <code>STRATA_IQ_MT_MIN=1</code> 后，所有情况都走多 token 内核，答案就不再依赖草稿。若要在服务里做到字节级可重复，还要加上 <code>--prompt-cache 0 --adapt-swaps 0 --pcie-frac 0</code>。作者实测（IQ3_XXS、3.6K token 的提示、重复 4 次）：三个开关都加，4 次只出现 1 种答案；不加 <code>--pcie-frac 0</code>，出现 2 种（第一次不同）；全用默认值，也是 2 种。<span class="ev ev-report">上游报告</span>[S03] 头文件写的是设计目标，文档写的是实测边界，两样都要读。</p>
+<p>Strata 的验证窗口在头文件里承诺：每个位置的选词和逐个生成时逐位相同。[S08] 这个承诺针对默认的精确匹配；打开可选的概率接受后，采样请求只保证分布相同，同一个随机种子写出的文字还会随草稿变化。<span class="ev ev-report">上游报告</span> 可上游文档同时记录：使用 IQ 系列量化时，CPU 计算一个 token 和计算多个 token 用的是两套舍入略有不同的内核，所以温度为 0 的同一个提示，可能因为草稿、缓存状态或会话恢复的不同，得出另一个同样好的答案（issue #152）。设置 <code>STRATA_IQ_MT_MIN=1</code> 后，所有情况都走多 token 内核，答案就不再依赖草稿。若要在服务里做到字节级可重复，还要加上 <code>--prompt-cache 0 --adapt-swaps 0 --pcie-frac 0</code>。作者实测（IQ3_XXS、3.6K token 的提示、重复 4 次）：三个开关都加，4 次只出现 1 种答案；不加 <code>--pcie-frac 0</code>，出现 2 种（第一次不同）；全用默认值，也是 2 种。<span class="ev ev-report">上游报告</span>[S03] 头文件写的是设计目标，文档写的是实测边界，两样都要读。</p>
 <h3>主动注入的负例清单</h3>
 <p>给测试故意注入这些错误：把头映射从取模改成整数除法；用 RMS 归一化代替 L2 归一化；每层的激活缓存只按指针判断；路由权重重复乘；位置计数被冻结；恢复会话时漏掉 PLE 的历史。测试应当稳定失败，并指出最早被违反的契约。如果注入后测试仍然通过，它多半只检查了“进程没崩溃”。参照实现不能和被测代码共享同一个错误假设，<code>layer.cpp</code> 里两个工具都找错字段名的案例适合在课堂上讨论。[S14]</p>
 <h3>公开仓库能跑哪些测试</h3>
-<p>Strata 的 <code>CMakeLists.txt</code> 注释写明：完整的测试套件和微基准放在 <code>tests/</code> 和 <code>bench/micro/</code>，公开源码没有包含它们，所以构建测试的开关默认是关的。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/1735d6471df29b42c26170efaac1f1446a58640f/CMakeLists.txt#L94-L99" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）同样，<code>gdn.hpp</code> 注释里提到的参照实现 <code>ref/gdn.py</code>，在公开仓库的 <code>ref/</code> 目录里也找不到，那里只有 <code>load.py</code>。本章引用的对照测试和实测，来自公开的源码注释、测试文件和报告；本书没有在 GPU 上重跑它们。</p>
+<p>Strata 的 <code>CMakeLists.txt</code> 注释写明：完整的测试套件和微基准放在 <code>tests/</code> 和 <code>bench/micro/</code>，公开源码没有包含它们，所以构建测试的开关默认是关的。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/CMakeLists.txt#L94-L99" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a>）同样，<code>gdn.hpp</code> 注释里提到的参照实现 <code>ref/gdn.py</code>，在公开仓库的 <code>ref/</code> 目录里也找不到，那里只有 <code>load.py</code>。本章引用的对照测试和实测，来自公开的源码注释、测试文件和报告；本书没有在 GPU 上重跑它们。</p>
 <h3>本书随附测试证明的是什么</h3>
 <p><code>labs/tiny_inference.py</code> 的测试检查分段处理、保存与恢复、参考重放和受控草稿接受。它们证明的是本书的教学代码，<strong>不是</strong>上游 Strata 的 GPU 实现。Strata 的分派、量化、异步执行和真实权重，需要在对应的环境里独立验证。</p>
 </details>

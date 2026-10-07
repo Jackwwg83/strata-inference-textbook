@@ -24,7 +24,7 @@
 <text class="f-muted" fill="#5c6d66" x="200" y="254" font-size="12" text-anchor="middle">sm_75 … sm_120</text>
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="268" y="212" width="124" height="54" rx="8"/>
 <text class="f-text" fill="#182f2b" x="330" y="234" font-size="13" font-weight="600" text-anchor="middle">AMD GPU</text>
-<text class="f-muted" fill="#5c6d66" x="330" y="254" font-size="12" text-anchor="middle">gfx1012 … gfx1201</text>
+<text class="f-muted" fill="#5c6d66" x="330" y="254" font-size="12" text-anchor="middle">gfx1010 … gfx1201</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="290" font-size="12" text-anchor="middle">同一份源码，三种“方言”的机器码</text>
 </svg><figcaption>图 22-1　源代码只写一次。预处理器先按目标改写源码，编译器再把它翻译成目标芯片的指令。换一种芯片，就要重新编译一次。</figcaption></figure>
 <p>图里的 <code>sm_120</code>、<code>gfx1100</code> 是显卡架构的编号，相当于厨房的型号。Strata 的构建脚本要求 NVIDIA 显卡的计算能力至少是 7.5，也就是 RTX 20 系列及更新；AMD 这边只收一份明确的名单，名单外的架构直接报错。<span class="ev ev-code">代码事实</span> v0.1.39 另开了两条实验路径：给 Pascal、Volta 老卡的 CUDA 12 引擎，和给 gfx906 的单独构建。22.3 节会讲到它们。<span class="ev ev-report">上游报告</span></p>
@@ -52,7 +52,7 @@
 <text class="f-text" fill="#182f2b" x="200" y="202" font-size="12" text-anchor="middle">预处理器在编译之前，删掉没选中的分支</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="222" font-size="12" text-anchor="middle">所以同一份源码，能编出只含一条路的不同程序</text>
 </svg><figcaption>图 22-2　条件编译：一份源文件写好所有分支，每次编译只留下与目标相符的那一个。编译器根本看不到其他分支。</figcaption></figure>
-<p>这正是 Strata 在 AMD 显卡上做“四字节点积”的写法：RDNA3、RDNA4 显卡（v0.1.40 起还有 RDNA3.5 的 gfx1150、gfx1151）用一条 sudot4 指令；RDNA2 没有这条，改用老一些的 sdot4；RDNA1（gfx1012）连 sdot4 也没有，就用一小段汇编，以 4 次乘法、2 次三数相加拼出同样的结果；其他情况退回一个逐字节相乘再相加的循环。四条路算出的整数一模一样，快慢不同。<span class="ev ev-code">代码事实</span> 22.3 节会亲手编译它。</p>
+<p>这正是 Strata 在 AMD 显卡上做“四字节点积”的写法：RDNA3、RDNA4 显卡（v0.1.40 起还有 RDNA3.5 的 gfx1150、gfx1151）用一条 sudot4 指令；RDNA2 没有这条，改用老一些的 sdot4；RDNA1 的 gfx1012 连 sdot4 也没有，就用一小段汇编，以 4 次乘法、2 次三数相加拼出同样的结果；其他情况（包括 v0.1.40.2 新加的 RDNA1 gfx1010、gfx1011 和 RDNA3 核显 gfx1103）退回一个逐字节相乘再相加的循环。四条路算出的整数一模一样，快慢不同。<span class="ev ev-code">代码事实</span> 22.3 节会亲手编译它。</p>
 <p class="further">延伸阅读：<a href="https://oi-wiki.org/tools/compiler/" target="_blank" rel="noopener noreferrer">OI Wiki：编译器</a> · <a href="https://zh.wikipedia.org/zh-cn/指令集" target="_blank" rel="noopener noreferrer">维基百科：指令集架构</a> · <a href="https://zh.wikipedia.org/zh-cn/C预处理器" target="_blank" rel="noopener noreferrer">维基百科：C 预处理器</a> · <a href="https://en.cppreference.com/w/cpp/preprocessor/conditional" target="_blank" rel="noopener noreferrer">cppreference：条件编译（英文）</a></p>
 </aside>
 <p class="bridge"><strong>学过计算机的同学：</strong>《编译原理》课讲的是词法分析、语法分析、代码生成这条主线；预处理发生在这一切之前，是纯文本加工，不懂语法。所以宏替换出了错，报错位置常常很怪：编译器看到的已经是替换之后的代码。</p>
@@ -128,7 +128,7 @@
 <ol>
 <li>构建脚本把所有 <code>.cu</code> 文件标成 HIP 语言，交给 AMD 的编译器。</li>
 <li>编译参数里加上 <code>-include hip_compat/cuda_runtime.h</code>，把这份垫片头文件强行塞到每个源文件的最前面。这里的<dfn>垫片</dfn>（shim），指夹在两层之间、专门抹平差异的一薄层代码。</li>
-<li>垫片里有 89 行形如 <code>#define cudaMalloc hipMalloc</code> 的宏；其中几个名字按 HIP 版本或平台给了两种写法，每次编译只留一种。另一份 <code>cublas_v2.h</code> 垫片再管矩阵库的名字：新版 hipBLAS 用 17 行，老版本（0.x）另有 15 行，直接换成更底层的 rocBLAS 的名字。预处理器一替换，CUDA 的名字就变成了 HIP 的名字。</li>
+<li>垫片里有 91 行形如 <code>#define cudaMalloc hipMalloc</code> 的宏；其中几个名字按 HIP 版本或平台给了两种写法，每次编译只留一种。另一份 <code>cublas_v2.h</code> 垫片再管矩阵库的名字：新版 hipBLAS 用 17 行，老版本（0.x）另有 15 行，直接换成更底层的 rocBLAS 的名字。预处理器一替换，CUDA 的名字就变成了 HIP 的名字。</li>
 </ol>
 <p>构建脚本还规定：CUDA 和 HIP 两个开关不能同时打开，一次构建只编一个后端。<span class="ev ev-code">代码事实</span></p>
 <p>光改名还不够。有些 CUDA 的显卡内置函数，HIP 在 RDNA 显卡上没有现成的，垫片只好自己实现。比如四字节点积 <code>__dp4a</code>：把两个 32 位整数各拆成 4 个有符号字节，对应相乘再加到累加器上。垫片按显卡架构分四路（见 22.1 节的专栏）。再比如 warp 内交换数据的 <code>__shfl_xor_sync</code>：垫片先检查“32 条通道是否全部参与”，不是就立刻中止，而不是悄悄丢掉这层语义。<span class="ev ev-code">代码事实</span></p>
@@ -149,11 +149,11 @@
 <text class="f-text" fill="#182f2b" x="216" y="160" font-size="11">cudaMalloc → hipMalloc</text>
 <text class="f-text" fill="#182f2b" x="216" y="184" font-size="11">STRATA_DP4A → sudot4</text>
 <text class="f-muted" fill="#5c6d66" x="216" y="208" font-size="11">RDNA3 的 v_dot4 指令</text>
-<text class="f-text" fill="#182f2b" x="200" y="258" font-size="12" text-anchor="middle">改名靠 hip_compat/cuda_runtime.h 里的 89 行 #define</text>
+<text class="f-text" fill="#182f2b" x="200" y="258" font-size="12" text-anchor="middle">改名靠 hip_compat/cuda_runtime.h 里的 91 行 #define</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="282" font-size="11" text-anchor="middle">例题 dp4a 在两边都算出 95：整数运算逐位相同</text>
 </svg><figcaption>图 22-5　源码一个字不改。NVIDIA 构建直接用 CUDA 的名字；AMD 构建由垫片把名字换成 HIP 的说法，把点积换成 AMD 自己的指令。</figcaption></figure></div>
 <p>编出来的引擎还记着自己是给哪些架构编的。启动时，引擎拿显卡的实际架构和这份名单对照，并要求 wave32。对不上就带着显卡名字和名单报错退出，而不是等到运行中冒出一句看不懂的“invalid device function”。<span class="ev ev-code">代码事实</span></p>
-<p>NVIDIA 这边同样用条件编译照顾老卡。<code>__dp4a</code> 从计算能力 6.1 才有。给 6.0 的老卡编译时，<code>#if</code> 会换成一段等价的软件循环；这条路要手动打开实验开关 <code>STRATA_EXPERIMENTAL_SM60</code>，还要用 CUDA 12，因为 CUDA 13 已经编不了这些老卡。<span class="ev ev-code">代码事实</span> v0.1.39 起，上游也发布了这样一个用 CUDA 12.9 编的实验引擎，给 Pascal、Volta 老卡用。当时维护者手上没有这些卡，只验证了它能编译、能通过单元测试。v0.1.40 起，维护者有了一块 P100（sm_60），在 3 种量化上测得 10/10 一致；Volta 仍没有真卡验证。<span class="ev ev-report">上游报告</span> 构建脚本的报错信息却还写着“上游不支持”：提示文字常常落后于代码。另一个例子：用 CUDA 12.8 给 RTX 50 系列编译时，构建脚本会给出警告，因为有用户报告这样编出的引擎在长提示词上崩溃过。<span class="ev ev-code">代码事实</span> 可见编译器版本本身也是变量。</p>
+<p>NVIDIA 这边同样用条件编译照顾老卡。<code>__dp4a</code> 从计算能力 6.1 才有。给 6.0 的老卡编译时，<code>#if</code> 会换成 4 条 PTX 的 <code>vmad</code> 指令：每条从两个操作数里各取同一个字节，相乘后加进累加器，结果和逐字节相乘的写法逐位相同。这条路要手动打开实验开关 <code>STRATA_EXPERIMENTAL_SM60</code>，还要用 CUDA 12，因为 CUDA 13 已经编不了这些老卡。<span class="ev ev-code">代码事实</span> v0.1.40 时这里还是逐字节相乘的 C 代码。上游拿新写法和它对比了约 10.7 亿组输入，没有一处不同；单独测时，新写法在 P100 上快约 2.2 倍。<span class="ev ev-report">上游报告</span> 整数结果没变，只是更快了。v0.1.39 起，上游也发布了这样一个用 CUDA 12.9 编的实验引擎，给 Pascal、Volta 老卡用。当时维护者手上没有这些卡，只验证了它能编译、能通过单元测试。v0.1.40 起，维护者有了一块 P100（sm_60），在 3 种量化上测得 10/10 一致；Volta 仍没有真卡验证。<span class="ev ev-report">上游报告</span> 构建脚本的报错信息却还写着“上游不支持”：提示文字常常落后于代码。另一个例子：用 CUDA 12.8 给 RTX 50 系列编译时，构建脚本会给出警告，因为有用户报告这样编出的引擎在长提示词上崩溃过。<span class="ev ev-code">代码事实</span> 可见编译器版本本身也是变量。</p>
 
 <h2 id="sec-4">22.4 “能编译”离“支持”还有多远</h2>
 <p>假设你的显卡架构在名单里，引擎也编出来了。这算“支持”吗？Strata 自己的构建脚本给出了很细的回答。它把 AMD 架构分成三档，CMake 配置时对每档的态度不同：<span class="ev ev-code">代码事实</span></p>
@@ -170,7 +170,7 @@
 <text class="f-muted" fill="#5c6d66" x="80" y="197" font-size="12">gfx1102：ctest 通过</text>
 <rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="10" y="220" width="200" height="46" rx="8"/>
 <text class="f-text" fill="#182f2b" x="20" y="239" font-size="13" font-weight="600">① 能编译</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="257" font-size="12">6 种未验证架构编译时带警告</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="257" font-size="12">10 种未验证架构编译时带警告</text>
 <text class="f-muted" fill="#5c6d66" x="222" y="247" font-size="12">← 只证明编译器接受</text>
 <text class="f-muted" fill="#5c6d66" x="282" y="187" font-size="12">← 没崩、算得对</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="127" font-size="12">真实负载跑通 →</text>
@@ -180,15 +180,16 @@
 <ul>
 <li><strong>维护者验证</strong>：gfx1100（RX 7900 XT / XTX）和 gfx1201（RX 9070 系列、Radeon AI PRO R9700），维护者在真卡上跑过。</li>
 <li><strong>用户验证</strong>：gfx1101 和 gfx1200，由显卡的主人跑通并回报。配置时只打一行提示。</li>
-<li><strong>未验证</strong>：gfx1012、gfx1102、gfx1030、gfx1031、gfx1034 和 gfx1151 能编译，配置时给出警告，请用户回报结果。gfx1102 通过了自带测试，但还没有人报告过完整的模型运行；gfx1030 有一台社区机器跑通了，维护者还没亲自验证。gfx1012（RX 5500 XT，RDNA1）和 gfx1031（RX 6700 XT）是 v0.1.39 新加的，各有一位用户在自己的卡上跑过。gfx1034 和 gfx1151 是 v0.1.40 新加的。gfx1151 是 Ryzen AI Max（Strix Halo）芯片里的 Radeon 8060S / 8050S 核显（RDNA3.5），上游标为实验性：发布说明里有它在 Linux 上的实测，构建脚本却仍把它列为未验证，Windows 上也还没在真机跑过。<span class="ev ev-report">上游报告</span></li>
+<li><strong>未验证</strong>：gfx1010、gfx1011、gfx1012、gfx1102、gfx1103、gfx1030、gfx1031、gfx1034、gfx1150 和 gfx1151，共 10 种。它们能编译，配置时给出警告，请用户回报结果。<span class="ev ev-code">代码事实</span> gfx1102 通过了自带测试，还有一位用户用 RX 7600 XT 跑通了完整模型：146 个请求，上下文最长 51K。可这只是一份报告，构建脚本仍把它列为未验证；脚本里的注释甚至还写着“还没有人报告过模型运行”，落后于文档。gfx1030 有一台社区机器跑通了，维护者还没亲自验证。gfx1012（RX 5500 XT，RDNA1）和 gfx1031（RX 6700 XT）是 v0.1.39 新加的，都有用户在自己的卡上跑过。gfx1034 和 gfx1151 是 v0.1.40 新加的。gfx1151 是 Ryzen AI Max（Strix Halo）芯片里的 Radeon 8060S / 8050S 核显（RDNA3.5），上游标为实验性：发布说明里有它在 Linux 上的实测，构建脚本却仍把它列为未验证，Windows 上也还没在真机跑过。v0.1.40.2 又加了 4 种：RDNA1 的 gfx1010（RX 5700 XT，有人跑通了模型）和 gfx1011（只证明能编译，还没人在真卡上跑过），以及两种核显：gfx1103（Radeon 780M，只走可移植内核）和 gfx1150（Radeon 890M，有一台社区机器跑通了）。<span class="ev ev-report">上游报告</span></li>
 </ul>
+<p>Intel 显卡走的是第三条路，不经过上面这份 CUDA→HIP 垫片。仓库里的 <code>sycl/</code> 目录把 Strata 的引擎移植到了 SYCL（Intel oneAPI 用的 C++ 编程模型）。它是一个独立的 CMake 工程：打开它时，其余的 CUDA / HIP 配置一概不走。目前它只能在 Linux 上从源码构建。<span class="ev ev-code">代码事实</span> 它的“支持”说法本身就是一个证据分级的例子。v0.1.40.2 的发布说明写 Intel Arc“正式支持”，并列出两块实测过的卡（Arc Pro B70 和 Arc A750）。同一个版本的 README 却仍把 Intel Arc 列在“实验性、由社区成员在自己机器上编写和测试”一栏；INTEL_ARC.md 的标题也还写着“实验性”，正文说维护者手上没有 Intel 显卡。<span class="ev ev-report">上游报告</span> 三份文字，三种说法。读支持声明时，要追问它背后是哪一级证据。</p>
 <p>第二个陷阱是数值。图 22-5 里的 dp4a 是整数运算，每条路都逐位相同。浮点运算就不同了：加法的先后顺序一变，最后几位就可能不同（第 4 章讲过浮点数的舍入）。Strata 的 AMD 文档明说：不承诺两个后端给出逐位相同的回答。<span class="ev ev-report">上游报告</span> 同一台机器上也会这样。用 IQ 系列模型时，CPU 单独算一个 token 用 ggml 的点积，成组算用 Strata 的多 token 内核，两者舍入略有不同；一组有几个 token 又取决于草稿。所以温度为 0 时，同一个提示词也可能得到另一个同样合理的回答。引擎 0.1.30 起可以设置 <code>STRATA_IQ_MT_MIN=1</code> 消除这一差异，代价是上游在 Ryzen 7600（AVX-512）上测得 IQ3_S 解码慢 1–3%。<span class="ev ev-report">上游报告</span>[S03]</p>
 <p>所以<strong>构建配置是实验条件</strong>，和硬件一样要写进报告。同一个提交，开不开 <code>STRATA_PORTABLE</code>，ggml 的 CPU 部分就会按“任何 AVX2 CPU”或“本机 CPU”来编；改一个环境变量，就换了一条计算路径。<span class="ev ev-code">代码事实</span> 再看 README 里的速度表：Q2_0 模型在 RTX 5070 的机器上每秒写 94 个 token，在 RX 9070 XT 的机器上每秒 60 个。<span class="ev ev-report">上游报告</span>[S01] 表下的说明只写了 NVIDIA 这台的条件：Q2_0 用引擎 0.1.36 测，其余几行用 0.1.26 测，写答案按 4K 测，读题按 32K 测；AMD 那台没写引擎版本。v0.1.39 的发布说明还特意交代，这张表这次没有重测。两台机器的 CPU 也不同：一台是 Ryzen 5 7600，有 AVX-512；一台是 Ryzen 9 3900X（Zen 2），只有 AVX2。这组数字说明“两台机器都能跑”，却不能拿来比较 NVIDIA 和 AMD 谁快。</p>
 <p>要验证的组合有多少？粗算一下，见图 22-7。<span class="ev ev-est">教学推演</span></p>
-<figure class="fig"><svg viewBox="0 0 400 172" role="img" aria-label="图 22-7：11 种 GPU 架构乘 3 条 CPU 路线乘 2 种操作系统乘 5 种模型包，共 330 种组合">
+<figure class="fig"><svg viewBox="0 0 400 172" role="img" aria-label="图 22-7：12 种 GPU 架构乘 3 条 CPU 路线乘 2 种操作系统乘 5 种模型包，共 360 种组合">
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="10" width="76" height="58" rx="8"/>
 <text class="f-text" fill="#182f2b" x="46" y="32" font-size="13" font-weight="600" text-anchor="middle">GPU 架构</text>
-<text class="f-text" fill="#182f2b" x="46" y="56" font-size="14" text-anchor="middle">11</text>
+<text class="f-text" fill="#182f2b" x="46" y="56" font-size="14" text-anchor="middle">12</text>
 <text class="f-muted" fill="#5c6d66" x="93" y="44" font-size="14" text-anchor="middle">×</text>
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="102" y="10" width="76" height="58" rx="8"/>
 <text class="f-text" fill="#182f2b" x="140" y="32" font-size="13" font-weight="600" text-anchor="middle">CPU 路线</text>
@@ -202,11 +203,11 @@
 <text class="f-text" fill="#182f2b" x="328" y="32" font-size="13" font-weight="600" text-anchor="middle">模型包</text>
 <text class="f-text" fill="#182f2b" x="328" y="56" font-size="14" text-anchor="middle">5</text>
 <rect class="f-accent" fill="#136d5a" x="100" y="90" width="200" height="40" rx="9"/>
-<text class="f-on" fill="#ffffff" x="200" y="115" font-size="14" font-weight="600" text-anchor="middle">共 330 种组合</text>
+<text class="f-on" fill="#ffffff" x="200" y="115" font-size="14" font-weight="600" text-anchor="middle">共 360 种组合</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 68V88"/>
 <text class="f-muted" fill="#5c6d66" x="200" y="160" font-size="12" text-anchor="middle">再乘上上下文长度、多卡、KV 格式，数量还会成倍增长</text>
-</svg><figcaption>图 22-7　粗算一下就有 330 种组合，一台机器只能点亮其中一格。没测过的格子应当留空，而不是默认打勾。</figcaption></figure>
-<p>算式：GPU 架构 11 种（NVIDIA 按构建脚本列的 RTX 20/30/40/50 四代，AMD 按 Windows 版引擎编进去的 7 种），CPU 路线 3 条（AVX-512、AVX2、ggml），操作系统 2 种，README 列的模型包 5 种：11 × 3 × 2 × 5 = 330。没人能全测一遍。可行的办法是分层：纯数学的小样本覆盖算法；格式测试覆盖量化解码；每个后端挑代表性的内核做对比测试；端到端只覆盖最关键的几种组合。</p>
+</svg><figcaption>图 22-7　粗算一下就有 360 种组合，一台机器只能点亮其中一格。没测过的格子应当留空，而不是默认打勾。</figcaption></figure>
+<p>算式：GPU 架构 12 种（NVIDIA 按构建脚本列的 RTX 20/30/40/50 四代，AMD 按 Windows 版引擎编进去的 8 种），CPU 路线 3 条（AVX-512、AVX2、ggml），操作系统 2 种，README 列的模型包 5 种：12 × 3 × 2 × 5 = 360。没人能全测一遍。可行的办法是分层：纯数学的小样本覆盖算法；格式测试覆盖量化解码；每个后端挑代表性的内核做对比测试；端到端只覆盖最关键的几种组合。</p>
 
 <h2 id="sec-5">22.5 动手：把一行源码交给两个后端</h2>
 <p>本章没有单独的交互实验，两个模拟器就是实验台。建议按这个顺序玩：</p>
@@ -228,7 +229,7 @@
 <li>能编译、测试通过、真卡跑通、维护者验证，是四级不同的证据。浮点结果跨后端也不保证逐位相同，构建配置和环境变量都要当作实验条件记录下来。</li>
 </ol></div>
 <div class="myth"><p><strong>常见误解：“代码在我的显卡上能编译通过，就说明支持我的显卡。”</strong></p>
-<p>编译通过只说明编译器认得这段代码。Strata 的构建脚本里就有现成的反例：gfx1102 能编译，也通过了自带测试，但还没人报告过完整的模型运行，所以配置时照样给出“未验证”的警告。真正的支持，要靠在真卡上跑真模型、结果对得上，并且有人能复现。</p></div>
+<p>编译通过只说明编译器认得这段代码。Strata 的构建脚本里就有现成的反例：gfx1011 能编译，上游文档写明编译时 0 个错误，但还没有人在真卡上跑过，所以配置时照样给出“未验证”的警告。gfx1102 走得更远：通过了自带测试，也有一位用户跑通了完整模型，可它仍挂着“未验证”，因为只有一份报告，维护者也没有复现。真正的支持，要靠在真卡上跑真模型、结果对得上，并且有人能复现。</p></div>
 
 <details class="deep"><summary>深入一层：编译期与运行期的分工、垫片的边界与支持声明</summary>
 <h3>为什么 AVX-512 开关只加在单个文件上</h3>
@@ -236,7 +237,7 @@
 <p>探测本身也用了条件编译：同一段 CPUID 代码，MSVC 编译器用 <code>__cpuidex</code> 和 <code>_xgetbv</code>，GCC/Clang 用 <code>__cpuid_count</code> 和内联汇编 <code>xgetbv</code>。检查 XCR0 寄存器，是确认操作系统在线程切换时会保存 AVX-512 的大寄存器；CPU 支持而系统不保存，照样不能用。<span class="ev ev-code">代码事实</span></p>
 <h3>垫片的边界：宁可中止，不可悄悄改语义</h3>
 <p>CUDA 的 warp 交换函数带一个“哪些通道参与”的掩码参数。HIP 的对应函数没有这个参数。垫片的做法是：当前内核只用全掩码，所以遇到不是全掩码的调用就直接中止（<code>__builtin_trap</code>），而不是把掩码丢掉继续算。<code>__nanosleep</code> 在 CUDA 里按时钟周期计数，AMD 的休眠指令只接受 0 到 15，垫片干脆统一用最小值 1，因为这里只把它当作“稍等一下”的提示。<span class="ev ev-code">代码事实</span></p>
-<p>dp4a 的四条路也各有讲究。RDNA3/RDNA4 的 sudot4 指令能分别指定两个操作数是否有符号，垫片把两个都标成有符号，才和 CUDA 的 <code>__dp4a</code> 语义一致。RDNA2 的 sdot4 本来就是“有符号 × 有符号，按 2³² 取模累加”，语义相同。RDNA1 的汇编先把每个字节符号扩展再相乘（<code>v_mul_i32_i24</code>），再用 <code>v_add3_u32</code> 每次把两个乘积加进累加器；32 位无符号加法本身就是模 2³²。这段写法改编自 llama.cpp；打开编译开关 <code>STRATA_GFX1012_PORTABLE_DOT</code>，gfx1012 就改用可移植循环，方便对照。可移植循环用无符号 32 位整数累加，再按有符号解释，结果同样是模 2³²。本章模拟器的测试文件逐一核对了 RDNA1 汇编、可移植循环和 NVIDIA 老卡的软件循环，在溢出边界上也和参考值逐位相同。</p>
+<p>dp4a 的四条路也各有讲究。RDNA3/RDNA4 的 sudot4 指令能分别指定两个操作数是否有符号，垫片把两个都标成有符号，才和 CUDA 的 <code>__dp4a</code> 语义一致。RDNA2 的 sdot4 本来就是“有符号 × 有符号，按 2³² 取模累加”，语义相同。RDNA1 的汇编先把每个字节符号扩展再相乘（<code>v_mul_i32_i24</code>），再用 <code>v_add3_u32</code> 每次把两个乘积加进累加器；32 位无符号加法本身就是模 2³²。这段写法改编自 llama.cpp；打开编译开关 <code>STRATA_GFX1012_PORTABLE_DOT</code>，gfx1012 就改用可移植循环，方便对照。可移植循环用无符号 32 位整数累加，再按有符号解释，结果同样是模 2³²。本章模拟器的测试文件逐一核对了 RDNA1 汇编、可移植循环和 NVIDIA 老卡的 vmad 写法，在溢出边界上也和参考值逐位相同。</p>
 <h3>名字不决定格式：按类型分派</h3>
 <p>同一个张量名，在不同层可能用不同的量化格式。<code>layer.cpp</code> 的注释记录了一次教训：早期代码假设“名字决定格式”，比如 <code>attn_qkv</code> 一定是某种 K-quant；实际的模型包里，36 个 GDN 层的 <code>attn_qkv</code> 有 IQ4_XS、Q3_K、Q2_0、Q4_K 四种。规则因此改成按<strong>类型</strong>分派：2 位编码走 Q8_0 激活，其余量化格式走 Q8_K。用错了，矩阵向量乘法的误差是 0.6%–1.4%：算出的是一个“看起来合理”的向量，而不是一个明显坏掉的向量，最难发现。<span class="ev ev-code">代码事实</span>[S14]</p>
 <h3>依赖也要钉死</h3>
