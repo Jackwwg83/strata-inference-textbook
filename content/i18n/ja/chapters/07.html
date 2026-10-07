@@ -110,7 +110,7 @@
 <p>この章との関係：Strata では両方を使いますが、使う場所が違います。取り違えてもエラーにはならず、√d 倍だけずれます。</p>
 <p class="further">さらに読む：<a href="https://en.wikipedia.org/wiki/Normalization_(machine_learning)" target="_blank" rel="noopener noreferrer">Wikipedia（英語）：Normalization (machine learning)</a> · <a href="https://arxiv.org/abs/1910.07467" target="_blank" rel="noopener noreferrer">RMSNorm の原論文</a> · <a href="https://pytorch.org/docs/stable/generated/torch.nn.RMSNorm.html" target="_blank" rel="noopener noreferrer">PyTorch ドキュメント：RMSNorm</a> · <a href="https://ja.wikipedia.org/wiki/%E3%83%8E%E3%83%AB%E3%83%A0" target="_blank" rel="noopener noreferrer">Wikipedia：ノルム</a></p>
 </aside>
-<p>Strata では、残差を読み出すたびに、各レーンが別々に RMS 正規化されます。GDN 層は q と k に L2 正規化をかけ、v にはかけません。<span class="ev ev-code">コード上の事実</span>（<code>gr.hpp</code> 81 行目、<code>layer.hpp</code> 12、23 行目）GDN のヘッダーファイルは、わざわざ注意書きを付けています。ε は<strong>二乗和</strong>に付ける下限で、平均に付けるものではありません。だから幅で割ってはいけません。もし「平均二乗」と読み違えると、1 ヘッド 128 次元なので、結果は √128 ≈ 11.3 倍ずれます。[S17] このモデルの RMS 正規化の ε は 10<sup>−6</sup> です。[S14][S18]</p>
+<p>Strata では、残差を読み出すたびに、各レーンが別々に RMS 正規化されます。GDN 層は q と k に L2 正規化をかけ、v にはかけません。<span class="ev ev-code">コード上の事実</span>（<code>gr.hpp</code> 83 行目、<code>layer.hpp</code> 12、23 行目）GDN のヘッダーファイルは、わざわざ注意書きを付けています。ε は<strong>二乗和</strong>に付ける下限で、平均に付けるものではありません。だから幅で割ってはいけません。もし「平均二乗」と読み違えると、1 ヘッド 128 次元なので、結果は √128 ≈ 11.3 倍ずれます。[S17] このモデルの RMS 正規化の ε は 10<sup>−6</sup> です。[S14][S18]</p>
 <p>下の小さなツールで計算してみましょう。入力を変えて、2 種類の正規化を比べます。</p>
 <div class="viz" data-viz="norm-compare"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="図 7-5：入力が 3 と 4 のとき、L2 正規化は 0.6 と 0.8、RMS 正規化は 0.85 と 1.13 になり、2 つは √2 倍違う">
 <text class="f-text" fill="#182f2b" x="10" y="44" font-size="12">入力 x</text>
@@ -142,7 +142,7 @@
 <p>この章との関係：Strata のモデルは、この直通レーンを 4 本に増やしています。足し戻すときには、学習できる重みも掛けます。</p>
 <p class="further">さらに読む：<a href="https://ja.wikipedia.org/wiki/%E6%AE%8B%E5%B7%AE%E3%83%8D%E3%83%83%E3%83%88%E3%83%AF%E3%83%BC%E3%82%AF" target="_blank" rel="noopener noreferrer">Wikipedia：残差ネットワーク</a> · <a href="https://arxiv.org/abs/1512.03385" target="_blank" rel="noopener noreferrer">ResNet の原論文</a> · <a href="https://jalammar.github.io/illustrated-transformer/" target="_blank" rel="noopener noreferrer">The Illustrated Transformer（図解。残差と正規化を含む）</a></p>
 </aside>
-<p>Strata の残差は、4 本の並列レーンで、各レーンは 2560 個の数です。<span class="ev ev-code">コード上の事実</span>[S04][S13] 読むときは、4 本のレーンを別々に正規化し、1 本のベクトルにまとめて、ミキサーまたは MoE に渡します。書き戻すときは、同じ修正を<strong>すべての</strong>レーンに加えます。違うのは、レーンごとに掛ける重みだけです。重みは w = 2 × sigmoid(inject ÷ 4) で、inject は残差を読むときについでに計算される数です。（<code>gr.hpp</code> 6–8、119–125 行目）</p>
+<p>Strata の残差は、4 本の並列レーンで、各レーンは 2560 個の数です。<span class="ev ev-code">コード上の事実</span>[S04][S13] 読むときは、4 本のレーンを別々に正規化し、1 本のベクトルにまとめて、ミキサーまたは MoE に渡します。書き戻すときは、同じ修正を<strong>すべての</strong>レーンに加えます。違うのは、レーンごとに掛ける重みだけです。重みは w = 2 × sigmoid(inject ÷ 4) で、inject は残差を読むときについでに計算される数です。（<code>gr.hpp</code> 6–8、121–127 行目）</p>
 <p>この「2 倍の sigmoid」は、うまい設計です。sigmoid(0) = 0.5 なので、inject = 0 のとき w はちょうど 1 になり、書き戻しは、ふつうの残差の足し算に戻ります。ソースコードのコメントもこの点を指摘していて、テストでも断言（assert）しています。重みは 0 から 2 のあいだで動けるので、モデルは各レーンに「もっと聞く」か「あまり聞かない」かを自分で決められます。図 7-4 を見てください。</p>
 <div class="viz" data-viz="layer-walk"><figure class="fig"><svg viewBox="0 0 400 266" role="img" aria-label="図 7-4：4 本の残差レーンから 1 本のベクトルを読み出し、修正 Δ を計算して、Δ にそれぞれの重みを掛けて各レーンに加え戻す">
 <text class="f-text" fill="#182f2b" x="8" y="43" font-size="12">レーン 0</text>
@@ -241,8 +241,8 @@
 <details class="deep"><summary>もう一歩深く：マルチレーン残差の本当の式、型で選ぶ活性化フォーマット、どの層が間違っているのかを突き止める方法</summary>
 <h3>教育用の式 x′ = x + f(norm(x)) は、Strata の式そのものではありません</h3>
 <p>本文では、1 本のベクトルの残差の式で直感をつかみました。本物のモデルの形状には <code>hc = 4</code> があり、セッション状態の残差 R は 4 × 2560 のマルチレーン構造です。[S04][S13] これをふつうの 1 本のベクトルの残差に置き換えると、別のモデルになってしまいます。</p>
-<p>残差の読み出し（<code>gr_read</code>）の完全な手順は次のとおりです。各レーンが別々に RMS 正規化されて xn になります（正規化の係数は、保存のときから 1 + w の形で書かれています）。4 本のレーンをつなげ、320 次元の「ボトルネック」を通します。lo = SiLU((xn の BF16 版 × w_down) ÷ hc)。hc で割るのは SiLU の<strong>中</strong>です。見落としやすく、結果を実質的に変えます。そのあと mixed = 各レーンの xn × sigmoid(lo × w_up) の平均、inject = xn × w_inject です。最後の層のあとの「最終ミックス」には inject がありません。そのあとに書き戻しがないからです。（<code>gr.hpp</code> 79–91 行目）</p>
-<p>書き戻し（<code>gr_write</code>）は R_out[c] = R[c] + block_out × w[c]、w[c] = 2 × sigmoid(inject[c] ÷ hc) です。（<code>gr.hpp</code> 119–125 行目）</p>
+<p>残差の読み出し（<code>gr_read</code>）の完全な手順は次のとおりです。各レーンが別々に RMS 正規化されて xn になります（正規化の係数は、保存のときから 1 + w の形で書かれています）。4 本のレーンをつなげ、320 次元の「ボトルネック」を通します。lo = SiLU((xn の BF16 版 × w_down) ÷ hc)。hc で割るのは SiLU の<strong>中</strong>です。見落としやすく、結果を実質的に変えます。そのあと mixed = 各レーンの xn × sigmoid(lo × w_up) の平均、inject = xn × w_inject です。最後の層のあとの「最終ミックス」には inject がありません。そのあとに書き戻しがないからです。（<code>gr.hpp</code> 81–93 行目）</p>
+<p>書き戻し（<code>gr_write</code>）は R_out[c] = R[c] + block_out × w[c]、w[c] = 2 × sigmoid(inject[c] ÷ hc) です。（<code>gr.hpp</code> 121–127 行目）</p>
 <p>これらのレーンの重みは BF16 形式です。パックファイルは、デコードを単純にするため、これを 32 ビットに広げて保存しています。エンジンは読み込み時に 16 ビットに戻します。精度は何も失われず、稠密な重み 5.305 GiB のうち 1.374 GiB を節約できます。コメントによると、これが「稠密な重みがエキスパートキャッシュと一緒に VRAM に収まる」か「収まらない」かの分かれ目です。（<code>gr.hpp</code> 10–14 行目）</p>
 <h3>活性化フォーマットは、名前ではなくテンソルの型に従う</h3>
 <p>量子化された重みで行列積をする前に、入力ベクトルも、合ったフォーマットに変換しなければなりません。<code>layer.cpp</code> には、教訓が 1 つ記録されています。同じ名前のテンソルでも、層によって量子化の型が違うことがあるのです。たとえば 36 個の GDN 層の <code>attn_qkv</code> は、13 層が IQ4_XS、18 層が Q3_K、4 層が Q4_K、1 層が Q2_0 です。規則は<strong>型</strong>で決まります。2 ビット符号には Q8_0 形式の入力、それ以外の量子化型には Q8_K を組み合わせます。フォーマットを間違えると、行列積が 0.6%–1.4% ずれます。出てくるのは、壊れたベクトルではなく、「もっともらしく見える」ベクトルです。[S14]</p>
