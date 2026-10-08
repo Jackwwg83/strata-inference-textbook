@@ -279,3 +279,7 @@ test('stats report reading time, depth and lab guesses', async () => {
   assert.deepEqual(s.reading, [{ chapter: '05', readers: 3, median_seconds: 180, half: 2, finished: 1 }]);
   assert.deepEqual(s.guesses, [{ lab: 'cache', answers: 3, correct: 1, c0: 2, c1: 1, c2: 0, right: 1 }]);
 });
+
+test('page views of the changelog page are accepted', () => {
+  assert.equal(a.sanitizeEvent({ type: 'pageview', route: 'changelog' }).route, 'changelog');
+});

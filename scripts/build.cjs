@@ -35,7 +35,8 @@ function overlay(base, tr, key, fields) {
 
 function loadBook(lang) {
   const Book = {};
-  for (const n of ['chapters', 'sources', 'tracks', 'weeks', 'glossary', 'walkthroughs', 'labs', 'provenance', 'courses']) Book[n] = json(`content/${n}.json`);
+  // changelog.json is English only: every edition shows the same entries (no overlay).
+for (const n of ['chapters', 'sources', 'tracks', 'weeks', 'glossary', 'walkthroughs', 'labs', 'provenance', 'courses', 'changelog']) Book[n] = json(`content/${n}.json`);
   const missing = [];
   if (lang !== 'zh') {
     const dir = `content/i18n/${lang}`;
