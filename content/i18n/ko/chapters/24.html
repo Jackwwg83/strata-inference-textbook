@@ -151,11 +151,12 @@
 
 <h2 id="sec-4">24.4 멈춰 버리면 어떻게 할까: 워치독</h2>
 <p>취소는 엔진이 「협조」해야 성립해요. 엔진이 멈춰 버려서 아무 말도 하지 않으면 어떨까요? 서버에게는 <dfn>워치독</dfn>이 필요해요. 한동안 아무 기척이 없으면 문제가 생겼다고 판정하는 장치예요.</p>
-<p>어려운 점은 「얼마나 오래면 너무 오래인가」예요. 엔진이 생성할 때는 토큰마다 한 줄씩 써서 아주 시끌벅적해요. 그런데 아주 긴 질문을 읽을 때는 몇 분 동안 아무 소리도 안 낼 수 있어요. 워치독이 일률적이면, 열심히 문제를 읽는 엔진을 오해해서 죽이거나, 정말 멈춘 엔진을 한참 기다리게 돼요. Strata는 단계별로 다른 시간 제한을 둬요 [S15].</p>
+<p>어려운 점은 「얼마나 오래면 너무 오래인가」예요. 엔진이 생성할 때는 토큰마다 한 줄씩 써서 아주 시끌벅적해요. 그런데 아주 긴 질문을 읽을 때는 몇 분 동안 아무 소리도 안 낼 수 있어요. 워치독이 일률적이면, 열심히 문제를 읽는 엔진을 오해해서 죽이거나, 정말 멈춘 엔진을 한참 기다리게 돼요. Strata는 단계별로 다른 시간 제한을 두고, 거기에 「일을 하고 있는가」를 보는 검사를 하나 더 해요 [S15].</p>
 <ul>
-<li>기본 제한 300초: 요청이 진행 중인데 엔진이 이만큼 오래 아무 출력이 없으면 응답이 끊긴 것으로 판정해요. 설정에서 바꿀 수 있고, 0이면 영원히 기다려요.</li>
+<li>기본 제한 300초: 요청이 진행 중인데 엔진이 이만큼 오래 아무 출력이 없으면 응답이 끊긴 것으로 판정해요. 설정에서 바꿀 수 있고, 0이면 시간으로는 판정하지 않아요.</li>
 <li>문제 읽기의 첫 청크: 300초에 더해, 「가장 느린 컴퓨터가 초당 50토큰만 읽는다」고 보고 이 청크를 읽는 시간을 더해요.</li>
 <li>청크 하나를 다 읽은 뒤: 다음 청크는 앞 청크가 실제로 걸린 시간의 최대 3배까지 쓸 수 있고, 300초보다 적지는 않아요.</li>
+<li>v0.1.41부터는 「프리즈 워치독」이 하나 더 있어요. 단계를 보지 않고 엔진이 일하고 있는지를 봐요. 90초 동안 출력이 없고, 그 사이 CPU를 0.5초도 안 쓰고, 디스크 읽기와 쓰기가 1 MiB 미만이고, GPU도 놀고 있으면 얼어붙은 것으로 판정하고 엔진을 끝내요. 위의 시간 제한을 0으로 해도 이 검사는 그대로 일해요. 엔진이 아직 일하고 있으면 손대지 않고 로그에 한 번만 알려요. 환경 변수 <code>STRATA_ENGINE_STALL_S</code>로 이 시간을 바꾸고, 0으로 하면 꺼져요. 프로세스가 CPU와 디스크를 얼마나 썼는지는 psutil로 읽고, 읽지 못하면 판정하지 않아요.<span class="ev ev-code">코드 사실</span></li>
 </ul>
 <figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="그림 24-6: 워치독의 시간 제한. 생성 중 300초, 문제 읽기 첫 청크 약 955초, 빠른 컴퓨터는 청크 하나를 읽은 뒤에도 300초, 느린 컴퓨터는 약 983초">
 <text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">엔진이 조용해도 되는 시간(초, 막대 길이는 비례)</text>
@@ -188,8 +189,8 @@
 <p class="further">더 읽을거리: <a href="https://ko.wikipedia.org/wiki/API_키" target="_blank" rel="noopener noreferrer">위키백과: API 키</a> · <a href="https://ko.wikipedia.org/wiki/부채널_공격" target="_blank" rel="noopener noreferrer">위키백과: 부채널 공격</a> · <a href="https://developer.mozilla.org/ko/docs/Web/HTTP/Reference/Headers/Authorization" target="_blank" rel="noopener noreferrer">MDN: Authorization 헤더</a> · <a href="https://docs.python.org/ko/3/library/hmac.html" target="_blank" rel="noopener noreferrer">Python 문서: hmac.compare_digest</a> · <a href="https://www.rfc-editor.org/rfc/rfc6750" target="_blank" rel="noopener noreferrer">RFC 6750: Bearer 토큰</a></p>
 </aside>
 <p>Strata의 첫 번째 방어선은 <strong>기본적으로 이 컴퓨터만 듣는 것</strong>이에요. 서버는 기본으로 <code>127.0.0.1</code>에서 대기하니까 다른 기기는 아예 연결할 수 없어요. <span class="ev ev-code">코드 사실</span> 이때 README는 앱에 API Key를 아무거나 넣어도 된다고 알려 줘요. [S01] 휴대폰이나 다른 컴퓨터에서 접속하려면 <code>0.0.0.0</code>에서 대기하도록 바꿔야 하고, README의 원문은 「반드시 키를 설정하세요」예요. [S01] 대기 주소를 바꿨는데 키를 설정하지 않으면 서버는 시작할 때 경고를 한 줄 찍어요. API Key가 없으니 네트워크의 누구든 이 모델을 쓸 수 있다는 내용이에요. <span class="ev ev-code">코드 사실</span></p>
-<p>키를 설정하면 <code>/v1/*</code>에 접근하는 요청은 반드시 키를 갖고 와야 해요. <code>Authorization: Bearer …</code>로 쓰거나 <code>x-api-key</code> 헤더에 써요(Anthropic 스타일 클라이언트는 이쪽을 써요). 비교에는 <code>hmac.compare_digest</code>를 쓰고, 코드 주석에는 「상수 시간」이라고 적혀 있어요. 비교가 실패하면 401을 돌려주고 종류는 <code>authentication_error</code>예요. <span class="ev ev-code">코드 사실</span> 전체 판단 과정은 그림 24-7이에요.</p>
-<figure class="fig"><svg viewBox="0 0 400 310" role="img" aria-label="그림 24-7: Strata의 API Key 검사 흐름. 키를 설정하지 않았으면 바로 통과시키고, 설정했으면 클라이언트가 보낸 키를 꺼내 상수 시간으로 비교한다. 같으면 처리하고 다르면 401을 돌려준다">
+<p>키를 설정하면 <code>/v1/*</code>에 접근하는 요청은 반드시 키를 갖고 와야 해요. <code>Authorization: Bearer …</code>로 쓰거나 <code>x-api-key</code> 헤더에 써요(Anthropic 스타일 클라이언트는 이쪽을 써요). 비교에는 <code>hmac.compare_digest</code>를 쓰고, 코드 주석에는 「상수 시간」이라고 적혀 있어요. 비교가 실패하면 401을 돌려주고 종류는 <code>authentication_error</code>예요. <span class="ev ev-code">코드 사실</span> v0.1.41부터는 키를 여러 개 설정할 수 있어요. 명령줄이나 환경 변수에서는 쉼표로 구분하고, 설정에서는 목록으로 써요. 서버는 클라이언트가 보낸 키를 모든 키와 하나씩 비교해요. 어느 키가 먼저 맞든 끝까지 다 비교한 뒤에 돌려주기 때문에 여전히 상수 시간이에요. 키 자체에 쉼표가 들어 있으면 명령줄이나 환경 변수로 줄 때 잘려 버리니, 설정의 목록으로 써야 해요.<span class="ev ev-code">코드 사실</span> 전체 판단 과정은 그림 24-7이에요.</p>
+<figure class="fig"><svg viewBox="0 0 400 310" role="img" aria-label="그림 24-7: Strata의 API Key 검사 흐름. 키를 설정하지 않았으면 바로 통과시키고, 설정했으면 클라이언트가 보낸 키를 꺼내 모든 키와 하나씩 상수 시간으로 비교한다. 하나라도 맞으면 처리하고 모두 다르면 401을 돌려준다">
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="8" width="200" height="34" rx="8"/>
 <text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">요청이 /v1/… 에 도착</text>
 <rect class="f-soft" fill="#e5f1df" x="100" y="62" width="200" height="34" rx="8"/>
@@ -201,11 +202,11 @@
 <text class="f-text" fill="#182f2b" x="200" y="144" font-size="13" text-anchor="middle">Bearer 헤더 또는 x-api-key 헤더 꺼내기</text>
 <text class="f-muted" fill="#5c6d66" x="208" y="114" font-size="12">있음</text>
 <rect class="f-accent" fill="#136d5a" x="80" y="176" width="240" height="34" rx="8"/>
-<text class="f-on" fill="#ffffff" x="200" y="198" font-size="13" text-anchor="middle">hmac.compare_digest로 비교</text>
+<text class="f-on" fill="#ffffff" x="200" y="198" font-size="13" text-anchor="middle">키마다 hmac.compare_digest로 비교</text>
 <rect class="f-soft" fill="#e5f1df" x="20" y="236" width="160" height="34" rx="8"/>
-<text class="f-text" fill="#182f2b" x="100" y="258" font-size="13" text-anchor="middle">같음: 요청 처리</text>
+<text class="f-text" fill="#182f2b" x="100" y="258" font-size="13" text-anchor="middle">하나라도 같음: 처리</text>
 <rect class="f-warn" fill="#9e5d24" x="220" y="236" width="160" height="34" rx="8"/>
-<text class="f-on" fill="#ffffff" x="300" y="258" font-size="13" text-anchor="middle">다름: 401 반환</text>
+<text class="f-on" fill="#ffffff" x="300" y="258" font-size="13" text-anchor="middle">모두 다름: 401 반환</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V60M300 79H314M200 96V120M200 156V174M160 210V222H100V234M240 210V222H300V234"/>
 <text class="f-muted" fill="#5c6d66" x="200" y="300" font-size="12" text-anchor="middle">더 앞에 한 겹 더: 기본은 127.0.0.1만 듣고, 다른 기기는 연결 불가</text>
 </svg><figcaption>그림 24-7　Strata의 API Key 검사. 기본이 이 컴퓨터만 듣는 것이라서 키가 없어도 안전해요. 바깥에 열면 키가 유일한 자물쇠가 되고, 비교는 반드시 상수 시간이어야 해요.</figcaption></figure>
@@ -258,7 +259,7 @@
 <p>「잠깐 글자 출력이 없다」를 무조건 교착으로 보면, 긴 질문을 읽는 멀쩡한 요청을 오해해 죽여요. 영원히 기다리면 FIFO 전체가 막혀요. 합리적인 진단은 이런 경우를 구분할 수 있어야 해요. 대기, 정당한 긴 계산, 느린 I/O, 자식 프로세스 응답 끊김, 프로토콜 어긋남이에요. 그리고 모호한 「시간 초과」 하나가 아니라 상태와 마지막 진행 상황을 보고해야 해요. Strata가 문제 읽기 청크에 맞춰 시간 제한을 조정하고 응답이 끊긴 이유를 오류 메시지에 적는 것이 이 발상이에요. [S15]</p>
 <p>마찬가지로 「명시적 모델 제어」(로드, 언로드)는 실행 중이거나 대기 중인 요청을 끊으면 안 돼요. 코드에는 이를 위한 <code>ModelBusy</code>가 따로 정의돼 있어요. [S15] 업스트림 문서에 따르면 이때 제어 API는 409를 돌려줘요. <span class="ev ev-report">업스트림 보고</span></p>
 <h3>도구, 이미지 URL, 로컬 파일은 모두 신뢰 경계예요</h3>
-<p>모델 출력은 신뢰할 수 없는 입력이에요. 도구 인자는 구조 검증과 권한 검사를 거쳐야 해요. 원격 URL을 가져오는 일은 외부 접근과 자원 제한이 걸려 있어요. 로컬 경로를 읽는 일은 파일 권한과 경로 범위가 걸려 있어요. Strata의 이미지 입력은 base64 데이터, http(s) URL, 로컬 파일 경로 세 가지 출처를 지원해요. [S15] v0.1.40은 이 입구들에 검사 세 가지를 더했어요. 다른 컴퓨터를 가리키는 네트워크 경로는 읽지 않아요. URL에서 이미지를 읽을 때는 최대 32 MiB까지만 읽어요. 다른 웹사이트의 페이지가 서버에게 이 컴퓨터의 파일을 이미지로 읽게 할 수는 없어요.<span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/serve/server.py#L1808-L1845" target="_blank" rel="noopener noreferrer">server.py</a>) 업스트림도 입구를 하나씩 막아 갔어요. 커뮤니티가 낸 수정은 <code>/v1/responses</code> 입구를 빠뜨렸고, 메인테이너가 병합하면서 채웠어요.<span class="ev ev-report">업스트림 보고</span> 서버가 http(s) URL을 가져오는 단계에서 SSRF를 막았는지는 이 책이 감사하지 않았어요. 보안은 입구마다 감사해야 해요. 어딘가에서 안전한 라이브러리를 썼다고 해서 전체가 안전하다고 단정하면 안 돼요.</p>
+<p>모델 출력은 신뢰할 수 없는 입력이에요. 도구 인자는 구조 검증과 권한 검사를 거쳐야 해요. 원격 URL을 가져오는 일은 외부 접근과 자원 제한이 걸려 있어요. 로컬 경로를 읽는 일은 파일 권한과 경로 범위가 걸려 있어요. Strata의 이미지 입력은 base64 데이터, http(s) URL, 로컬 파일 경로 세 가지 출처를 지원해요. [S15] v0.1.40은 이 입구들에 검사 세 가지를 더했어요. 다른 컴퓨터를 가리키는 네트워크 경로는 읽지 않아요. URL에서 이미지를 읽을 때는 최대 32 MiB까지만 읽어요. 다른 웹사이트의 페이지가 서버에게 이 컴퓨터의 파일을 이미지로 읽게 할 수는 없어요.<span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/fb58e0dbc8399662c0e47c76578c6e878b14f6cf/serve/server.py#L1928-L1965" target="_blank" rel="noopener noreferrer">server.py</a>) 업스트림도 입구를 하나씩 막아 갔어요. 커뮤니티가 낸 수정은 <code>/v1/responses</code> 입구를 빠뜨렸고, 메인테이너가 병합하면서 채웠어요.<span class="ev ev-report">업스트림 보고</span> 서버가 http(s) URL을 가져오는 단계에서 SSRF를 막았는지는 이 책이 감사하지 않았어요. 보안은 입구마다 감사해야 해요. 어딘가에서 안전한 라이브러리를 썼다고 해서 전체가 안전하다고 단정하면 안 돼요.</p>
 <p><code>frontend.py</code>는 샌드박스화된 Jinja 환경으로 템플릿을 렌더링해요. [S16] 이것은 템플릿 층의 구체적인 선택이고, 도구 실행, URL 가져오기, 파일 접근까지 안전하다고 저절로 증명해 주지는 않아요. 자원마다 별도의 위협 모델이 필요해요.</p>
 <h3>「취소 완료」 검증 체크리스트</h3>
 <p>mock 엔진에 이런 상황을 주입해 보세요. 문제 읽기 중 취소, 출력 중단, 중복 취소, 엔진 무응답, 옛 결과의 지각 도착, 복구 뒤 재요청이에요. 검증 조건은 이래요. 사용자에게 보이는 새 토큰이 더 제출되지 않는다. 읽고 쓰는 관련 버퍼를 건드리는 작업이 모두 멈추거나 끝났다. 큐와 상태를 다음 요청이 잘못 쓰지 않는다. 늦게 온 옛 출력을 알아보고 버릴 수 있다. 자원은 딱 한 번만 해제된다. 클라이언트는 「성공」이 아니라 분명한 「취소됨」 또는 「실패」를 받는다.</p>
