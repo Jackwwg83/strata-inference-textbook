@@ -155,11 +155,12 @@
 
 <h2 id="sec-4">24.4 固まったらどうするか：ウォッチドッグ</h2>
 <p>キャンセルは、エンジンが「協力してくれる」ことを前提にしています。エンジンが固まって、何も言わなくなったらどうでしょう。サーバーには<dfn>ウォッチドッグ</dfn>（番犬）が必要です。しばらく何の動きもなければ、問題が起きたと判断する仕組みです。</p>
-<p>難しいのは「どれくらいなら長すぎるか」です。エンジンがデコードしているときは、トークンごとに 1 行書くので、にぎやかです。ところが、とても長い質問を読んでいるときは、何分も黙っていることがあります。ウォッチドッグが一律の基準だと、真面目に質問を読んでいるエンジンを誤って殺してしまうか、本当に固まったエンジンをいつまでも待つことになります。Strata は、段階ごとに別の制限時間を決めています [S15]。</p>
+<p>難しいのは「どれくらいなら長すぎるか」です。エンジンがデコードしているときは、トークンごとに 1 行書くので、にぎやかです。ところが、とても長い質問を読んでいるときは、何分も黙っていることがあります。ウォッチドッグが一律の基準だと、真面目に質問を読んでいるエンジンを誤って殺してしまうか、本当に固まったエンジンをいつまでも待つことになります。Strata は、段階ごとに別の制限時間を決め、さらに「仕事をしているか」の検査を加えています [S15]。</p>
 <ul>
-<li>基本の制限時間 300 秒：リクエストの処理中に、エンジンからの出力がこれだけ途絶えたら、応答なしと判断します。設定で変更でき、0 にすると永遠に待ちます。</li>
+<li>基本の制限時間 300 秒：リクエストの処理中に、エンジンからの出力がこれだけ途絶えたら、応答なしと判断します。設定で変更でき、0 にすると時間による判定をやめます。</li>
 <li>プリフィルの最初のチャンク：300 秒に加えて、「いちばん遅いマシンでも毎秒 50 トークンは読める」として、そのチャンクにかかる時間を足します。</li>
 <li>1 チャンクを読み終えたあと：次のチャンクには、前のチャンクの実際の所要時間の最大 3 倍まで使えます。ただし 300 秒を下回りません。</li>
+<li>v0.1.41 からは「フリーズ・ウォッチドッグ」がもう 1 つあります。段階は見ず、エンジンが仕事をしているかを見ます。90 秒間まったく出力がなく、その間 CPU は 0.5 秒未満しか使わず、ディスクの読み書きは 1 MiB 未満で、GPU も空いているなら、フリーズと判断してエンジンを終了します。上の制限時間を 0 にしても、これは働きます。エンジンがまだ仕事をしているなら手を出さず、ログに 1 回知らせるだけです。環境変数 <code>STRATA_ENGINE_STALL_S</code> でこの時間を変えられ、0 にすると止まります。プロセスが使った CPU とディスクの量は psutil で読むので、読めなければ判定しません。<span class="ev ev-code">コード上の事実</span></li>
 </ul>
 <figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="図 24-6：ウォッチドッグの制限時間。デコード中は 300 秒、プリフィルの最初のチャンクは約 955 秒、速い PC は 1 チャンク読み終えたあとも 300 秒、遅い PC は約 983 秒">
 <text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">エンジンはどれだけ黙っていてよいか（秒、バーの長さは比例）</text>
@@ -193,8 +194,8 @@
 <p class="further">さらに読む：<a href="https://en.wikipedia.org/wiki/API_key" target="_blank" rel="noopener noreferrer">Wikipedia：API key（英語）</a> · <a href="https://ja.wikipedia.org/wiki/%E3%82%B5%E3%82%A4%E3%83%89%E3%83%81%E3%83%A3%E3%83%8D%E3%83%AB%E6%94%BB%E6%92%83" target="_blank" rel="noopener noreferrer">Wikipedia：サイドチャネル攻撃</a> · <a href="https://developer.mozilla.org/ja/docs/Web/HTTP/Reference/Headers/Authorization" target="_blank" rel="noopener noreferrer">MDN：Authorization ヘッダー</a> · <a href="https://docs.python.org/ja/3/library/hmac.html" target="_blank" rel="noopener noreferrer">Python ドキュメント：hmac.compare_digest</a> · <a href="https://www.rfc-editor.org/rfc/rfc6750" target="_blank" rel="noopener noreferrer">RFC 6750：Bearer トークン</a></p>
 </aside>
 <p>Strata の第 1 の防御線は、<strong>既定ではローカルだけを待ち受ける</strong>ことです。サーバーは既定で <code>127.0.0.1</code> を待ち受けるので、ほかの機器はそもそもつながりません。<span class="ev ev-code">コード上の事実</span> このとき README は、アプリには API キーとして何を入れてもよい、と伝えています。[S01] スマホやほかのコンピュータからアクセスしたいときは、待ち受けを <code>0.0.0.0</code> に変える必要があります。README の原文は「必ずキーを設定すること」です。[S01] 待ち受けアドレスを変えたのにキーを設定していないと、サーバーは起動時に警告を 1 行出します。API キーがないので、ネットワーク内の誰でもこのモデルを使える、という警告です。<span class="ev ev-code">コード上の事実</span></p>
-<p>キーを設定したあとは、<code>/v1/*</code> へのリクエストは必ずキーを付けなければなりません。<code>Authorization: Bearer …</code> と書くか、<code>x-api-key</code> ヘッダに書きます（Anthropic 流のクライアントはこちらを使います）。照合には <code>hmac.compare_digest</code> を使い、コードのコメントには「定数時間」と書かれています。照合に失敗したら 401 を返し、種別は <code>authentication_error</code> です。<span class="ev ev-code">コード上の事実</span> 判断の全体は図 24-7 のとおりです。</p>
-<figure class="fig"><svg viewBox="0 0 400 326" role="img" aria-label="図 24-7：Strata の API キー検査の流れ。キー未設定ならそのまま通す。設定済みならクライアントのキーを取り出し、定数時間で比較して、一致すれば処理し、不一致なら 401 を返す">
+<p>キーを設定したあとは、<code>/v1/*</code> へのリクエストは必ずキーを付けなければなりません。<code>Authorization: Bearer …</code> と書くか、<code>x-api-key</code> ヘッダに書きます（Anthropic 流のクライアントはこちらを使います）。照合には <code>hmac.compare_digest</code> を使い、コードのコメントには「定数時間」と書かれています。照合に失敗したら 401 を返し、種別は <code>authentication_error</code> です。<span class="ev ev-code">コード上の事実</span> v0.1.41 からは、キーを複数設定できます。コマンドラインか環境変数ではコンマで区切り、設定ファイルではリストで書きます。サーバーは、クライアントが持ってきたキーを、すべてのキーと 1 つずつ比べます。どれが先に一致しても最後まで比べてから返すので、今も定数時間です。コンマを含むキーは、コマンドラインや環境変数で渡すと分割されてしまうので、設定ファイルのリストで書きます。<span class="ev ev-code">コード上の事実</span> 判断の全体は図 24-7 のとおりです。</p>
+<figure class="fig"><svg viewBox="0 0 400 326" role="img" aria-label="図 24-7：Strata の API キー検査の流れ。キー未設定ならそのまま通す。設定済みならクライアントのキーを取り出し、すべてのキーと定数時間で比較して、どれか 1 つに一致すれば処理し、どれにも一致しなければ 401 を返す">
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="8" width="200" height="34" rx="8"/>
 <text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">リクエストが /v1/… に到着</text>
 <rect class="f-soft" fill="#e5f1df" x="100" y="62" width="200" height="34" rx="8"/>
@@ -206,11 +207,11 @@
 <text class="f-text" fill="#182f2b" x="200" y="144" font-size="13" text-anchor="middle">Bearer / x-api-key ヘッダから取得</text>
 <text class="f-muted" fill="#5c6d66" x="208" y="114" font-size="12">あり</text>
 <rect class="f-accent" fill="#136d5a" x="60" y="176" width="280" height="34" rx="8"/>
-<text class="f-on" fill="#ffffff" x="200" y="198" font-size="13" text-anchor="middle">hmac.compare_digest で比較</text>
+<text class="f-on" fill="#ffffff" x="200" y="198" font-size="13" text-anchor="middle">キーごとに hmac.compare_digest で比較</text>
 <rect class="f-soft" fill="#e5f1df" x="20" y="236" width="160" height="34" rx="8"/>
-<text class="f-text" fill="#182f2b" x="100" y="258" font-size="13" text-anchor="middle">一致：処理する</text>
+<text class="f-text" fill="#182f2b" x="100" y="258" font-size="13" text-anchor="middle">どれかに一致：処理</text>
 <rect class="f-warn" fill="#9e5d24" x="220" y="236" width="160" height="34" rx="8"/>
-<text class="f-on" fill="#ffffff" x="300" y="258" font-size="13" text-anchor="middle">不一致：401 を返す</text>
+<text class="f-on" fill="#ffffff" x="300" y="258" font-size="13" text-anchor="middle">どれも不一致：401</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V60M300 79H314M200 96V120M200 156V174M160 210V222H100V234M240 210V222H300V234"/>
 <text class="f-muted" fill="#5c6d66" x="200" y="296" font-size="12" text-anchor="middle">さらに手前にもう 1 枚：既定では 127.0.0.1 だけを</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="314" font-size="12" text-anchor="middle">待ち受けるので、ほかの機器は接続できない</text>
@@ -264,7 +265,7 @@
 <p>「しばらく文字の出力がない」ことをすべてデッドロックとみなすと、長い質問を読んでいる健全なリクエストを誤って殺します。永遠に待つと、FIFO 全体が詰まります。まともな診断は、次を区別できなければなりません。キュー待ち、正当な長い計算、遅い I/O、子プロセスの応答なし、プロトコルのずれ。そして、あいまいな「タイムアウト」だけでなく、状態と最後の進み具合を報告します。Strata がプリフィルのチャンクごとに制限時間を調整し、応答なしの原因をエラーメッセージに書くのは、この考え方です。[S15]</p>
 <p>同じように、「明示的なモデル制御」（ロードとアンロード）は、実行中やキュー待ちのリクエストを中断してはいけません。コードには、そのための <code>ModelBusy</code> が定義されています。[S15] 上流のドキュメントによると、このとき制御 API は 409 を返します。<span class="ev ev-report">上流レポート</span></p>
 <h3>ツール、画像 URL、ローカルファイルは、どれも信頼の境界</h3>
-<p>モデルの出力は信頼できない入力です。ツールの引数は、構造の検証と権限の検査を通す必要があります。リモート URL の取得は、外部へのアクセスと資源の制限に関わります。ローカルパスの読み取りは、ファイルの権限とパスの範囲に関わります。Strata の画像入力は、base64 データ、http(s) の URL、ローカルファイルのパスの 3 種類の入力元に対応しています。[S15] v0.1.40 は、これらの入口に 3 つの検査を足しました。別のコンピュータを指すネットワークパスは、一切読みません。URL から読む画像は、最大 32 MiB までです。別のサイトの Web ページが、サーバーにこのマシンのファイルを画像として読ませることはできません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/serve/server.py#L1808-L1845" target="_blank" rel="noopener noreferrer">server.py</a>）上流自身も、入口を 1 つずつ直してきました。コミュニティから届いた修正は <code>/v1/responses</code> という入口を見落としていて、メンテナーがマージするときに足しました。<span class="ev ev-report">上流レポート</span> サーバーが http(s) の URL を取りに行く部分で SSRF を防げているかは、この教材では監査していません。安全は入口ごとに監査する必要があります。どこかで安全なライブラリを使っているからといって、全体が安全だと断言してはいけません。</p>
+<p>モデルの出力は信頼できない入力です。ツールの引数は、構造の検証と権限の検査を通す必要があります。リモート URL の取得は、外部へのアクセスと資源の制限に関わります。ローカルパスの読み取りは、ファイルの権限とパスの範囲に関わります。Strata の画像入力は、base64 データ、http(s) の URL、ローカルファイルのパスの 3 種類の入力元に対応しています。[S15] v0.1.40 は、これらの入口に 3 つの検査を足しました。別のコンピュータを指すネットワークパスは、一切読みません。URL から読む画像は、最大 32 MiB までです。別のサイトの Web ページが、サーバーにこのマシンのファイルを画像として読ませることはできません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/fb58e0dbc8399662c0e47c76578c6e878b14f6cf/serve/server.py#L1928-L1965" target="_blank" rel="noopener noreferrer">server.py</a>）上流自身も、入口を 1 つずつ直してきました。コミュニティから届いた修正は <code>/v1/responses</code> という入口を見落としていて、メンテナーがマージするときに足しました。<span class="ev ev-report">上流レポート</span> サーバーが http(s) の URL を取りに行く部分で SSRF を防げているかは、この教材では監査していません。安全は入口ごとに監査する必要があります。どこかで安全なライブラリを使っているからといって、全体が安全だと断言してはいけません。</p>
 <p><code>frontend.py</code> は、サンドボックス化した Jinja 環境でテンプレートを描画します。[S16] これはテンプレート層の具体的な選択であり、ツールの実行、URL の取得、ファイルへのアクセスがすべて安全であることを、自動的に証明するものではありません。資源の種類ごとに、別々の脅威モデルが必要です。</p>
 <h3>「キャンセル完了」の受け入れチェックリスト</h3>
 <p>mock エンジンに、次の状況を注入します。プリフィル中のキャンセル、出力の中断、重複したキャンセル、エンジンの無応答、古い結果の遅れ、復旧後の再リクエスト。受け入れ条件：ユーザーに見える新しいトークンをもう渡さない。バッファの読み書きに関わるタスクがすべて停止または完了している。キューと状態が次のリクエストに誤って使われない。遅れて届いた古い出力を識別して捨てられる。資源の解放は 1 回だけ。クライアントには、「成功」ではなく、明確な「キャンセル済み」か「失敗」が返る。</p>
