@@ -151,11 +151,12 @@
 
 <h2 id="sec-4">24.4 卡住了怎么办：看门狗</h2>
 <p>取消依赖引擎“配合”。如果引擎卡死了，一句话都不说呢？服务器需要一只<dfn>看门狗</dfn>：一段时间没有动静，就判定出了问题。</p>
-<p>难点在于“多久算太久”。引擎生成时，每个 token 都会写一行，很热闹；读一段很长的提问时，却可能好几分钟一声不吭。看门狗如果一刀切，要么误杀正在认真读题的引擎，要么对真正卡死的引擎等上半天。Strata 的做法是按阶段给不同的时限 [S15]：</p>
+<p>难点在于“多久算太久”。引擎生成时，每个 token 都会写一行，很热闹；读一段很长的提问时，却可能好几分钟一声不吭。看门狗如果一刀切，要么误杀正在认真读题的引擎，要么对真正卡死的引擎等上半天。Strata 的做法是按阶段给不同的时限，再加一道“有没有在干活”的检查 [S15]：</p>
 <ul>
-<li>基础时限 300 秒：请求进行中，引擎超过这么久没有任何输出，就判定失联。配置里可以改，设成 0 表示永远等。</li>
+<li>基础时限 300 秒：请求进行中，引擎超过这么久没有任何输出，就判定失联。配置里可以改，设成 0 表示不再按时长判定。</li>
 <li>读题的第一块：在 300 秒之上，再按“最慢的电脑每秒只读 50 个 token”加上这一块的时间。</li>
 <li>读完一块以后：下一块最多可以用上一块实际耗时的 3 倍，但不少于 300 秒。</li>
+<li>v0.1.41 起另有一只“冻结看门狗”，它不看阶段，看引擎有没有在干活：90 秒没有任何输出，这段时间里 CPU 只用了不到 0.5 秒、磁盘读写不到 1 MiB，显卡也闲着，就判定冻结，结束引擎。上面的时限设成 0，它也照样管。只要引擎还在干活，它就不动手，只在日志里提醒一次。环境变量 <code>STRATA_ENGINE_STALL_S</code> 改这个时长，设成 0 关掉；它靠 psutil 读进程用了多少 CPU 和磁盘，读不到就不判定。<span class="ev ev-code">代码事实</span></li>
 </ul>
 <figure class="fig"><svg viewBox="0 0 400 246" role="img" aria-label="图 24-6：看门狗的时限。生成中 300 秒；读题第一块约 955 秒；快的电脑读完一块后仍是 300 秒；慢的电脑约 983 秒">
 <text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">引擎可以沉默多久（秒，条长按比例）</text>
@@ -188,8 +189,8 @@
 <p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/API密鑰" target="_blank" rel="noopener noreferrer">维基百科：API 密钥</a> · <a href="https://zh.wikipedia.org/zh-cn/旁路攻击" target="_blank" rel="noopener noreferrer">维基百科：旁路攻击</a> · <a href="https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Reference/Headers/Authorization" target="_blank" rel="noopener noreferrer">MDN：Authorization 头</a> · <a href="https://docs.python.org/zh-cn/3/library/hmac.html" target="_blank" rel="noopener noreferrer">Python 文档：hmac.compare_digest</a> · <a href="https://www.rfc-editor.org/rfc/rfc6750" target="_blank" rel="noopener noreferrer">RFC 6750：Bearer 令牌</a></p>
 </aside>
 <p>Strata 的第一道防线是<strong>默认只听本机</strong>：服务器默认监听 <code>127.0.0.1</code>，别的设备根本连不上。<span class="ev ev-code">代码事实</span> 这时 README 告诉你，应用里随便填一个 API Key 都行。[S01] 想从手机或另一台电脑访问，就要改成监听 <code>0.0.0.0</code>，README 的原话是“一定要设一个密钥”。[S01] 如果你改了监听地址却没设密钥，服务器启动时会打出一行警告：没有 API Key，网络里的任何人都能用这个模型。<span class="ev ev-code">代码事实</span></p>
-<p>设了密钥以后，访问 <code>/v1/*</code> 的请求必须带上它：写成 <code>Authorization: Bearer …</code>，或者写在 <code>x-api-key</code> 头里（Anthropic 风格的客户端用这个）。比对用的是 <code>hmac.compare_digest</code>，代码注释写着“恒定时间”；比对失败回 401，类型是 <code>authentication_error</code>。<span class="ev ev-code">代码事实</span> 整个判断过程见图 24-7。</p>
-<figure class="fig"><svg viewBox="0 0 400 310" role="img" aria-label="图 24-7：Strata 检查 API Key 的流程：没设密钥直接放行；设了密钥就取出客户端带的密钥，用恒定时间比较，一致才处理，不一致回 401">
+<p>设了密钥以后，访问 <code>/v1/*</code> 的请求必须带上它：写成 <code>Authorization: Bearer …</code>，或者写在 <code>x-api-key</code> 头里（Anthropic 风格的客户端用这个）。比对用的是 <code>hmac.compare_digest</code>，代码注释写着“恒定时间”；比对失败回 401，类型是 <code>authentication_error</code>。<span class="ev ev-code">代码事实</span> v0.1.41 起可以设好几把密钥：命令行或环境变量里用逗号隔开，或者在配置里写成列表。服务器把客户端带来的密钥和每一把都比一遍，不管哪一把先对上，都比完再返回，所以仍是恒定时间。一把本身含逗号的密钥，从命令行或环境变量给会被切开，要写成配置里的列表。<span class="ev ev-code">代码事实</span> 整个判断过程见图 24-7。</p>
+<figure class="fig"><svg viewBox="0 0 400 310" role="img" aria-label="图 24-7：Strata 检查 API Key 的流程：没设密钥直接放行；设了密钥就取出客户端带的密钥，和每一把密钥做恒定时间比较，对上任一把才处理，都不对回 401">
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="8" width="200" height="34" rx="8"/>
 <text class="f-text" fill="#182f2b" x="200" y="30" font-size="13" text-anchor="middle">请求到达 /v1/…</text>
 <rect class="f-soft" fill="#e5f1df" x="100" y="62" width="200" height="34" rx="8"/>
@@ -201,11 +202,11 @@
 <text class="f-text" fill="#182f2b" x="200" y="144" font-size="13" text-anchor="middle">取 Bearer 头或 x-api-key 头</text>
 <text class="f-muted" fill="#5c6d66" x="208" y="114" font-size="12">设了</text>
 <rect class="f-accent" fill="#136d5a" x="80" y="176" width="240" height="34" rx="8"/>
-<text class="f-on" fill="#ffffff" x="200" y="198" font-size="13" text-anchor="middle">hmac.compare_digest 比较</text>
+<text class="f-on" fill="#ffffff" x="200" y="198" font-size="13" text-anchor="middle">逐把 hmac.compare_digest 比较</text>
 <rect class="f-soft" fill="#e5f1df" x="20" y="236" width="160" height="34" rx="8"/>
-<text class="f-text" fill="#182f2b" x="100" y="258" font-size="13" text-anchor="middle">一致：处理请求</text>
+<text class="f-text" fill="#182f2b" x="100" y="258" font-size="13" text-anchor="middle">对上任一把：处理</text>
 <rect class="f-warn" fill="#9e5d24" x="220" y="236" width="160" height="34" rx="8"/>
-<text class="f-on" fill="#ffffff" x="300" y="258" font-size="13" text-anchor="middle">不一致：回 401</text>
+<text class="f-on" fill="#ffffff" x="300" y="258" font-size="13" text-anchor="middle">都不对：回 401</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 42V60M300 79H314M200 96V120M200 156V174M160 210V222H100V234M240 210V222H300V234"/>
 <text class="f-muted" fill="#5c6d66" x="200" y="300" font-size="12" text-anchor="middle">更前面还有一道：默认只听 127.0.0.1，别的设备连不上</text>
 </svg><figcaption>图 24-7　Strata 的 API Key 检查。默认只听本机，所以不设密钥也安全；一旦对外开放，密钥就是唯一的门锁，比对必须用恒定时间。</figcaption></figure>
@@ -258,7 +259,7 @@
 <p>把“暂时没有文字输出”一律当成死锁，会误杀正在读长提问的健康请求；永远等待，又会堵死整个 FIFO。合理的诊断要能区分：排队、合法的长计算、慢速 I/O、子进程失联、协议失步，并且报告状态和最后的进度，而不是只给一个含糊的“超时”。Strata 按读题分块调整时限，并把失联原因写进错误信息，就是这个思路。[S15]</p>
 <p>同理，“显式的模型控制”（加载、卸载）不能打断正在运行或排队的请求：代码里为此专门定义了 <code>ModelBusy</code>。[S15] 上游文档说明，这时控制接口返回 409。<span class="ev ev-report">上游报告</span></p>
 <h3>工具、图片 URL 和本地文件都是信任边界</h3>
-<p>模型输出是不可信输入。工具参数要经过结构校验和权限检查；获取远程 URL 牵涉对外访问和资源限制；读取本地路径牵涉文件权限和路径范围。Strata 的图片输入支持 base64 数据、http(s) URL 和本地文件路径三种来源。[S15] v0.1.40 给这些入口补了三道检查：指向别的电脑的网络路径一律不读；从 URL 读图片最多读 32 MiB；别的网站的网页不能让服务器把本机文件当图片读。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/serve/server.py#L1808-L1845" target="_blank" rel="noopener noreferrer">server.py</a>）上游自己也是一个入口一个入口补的：社区提交的修复漏了 <code>/v1/responses</code> 这个入口，维护者合并时才补上。<span class="ev ev-report">上游报告</span> 服务器去取 http(s) URL 这一环是否防住了 SSRF，本书没有审计。安全要逐个入口审计，不能因为某处用了一个安全的库，就断言整体安全。</p>
+<p>模型输出是不可信输入。工具参数要经过结构校验和权限检查；获取远程 URL 牵涉对外访问和资源限制；读取本地路径牵涉文件权限和路径范围。Strata 的图片输入支持 base64 数据、http(s) URL 和本地文件路径三种来源。[S15] v0.1.40 给这些入口补了三道检查：指向别的电脑的网络路径一律不读；从 URL 读图片最多读 32 MiB；别的网站的网页不能让服务器把本机文件当图片读。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/fb58e0dbc8399662c0e47c76578c6e878b14f6cf/serve/server.py#L1928-L1965" target="_blank" rel="noopener noreferrer">server.py</a>）上游自己也是一个入口一个入口补的：社区提交的修复漏了 <code>/v1/responses</code> 这个入口，维护者合并时才补上。<span class="ev ev-report">上游报告</span> 服务器去取 http(s) URL 这一环是否防住了 SSRF，本书没有审计。安全要逐个入口审计，不能因为某处用了一个安全的库，就断言整体安全。</p>
 <p><code>frontend.py</code> 用沙箱化的 Jinja 环境渲染模板。[S16] 这是模板层的具体选择，不能自动证明工具执行、URL 获取和文件访问都安全。每一种资源都需要单独的威胁模型。</p>
 <h3>“取消完成”的验收清单</h3>
 <p>在 mock 引擎里注入这些情况：读题时取消、输出中断、重复取消、引擎无响应、旧结果迟到、恢复后再次请求。验收条件：不再提交新的用户可见 token；所有读写相关缓冲的任务都已停止或完成；队列和状态不会被下一个请求误用；迟到的旧输出能被识别并丢弃；资源只释放一次；客户端得到明确的“已取消”或“失败”，而不是“成功”。</p>
