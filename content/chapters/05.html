@@ -5,7 +5,7 @@
 
 <h2 id="sec-1">5.1 显卡那么快，为什么 token 还是慢</h2>
 <p>想象一位厨师，切菜快得惊人，可食材要从楼下仓库一趟趟搬上来。只要搬运跟不上，厨师刀再快也只能等着。显卡的计算单元就是这位厨师，显存、内存就是仓库，中间的通道每秒能搬多少字节，决定了厨师能不能忙起来。</p>
-<p>写答案时，每生成一个 token，都要把这一步用到的权重读一遍。第 10 章算过，光是专家数据就有约 664 MB。Strata 的源码里记着一个测量：在那台测试机上，从内存读专家的速度是 44.14 GB/s。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/e8ca9afd03d839d4f8dbbe82dffce7f8a3bafd7a/include/strata/core/expert_source.hpp#L441-L448" target="_blank" rel="noopener noreferrer">expert_source.hpp</a> 假如每个 token 的 663.6 MB 专家都从内存读，光读就要 663.6 MB ÷ 44.14 GB/s ≈ 15 ms，每秒最多 66 个 token，还没开始算。<span class="ev ev-est">教学推演</span></p>
+<p>写答案时，每生成一个 token，都要把这一步用到的权重读一遍。第 10 章算过，光是专家数据就有约 664 MB。Strata 的源码里记着一个测量：在那台测试机上，从内存读专家的速度是 44.14 GB/s。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/fb58e0dbc8399662c0e47c76578c6e878b14f6cf/include/strata/core/expert_source.hpp#L459-L466" target="_blank" rel="noopener noreferrer">expert_source.hpp</a> 假如每个 token 的 663.6 MB 专家都从内存读，光读就要 663.6 MB ÷ 44.14 GB/s ≈ 15 ms，每秒最多 66 个 token，还没开始算。<span class="ev ev-est">教学推演</span></p>
 <p>这就是为什么 Strata 要把热门专家放进显存（显存读得快得多），并让 CPU 在内存里就地计算没命中的专家（数据不必过 PCIe）。上游实测的输出速度是每秒 93 个 token（RTX 5070 12 GB，Q2_0，4K 提问，引擎 0.1.26，开启投机解码），比上面那个“全从内存读”的上限还高。原因有二：大量专家根本不用从内存读；投机解码让一轮能产出不止一个 token（第 18 章）。<span class="ev ev-report">上游报告</span>[S03]</p>
 <aside class="primer" id="c05-bandwidth-latency">
 <h3>带宽与延迟</h3>
