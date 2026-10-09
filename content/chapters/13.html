@@ -173,5 +173,5 @@
 <h3>注释和设计对不上的地方</h3>
 <p><code>session.hpp</code> 后半段有一段较早的注释，说“重叠来自一层的延迟：专家池的结果由下一层消费”。<span class="ev ev-code">代码事实</span>（<code>session.hpp</code>）而前面关于两张计算图的注释说的正相反：为了不让第 l 层的专家配上第 l + 1 层的路由权重，合并必须留在本层。<span class="ev ev-code">代码事实</span>[S13] 遇到这种矛盾，以当前的调用顺序和测试为准。</p>
 <h3>GPU 和 CPU 算同一个专家，最后几位可能不同</h3>
-<p>GPU 和 CPU 的内核舍入方式不同。哪个专家由谁算，取决于缓存状态和 PCIe 份额，所以同一提示词重复运行，答案可能不逐字节相同。上游文档说，想要可重复的结果，可以把 PCIe 份额设成 0 等几个开关，代价是生成变慢。<span class="ev ev-report">上游报告</span>[S03]</p>
+<p>GPU 和 CPU 的内核舍入方式不同。哪个专家由谁算，取决于缓存状态和 PCIe 份额，所以同一提示词重复运行，答案可能不逐字节相同。上游文档说，想要可重复的结果，可以把 PCIe 份额设成 0 等几个开关，代价是生成变慢。<span class="ev ev-report">上游报告</span>[S03] v0.1.41 起，单张 NVIDIA 卡读短提示时，还要看 CPU 分担的份额（第 16 章）。从代码看，这个份额按每层实测的耗时算出，状态在请求之间累计，所以重复运行时也可能分得不一样。要关掉它，再加 <code>STRATA_PREFILL_CPU_SHARE=0</code>。<span class="ev ev-code">代码事实</span>（<code>src/prefill/prefill.cpp</code>）</p>
 </details>
