@@ -107,7 +107,7 @@ test('vector width: AVX2 holds 32 int8 lanes, AVX-512 holds 64', () => {
 
 test('support matrix size is the product of its dimensions', () => {
   assert.equal(m.combos([2, 3, 2, 2]), 24);
-  assert.equal(m.combos([12, 3, 2, 5]), 360, 'figure 22-7 at v0.1.40.2: 4 NVIDIA generations + 8 AMD archs in the Windows HIP zip');
+  assert.equal(m.combos([12, 3, 2, 5]), 360, 'figure 22-7 at v0.1.41: 4 NVIDIA generations + 8 AMD archs in the Windows HIP zip');
   assert.equal(m.combos([]), 1);
   assert.throws(() => m.combos([2, 0]));
 });

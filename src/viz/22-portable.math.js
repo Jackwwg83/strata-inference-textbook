@@ -1,5 +1,5 @@
 /* Pure logic behind the chapter 22 widgets. Teaching model, not Strata code.
-   The branch rules mirror files at the pinned commit e8ca9af (v0.1.40.2):
+   The branch rules mirror files at the pinned commit fb58e0d (v0.1.41):
    include/strata/kernels/dp4a.hpp, include/strata/hip_compat/intrinsics.hpp, cmake/hip_backend.cmake,
    CMakeLists.txt (CUDA guard), src/program/generate.cpp and src/kernels/cpu/native_expert.cpp. */
 (function (root) {
