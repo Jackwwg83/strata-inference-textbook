@@ -32,7 +32,7 @@ test('watchdog allowance follows serve/server.py constants', () => {
   assert.equal(Math.round(m.firstAllowance(32768)), 955);
   assert.equal(m.firstAllowance(100000), 300 + 32768 / 50, 'a prompt longer than one chunk only counts its first chunk');
   assert.equal(m.firstAllowance(4096), 300 + 4096 / 50);
-  assert.equal(m.firstAllowance(4096, { silence: 0 }), Infinity, '0 means wait forever');
+  assert.equal(m.firstAllowance(4096, { silence: 0 }), Infinity, '0 turns the time limit off (the v0.1.41 frozen-engine check still applies)');
   assert.equal(m.nextAllowance(32768, 2171), 300, 'a fast PC keeps the base silence');
   assert.equal(Math.round(m.nextAllowance(32768, 100)), 983, 'a slow PC gets three times the last chunk');
   assert.throws(() => m.nextAllowance(100, 0));

@@ -23,7 +23,8 @@
 
   // serve/server.py: ENGINE_SILENCE_S = 300, PP_CHUNK_MAX = 32768, PP_FLOOR_TOK_S = 50, PP_SLACK = 3.
   const SILENCE = 300, CHUNK_MAX = 32768, FLOOR = 50, SLACK = 3;
-  // How long the engine may stay silent before the first prompt-progress line (seconds; Infinity = wait forever).
+  // How long the engine may stay silent before the first prompt-progress line (seconds; Infinity = no time limit;
+  // the frozen-engine check of v0.1.41, ENGINE_STALL_S = 90, still applies and is not modelled here).
   function firstAllowance(promptTokens, { silence = SILENCE, chunkMax = CHUNK_MAX, floor = FLOOR } = {}) {
     if (!(silence > 0)) return Infinity;
     return silence + Math.min(promptTokens, chunkMax) / floor;
