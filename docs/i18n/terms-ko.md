@@ -145,3 +145,4 @@ Keep MB vs MiB and GB vs GiB exactly as in the source. Decimal point `.`, thousa
 | 首 token 延迟 | TTFT | TTFT(첫 토큰까지 걸리는 시간) | |
 | 第 95 百分位 | p95 | p95(95번째 백분위수) | |
 | 推理引擎 | inference engine | 추론 엔진 | |
+| 路由尾部跳过 | route tail skip | 라우팅 꼬리 건너뛰기(처음)／꼬리 건너뛰기 | v0.1.42부터 기본값. `STRATA_ROUTE_TAIL_SKIP` |

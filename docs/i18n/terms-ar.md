@@ -141,3 +141,4 @@ Use these terms in every Arabic content file. One concept, one term.
 | buffer | مخزن مؤقت (buffer) | |
 | code | الشيفرة | "الكود" common in speech |
 | lab | المختبر | |
+| route tail skip (路由尾部跳过) | تخطي ذيل التوجيه (first use) / تخطي الذيل | default since v0.1.42; `STRATA_ROUTE_TAIL_SKIP`; no shadda |

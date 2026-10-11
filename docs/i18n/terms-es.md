@@ -135,3 +135,4 @@ Spanish engineers keep many English terms. The table gives the term to use; a gl
 | host | host | |
 | buffer | búfer | |
 | lab | laboratorio | nav label: "Lab" |
+| route tail skip (路由尾部跳过) | omisión de cola de ruta (first use) / omisión de cola | default since v0.1.42; `STRATA_ROUTE_TAIL_SKIP` |

@@ -169,3 +169,4 @@ Chapter metadata uses these fixed values:
 | 首 token 延迟 | TTFT |
 | 第 95 百分位 | p95 |
 | 吞吐量 | throughput |
+| 路由尾部跳过 | route tail skip (first use, `<dfn>`) / tail skip |
