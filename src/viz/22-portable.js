@@ -78,7 +78,7 @@
       c5: (name) => `<span class="y">[5] 选中</span>：<span class="w">${name}</span>`,
       c5iq4: '<span class="y">注意</span>：IQ4_XS 只有 AVX2 版多 token 内核。AVX-512 的 CPU 不借用它，因为舍入方式会变，于是退回 ggml-cpu',
       cVerdict: {
-        'refuse-avx2': '这台 CPU 太老，现成引擎的专家内核都跑不了。引擎在第 0 秒说清原因并退出。v0.1.39 起，setup 可以在这台电脑上现场编一个实验版引擎（STRATA_ISA_FLOOR），专家改走 ggml-cpu：能跑，但很慢。',
+        'refuse-avx2': '这台 CPU 太老，现成引擎的专家内核都跑不了。引擎在第 0 秒说清原因并退出。v0.1.39 起，setup 可以在这台电脑上现场编一个实验版引擎（STRATA_ISA_FLOOR），专家主要交给 ggml-cpu 算；v0.1.42 起，只有 AVX 的 CPU 上，Strata 自己的 128 位内核还会接过一部分行：能跑，但很慢。',
         'refuse-avx512': '标准 Q2_0 包只有 AVX-512 内核。没有 AVX-512 就在启动时拒绝，换原生格式的包才能在 AVX2 CPU 上跑。',
         'strata-vnni': '标准 Q2_0 包走 Strata 自己写的 AVX-512 内核。',
         iq512: '同一份程序，这台 CPU 走最宽的 512 位路线：权重解码一次，整组 token 共用。',
@@ -163,7 +163,7 @@
       c5: (name) => `<span class="y">[5] Chosen</span>: <span class="w">${name}</span>`,
       c5iq4: '<span class="y">Note</span>: IQ4_XS has only an AVX2 multi-token kernel. AVX-512 CPUs do not borrow it, because the rounding would change, so they fall back to ggml-cpu',
       cVerdict: {
-        'refuse-avx2': 'This CPU is too old: none of the prebuilt engine\'s expert kernels can run. The engine explains why at second 0 and exits. Since v0.1.39, setup can build an experimental engine on this machine (STRATA_ISA_FLOOR), and the experts then go through ggml-cpu: it runs, but very slowly.',
+        'refuse-avx2': 'This CPU is too old: none of the prebuilt engine\'s expert kernels can run. The engine explains why at second 0 and exits. Since v0.1.39, setup can build an experimental engine on this machine (STRATA_ISA_FLOOR), and the experts then go mostly through ggml-cpu; since v0.1.42, on an AVX-only CPU, Strata\'s own 128-bit kernel also takes over some rows: it runs, but very slowly.',
         'refuse-avx512': 'The standard Q2_0 pack has only an AVX-512 kernel. Without AVX-512 it refuses at startup; switch to a native-format pack to run on an AVX2 CPU.',
         'strata-vnni': 'The standard Q2_0 pack uses the AVX-512 kernel Strata wrote itself.',
         iq512: 'Same program; this CPU takes the widest, 512-bit route: weights are decoded once and shared by the whole group of tokens.',
@@ -249,7 +249,7 @@
       c5: (name) => `<span class="y">[5] اختيرت</span>: <span class="w">${name}</span>`,
       c5iq4: '<span class="y">تنبيه</span>: IQ4_XS ليس له إلا نواة AVX2 متعددة الرموز. ولا تستعيرها معالجات AVX-512 لأن طريقة التقريب ستتغير، فتعود إلى ggml-cpu',
       cVerdict: {
-        'refuse-avx2': 'هذا المعالج قديم جدًّا: لا تعمل عليه أي نواة خبراء من المحرك الجاهز. يشرح المحرك السبب في الثانية 0 ثم يخرج. ومنذ v0.1.39 يمكن لـ setup أن يبني على هذا الجهاز محركًا تجريبيًّا (STRATA_ISA_FLOOR)، ويذهب الخبراء حينئذ إلى ggml-cpu: يعمل، لكن ببطء شديد.',
+        'refuse-avx2': 'هذا المعالج قديم جدًّا: لا تعمل عليه أي نواة خبراء من المحرك الجاهز. يشرح المحرك السبب في الثانية 0 ثم يخرج. ومنذ v0.1.39 يمكن لـ setup أن يبني على هذا الجهاز محركًا تجريبيًّا (STRATA_ISA_FLOOR)، ويذهب الخبراء حينئذ في معظمهم إلى ggml-cpu؛ ومنذ v0.1.42، على معالج فيه AVX فقط، تتولى نواة 128 بت التي كتبتها Strata بعض الصفوف أيضًا: يعمل، لكن ببطء شديد.',
         'refuse-avx512': 'حزمة Q2_0 القياسية ليس لها إلا نواة AVX-512. وبلا AVX-512 يُرفَض الإقلاع؛ وبحزمة بصيغة أصلية يمكن التشغيل على معالج AVX2.',
         'strata-vnni': 'تستخدم حزمة Q2_0 القياسية نواة AVX-512 التي كتبتها Strata بنفسها.',
         iq512: 'البرنامج نفسه، وهذا المعالج يأخذ الطريق الأعرض بسجلات 512 بتًّا: تُفك الأوزان مرة واحدة وتشترك فيها مجموعة الرموز كلها.',
@@ -334,7 +334,7 @@
       c5: (name) => `<span class="y">[5] Elegido</span>: <span class="w">${name}</span>`,
       c5iq4: '<span class="y">Nota</span>: IQ4_XS solo tiene un kernel multi-token AVX2. Las CPU con AVX-512 no lo toman prestado, porque cambiaría el redondeo, y vuelven a ggml-cpu',
       cVerdict: {
-        'refuse-avx2': 'Esta CPU es demasiado vieja: ningún kernel de expertos del motor precompilado puede correr. El motor explica el motivo en el segundo 0 y sale. Desde v0.1.39, setup puede compilar en esta máquina un motor experimental (STRATA_ISA_FLOOR), y los expertos pasan entonces por ggml-cpu: funciona, pero muy lento.',
+        'refuse-avx2': 'Esta CPU es demasiado vieja: ningún kernel de expertos del motor precompilado puede correr. El motor explica el motivo en el segundo 0 y sale. Desde v0.1.39, setup puede compilar en esta máquina un motor experimental (STRATA_ISA_FLOOR), y los expertos pasan entonces sobre todo por ggml-cpu; desde v0.1.42, en una CPU que solo tiene AVX, el kernel de 128 bits propio de Strata se encarga además de algunas filas: funciona, pero muy lento.',
         'refuse-avx512': 'El paquete Q2_0 estándar solo tiene un kernel AVX-512. Sin AVX-512 se niega a arrancar; cambia a un paquete de formato nativo para correr en una CPU con AVX2.',
         'strata-vnni': 'El paquete Q2_0 estándar usa el kernel AVX-512 que escribió el propio Strata.',
         iq512: 'El mismo programa; esta CPU toma la ruta más ancha, de 512 bits: los pesos se decodifican una vez y los comparte todo el grupo de tokens.',
@@ -419,7 +419,7 @@
       c5: (name) => `<span class="y">[5] 선택</span>: <span class="w">${name}</span>`,
       c5iq4: '<span class="y">참고</span>: IQ4_XS는 AVX2 다중 토큰 커널만 있어요. AVX-512 CPU도 이 커널을 빌려 쓰지 않아요. 반올림 방식이 달라지기 때문이에요. 그래서 ggml-cpu로 돌아가요',
       cVerdict: {
-        'refuse-avx2': '이 CPU는 너무 오래돼서 미리 빌드된 엔진의 전문가 커널을 하나도 돌릴 수 없어요. 엔진은 0초 시점에 이유를 밝히고 종료해요. v0.1.39부터 setup이 이 컴퓨터에서 실험 엔진(STRATA_ISA_FLOOR)을 직접 빌드할 수 있고, 이때 전문가는 ggml-cpu로 돌아요. 돌아가지만 아주 느려요.',
+        'refuse-avx2': '이 CPU는 너무 오래돼서 미리 빌드된 엔진의 전문가 커널을 하나도 돌릴 수 없어요. 엔진은 0초 시점에 이유를 밝히고 종료해요. v0.1.39부터 setup이 이 컴퓨터에서 실험 엔진(STRATA_ISA_FLOOR)을 직접 빌드할 수 있고, 이때 전문가는 주로 ggml-cpu로 돌아요. v0.1.42부터는 AVX만 있는 CPU에서 Strata가 직접 쓴 128비트 커널이 일부 행을 넘겨받아요. 돌아가지만 아주 느려요.',
         'refuse-avx512': '표준 Q2_0 팩에는 AVX-512 커널뿐이에요. AVX-512가 없으면 시작할 때 거부해요. AVX2 CPU에서 돌리려면 네이티브 형식 팩으로 바꿔야 해요.',
         'strata-vnni': '표준 Q2_0 팩은 Strata가 직접 쓴 AVX-512 커널을 써요.',
         iq512: '같은 프로그램인데, 이 CPU는 가장 넓은 512비트 길로 가요. 가중치를 한 번 디코딩해서 묶음 전체가 함께 써요.',
@@ -504,7 +504,7 @@
       c5: (name) => `<span class="y">[5] 選択</span>：<span class="w">${name}</span>`,
       c5iq4: '<span class="y">注意</span>：IQ4_XS には AVX2 版のマルチトークンカーネルしかありません。AVX-512 の CPU はそれを借りません。丸め方が変わってしまうので、ggml-cpu に戻ります',
       cVerdict: {
-        'refuse-avx2': 'この CPU は古すぎて、ビルド済みエンジンのエキスパートカーネルは 1 つも動かせません。エンジンは 0 秒目に理由を説明して終了します。v0.1.39 以降、setup はこのマシン上で実験版エンジン（STRATA_ISA_FLOOR）をビルドでき、エキスパートは ggml-cpu で動きます。動きますが、とても遅いです。',
+        'refuse-avx2': 'この CPU は古すぎて、ビルド済みエンジンのエキスパートカーネルは 1 つも動かせません。エンジンは 0 秒目に理由を説明して終了します。v0.1.39 以降、setup はこのマシン上で実験版エンジン（STRATA_ISA_FLOOR）をビルドでき、エキスパートは主に ggml-cpu で動きます。v0.1.42 以降、AVX しかない CPU では、Strata 自前の 128 ビットカーネルが一部の行を引き受けます。動きますが、とても遅いです。',
         'refuse-avx512': '標準 Q2_0 パッケージには AVX-512 カーネルしかありません。AVX-512 がなければ起動時に拒否します。AVX2 の CPU で動かすには、ネイティブ形式のパッケージに替えます。',
         'strata-vnni': '標準 Q2_0 パッケージは、Strata が自前で書いた AVX-512 カーネルを使います。',
         iq512: '同じプログラムで、この CPU はいちばん幅の広い 512 ビットの道を通ります。重みは 1 回だけデコードし、グループ全体のトークンで共有します。',
