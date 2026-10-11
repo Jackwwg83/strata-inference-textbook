@@ -46,3 +46,14 @@ test('window size is capped like the verifier (8 rows)', () => {
   assert.equal(m.MAX_T, 8);
   assert.throws(() => m.round(['a', 'b'], 0, Array(8).fill('b')));
 });
+
+test('the zh verdict names both runtime exceptions, not only the rounding one (v0.1.43 tail skip)', () => {
+  require('../src/viz/core.js');
+  require('../src/viz/18-spec.js');
+  const t = globalThis.Viz.tables.find(x => x.zh && x.zh.code === 'SPEC_VERIFY');
+  assert.ok(t, 'the SPEC_VERIFY table is registered');
+  const v = t.zh.verdict('2.50', 4, 10);
+  assert.match(v, /逐字相同/);
+  assert.match(v, /尾部跳过/);
+  assert.doesNotMatch(v, /一个舍入例外/);
+});

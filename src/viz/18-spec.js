@@ -32,7 +32,7 @@
       l3: (n, emitted) => `<span class="w">提交</span>：commit(${n}) 只让前 ${n} 行生效；本轮输出 ${emitted}`,
       l4: (void_, next) => `<span class="c">回滚</span>：${void_ ? '作废 ' + void_ + '；' : ''}多写的 KV 格等下一轮直接覆盖。下一轮从“${next}”开始`,
       lEnd: '<span class="y">// 文本写完了，按 [ 重置 ] 再来一遍</span>',
-      verdict: (avg, rounds, toks) => `① ${rounds} 轮输出了 ${toks} 个 token，平均每轮 <b>${avg}</b> 个；逐个生成要 ${toks} 轮。<br>② 每轮至少前进 1 个：就算第一个草稿就猜错，目标模型也会在那里给出自己的选择。<br>③ 草稿只决定一轮能前进几步，每个字都由目标模型拍板，所以按设计输出和不用草稿时<b>逐字相同</b>（正文讲了上游记录的一个舍入例外）。`,
+      verdict: (avg, rounds, toks) => `① ${rounds} 轮输出了 ${toks} 个 token，平均每轮 <b>${avg}</b> 个；逐个生成要 ${toks} 轮。<br>② 每轮至少前进 1 个：就算第一个草稿就猜错，目标模型也会在那里给出自己的选择。<br>③ 草稿只决定一轮能前进几步，每个字都由目标模型拍板，所以按设计输出和不用草稿时<b>逐字相同</b>（正文讲了实际运行中的两个例外：上游记录的舍入差异，和 v0.1.42 起服务端默认的尾部跳过）。`,
       try: [
         '连按 <b>单步</b> 走完第 2 轮：第 2 个草稿猜错后，第 3 个草稿其实和原文一样，可它照样作废。它是接在错字后面猜的，前提已经不成立。',
         '把 <b>k</b> 调到 1 再跑 5 轮：每轮最多输出 2 个 token。调到 5：猜得越多，全对时赚得越多，但每轮的验证也更贵（见第 16 章）。',
@@ -65,7 +65,7 @@
       l3: (n, emitted) => `<span class="w">Commit</span>: commit(${n}) makes only the first ${n === 1 ? 'row' : n + ' rows'} take effect; this round outputs ${emitted}`,
       l4: (void_, next) => `<span class="c">Roll back</span>: ${void_ ? 'throw away ' + void_ + '; ' : ''}the extra KV slots are simply overwritten next round. The next round starts from "${String(next).trim()}"`,
       lEnd: '<span class="y">// the text is finished; press [ Reset ] to go again</span>',
-      verdict: (avg, rounds, toks) => `① ${rounds} rounds output ${toks} tokens, <b>${avg}</b> per round on average; one-by-one generation needs ${toks} rounds.<br>② Every round moves at least 1 token: even if the first draft is wrong, the target model gives its own pick there.<br>③ Drafts only decide how far a round moves; the target model decides every word, so by design the output is <b>word-for-word identical</b> to running without drafts (the chapter text covers one rounding exception that upstream records).`,
+      verdict: (avg, rounds, toks) => `① ${rounds} rounds output ${toks} tokens, <b>${avg}</b> per round on average; one-by-one generation needs ${toks} rounds.<br>② Every round moves at least 1 token: even if the first draft is wrong, the target model gives its own pick there.<br>③ Drafts only decide how far a round moves; the target model decides every word, so by design the output is <b>word-for-word identical</b> to running without drafts (the chapter text covers two exceptions in real runs: a rounding difference that upstream records, and the tail skip that server mode has turned on by default since v0.1.42).`,
       try: [
         'Keep pressing <b>Step</b> through round 2: after the 2nd draft is wrong, the 3rd draft actually matches the original text, yet it is still thrown away. It was guessed after a wrong word, so its premise no longer holds.',
         'Set <b>k</b> to 1 and run 5 rounds: each round outputs at most 2 tokens. Set it to 5: the more you guess, the more you gain when all are right, but each round\'s verification also costs more (see Chapter 16).',
@@ -98,7 +98,7 @@
       l3: (n, emitted) => `<span class="w">الإيداع</span>: commit(${n}) يُفعّل الصفوف الأولى فقط (العدد ${n})؛ ناتج هذه الجولة: ${emitted}`,
       l4: (void_, next) => `<span class="c">التراجع</span>: ${void_ ? 'تُلغى ' + void_ + '؛ ' : ''}وتُكتب فوق خانات KV الزائدة في الجولة التالية مباشرة. تبدأ الجولة التالية من «${String(next).trim()}»`,
       lEnd: '<span class="y">// انتهى النص؛ اضغط [ إعادة ضبط ] للمحاولة من جديد</span>',
-      verdict: (avg, rounds, toks) => `① أخرجت الجولات (العدد ${rounds}) ما مجموعه ${toks} من الرموز، بمتوسط <b>${avg}</b> لكل جولة؛ والتوليد واحدًا بعد واحد يحتاج إلى ${toks} جولة.<br>② كل جولة تتقدم رمزًا واحدًا على الأقل: حتى لو أخطأت المسودة الأولى، يعطي النموذج الهدف اختياره الخاص عندها.<br>③ المسودات تحدد فقط مقدار تقدم الجولة؛ والنموذج الهدف هو من يحسم كل كلمة، فبحسب التصميم يكون الناتج <b>مطابقًا كلمة بكلمة</b> لما يخرج بلا مسودات (يتناول نص الفصل استثناء تقريب واحدًا سجّله المصدر الأصلي).`,
+      verdict: (avg, rounds, toks) => `① أخرجت الجولات (العدد ${rounds}) ما مجموعه ${toks} من الرموز، بمتوسط <b>${avg}</b> لكل جولة؛ والتوليد واحدًا بعد واحد يحتاج إلى ${toks} جولة.<br>② كل جولة تتقدم رمزًا واحدًا على الأقل: حتى لو أخطأت المسودة الأولى، يعطي النموذج الهدف اختياره الخاص عندها.<br>③ المسودات تحدد فقط مقدار تقدم الجولة؛ والنموذج الهدف هو من يحسم كل كلمة، فبحسب التصميم يكون الناتج <b>مطابقًا كلمة بكلمة</b> لما يخرج بلا مسودات (يتناول نص الفصل استثناءين في التشغيل الفعلي: فرق تقريب سجّله المصدر الأصلي، وتخطي الذيل الذي يفعّله وضع الخادم افتراضيًا منذ v0.1.42).`,
       try: [
         'تابع الضغط على <b>خطوة</b> حتى تنتهي الجولة 2: بعد خطأ المسودة الثانية، تطابق المسودة الثالثة النص الأصلي فعلًا، ومع ذلك تُلغى. لقد خُمّنت بعد كلمة خاطئة، فلم يعد شرطها قائمًا.',
         'اجعل <b>k</b> يساوي 1 وشغّل 5 جولات: تُخرج كل جولة رمزين على الأكثر. واجعله 5: كلما خمّنت أكثر ربحت أكثر عند صحة الكل، لكن تحقق كل جولة يصير أغلى أيضًا (راجع الفصل 16).',
@@ -131,7 +131,7 @@
       l3: (n, emitted) => `<span class="w">커밋</span>: commit(${n})은 앞의 ${n}개 행만 적용해요. 이번 라운드 출력: ${emitted}`,
       l4: (void_, next) => `<span class="c">롤백</span>: ${void_ ? '폐기: ' + void_ + '. ' : ''}더 써 둔 KV 칸은 다음 라운드에서 그대로 덮어써요. 다음 라운드는 “${next}”부터 시작해요`,
       lEnd: '<span class="y">// 글을 다 썼어요. [ 초기화 ]를 눌러 다시 해 보세요</span>',
-      verdict: (avg, rounds, toks) => `① ${rounds}라운드에 토큰 ${toks}개를 출력했어요. 라운드당 평균 <b>${avg}</b>개예요. 하나씩 생성하면 ${toks}라운드가 필요해요.<br>② 라운드마다 최소 1개는 나아가요. 첫 드래프트부터 틀려도 목표 모델이 거기서 자기 선택을 내놔요.<br>③ 드래프트는 한 라운드에 몇 걸음 나아갈지만 정해요. 글자는 하나하나 목표 모델이 확정해요. 그래서 설계상 출력은 드래프트를 쓰지 않을 때와 <b>글자 단위로 똑같아요</b>(본문에서 업스트림이 기록한 반올림 예외를 설명해요).`,
+      verdict: (avg, rounds, toks) => `① ${rounds}라운드에 토큰 ${toks}개를 출력했어요. 라운드당 평균 <b>${avg}</b>개예요. 하나씩 생성하면 ${toks}라운드가 필요해요.<br>② 라운드마다 최소 1개는 나아가요. 첫 드래프트부터 틀려도 목표 모델이 거기서 자기 선택을 내놔요.<br>③ 드래프트는 한 라운드에 몇 걸음 나아갈지만 정해요. 글자는 하나하나 목표 모델이 확정해요. 그래서 설계상 출력은 드래프트를 쓰지 않을 때와 <b>글자 단위로 똑같아요</b>(본문에서 실제 실행에서 생기는 예외 두 가지를 설명해요. 업스트림이 기록한 반올림 차이와, v0.1.42부터 서버 모드가 기본으로 켜는 꼬리 건너뛰기예요).`,
       try: [
         '<b>한 단계</b>를 계속 눌러 2라운드를 끝까지 가 보세요. 드래프트 2번째가 틀린 뒤에는 3번째 드래프트가 사실 원문과 같은데도 그대로 폐기돼요. 틀린 토큰 뒤에 이어서 추측한 것이라 전제가 이미 무너졌기 때문이에요.',
         '<b>k</b>를 1로 낮춰서 5라운드를 다시 돌려 보세요. 라운드마다 토큰이 최대 2개 나와요. 5로 올리면 많이 추측할수록 전부 맞았을 때 더 벌지만, 라운드마다 검증 비용도 더 커져요(16장 참고).',
@@ -164,7 +164,7 @@
       l3: (n, emitted) => `<span class="w">コミット</span>：commit(${n}) で、先頭の ${n} 行だけが有効になります。このラウンドの出力は ${emitted}`,
       l4: (void_, next) => `<span class="c">ロールバック</span>：${void_ ? void_ + ' を破棄します。' : ''}余分に書いた KV の枠は、次のラウンドでそのまま上書きされます。次のラウンドは「${next}」から始まります`,
       lEnd: '<span class="y">// 文章が書き終わりました。[ リセット ] でもう一度</span>',
-      verdict: (avg, rounds, toks) => `① ${rounds} ラウンドで ${toks} token を出力しました。1 ラウンドの平均は <b>${avg}</b> 個です。1 個ずつの生成なら ${toks} ラウンドかかります。<br>② 1 ラウンドで必ず 1 個以上進みます。最初のドラフトが外れても、ターゲットモデルがそこで自分の選択を出します。<br>③ ドラフトが決めるのは、1 ラウンドで何ステップ進めるかだけです。どの文字もターゲットモデルが決めるので、設計上、ドラフトなしの場合と<b>1 文字ずつ同じ</b>出力になります（本文で、上流が記録している丸めの例外を説明しています）。`,
+      verdict: (avg, rounds, toks) => `① ${rounds} ラウンドで ${toks} token を出力しました。1 ラウンドの平均は <b>${avg}</b> 個です。1 個ずつの生成なら ${toks} ラウンドかかります。<br>② 1 ラウンドで必ず 1 個以上進みます。最初のドラフトが外れても、ターゲットモデルがそこで自分の選択を出します。<br>③ ドラフトが決めるのは、1 ラウンドで何ステップ進めるかだけです。どの文字もターゲットモデルが決めるので、設計上、ドラフトなしの場合と<b>1 文字ずつ同じ</b>出力になります（本文で、実際の運用での 2 つの例外を説明しています。上流が記録している丸めの差と、v0.1.42 以降サーバーモードが既定で有効にしている末尾スキップです）。`,
       try: [
         '<b>ステップ</b>を続けて押し、第 2 ラウンドを最後まで進めましょう。2 つ目のドラフトが外れたあと、3 つ目のドラフトは実は元の文と同じです。それでも破棄されます。誤った語の後ろで推測したので、前提がもう成り立たないのです。',
         '<b>k</b> を 1 にして 5 ラウンド走らせます。1 ラウンドの出力は最大 2 token です。5 にすると、推測が多いほど全部当たったときの利益は増えますが、1 ラウンドの検証も高くつきます（第 16 章を参照）。',
@@ -197,7 +197,7 @@
       l3: (n, emitted) => `<span class="w">Confirmar</span>: commit(${n}) hace que surta efecto solo ${n === 1 ? 'la primera fila' : 'las primeras ' + n + ' filas'}; esta ronda emite ${emitted}`,
       l4: (void_, next) => `<span class="c">Deshacer</span>: ${void_ ? 'se descarta ' + void_ + '; ' : ''}las ranuras extra de KV simplemente se sobrescriben en la ronda siguiente. La ronda siguiente empieza en «${String(next).trim()}»`,
       lEnd: '<span class="y">// el texto ha terminado; pulsa [ Reiniciar ] para repetir</span>',
-      verdict: (avg, rounds, toks) => `① ${rounds} rondas emitieron ${toks} tokens, <b>${avg}</b> por ronda de promedio; la generación uno por uno necesita ${toks} rondas.<br>② Cada ronda avanza al menos 1 token: aunque el primer borrador sea incorrecto, el modelo objetivo da ahí su propia elección.<br>③ Los borradores solo deciden cuánto avanza una ronda; el modelo objetivo decide cada palabra, así que por diseño la salida es <b>idéntica palabra por palabra</b> a la de ejecutar sin borradores (el texto del capítulo trata una excepción de redondeo que registra upstream).`,
+      verdict: (avg, rounds, toks) => `① ${rounds} rondas emitieron ${toks} tokens, <b>${avg}</b> por ronda de promedio; la generación uno por uno necesita ${toks} rondas.<br>② Cada ronda avanza al menos 1 token: aunque el primer borrador sea incorrecto, el modelo objetivo da ahí su propia elección.<br>③ Los borradores solo deciden cuánto avanza una ronda; el modelo objetivo decide cada palabra, así que por diseño la salida es <b>idéntica palabra por palabra</b> a la de ejecutar sin borradores (el texto del capítulo trata dos excepciones en la ejecución real: una diferencia de redondeo que registra upstream y la omisión de cola que el modo servidor activa por defecto desde v0.1.42).`,
       try: [
         'Sigue pulsando <b>Paso</b> durante la ronda 2: tras fallar el 2.º borrador, el 3.º en realidad coincide con el texto original, pero aun así se descarta. Se adivinó tras una palabra equivocada, así que su premisa ya no se sostiene.',
         'Pon <b>k</b> en 1 y ejecuta 5 rondas: cada ronda emite como máximo 2 tokens. Ponlo en 5: cuanto más adivinas, más ganas cuando todo acierta, pero la verificación de cada ronda también cuesta más (mira el capítulo 16).',
