@@ -29,7 +29,7 @@
 <rect class="f-soft" fill="#e5f1df" x="40" y="322" width="320" height="48" rx="9"/>
 <text class="f-text" fill="#182f2b" x="200" y="351" font-size="15" font-weight="600" text-anchor="middle">交给第 1 层的 PLE 模块，混进主干</text>
 </svg><figcaption>图 11-1　每个 token 的查表流程。三个 token 拆成两种 n-gram，各算 8 个行号；取回的 16 行拼成一个和模型一样宽的向量。</figcaption></figure>
-<p>这张表本身就是模型的一部分参数，名字叫 <code>per_layer_token_embd</code>，一共 320,001,536 行。按每行 90 字节算，整张表 28.8 GB（合 26.8 GiB）。<span class="ev ev-code">代码事实</span>（<code>ple_reader.hpp</code>）它比 12 GB 显存大得多，也不放进内存，就待在硬盘上。</p>
+<p>这张表本身就是模型的一部分参数，名字叫 <code>per_layer_token_embd</code>，一共 320,001,536 行。按每行 90 字节算，整张表 28.8 GB（合 26.8 GiB）。<span class="ev ev-code">代码事实</span>（<code>ple_reader.hpp</code>）它比 12 GB 显存大得多，默认也不放进内存，就待在硬盘上。</p>
 <aside class="primer" id="c11-ngram">
 <h3>n-gram 语言模型</h3>
 <p>猜下一个词，最朴素的办法是“看前面几个词”。如果语料里“我 喜欢”后面 30% 是“猫”、20% 是“你”，那就按这个比例猜。只看前 n−1 个词来猜第 n 个词，就是 <dfn>n-gram 语言模型</dfn>。n = 2 叫二元模型，n = 3 叫三元模型。</p>
@@ -96,7 +96,7 @@
 </aside>
 
 <h2 id="sec-3">11.3 一行 90 字节，为什么要读 4 KiB</h2>
-<p>行号有了，接下来去硬盘上取。问题来了：硬盘不按字节读，按<dfn>页</dfn>读。Strata 读这张表用的是“绕过操作系统缓存”的直接读取，每次读取的起点、长度和内存地址都必须是 4096 字节的整数倍。<span class="ev ev-code">代码事实</span>（<code>include/strata/platform/direct_file.hpp</code>）想要一行 90 字节，就得把它所在的整整一页 4096 字节读进来。见图 11-3。</p>
+<p>行号有了，接下来去硬盘上取。问题来了：硬盘不按字节读，按<dfn>页</dfn>读。Strata 读这张表默认用的是“绕过操作系统缓存”的直接读取，每次读取的起点、长度和内存地址都必须是 4096 字节的整数倍。<span class="ev ev-code">代码事实</span>（<code>include/strata/platform/direct_file.hpp</code>）想要一行 90 字节，就得把它所在的整整一页 4096 字节读进来。见图 11-3。</p>
 <figure class="fig"><svg viewBox="0 0 400 316" role="img" aria-label="图 11-3：一行整个落在一页里时读 1 页，跨过页边界时读 2 页；一个 token 取 16 行，有用的只有 1440 字节，却要读 64 KiB">
 <text class="f-muted" fill="#5c6d66" x="200" y="18" font-size="14" text-anchor="middle">文件按 4 KiB 分页（示意，行画宽了）</text>
 <rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="30" width="180" height="44"/>
@@ -228,7 +228,7 @@
 <text class="f-muted" fill="#5c6d66" x="8" y="264" font-size="14">只有超出窗口的那一截，才变成等待</text>
 </svg><figcaption>图 11-6　先发请求、后取结果。读盘和计算同时进行，读盘时间被“藏”在嵌入和第 0 层后面；读得比窗口还慢时，只等差额。</figcaption></figure>
 <p>谁去跟硬盘打交道？默认有一个专门的 I/O 线程。它负责提交读请求、收取“读完了”的通知；调用 <code>issue</code> 的那一方只是把请求排进队列，再把它叫醒。源码注释说，这样每次读文件约 11 微秒的系统调用开销，就不再落在主循环上。队列和状态由一把互斥锁保护。<span class="ev ev-code">代码事实</span>[S11] 同时在路上的读请求默认最多 256 个：生成时每个 token 只要 16 个，读一大块提示词时才用得满。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>）</p>
-<p>还有一个让人会心一笑的细节。有些固态硬盘闲置约 250 毫秒就进入省电状态，下一次读要多等 50–150 毫秒。生成时如果连着几轮都在行缓存里命中，硬盘就可能“睡着”。所以读取器有一个“保持清醒”的功能：一段时间没有读请求，就随便读一页表，让硬盘别睡着。生成程序默认会打开它。<span class="ev ev-code">代码事实</span>（<code>ple_reader.hpp</code>）这种“先发出去、过会儿再收”的异步思路，第 14 章会系统地讲。</p>
+<p>还有一个让人会心一笑的细节。有些固态硬盘闲置约 250 毫秒就进入省电状态，下一次读要多等 50–150 毫秒。生成时如果连着几轮都在行缓存里命中，硬盘就可能“睡着”。所以读取器有一个“保持清醒”的功能：一段时间没有读请求，就随便读一页表，让硬盘别睡着。直接读取模式下，生成程序默认会打开它。<span class="ev ev-code">代码事实</span>（<code>ple_reader.hpp</code>）这种“先发出去、过会儿再收”的异步思路，第 14 章会系统地讲。</p>
 
 <h2 id="sec-6">11.6 动手：亲手制造一次冲突</h2>
 <p>本章两个模拟器分工不同。「n-gram 哈希」让你看清行号怎么来、撞车怎么发生；「行缓存」让你看清组相联和替换指针怎样工作。建议先在「行缓存」里跑一遍“冲突”，记下两个命中率，再换“热点”对比。</p>
@@ -245,11 +245,11 @@
 
 <details class="deep"><summary>深入一层：三种“查找”、文档与代码的出入、哈希的陷阱和验收指标</summary>
 <h3>三种查找，不能画成一个框</h3>
-<p>Strata 里至少有三样东西带着“查找”或“缓存”的名字，正确性条件完全不同。<strong>n-gram 表查询</strong>是模型数值计算的一部分：它依赖序列历史，读的是训练好的表行，取错一行就是算错。<strong>prompt lookup 草稿</strong>从前文里已经出现过的文字猜接下来的几个 token（最多 5 个），猜得对不对，最后还要大模型验证。<span class="ev ev-report">上游报告</span>[S02] <strong>专家缓存</strong>在默认配置下只决定某个专家的权重此刻在不在显存，不改变算什么（第 12 章）。三者名字相近，坏了的后果完全不同：第一种坏了输出变错，第二种坏了只是变慢，第三种坏了可能“看起来对、其实错”。</p>
+<p>Strata 里至少有三样东西带着“查找”或“缓存”的名字，正确性条件完全不同。<strong>n-gram 表查询</strong>是模型数值计算的一部分：它依赖序列历史，读的是训练好的表行，取错一行就是算错。<strong>prompt lookup 草稿</strong>从前文里已经出现过的文字猜接下来的几个 token（最多 5 个），猜得对不对，最后还要大模型验证。<span class="ev ev-report">上游报告</span>[S02] <strong>专家缓存</strong>本意是只决定某个专家的权重此刻在不在显存，不改变算什么（第 12 章）；不过 v0.1.42 起，服务端默认的路由尾部跳过会丢掉一部分不在显存、排名又靠后的专家，这时缓存装着谁也影响了算什么（第 10 章）。三者名字相近，坏了的后果完全不同：第一种坏了输出变错，第二种坏了只是变慢，第三种坏了可能“看起来对、其实错”。</p>
 <p>PLE 用到的两个历史 token 是序列状态的一部分，还有一段卷积式的历史缓冲。<span class="ev ev-code">代码事实</span>[S13] 它们要随对话保存和恢复，不是随手可丢的日志。</p>
 <h3>注释、文档和代码对不上的地方</h3>
 <p><code>ple_reader.hpp</code> 开头的注释说行缓存用“clock 淘汰”，而 <code>ple_reader.cpp</code> 里写的是每组一个轮换指针，没有 clock 算法需要的“最近用过”标记位。<span class="ev ev-code">代码事实</span>[S11] 没有标记位的 clock 退化成按顺序轮换，所以两者效果一样，但读代码时要以实现为准。</p>
-<p>另一处：上游文档说这张表“通过操作系统缓存读取”。<span class="ev ev-report">上游报告</span>[S02] 而当前代码的默认模式是直接读取，注释明确要求这张表不占用内存，包括操作系统的文件缓存；内存映射只作为对照组保留，另有一个把整张表锁进内存的选项。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>、<code>direct_file.hpp</code>）文档往往落后于代码，遇到这种出入，要追到默认配置和调用路径上去确认。</p>
+<p>另一处：上游文档说这张表“通过操作系统缓存读取”。<span class="ev ev-report">上游报告</span>[S02] 而代码的默认模式是直接读取，注释明确要求这张表不占用内存，包括操作系统的文件缓存；内存映射原本只作为对照组保留，另有一个把整张表锁进内存的选项。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>、<code>direct_file.hpp</code>）v0.1.42 起又多了一层：引擎启动时先用直接读取随机读一小批行，测一次速度。每秒不到 15,000 行（约合每秒 60 MB 的 4 KiB 随机读，常见于没有 DRAM 缓存的固态硬盘），就自动改用内存映射，让操作系统的文件缓存存这些页；这时“保持清醒”也关掉。如果你明确写了 <code>--ple-io direct</code>，它只警告，不切换。<span class="ev ev-code">代码事实</span>（<code>src/program/generate.cpp</code>）于是文档和注释的两种说法，在不同的盘上各对一半。两种模式读出的行一样，变的是速度和占不占内存。文档往往落后于代码，遇到这种出入，要追到默认配置和调用路径上去确认。</p>
 <h3>哈希里每个错误都“看起来对”</h3>
 <p><code>ngram.hpp</code> 的注释列出了一串陷阱：用加法代替异或；用“与上 2 的幂减 1”代替取余（模数不是 2 的幂，两者是不同的函数）；“对话结束”符的截断要向更早的位置传播；缺失的前文是 −1，而编号 0 是一个真实的 token；当前 token 自己是结束符时，不截断它自己的上下文；前文数组是“旧的在前”，读反了方向依然能算出合法行号。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>、<code>src/kernels/ngram.cpp</code>）每一种写错，算出的行号都在合法范围内，范围检查抓不住，只能拿独立实现的“标准答案”逐项比对。</p>
 <p>还有一个偏移量陷阱：表的数据不是从文件第 0 字节开始的，前面有文件头。从 0 开始读，会读到“头部 ＋ 错位的行”，解码出来依然是看似合理的数字。所以读取器从真正解析过的文件头里取偏移，并检查这张表恰好填满文件的剩余部分。<span class="ev ev-code">代码事实</span>（<code>ngram.hpp</code>）</p>

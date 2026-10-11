@@ -168,7 +168,9 @@
 <text class="f-muted" fill="#5c6d66" x="10" y="202" font-size="11">槽位总数不变，变的是“谁住在显存里”。编号是示意。</text>
 </svg><figcaption>图 10-7　话题变了，热门专家也会变。缓存把冷门专家换出、热门专家换入，显存总量不变。</figcaption></figure>
 <p>这和整理厨房台面是一个道理：最近天天做川菜，花椒辣椒就摆在手边；换成烘焙，台面上的东西也跟着换。台面大小不变，摆什么由最近的使用情况决定。第 12 章会细讲这个缓存怎样决定“换谁进、换谁出”。</p>
-<p>注意一点：在默认配置下，缓存只改变专家<strong>在哪里算</strong>，不改变<strong>算什么</strong>。被换出的专家依然在内存里，被选中时由 CPU 计算，模型本身一个专家都没少。（第 26 章会讲到，CPU 和 GPU 算同一个专家时，最后几位小数可能略有差异，但这不是“丢了专家”。）v0.1.41 有一个实验开关 <code>STRATA_ROUTE_RESIDENT</code>：选完 10 个专家后，排名靠后的未缓存专家如果和某个已缓存专家分数很接近，就换成那个已缓存的。这就改了“算什么”，回答也会变，所以它默认关闭。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/fb58e0dbc8399662c0e47c76578c6e878b14f6cf/src/kernels/cuda/native_router.cu#L180-L183" target="_blank" rel="noopener noreferrer">native_router.cu</a></p>
+<p>注意一点：缓存的本意是只改变专家<strong>在哪里算</strong>，不改变<strong>算什么</strong>。被换出的专家依然在内存里，被选中时由 CPU 计算，模型本身一个专家都没少。（第 26 章会讲到，CPU 和 GPU 算同一个专家时，最后几位小数可能略有差异，但这不是“丢了专家”。）在命令行里单次运行时，这一点仍然成立。</p>
+<p>不过 v0.1.42 起，服务模式默认在这个规则上加了一个近似，叫<dfn>路由尾部跳过</dfn>（AMD RDNA4 显卡自 v0.1.43 起）。一次验证窗口里有好几个 token。一个不在显存的专家，如果窗口里<strong>每个</strong> token 都只把它排在 10 名里的第 8–10 名，它就既不搬、也不算，贡献记 0；其余专家保留路由器给的权重，不重新归一。在显存里的专家照常算。所以这时缓存装着谁，决定了哪些专家被丢掉，也就改了“算什么”。<span class="ev ev-code">代码事实</span>（<code>src/core/expert_source.cpp</code>、<code>src/program/generate.cpp</code>）设 <code>STRATA_ROUTE_TAIL_SKIP=0</code> 就关掉它，回到严格的规则；显存里已经有 90% 以上的专家时，它默认不开。上游在 12–16 GB 的显卡上测得生成快 13%–16%，回答和不跳过时略有不同。<span class="ev ev-report">上游报告</span>（<code>docs/DETAILS.md</code>）</p>
+<p>另有一个实验开关 <code>STRATA_ROUTE_RESIDENT</code>：选完 10 个专家后，排名靠后的未缓存专家如果和某个已缓存专家分数很接近，就换成那个已缓存的。这就改了“算什么”，回答也会变，所以它默认关闭。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/7695859aa13afb248bdb4d36f9b2e95707db079d/src/kernels/cuda/native_router.cu#L180-L183" target="_blank" rel="noopener noreferrer">native_router.cu</a></p>
 
 <h2 id="sec-6">10.6 动手：体会“热门”带来的命中率</h2>
 <p>缓存能帮多大忙，取决于专家被选中的频率是否均匀。如果少数热门专家承担了大量工作，缓存住它们，显卡就能多干活、CPU 少干活；如果每个专家被选中的机会完全均等，缓存 6% 的专家，大约也只能命中 6%。</p>
