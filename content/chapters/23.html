@@ -86,7 +86,7 @@
 <text class="f-on" fill="#ffffff" x="18" y="268" font-size="12" font-family="monospace">data: [DONE]↵↵</text>
 <text class="f-muted" fill="#5c6d66" x="18" y="294" font-size="12">结束信号。这是 OpenAI 接口的约定，不属于 SSE 规范本身</text>
 </svg><figcaption>图 23-3　Strata 写出的一段 SSE 字节流（JSON 里的 id、model 等字段用“…”省略）。客户端靠空行判断一个事件何时完整。</figcaption></figure>
-<p>注意中间那条 <code>: keep-alive</code>。读一段很长的提问时，引擎可能好几分钟不吐 token。这期间 Strata 每 10 秒产出一个“心跳”，HTTP 层把它写成一条 SSE 注释。<span class="ev ev-code">代码事实</span> 客户端会忽略注释，但看到有字节进来，就不会以为连接断了；服务器写的时候，也能顺便发现对方是不是已经走了（第 24 章细讲）。v0.1.39 的 Responses 接口还多做了一步：Codex CLI 只把真正的事件算作“还在工作”，不看注释，所以读长提问时，服务器每 15 秒额外发一条 <code>response.in_progress</code> 事件。<span class="ev ev-code">代码事实</span></p>
+<p>注意中间那条 <code>: keep-alive</code>。读一段很长的提问时，引擎可能好几分钟不吐 token。这期间 Strata 每 10 秒产出一个“心跳”，HTTP 层把它写成一条 SSE 注释。<span class="ev ev-code">代码事实</span> v0.1.42 起，还有两种时候也发这条注释，同样每 10 秒一条：请求在排队、等前一个请求用完引擎时；模型正在写一个工具调用的参数，而前端要等参数写完才整个发出时。<span class="ev ev-code">代码事实</span> 客户端会忽略注释，但看到有字节进来，就不会以为连接断了；服务器写的时候，也能顺便发现对方是不是已经走了（第 24 章细讲）。v0.1.39 的 Responses 接口还多做了一步：Codex CLI 只把真正的事件算作“还在工作”，不看注释，所以读长提问时，服务器每 15 秒额外发一条 <code>response.in_progress</code> 事件。<span class="ev ev-code">代码事实</span></p>
 
 <h2 id="sec-3">23.3 一个汉字，三个字节</h2>
 <p>网络只认字节，不认字。拿一个简化的事件 <code>data: {"delta":"你好"}</code> 来说，连同结尾的空行，它在线路上是 26 个字节，其中“你”和“好”各占 3 个。问题来了：TCP 连接每次交给程序的“一块”有多大，由网络和操作系统决定，跟字的边界毫无关系。一个汉字的 3 个字节，完全可能前 1 个在这一块、后 2 个在下一块。</p>
@@ -224,7 +224,7 @@
 <li>模型输出里的标签同样会被切开。Strata 的 <code>OutputParser</code> 扣住可能是标签开头的尾巴，从不发出半个标签；完整的工具调用要等它写完才算数。</li>
 </ol></div>
 <div class="myth"><p><strong>常见误解：“数一数 SSE 事件，就知道模型生成了多少个 token。”</strong></p>
-<p>两者没有固定关系。Strata 的第一个事件只宣布“助手开始说话”，不含任何 token；读长提问时会插入保活注释；一个 token 只带来半个汉字时，这一步没有文字可发；标签被扣住时，也可能暂时不发。反过来，一个事件里的文字也可能来自好几个 token。要统计 token 数，请看响应结尾的 <code>usage</code> 字段，不要数事件。</p></div>
+<p>两者没有固定关系。Strata 的第一个事件只宣布“助手开始说话”，不含任何 token；读长提问、排队、或者等工具参数写完时，会插入保活注释；一个 token 只带来半个汉字时，这一步没有文字可发；标签被扣住时，也可能暂时不发。反过来，一个事件里的文字也可能来自好几个 token。要统计 token 数，请看响应结尾的 <code>usage</code> 字段，不要数事件。</p></div>
 
 <details class="deep"><summary>深入一层：三道边界的严格要求、“兼容”的范围与验收方法</summary>
 <h3>三道边界，按规范写清楚</h3>
