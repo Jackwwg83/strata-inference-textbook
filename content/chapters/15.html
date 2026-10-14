@@ -175,6 +175,7 @@
 <text class="f-muted" fill="#5c6d66" x="10" y="192" font-size="12">数字来自 session.hpp 的注释；条长按对数刻度画</text>
 </svg><figcaption>图 15-5　Strata 一步步减少提交次数：先按层录图，再把整个 token 录成一张图。每少一次提交，就少一笔几十到几百微秒的固定开销。</figcaption></figure>
 <p>为什么不一开始就录整个 token？因为每层中间要和 CPU 专家池交接：GPU 算到路由那一步，CPU 才知道该算哪些专家。Strata 最早把“一层”作为图的单位，就是为了让主机在层与层之间插手，让 CPU 专家池在 GPU 跑下一段时同时开工。[S13] 整 token 图改用一个 GPU 上的单线程 kernel 在设备端等主机写好标志位，主机不再调用驱动。<span class="ev ev-code">代码事实</span></p>
+<p>v0.1.44 起，Strata 多了一个实验性的 Mac 版，跑在 Apple 的 Metal 上。Metal 没有 CUDA Graph，Mac 版的运行时自己补了一套“录制”：记下一条流上的所有提交，每次重放时重新编码一遍。源码注释特意写明，“每步变的值放在显存缓冲里，不放在参数里”这条规矩在那里照样成立。<span class="ev ev-code">代码事实</span>（<code>metal/include/strata/gpu/runtime.hpp</code>）上游文档还说，Mac 版每个验证窗口（第 18 章）只提交一个 command buffer。<span class="ev ev-report">上游报告</span></p>
 
 <h2 id="sec-5">15.5 图会把参数录死：被冻住的位置</h2>
 <p>CUDA Graph 有个脾气：录制时，kernel 的<strong>参数</strong>被原样抄进图里，以后每次重放都用这份抄本。Strata 专门写了个小实验验证：图在重放时会重新读取输入缓冲里的数据，但不会重新读取 kernel 参数。<span class="ev ev-code">代码事实</span></p>

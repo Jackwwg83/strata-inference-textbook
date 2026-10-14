@@ -77,10 +77,10 @@
 <p>有了专家缓存，一层里的 10 个专家分成三拨：<span class="ev ev-code">代码事实</span>（<code>src/core/expert_source.cpp</code>、<code>src/program/generate.cpp</code>）</p>
 <ol>
 <li>在显存里的（命中），GPU 直接算。</li>
-<li>没命中的里，按一个比例挑出一部分，GPU 经 PCIe 从锁页内存读过去算。在 NVIDIA 卡上，这个比例从一个起步值开始：Q2_0 模型 0.2，其他原生格式 0.55。原生格式的引擎启动时还会实测一次 PCIe 带宽，不到 20 GB/s 就按带宽成比例调小。v0.1.42 起，单卡服务端没有指定 <code>--pcie-frac</code> 时，还会在开头约 10 秒里按 CPU 专家池的实测速度重算这个比例（深入一层有公式）。Q2_0 模型从 v0.1.43 起才这样做，在 Windows 上默认不做。</li>
+<li>没命中的里，按一个比例挑出一部分，GPU 经 PCIe 从锁页内存读过去算。在 NVIDIA 卡上，这个比例从一个起步值开始：Q2_0 模型 0.2，NVFP4 包 0.25（v0.1.44 起），其他原生格式 0.55。原生格式的引擎启动时还会实测一次 PCIe 带宽，不到 20 GB/s 就按带宽成比例调小。v0.1.42 起，单卡服务端没有指定 <code>--pcie-frac</code> 时，还会在开头约 10 秒里按 CPU 专家池的实测速度重算这个比例（深入一层有公式）。Q2_0 模型从 v0.1.43 起才这样做，在 Windows 上默认不做。</li>
 <li>剩下没命中的，CPU 就地算。</li>
 </ol>
-<p>v0.1.42 起，服务模式默认还多一种去向：<strong>跳过</strong>。一个没命中的专家，如果这个验证窗口里每个 token 都只把它排在第 8–10 名，它就既不搬、也不算，贡献记 0（第 10 章的“路由尾部跳过”）。PCIe 那一份，按跳过之后剩下的未命中专家来分。<span class="ev ev-code">代码事实</span>（<code>expert_source.cpp</code>）这一步改变了输出，设 <code>STRATA_ROUTE_TAIL_SKIP=0</code> 可以关掉。</p>
+<p>v0.1.42 起，服务模式默认（NVFP4 包除外）还多一种去向：<strong>跳过</strong>。一个没命中的专家，如果这个验证窗口里每个 token 都只把它排在第 8–10 名，它就既不搬、也不算，贡献记 0（第 10 章的“路由尾部跳过”）。PCIe 那一份，按跳过之后剩下的未命中专家来分。<span class="ev ev-code">代码事实</span>（<code>expert_source.cpp</code>）这一步改变了输出，设 <code>STRATA_ROUTE_TAIL_SKIP=0</code> 可以关掉。</p>
 <p>顺序很讲究：GPU 那一份先决定、先发布，让 GPU 先动起来，CPU 再开始自己的那份。<span class="ev ev-code">代码事实</span>（<code>expert_source.cpp</code> 注释）上游文档提到，把 PCIe 份额设成 0，所有未命中都回到 CPU，生成速度会变慢。<span class="ev ev-report">上游报告</span>[S03]</p>
 <p>下面的模拟器把一层画成时间线。数字是教学推演：每个专家 1.38 MB，CPU 按 40 GB/s、显存按 672 GB/s、PCIe 按 63 GB/s 读；注意力加路由按 0.25 毫秒、合并按 0.05 毫秒假设。</p>
 <div class="viz" data-viz="layer-timeline"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="图 13-4：命中率 65%、PCIe 份额 20% 时一层的时间线。GPU 先算注意力和路由，之后 GPU 和 CPU 同时算专家，CPU 分支更长，是关键路径">
@@ -174,5 +174,5 @@
 <h3>注释和设计对不上的地方</h3>
 <p><code>session.hpp</code> 后半段有一段较早的注释，说“重叠来自一层的延迟：专家池的结果由下一层消费”。<span class="ev ev-code">代码事实</span>（<code>session.hpp</code>）而前面关于两张计算图的注释说的正相反：为了不让第 l 层的专家配上第 l + 1 层的路由权重，合并必须留在本层。<span class="ev ev-code">代码事实</span>[S13] 遇到这种矛盾，以当前的调用顺序和测试为准。</p>
 <h3>GPU 和 CPU 算同一个专家，最后几位可能不同</h3>
-<p>GPU 和 CPU 的内核舍入方式不同。哪个专家由谁算，取决于缓存状态和 PCIe 份额，所以同一提示词重复运行，答案可能不逐字节相同。v0.1.42 起，单卡服务端的 PCIe 份额还会在开头按计时重算（见上面的公式），更不能指望它每次一样。上游文档说，想要可重复的结果，可以把 PCIe 份额设成 0 等几个开关，代价是生成变慢。<span class="ev ev-report">上游报告</span>[S03] 明确给出 <code>--pcie-frac</code> 的值，就不再重算。<span class="ev ev-code">代码事实</span>（<code>generate.cpp</code>）v0.1.41 起，单张 NVIDIA 卡读短提示时，还要看 CPU 分担的份额（第 16 章）。从代码看，这个份额按每层实测的耗时算出，状态在请求之间累计。<span class="ev ev-code">代码事实</span>（<code>src/prefill/prefill.cpp</code>）上游文档现在也写明：同一个请求两次运行可能分得不同、答得也不同；一次续接对话的重读，在 1,536 个 token 里有 31 个最可能的 token 不一样。<span class="ev ev-report">上游报告</span>（<code>docs/DETAILS.md</code>）要关掉它，再加 <code>STRATA_PREFILL_CPU_SHARE=0</code>。</p>
+<p>GPU 和 CPU 的内核舍入方式不同。哪个专家由谁算，取决于缓存状态和 PCIe 份额，所以同一提示词重复运行，答案可能不逐字节相同。v0.1.42 起，单卡服务端的 PCIe 份额还会在开头按计时重算（见上面的公式），更不能指望它每次一样。上游文档说，想要可重复的结果，可以把 PCIe 份额设成 0 等几个开关，代价是生成变慢。<span class="ev ev-report">上游报告</span>[S03] 明确给出 <code>--pcie-frac</code> 的值，就不再重算。<span class="ev ev-code">代码事实</span>（<code>generate.cpp</code>）v0.1.41 起，单张 NVIDIA 卡读短提示时，还要看 CPU 分担的份额（第 16 章）。从代码看，这个份额按每层实测的耗时算出，状态在请求之间累计。<span class="ev ev-code">代码事实</span>（<code>src/prefill/prefill.cpp</code>）上游文档现在也写明：同一个请求两次运行可能分得不同、答得也不同；一次续接对话的重读，在 1,536 个 token 里有 31 个最可能的 token 不一样。<span class="ev ev-report">上游报告</span>（<code>docs/DETAILS.md</code>）要关掉它，再加 <code>STRATA_PREFILL_CPU_SHARE=0</code>。还有两处也跟着计时走：一个验证窗口装几个草稿要看计时，而 CPU 单独算一个 token 和成组算，舍入不同；尾部跳过看的也是窗口里的每个 token。所以完整的配方还要加 <code>STRATA_IQ_MT_MIN=1</code> 和 <code>STRATA_ROUTE_TAIL_SKIP=0</code>。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/296b59d2f73c8f04a805df29c2fa97655adace78/docs/OLDER_GPUS.md#L145-L148" target="_blank" rel="noopener noreferrer">docs/OLDER_GPUS.md</a>）第 12 章把这六项放在一起讲。</p>
 </details>
