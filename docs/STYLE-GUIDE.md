@@ -114,8 +114,8 @@ SVG 技术约定（测试与打印版依赖这些规则）：
 ## 7. 证据与事实核查
 
 1. 证据标签：`<span class="ev ev-code">代码事实</span>`、`<span class="ev ev-report">上游报告</span>`、`<span class="ev ev-est">教学推演</span>`。基础原理不加标签。
-2. 所有关于 Strata 的事实，都要对照固定提交 `7695859aa13afb248bdb4d36f9b2e95707db079d` 的源码或文档核实：
-   `https://raw.githubusercontent.com/Niko1221/Strata/7695859aa13afb248bdb4d36f9b2e95707db079d/<路径>`
+2. 所有关于 Strata 的事实，都要对照固定提交 `296b59d2f73c8f04a805df29c2fa97655adace78` 的源码或文档核实：
+   `https://raw.githubusercontent.com/Niko1221/Strata/296b59d2f73c8f04a805df29c2fa97655adace78/<路径>`
 3. 引用 `[S01]`–`[S19]`、`[R01]`–`[R06]` 必须存在于 `content/sources.json`，且所引内容落在该来源的行号窗口内。
 4. 不确定的说法，宁可删掉，也不要写成事实。推算要标“教学推演”并写出算式。
 5. 上游数字要写清条件：硬件、模型版本、上下文长度、引擎版本。
