@@ -1,5 +1,5 @@
 /* Pure numbers behind the chapter 21 widgets. Teaching model, not a Strata scheduler.
-   Hand-off sizes from include/strata/core/verify.hpp (handoff_floats), layout.hpp (hc = 4, n_embd = 2560)
+   Hand-off sizes from include/strata/core/verify.hpp (handoff_floats), geometry.hpp (hc = 4, n_embd = 2560)
    and src/prefill/prefill.cpp (D = N * HC rows) at the pinned commit. Stage times and link latency are inputs. */
 (function (root) {
   'use strict';

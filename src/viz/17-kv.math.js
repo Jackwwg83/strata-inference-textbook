@@ -1,5 +1,5 @@
 /* Pure numbers behind the chapter 17 widgets. Budget exercise and teaching model, not an allocator simulation.
-   Geometry and formats from layout.hpp, qsa.hpp, kv_q8.hpp, kv_q4.hpp, kv_stream.hpp and session.cpp at the pinned commit. */
+   Geometry and formats from geometry.hpp, qsa.hpp, kv_q8.hpp, kv_q4.hpp, kv_stream.hpp and session.cpp at the pinned commit. */
 (function (root) {
   'use strict';
   const QSA_LAYERS = 12, KV_HEADS = 2, HEAD_DIM = 256;
