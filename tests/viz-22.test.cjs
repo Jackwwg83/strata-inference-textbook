@@ -45,11 +45,11 @@ test('dp4a branch follows the #if chains in dp4a.hpp and hip_compat/intrinsics.h
   assert.equal(m.dp4aBranch({ backend: 'cuda', sm: 120 }).id, 'cuda-hw');
   assert.equal(m.dp4aBranch({ backend: 'cuda', sm: 61 }).id, 'cuda-hw');
   assert.equal(m.dp4aBranch({ backend: 'cuda', sm: 60 }).id, 'cuda-sw');
-  for (const arch of ['gfx1100', 'gfx1101', 'gfx1102', 'gfx1150', 'gfx1151', 'gfx1200', 'gfx1201']) assert.equal(m.dp4aBranch({ backend: 'hip', arch }).id, 'hip-sudot4', arch + ' (v0.1.40 adds gfx1150 and gfx1151)');
+  for (const arch of ['gfx1100', 'gfx1101', 'gfx1102', 'gfx1103', 'gfx1150', 'gfx1151', 'gfx1200', 'gfx1201']) assert.equal(m.dp4aBranch({ backend: 'hip', arch }).id, 'hip-sudot4', arch + ' (v0.1.40 adds gfx1150 and gfx1151, v0.1.44 adds gfx1103)');
   for (const arch of ['gfx1030', 'gfx1031', 'gfx1032']) assert.equal(m.dp4aBranch({ backend: 'hip', arch }).id, 'hip-sdot4');
   assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1012' }).id, 'hip-sdwa', 'v0.1.39: RDNA1 SDWA sequence');
   assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1012', portableDot: true }).id, 'hip-loop', 'STRATA_GFX1012_PORTABLE_DOT');
-  assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1103' }).id, 'hip-loop', 'v0.1.40.2: gfx1103 (780M) takes the portable kernels');
+  assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1103:xnack-' }).id, 'hip-sudot4', 'v0.1.44: gfx1103 (780M) joins the sudot4 list and the gfx11 WMMA kernels');
   for (const arch of ['gfx1010', 'gfx1011']) assert.equal(m.dp4aBranch({ backend: 'hip', arch }).id, 'hip-loop', arch + ' (RDNA1, v0.1.40.2): only gfx1012 has the SDWA sequence');
   assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1152' }).id, 'hip-loop', 'v0.1.42: gfx1152 (860M / 840M) is not in the sudot4 list');
   assert.equal(m.dp4aBranch({ backend: 'hip', arch: 'gfx1034' }).id, 'hip-loop', 'gfx1034 is not in the sdot4 list');
@@ -109,7 +109,7 @@ test('vector width: AVX2 holds 32 int8 lanes, AVX-512 holds 64', () => {
 
 test('support matrix size is the product of its dimensions', () => {
   assert.equal(m.combos([2, 3, 2, 2]), 24);
-  assert.equal(m.combos([12, 3, 2, 5]), 360, 'figure 22-7 at v0.1.43: 4 NVIDIA generations + 8 AMD archs in the Windows HIP zip');
+  assert.equal(m.combos([12, 3, 2, 5]), 360, 'figure 22-7 at v0.1.44.1: 4 NVIDIA generations + 8 AMD archs in the Windows HIP zip');
   assert.equal(m.combos([]), 1);
   assert.throws(() => m.combos([2, 0]));
 });

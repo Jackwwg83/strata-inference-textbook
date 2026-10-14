@@ -91,12 +91,15 @@ test('swap protocol: correct order never lets the GPU read a half-copied slot; t
   assert.equal(ok[ok.length - 1].table331, -1);
 });
 
-test('the swap widget states the v0.1.43 per-layer wait as a refinement of the same rule (Strata v0.1.43)', () => {
+test('the swap widget states the opt-in per-layer wait as a refinement of the same rule (Strata v0.1.44.1)', () => {
   require('../src/viz/core.js');
   require('../src/viz/12-cache.js');
   const t = globalThis.Viz.tables.find(x => x.zh && x.zh.code === 'CACHE_RACE');
   assert.ok(t, 'the CACHE_RACE table is registered');
-  assert.match(t.zh.vGood, /v0\.1\.43/);
+  // v0.1.43.1 made STRATA_ADAPT_OVERLAP opt-in on every backend (generate.cpp:1388-1405 at 296b59d)
+  assert.match(t.zh.vGood, /STRATA_ADAPT_OVERLAP/);
+  assert.match(t.zh.vGood, /可选/);
   assert.match(t.zh.vGood, /这一层的拷贝/);
+  assert.doesNotMatch(t.zh.vGood, /v0\.1\.43 起/);
   assert.doesNotMatch(t.zh.vGood, /正是这样做的/);
 });

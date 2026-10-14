@@ -1,5 +1,5 @@
 /* Pure logic behind the chapter 22 widgets. Teaching model, not Strata code.
-   The branch rules mirror files at the pinned commit 7695859 (v0.1.43):
+   The branch rules mirror files at the pinned commit 296b59d (v0.1.44.1):
    include/strata/kernels/dp4a.hpp, include/strata/hip_compat/intrinsics.hpp, cmake/hip_backend.cmake,
    CMakeLists.txt (CUDA guard), src/program/generate.cpp and src/kernels/cpu/native_expert.cpp. */
 (function (root) {
@@ -26,7 +26,7 @@
     for (let i = 0; i < 4; i++) s = (s + x[i] * y[i]) | 0;
     return s;
   }
-  // The portable HIP branch (gfx1010, gfx1011, gfx1103, gfx1152, ...): unsigned 32-bit accumulation, then reinterpret as signed.
+  // The portable HIP branch (gfx1010, gfx1011, gfx1152, ...): unsigned 32-bit accumulation, then reinterpret as signed.
   function dp4aHipLoop(a, b, c) {
     let sum = c >>> 0;
     for (let lane = 0; lane < 4; lane++) {
@@ -51,7 +51,8 @@
     return (c + x[0] * y[0] + x[1] * y[1] + x[2] * y[2] + x[3] * y[3]) | 0;
   }
 
-  const SUDOT4 = ['gfx1100', 'gfx1101', 'gfx1102', 'gfx1150', 'gfx1151', 'gfx1200', 'gfx1201'];
+  // v0.1.44 adds gfx1103 (Radeon 780M) to the sudot4 list.
+  const SUDOT4 = ['gfx1100', 'gfx1101', 'gfx1102', 'gfx1103', 'gfx1150', 'gfx1151', 'gfx1200', 'gfx1201'];
   const SDOT4 = ['gfx1030', 'gfx1031', 'gfx1032'];
   // Which #if branch a call to STRATA_DP4A / __dp4a compiles to for one target.
   function dp4aBranch(t) {
@@ -78,7 +79,7 @@
     if (['gfx1010', 'gfx1011', 'gfx1012', 'gfx1102', 'gfx1103', 'gfx1030', 'gfx1031', 'gfx1034', 'gfx1150', 'gfx1151', 'gfx1152'].includes(base)) return 'unvalidated';
     return 'refused';
   }
-  // CMakeLists.txt lines 172-181: below 7.5 only with STRATA_EXPERIMENTAL_SM60, below 6.0 never.
+  // CMakeLists.txt lines 178-186: below 7.5 only with STRATA_EXPERIMENTAL_SM60, below 6.0 never.
   function cudaTier(sm, experimental) {
     if (sm < 60) return 'refused';
     if (sm < 75) return experimental ? 'experimental' : 'refused';

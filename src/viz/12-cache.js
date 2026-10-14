@@ -57,7 +57,7 @@
       sOkK: '本步计算结果', sOkF: '<b>正确条件</b>：登记的槽位里，<br>字节必须已经完整到位',
       slotOld: '#331（旧）', slotMixed: '一半 #112、一半 #331', slotNew: '#112（新）',
       okYes: '正确', okNo: '错误', okNa: '—',
-      vGood: '正确顺序下，表项只在字节到齐之后才指向槽位：拷贝途中 #112 一直由 CPU 计算，每一步都对。Strata 的自适应缓存守的是同一条规则：先把换出的专家标成“不在显存”，拷贝完成的事件到了，才把换入的专家登记进表。v0.1.43 起，Linux 上的单张 NVIDIA 卡改成提前登记，但 GPU 算到某一层时，先等这一层的拷贝落地再读，所以照样读不到半新半旧的字节。',
+      vGood: '正确顺序下，表项只在字节到齐之后才指向槽位：拷贝途中 #112 一直由 CPU 计算，每一步都对。Strata 的自适应缓存守的是同一条规则：先把换出的专家标成“不在显存”，拷贝完成的事件到了，才把换入的专家登记进表。打开可选的 STRATA_ADAPT_OVERLAP 时，换入的专家会提前登记，但 GPU 算到某一层时，先等这一层的拷贝落地再读，所以照样读不到半新半旧的字节。',
       vBad: '提前登记以后，拷贝途中选中 #112 的 token 让 GPU 读到了半新半旧的槽位。程序不崩、也不报错，只是这个 token 算错了。这就是“标签对、字节错”的伪命中，统计上看命中率还更高。',
       wTry: [
         '用正确顺序单步走完：注意第 4 步拷贝进行中，#112 仍由 CPU 计算。',
@@ -117,7 +117,7 @@
       sOkK: 'Result of this step', sOkF: '<b>Correct only if</b> the bytes in the registered<br>slot have fully arrived',
       slotOld: '#331 (old)', slotMixed: 'half #112, half #331', slotNew: '#112 (new)',
       okYes: 'Correct', okNo: 'Wrong', okNa: '—',
-      vGood: 'In the correct order, a table entry points to a slot only after all the bytes have arrived: during the copy, #112 is always computed by the CPU, and every step is right. Strata\'s adaptive cache follows the same rule: it first marks the outgoing expert "not in VRAM", and registers the incoming expert in the table only when the copy-done event arrives. Since v0.1.43, a single NVIDIA card on Linux registers the incoming expert earlier, but when the GPU reaches a layer it first waits for that layer\'s copy to land and only then reads, so it still never reads half-new, half-old bytes.',
+      vGood: 'In the correct order, a table entry points to a slot only after all the bytes have arrived: during the copy, #112 is always computed by the CPU, and every step is right. Strata\'s adaptive cache follows the same rule: it first marks the outgoing expert "not in VRAM", and registers the incoming expert in the table only when the copy-done event arrives. With the optional STRATA_ADAPT_OVERLAP turned on, the incoming expert is registered earlier, but when the GPU reaches a layer it first waits for that layer\'s copy to land and only then reads, so it still never reads half-new, half-old bytes.',
       vBad: 'After registering early, a token that picked #112 during the copy made the GPU read a half-new, half-old slot. The program does not crash or report an error; that token is simply computed wrong. This is a fake hit with "right label, wrong bytes", and on paper the hit rate even looks higher.',
       wTry: [
         'Step through in the correct order: note that at step 4, while the copy is running, #112 is still computed by the CPU.',
@@ -177,7 +177,7 @@
       sOkK: 'نتيجة هذه الخطوة', sOkF: '<b>تصح فقط إذا</b> وصلت بايتات الخانة<br>المسجَّلة كاملة',
       slotOld: '#331 (قديم)', slotMixed: 'نصفها #112 ونصفها #331', slotNew: '#112 (جديد)',
       okYes: 'صحيح', okNo: 'خطأ', okNa: '—',
-      vGood: 'في الترتيب الصحيح لا يشير إدخال الجدول إلى خانة إلا بعد وصول كل البايتات: أثناء النسخ يحسب CPU الخبير #112 دائمًا، وكل خطوة صحيحة. الذاكرة المؤقتة التكيّفية في Strata تلتزم بالقاعدة نفسها: تعلّم الخبير الخارج أولًا بأنه «ليس في VRAM»، ولا تسجّل الخبير الداخل في الجدول إلا عند وصول حدث اكتمال النسخ. ومنذ v0.1.43 صارت بطاقة NVIDIA واحدة على Linux تسجّل الخبير الداخل مبكرًا، لكن حين تصل GPU إلى طبقة ما فإنها تنتظر أولًا هبوط نسخ هذه الطبقة ثم تقرأ، فلا تقرأ أبدًا بايتات نصفها جديد ونصفها قديم.',
+      vGood: 'في الترتيب الصحيح لا يشير إدخال الجدول إلى خانة إلا بعد وصول كل البايتات: أثناء النسخ يحسب CPU الخبير #112 دائمًا، وكل خطوة صحيحة. الذاكرة المؤقتة التكيّفية في Strata تلتزم بالقاعدة نفسها: تعلّم الخبير الخارج أولًا بأنه «ليس في VRAM»، ولا تسجّل الخبير الداخل في الجدول إلا عند وصول حدث اكتمال النسخ. وعند تفعيل STRATA_ADAPT_OVERLAP الاختياري يُسجَّل الخبير الداخل مبكرًا، لكن حين تصل GPU إلى طبقة ما فإنها تنتظر أولًا هبوط نسخ هذه الطبقة ثم تقرأ، فلا تقرأ أبدًا بايتات نصفها جديد ونصفها قديم.',
       vBad: 'بعد التسجيل المبكر، رمز اختار #112 أثناء النسخ جعل GPU يقرأ خانة نصفها جديد ونصفها قديم. لا ينهار البرنامج ولا يبلّغ عن خطأ؛ هذا الرمز فقط حُسب خطأً. هذه إصابة زائفة «التسمية صحيحة والبايتات خاطئة»، وعلى الورق يبدو معدل الإصابة أعلى.',
       wTry: [
         'امشِ بالترتيب الصحيح خطوة خطوة: لاحظ أنه في الخطوة 4، أثناء النسخ، ما زال CPU يحسب #112.',
@@ -236,7 +236,7 @@
       sOkK: 'Resultado de este paso', sOkF: '<b>Condición de corrección</b>: en la ranura registrada,<br>los bytes ya deben estar completos',
       slotOld: '#331 (viejo)', slotMixed: 'mitad #112, mitad #331', slotNew: '#112 (nuevo)',
       okYes: 'correcto', okNo: 'erróneo', okNa: '—',
-      vGood: 'Con el orden correcto, la entrada de la tabla apunta a la ranura solo cuando los bytes ya llegaron: durante la copia, #112 lo calcula siempre la CPU y cada paso sale bien. La caché adaptativa de Strata sigue la misma regla: primero marca al experto saliente como "no está en la VRAM" y solo cuando llega el evento de copia terminada registra en la tabla al entrante. Desde v0.1.43, una sola tarjeta NVIDIA en Linux registra antes al entrante, pero cuando la GPU llega a una capa, espera a que aterrice la copia de esa capa y solo entonces lee, así que sigue sin leer bytes mitad nuevos, mitad viejos.',
+      vGood: 'Con el orden correcto, la entrada de la tabla apunta a la ranura solo cuando los bytes ya llegaron: durante la copia, #112 lo calcula siempre la CPU y cada paso sale bien. La caché adaptativa de Strata sigue la misma regla: primero marca al experto saliente como "no está en la VRAM" y solo cuando llega el evento de copia terminada registra en la tabla al entrante. Si se activa el STRATA_ADAPT_OVERLAP opcional, el entrante se registra antes, pero cuando la GPU llega a una capa, espera a que aterrice la copia de esa capa y solo entonces lee, así que sigue sin leer bytes mitad nuevos, mitad viejos.',
       vBad: 'Al registrar antes de tiempo, el token que elige #112 durante la copia hace que la GPU lea una ranura mezclada. El programa no se cae ni da error, pero ese token se calcula mal. Es el falso acierto de "etiqueta correcta, bytes erróneos", que en las estadísticas hasta sube la tasa de aciertos.',
       wTry: [
         'Recórrelo paso a paso con el orden correcto: fíjate en que, en el paso 4, con la copia en marcha, #112 sigue calculándolo la CPU.',
@@ -296,7 +296,7 @@
       sOkK: '이 단계의 계산 결과', sOkF: '<b>맞으려면</b> 등록된 슬롯 안의<br>바이트가 온전히 도착해 있어야 해요',
       slotOld: '#331(옛것)', slotMixed: '#112 절반, #331 절반', slotNew: '#112(새것)',
       okYes: '맞음', okNo: '틀림', okNa: '—',
-      vGood: '올바른 순서에서는 바이트가 다 도착한 뒤에야 표 항목이 슬롯을 가리켜요. 복사하는 동안 #112는 계속 CPU가 계산하므로 모든 단계가 맞아요. Strata의 적응형 캐시도 같은 규칙을 지켜요. 먼저 내보낼 전문가를 "VRAM에 없음"으로 표시하고, 복사 완료 이벤트가 도착해야 들여올 전문가를 표에 등록해요. v0.1.43부터 Linux의 NVIDIA 카드 한 장에서는 들여올 전문가를 미리 등록하지만, GPU가 어떤 레이어를 계산할 때는 그 레이어의 복사가 끝나기를 먼저 기다린 뒤 읽어요. 그래서 반쯤 새것이고 반쯤 옛것인 바이트는 여전히 읽지 않아요.',
+      vGood: '올바른 순서에서는 바이트가 다 도착한 뒤에야 표 항목이 슬롯을 가리켜요. 복사하는 동안 #112는 계속 CPU가 계산하므로 모든 단계가 맞아요. Strata의 적응형 캐시도 같은 규칙을 지켜요. 먼저 내보낼 전문가를 "VRAM에 없음"으로 표시하고, 복사 완료 이벤트가 도착해야 들여올 전문가를 표에 등록해요. 선택 사항인 STRATA_ADAPT_OVERLAP을 켜면 들여올 전문가를 미리 등록하지만, GPU가 어떤 레이어를 계산할 때는 그 레이어의 복사가 끝나기를 먼저 기다린 뒤 읽어요. 그래서 반쯤 새것이고 반쯤 옛것인 바이트는 여전히 읽지 않아요.',
       vBad: '일찍 등록하고 나면, 복사하는 동안 #112를 뽑은 토큰에서 GPU가 반쯤 새것, 반쯤 옛것인 슬롯을 읽었어요. 프로그램은 죽지도 않고 오류도 내지 않아요. 그 토큰만 조용히 틀리게 계산해요. 이것이 "라벨은 맞고 바이트는 틀린" 가짜 히트예요. 통계로는 히트율이 오히려 더 높게 보여요.',
       wTry: [
         '올바른 순서로 한 단계씩 끝까지 가 보세요. 4단계에서 복사가 진행되는 동안에도 #112는 여전히 CPU가 계산해요.',
@@ -356,7 +356,7 @@
       sOkK: 'このステップの計算結果', sOkF: '<b>正しくなる条件</b>：登録したスロットに、<br>バイトが丸ごと届いていること',
       slotOld: '#331（古い）', slotMixed: '#112 が半分、#331 が半分', slotNew: '#112（新しい）',
       okYes: '正しい', okNo: '誤り', okNa: '—',
-      vGood: '正しい順序では、バイトが全部届いてから、はじめてテーブルの項目がスロットを指します。コピーの途中、#112 はずっと CPU が計算するので、どのステップも正しいままです。Strata の適応キャッシュも同じルールを守ります。まず外すエキスパートを「VRAM にいない」にし、コピー完了イベントが届いてから、入れるエキスパートをテーブルに登録します。v0.1.43 以降、Linux の NVIDIA カード 1 枚の構成では、入れるエキスパートを先に登録しますが、GPU があるレイヤーを計算するときは、そのレイヤーのコピーが着地するのを待ってから読みます。そのため、新旧が半分ずつ混ざったバイトを読むことは今でもありません。',
+      vGood: '正しい順序では、バイトが全部届いてから、はじめてテーブルの項目がスロットを指します。コピーの途中、#112 はずっと CPU が計算するので、どのステップも正しいままです。Strata の適応キャッシュも同じルールを守ります。まず外すエキスパートを「VRAM にいない」にし、コピー完了イベントが届いてから、入れるエキスパートをテーブルに登録します。オプションの STRATA_ADAPT_OVERLAP を有効にすると、入れるエキスパートを先に登録しますが、GPU があるレイヤーを計算するときは、そのレイヤーのコピーが着地するのを待ってから読みます。そのため、新旧が半分ずつ混ざったバイトを読むことは今でもありません。',
       vBad: '早く登録したせいで、コピーの途中に #112 を選んだトークンでは、GPU が新旧半分ずつのスロットを読みました。プログラムは落ちず、エラーも出ません。そのトークンだけが静かに間違います。これが「ラベルは正しいのにバイトが誤り」という偽のヒットです。統計の上では、ヒット率はむしろ高く見えます。',
       wTry: [
         '正しい順序で 1 歩ずつ最後まで進みましょう。4 番目のステップ、コピーの途中でも #112 は CPU が計算していることに注目してください。',
