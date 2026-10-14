@@ -86,7 +86,7 @@
 <text class="f-on" fill="#ffffff" x="65" y="162" font-size="12" text-anchor="middle">厨房和厨师</text>
 <text class="f-text" fill="#182f2b" x="134" y="130" font-size="12">在你的硬件上把计算做出来</text>
 <text class="f-muted" fill="#5c6d66" x="134" y="150" font-size="12">安排显存、内存、CPU 和 GPU</text>
-<text class="f-muted" fill="#5c6d66" x="134" y="170" font-size="12">Strata 本体：C++ / CUDA / HIP</text>
+<text class="f-muted" fill="#5c6d66" x="134" y="170" font-size="12">Strata 本体：C++ / CUDA / HIP / Metal 等</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M65 180V208"/>
 <text class="f-muted" fill="#5c6d66" x="74" y="199" font-size="11">读取参数</text>
 <rect class="f-soft" fill="#e5f1df" x="10" y="210" width="110" height="70" rx="10"/>
@@ -98,7 +98,7 @@
 </svg><figcaption>图 1-4　三个角色各管一段。应用交给引擎的是一串 token 编号，引擎按模型的配方计算。</figcaption></figure>
 <ul>
 <li><strong>模型是配方。</strong>它是训练好的一大堆数字（叫“参数”或“权重”），加上一套固定的计算规则。Qwen3.8-Flash-Next 就是一个模型。</li>
-<li><strong>推理引擎是厨房和厨师。</strong>它负责在你的硬件上，按配方把计算做出来。Strata 就是一个推理引擎；llama.cpp、vLLM 也是。</li>
+<li><strong>推理引擎是厨房和厨师。</strong>它负责在你的硬件上，按配方把计算做出来。Strata 就是一个推理引擎；llama.cpp、vLLM 也是。Strata 主要跑在 NVIDIA 和 AMD 显卡上（CUDA / HIP）；另有社区成员编写和测试的实验版，包括 Intel Arc（SYCL）和 Apple Silicon Mac（Metal）。[S01]</li>
 <li><strong>应用是前台。</strong>它接待你，把你的话整理好交给厨房，再把做好的菜端给你。Strata 自带的网页聊天界面、以及通过 API 接入的编程工具，都在这一层。[S01]</li>
 </ul>
 <p>分清这三层，排查问题时就不会找错地方。引擎做得再快，模型也不会变聪明：配方不变，换个厨房，菜的味道应该一样。反过来，如果回答质量变差，原因可能在配方（换了模型或压缩得太狠），可能在厨房（引擎有 bug，算错了），也可能在前台（模板或协议把你的话传错了）。</p>
@@ -253,7 +253,7 @@
 <li>基础原理：数学或计算机的通用规律，不依赖 Strata，不另加标签。</li>
 </ul>
 <p>为什么要这么讲究？因为 AI 圈里的数字特别容易被搬错地方。别人显卡上的速度、某个配置下的显存占用、一张宣传图里的简化说法，一旦脱离了条件，就可能误导人。学会问“这个数字是在什么条件下得到的”，比记住任何一个数字都有用。</p>
-<p>本书的源码阅读固定在 Strata v0.1.43 上，也就是 2026-10-11 的提交 7695859…，页脚有它的完整编号。书里的事实在 2026-10-11 核对过。Strata 还在快速迭代，新版本里的数字可能已经不同。</p>
+<p>本书的源码阅读固定在 Strata v0.1.44.1 上，也就是 2026-10-13 的提交 296b59d…，页脚有它的完整编号。书里的事实在 2026-10-14 核对过。Strata 还在快速迭代，新版本里的数字可能已经不同。</p>
 <p><strong>动手：</strong>打开本章的交互实验「一个 token 的旅程」。它把图 1-1 的路径拆成可以逐步检查的环节，让你看清每一步的输入和输出。试着为其中一条箭头想一个“出错会怎样”的例子：比如模板换了，或者分词器和模型不配套。实验里的数字都是教学推演，不是你电脑上的实测。</p>
 
 <div class="recap"><h3>记住这三点</h3><ol>
@@ -267,7 +267,7 @@
 <details class="deep"><summary>深入一层：给想读源码的人</summary>
 <h3>服务层和引擎的真实边界</h3>
 <p>在 Strata 的服务代码里，应用层交给引擎的不是 HTTP 请求，也不是原始 JSON，而是一串 token 编号：接口是 <code>Engine.generate(ids, max_new, sampling, cancel)</code>，返回一个逐个产出 token 编号的迭代器。<span class="ev ev-code">代码事实</span>[S15] 模板渲染、分词、协议解析都在这条边界之外。所以排查问题时，第一步是判断错误发生在边界的哪一侧。</p>
-<p>同一个文件开头还写着：服务一次只处理一个序列，请求按先来先服务（FIFO）排队。[S15] 这是默认行为。从 v0.1.39 起，在模型的配置文件里写 <code>"parallel": N</code>，引擎就能同时解码最多 N 段对话；不写或写 1，仍是一次一个。引擎的一个批处理窗口最多放 8 行，所以 N 默认最大是 8。v0.1.40 新增了可选的 <code>--batch-mtp</code>：打开后，只要显存够，超过 8 段对话也能轮流使用这些 8 行的窗口。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/7695859aa13afb248bdb4d36f9b2e95707db079d/serve/server.py#L2372-L2393" target="_blank" rel="noopener noreferrer">server.py</a> README 提醒，在 12 GB 显卡上这样做会让每个回答都变慢。[S01] “支持 OpenAI 兼容 API”仍不等于“支持多人同时使用”，第 25 章会讨论把它扩展到多用户需要什么。</p>
+<p>同一个文件开头还写着：服务一次只处理一个序列，请求按先来先服务（FIFO）排队。[S15] 这是默认行为。从 v0.1.39 起，在模型的配置文件里写 <code>"parallel": N</code>，引擎就能同时解码最多 N 段对话；不写或写 1，仍是一次一个。引擎的一个批处理窗口最多放 8 行，所以 N 默认最大是 8。v0.1.40 新增了可选的 <code>--batch-mtp</code>：打开后，只要显存够，超过 8 段对话也能轮流使用这些 8 行的窗口。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/296b59d2f73c8f04a805df29c2fa97655adace78/serve/server.py#L2606-L2627" target="_blank" rel="noopener noreferrer">server.py</a> 这说的是单卡。多卡层切分时，v0.1.43.1 起只要没写 <code>--batch-groups</code>，引擎就把对话分组、按流水线跑，并关掉 <code>--batch-mtp</code>，日志里会说明（第 25 章）。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/296b59d2f73c8f04a805df29c2fa97655adace78/src/program/generate.cpp#L4491-L4514" target="_blank" rel="noopener noreferrer">generate.cpp</a> README 提醒，在 12 GB 显卡上同时解码多段对话，会让每个回答都变慢。[S01] “支持 OpenAI 兼容 API”仍不等于“支持多人同时使用”，第 25 章会讨论把它扩展到多用户需要什么。</p>
 <h3>不同层次的“缓存”不能混为一谈</h3>
 <p>CPU 的硬件缓存保存最近访问过的内存行；Strata 的专家缓存把部分权重放进显存；KV 缓存保存对话历史的中间结果；会话缓存保存可以恢复的整段序列状态；查找表的行缓存保存从硬盘读到的表行。它们缓存的对象、生命周期和失效条件完全不同。“加个缓存”只有说清<strong>缓存什么、怎样确认还是同一个对象、何时失效</strong>，才有意义。</p>
 <h3>注释不等于事实</h3>
