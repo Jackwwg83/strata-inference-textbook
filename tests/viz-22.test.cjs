@@ -68,8 +68,8 @@ test('HIP architecture tiers match cmake/hip_backend.cmake', () => {
   assert.equal(m.hipTier('gfx1034'), 'unvalidated', 'v0.1.40 adds gfx1034');
   assert.equal(m.hipTier('gfx1151'), 'unvalidated', 'v0.1.40 adds gfx1151 (Strix Halo, experimental)');
   for (const arch of ['gfx1010', 'gfx1011', 'gfx1103', 'gfx1150']) assert.equal(m.hipTier(arch), 'unvalidated', 'v0.1.40.2 adds ' + arch);
-  assert.equal(m.hipTier('gfx1152'), 'unvalidated', 'v0.1.42 adds gfx1152 (Krackan, #1625): 11 unvalidated architectures');
-  assert.equal(m.hipTier('gfx1032'), 'refused', 'gfx1032 has an sdot4 branch but is not in the CMake list');
+  assert.equal(m.hipTier('gfx1152'), 'unvalidated', 'v0.1.42 adds gfx1152 (Krackan, #1625)');
+  assert.equal(m.hipTier('gfx1032'), 'unvalidated', 'v0.1.45 adds gfx1032 (RX 6600): 12 unvalidated architectures');
   assert.equal(m.hipTier('gfx1100:xnack-'), 'validated', 'feature suffix is stripped');
   assert.equal(m.hipTier('gfx906'), 'refused');
 });
@@ -109,7 +109,7 @@ test('vector width: AVX2 holds 32 int8 lanes, AVX-512 holds 64', () => {
 
 test('support matrix size is the product of its dimensions', () => {
   assert.equal(m.combos([2, 3, 2, 2]), 24);
-  assert.equal(m.combos([12, 3, 2, 5]), 360, 'figure 22-7 at v0.1.44.1: 4 NVIDIA generations + 8 AMD archs in the Windows HIP zip');
+  assert.equal(m.combos([12, 3, 2, 5]), 360, 'figure 22-7 at v0.1.45: 4 NVIDIA generations + 8 AMD archs in the Windows HIP zip');
   assert.equal(m.combos([]), 1);
   assert.throws(() => m.combos([2, 0]));
 });
