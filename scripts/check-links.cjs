@@ -10,10 +10,13 @@ const lang = langAt >= 0 ? argv.splice(langAt, 2)[1] : 'zh';
 const dir = path.resolve(__dirname, '..', lang === 'zh' ? 'content/chapters' : `content/i18n/${lang}/chapters`);
 const only = new Set(argv);
 const links = new Map();
-for (const f of fs.readdirSync(dir).filter(f => f.endsWith('.html')).sort()) {
-  const id = f.slice(0, 2);
-  if (only.size && !only.has(id)) continue;
-  const html = fs.readFileSync(path.join(dir, f), 'utf8');
+// Column pages (content/columns/<column>/<page>.html) are named column/page; a bare column name checks all its pages.
+const colRoot = path.resolve(__dirname, '..', lang === 'zh' ? 'content/columns' : `content/i18n/${lang}/columns`);
+const files = fs.readdirSync(dir).filter(f => f.endsWith('.html')).sort().map(f => [f.slice(0, 2), path.join(dir, f)]);
+if (fs.existsSync(colRoot)) for (const c of fs.readdirSync(colRoot).sort()) for (const f of fs.readdirSync(path.join(colRoot, c)).filter(f => f.endsWith('.html')).sort()) files.push([c + '/' + f.slice(0, -5), path.join(colRoot, c, f)]);
+for (const [id, file] of files) {
+  if (only.size && !only.has(id) && !only.has(id.split('/')[0])) continue;
+  const html = fs.readFileSync(file, 'utf8');
   for (const [, href] of html.matchAll(/href="(https:[^"]+)"/g)) {
     if (!links.has(href)) links.set(href, new Set());
     links.get(href).add(id);
