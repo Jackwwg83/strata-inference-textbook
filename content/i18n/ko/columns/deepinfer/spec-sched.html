@@ -1,0 +1,348 @@
+<div class="hook"><span class="eyebrow">한 사람에서, 한 식탁 가득한 사람들로</span>
+<p>18장과 19장에서 Strata는 한 사람에게 서비스를 제공했습니다. 드래프트 층이 추측하는 토큰은 최대 3개입니다. 문맥에서 "베껴 온" 드래프트로 바꿀지는, 실측한 소요 시간 표로 정합니다.</p>
+<p>DeepInfer의 디코드용 GPU에서는 한 스텝에 수십 개의 요청이 몰려 있습니다. DeepSeek에 따르면 프로덕션 동작점은 GPU 한 장당 약 60개입니다.<span class="ev ev-report">업스트림 보고</span> 여기서 새 질문이 두 가지 생깁니다. 한 스텝에 수백 개나 되는 드래프트 토큰 중 어느 것을 검증할 가치가 있을까요? CPU가 다음 스텝을 줄 세우는 몇 밀리초 동안 GPU는 무엇을 하고 있을까요?</p></div>
+<p class="tldr"><strong>한마디로:</strong> DeepInfer의 드래프트 모듈은 한 번의 순전파로 토큰 5개를 추측하고, 각각에 "자신감" 점수를 붙입니다. 가변 길이 검증을 켜면, 스케줄러는 검증 슬롯을 신뢰도가 높은 드래프트에 먼저 나눠 줍니다. 그리고 실측한 소요 시간 곡선 위에서 "1밀리초당 기대 토큰 수"가 가장 큰 총합을 찾습니다. 제로 오버헤드 배치 스케줄러는 CPU가 다음 배치를 한 스텝 앞서 준비하게 해서, GPU가 멈추고 기다리지 않게 합니다. 둘을 겹치면 CPU는 총합만 정합니다. 각 요청에 몇 개씩 나눌지는 GPU 위의 커널이 그 자리에서 계산합니다.</p>
+
+<h2 id="sec-1">4.1 드래프트는 어디서 오나: 한 번의 순전파로 5개를 추측하고, 신뢰도 5개를 덧붙인다</h2>
+<p>먼저 <a href="#chapter/18/c18-speculation">18장 「추측 실행과 분기 예측」</a>에서 배운 <dfn>추측 디코딩</dfn>을 복습합니다. 값싼 드래프트가 먼저 토큰 몇 개를 추측합니다. 이를 <dfn>드래프트 토큰</dfn>이라고 부릅니다. 큰 모델은 "직전에 확정된 토큰 ＋ 이 드래프트들"을 한 줄로 세우고 한 번의 순전파로 계산합니다. 그런 다음 하나씩 <dfn>검증</dfn>해서, 끊기지 않고 이어지는 앞부분만 남깁니다.</p>
+<p>DeepInfer의 드래프트 모듈은 <code>deepinfer/model_executor/models/mtp/dflash.py</code>에 있고, 클래스 이름은 <code>DFlash</code>입니다. README와 DeepSeek의 배포 Q&amp;A는 이 추측 디코딩 방식을 <strong>DSpark</strong>라고 부르고, 검증을 스케줄하는 방법을 "신뢰도로 검증 스케줄링"(confidence-scheduled verification)이라고 부릅니다.<span class="ev ev-report">업스트림 보고</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md#L13-L24" target="_blank" rel="noopener noreferrer">README.md</a>) 코드에서 DSpark라는 이름은 드래프트 모듈의 설정 필드에만 나옵니다. 예를 들면 <code>dspark_target_layer_ids</code>, <code>dspark_noise_token_id</code>, <code>dspark_markov_rank</code>입니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L139-L159" target="_blank" rel="noopener noreferrer">dflash.py</a>) 이 두 이름의 유래는 코드에도 문서에도 설명이 없고, 이 페이지도 추측하지 않습니다.</p>
+<p>코드를 보면 이 드래프트 모듈에는 세 가지 특징이 있습니다.<span class="ev ev-code">코드 사실</span></p>
+<ul>
+<li><strong>메인 모델의 특징을 빌린다.</strong> 메인 모델이 순전파를 할 때, 드래프트 모듈은 메인 모델 몇 개 층의 은닉 상태를 가져와 이어 붙이고 한 번 투영해서, 자기 KV 캐시에 씁니다. 주석에는 이 단계가 "메인 모델 순전파 안에서 돈다"고 적혀 있습니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L198-L228" target="_blank" rel="noopener noreferrer">dflash.py</a>)</li>
+<li><strong>5개 위치를 한 번에 계산한다.</strong> 드래프트의 입력은 5개 위치가 한 줄로 늘어선 것입니다. 첫 번째는 방금 확정된 토큰이고, 뒤의 4개는 모두 고정된 "노이즈 토큰"으로 채웁니다. 이 줄을 드래프트 층에 한 번 통과시키면 5개 위치의 은닉 상태가 동시에 나옵니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L230-L269" target="_blank" rel="noopener noreferrer">dflash.py</a>) 그다음 위치마다 토큰을 하나씩 냅니다. 각 위치에는 작은 보정항을 더할 수 있고, 보정항은 바로 앞 토큰만 봅니다. 첫 번째 위치는 방금 확정된 토큰을 보고, 그 뒤 위치들은 각각 앞 위치에서 방금 뽑은 드래프트를 봅니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L308-L334" target="_blank" rel="noopener noreferrer">dflash.py</a>)</li>
+<li><strong>드래프트마다 자신감이 붙는다.</strong> <dfn>신뢰도 헤드</dfn>(Confidence Head)는 선형 층에 sigmoid를 붙인 것입니다. 각 드래프트에 대해 "수락될 확률"을 추정합니다. 주석에는 "각 드래프트 토큰의 수락 확률을 예측한다"고 적혀 있습니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L46-L79" target="_blank" rel="noopener noreferrer">dflash.py</a>)</li>
+</ul>
+<p>몇 개를 추측할지는 환경 변수 <code>DEEPINFER_USE_NEXTN_DECODE</code>가 정합니다. 기본값은 5이고, 0으로 두면 추측 디코딩이 꺼집니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L128-L131" target="_blank" rel="noopener noreferrer">environ.py</a>) Q&amp;A에 따르면 프로덕션에서도 드래프트 모델은 한 번에 5개를 냅니다. 내부 버전의 드래프트 모델은 조금 더 새롭지만, 성능 차이는 아주 작습니다.<span class="ev ev-report">업스트림 보고</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md#L243-L260" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>)</p>
+<p>검증에는 추측 디코딩의 고전적인 규칙을 씁니다. 드래프트는 min(1, p ÷ q)의 확률로 수락됩니다. p는 메인 모델의 확률이고 q는 드래프트의 확률입니다. 처음 거부된 위치에서는 둘의 차이인 "잔차 분포"에서 하나를 다시 뽑습니다. 난수는 요청의 시드와 위치로 계산합니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler.py#L74-L80" target="_blank" rel="noopener noreferrer">sampler.py</a>, <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/fused_sample.py#L227-L246" target="_blank" rel="noopener noreferrer">fused_sample.py</a>) 시드가 결과를 재현 가능하게 만드는 방법은 <a href="#deepinfer/determinism">이 칼럼의 "결정성" 페이지</a>를 보세요. 그림 D4-1은 디코드 한 스텝을 이어서 보여 줍니다.</p>
+<figure class="fig"><svg viewBox="0 0 400 384" role="img" aria-label="그림 D4-1: DeepInfer의 디코드 한 스텝. 메인 모델이 한 줄의 토큰을 한 번에 검증하고, 드래프트 모듈이 한 번의 순전파로 다음 스텝용 드래프트 5개와 신뢰도 5개를 낸다">
+<rect class="f-soft" fill="#e5f1df" x="30" y="8" width="340" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="27" font-size="13" text-anchor="middle">입력 한 줄: 이전 스텝에서 확정된 토큰 1개</text>
+<text class="f-text" fill="#182f2b" x="200" y="45" font-size="13" text-anchor="middle">＋ 이번 스텝에서 검증할 드래프트 토큰(0–5개)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 54V68"/>
+<path class="f-muted" fill="#5c6d66" d="M195 68H205L200 74Z"/>
+<rect class="f-accent" fill="#136d5a" x="30" y="76" width="340" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="95" font-size="13" font-weight="600" text-anchor="middle">메인 모델 순전파: 이 줄을 한 번에 계산</text>
+<text class="f-on" fill="#ffffff" x="200" y="113" font-size="12" text-anchor="middle">내친김에 몇 개 층의 은닉 상태를 드래프트 모듈에 전달</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 122V136"/>
+<path class="f-muted" fill="#5c6d66" d="M195 136H205L200 142Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="144" width="340" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="163" font-size="13" font-weight="600" text-anchor="middle">검증: min(1, p ÷ q)로 하나씩 수락</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="181" font-size="12" text-anchor="middle">처음 거부된 위치에서 잔차 분포로 1개 다시 뽑기</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 190V204"/>
+<path class="f-muted" fill="#5c6d66" d="M195 204H205L200 210Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="212" width="340" height="64" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="232" font-size="13" font-weight="600" text-anchor="middle">드래프트 모듈 DFlash: 순전파 1회</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="250" font-size="12" text-anchor="middle">입력 [방금 확정된 토큰, 노이즈 토큰 × 4]</text>
+<text class="f-text" fill="#182f2b" x="200" y="268" font-size="12" text-anchor="middle">출력: 드래프트 토큰 5개 ＋ 신뢰도 5개</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 276V290"/>
+<path class="f-muted" fill="#5c6d66" d="M195 290H205L200 296Z"/>
+<rect class="f-soft" fill="#e5f1df" x="30" y="298" width="340" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="317" font-size="13" font-weight="600" text-anchor="middle">스케줄러: 신뢰도로 결정</text>
+<text class="f-text" fill="#182f2b" x="200" y="335" font-size="12" text-anchor="middle">다음 스텝에서 검증할 개수(가변 길이 검증)</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M370 321H388V31H376"/>
+<path class="f-muted" fill="#5c6d66" d="M376 26V36L370 31Z"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="370" font-size="12" text-anchor="middle">가변 길이 검증을 끄면 매 스텝 드래프트 5개를 모두 검증</text>
+</svg><figcaption>그림 D4-1　디코드 한 스텝. 메인 모델은 한 줄의 토큰을 한 번에 검증합니다. 드래프트 모듈은 순전파를 한 번 해서 다음 스텝용 드래프트 5개와 각각의 자신감을 준비합니다. 그 자신감이 다음 스텝에서 몇 개를 검증할지 정합니다.</figcaption></figure>
+<div class="callout vs"><strong>Strata와 비교하면:</strong> Strata의 드래프트는 모델에 내장된 MTP 층 하나에서 나오고, 최대 3개를 추측합니다. 기본 검증 규칙은 "드래프트와 타깃의 샘플링 결과가 완전히 같을 때만 수락"입니다. 고전적인 min(1, p ÷ q) 규칙은 별도 스위치를 켜야 합니다(<a href="#chapter/18">18장</a> 18.5절). DeepInfer는 기본으로 고전적인 규칙을 쓰고, 한 번에 5개를 추측하며, 신뢰도 열을 하나 더 내보냅니다. 이 추가 열은 검증 자체를 위한 것이 아니라 스케줄링을 위한 것입니다. 한 스텝에 수십 개의 요청이 있으니, 누구를 먼저 검증할지 정할 근거가 필요합니다.</div>
+
+<h2 id="sec-2">4.2 몇 개를 검증해야 이득일까: 슬롯을 신뢰도가 가장 높은 드래프트에 먼저 준다</h2>
+<p>가장 손쉬운 방법은 모든 요청에서 드래프트 5개를 전부 검증하는 것입니다. Q&amp;A에 따르면 이러면 가망이 희박한 드래프트에 검증 연산을 낭비합니다. 요청과 위치에 따라 수락 확률이 크게 다르기 때문입니다.<span class="ev ev-report">업스트림 보고</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md#L243" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>)</p>
+<p>계산 방법은 <a href="#chapter/19/c19-expected-value">19장 「기댓값과 등비급수」</a>에서 이미 설명했습니다. i번째 드래프트가 쓸모 있으려면 앞의 i개가 모두 수락되어야 합니다. 그 확률은 각 위치의 조건부 수락률을 곱한 값입니다. 한 라운드는 기대값으로 1 ＋ c₁ ＋ c₂ ＋ … 개의 토큰을 커밋하고, 비교해야 할 것은 "기대 토큰 수 ÷ 한 라운드의 시간"입니다. DeepInfer의 코드는 신뢰도 헤드의 출력을 각 위치의 조건부 수락률로 보고, 스케줄링 전에 누적곱을 합니다. 소스 주석에는 이렇게 적혀 있습니다. "modeling이 돌려주는 confidence rate는 토큰마다 독립이므로, 쓰기 전에 누적곱을 해야 한다."<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L1242-L1251" target="_blank" rel="noopener noreferrer">scheduler.hpp</a>)</p>
+<p>다른 점은 한 스텝에 요청이 많고, 그 요청들이 같은 순전파를 공유한다는 것입니다. 이 스텝의 소요 시간은 배치 전체가 합쳐서 토큰을 몇 개 검증하느냐에 달려 있습니다. 그래서 DeepInfer는 요청을 하나씩 고르지 않고, 배치 전체를 하나의 예산 문제로 풉니다. <code>DEEPINFER_ENABLE_MTP_VARLEN=1</code>을 켜면 <code>MTPVarlen::schedule</code>이 다음과 같이 동작합니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L150-L267" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp</a>)</p>
+<ol>
+<li>모든 요청의 모든 드래프트를 누적곱 확률이 높은 순서대로 한 줄로 세웁니다.</li>
+<li>"각 요청은 메인 모델 토큰 1개만 검증"하는 상태에서 시작해, 이 줄을 따라 슬롯을 하나씩 더합니다. 하나 더할 때마다 기대 토큰 수가 그 확률만큼 늘어납니다.</li>
+<li>총합 q마다 소요 시간을 조회합니다. 시작할 때 측정해 둔 소요 시간 곡선에서 q 이상인 CUDA Graph의 소요 시간을 가져오고, 온라인으로 보정한 기울기 항과 샘플링 시간을 더합니다.</li>
+<li>"기대 토큰 수 ÷ 소요 시간"이 가장 큰 q를 고르고, 앞의 q − N개 슬롯을 해당 요청에 나눠 줍니다. N은 요청 수입니다. 사실 여기서는 줄을 두 개 세웁니다. 총합에는 한 라운드 더 이전의 신뢰도를 쓰고, 슬롯 분배에는 가장 최근 라운드의 신뢰도를 씁니다. ZOS를 꺼도 마찬가지입니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L160-L208" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp</a>)</li>
+</ol>
+<p>누적곱 확률은 뒤로 갈수록 작아지므로, 각 요청이 받는 슬롯은 항상 그 요청의 앞쪽 연속된 몇 개의 드래프트입니다. 이는 "연속된 앞부분만 수락한다"는 규칙과 맞아떨어집니다. Q&amp;A의 표현은 이렇습니다. 기대 수락률 순으로 정렬해서, 유효 <dfn>처리량</dfn>(초당 생성되는 토큰 수)이 가장 커지는 앞부분 부분집합을 고른다.<span class="ev ev-report">업스트림 보고</span></p>
+<p>소요 시간 곡선은 실측입니다. 엔진을 워밍업할 때, 녹화해 둔 CUDA Graph를 하나씩 5번 리플레이합니다. 가장 빠른 것과 가장 느린 것을 하나씩 빼고 평균을 내고, 다시 <dfn>전문가 병렬</dfn>(EP) 그룹의 GPU들 사이에서 평균을 냅니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L561-L631" target="_blank" rel="noopener noreferrer">model_runner.py</a>) 실행 중에는 디코드 스텝마다 실측한 순전파와 샘플링 시간을 스케줄러에 되돌려 주고, 슬라이딩 윈도 중앙값으로 이 곡선을 보정합니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L995-L1002" target="_blank" rel="noopener noreferrer">llm_engine.py</a>, <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L19-L148" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp</a>)</p>
+<p>이 스위치는 기본값이 꺼짐입니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L131" target="_blank" rel="noopener noreferrer">environ.py</a>) 스위치가 켜져 있고 CUDA Graph를 쓰고 있을 때만 엔진이 이 곡선을 측정합니다. 곡선이 비어 있으면, 각 요청은 1 ＋ 가진 드래프트 수(보통 5)개의 토큰을 고정으로 검증합니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/base.py#L274-L281" target="_blank" rel="noopener noreferrer">base.py</a>, <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L153-L157" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp</a>) 저장소의 평가 스크립트는 이것을 1로 설정합니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/eval/run_eval.py#L118-L121" target="_blank" rel="noopener noreferrer">run_eval.py</a>) README에는 결정적 샘플링을 하려면 이것을 꺼야 한다고도 적혀 있습니다. 이유는 <a href="#deepinfer/determinism">"결정성" 페이지</a>에 있습니다.</p>
+<aside class="primer" id="di-spec-sched-greedy">
+<h3>탐욕 알고리즘과 한계 이득</h3>
+<p>직관: 영화표 10장을 친구들에게 나눠 줘야 하는데, 친구마다 갈 가능성이 다릅니다. 오는 사람을 가장 많이 만들고 싶다면, 갈 가능성이 가장 높은 사람부터 한 장씩 차례로 나눠 줍니다. 매번 그 시점에서 이득이 가장 큰 몫을 가져갑니다. 이것이 <dfn>탐욕 알고리즘</dfn>입니다.</p>
+<p>정의: 탐욕 알고리즘은 매 단계에서 국소적으로 최선인 선택을 하고, 되돌아가지 않습니다. 항상 맞는 것은 아닙니다. 하지만 "전체 이득이 각 몫의 이득의 합이고, 몫끼리 서로 영향을 주지 않는" 문제에서는 탐욕 알고리즘이 최적해를 줍니다. 어떤 다른 분배든, 이득이 낮은 사람의 표 한 장을 이득이 높은 사람에게 옮기면 결과는 더 좋아지기만 하기 때문입니다. 이런 증명 방법을 "교환 논증"이라고 합니다.</p>
+<p>예: 드래프트 4개가 쓸모 있을 확률이 0.9, 0.7, 0.4, 0.1이고 2개만 검증할 수 있습니다. 탐욕 알고리즘은 0.9와 0.7을 골라 기대 토큰을 1.6개 더 얻습니다. 다른 어떤 2개를 고르든 이보다 적습니다.</p>
+<p>이 페이지와의 관계: 슬롯 수가 정해져 있을 때 DeepInfer가 확률이 높은 순서로 슬롯을 나눠 주는 것이 바로 이 탐욕 알고리즘입니다. 슬롯 수 자체는 정해져 있지 않으므로, 스케줄러는 모든 총합을 다 시험해 보고 "기대 토큰 수 ÷ 소요 시간"을 비교해서 가장 큰 것을 고릅니다. 슬롯을 하나 더 줄 때마다 기대값이 더 늘어나는 그 양이 바로 그 슬롯의 <dfn>한계 이득</dfn>입니다.</p>
+<p class="further">더 읽기: <a href="https://oi-wiki.org/basic/greedy/" target="_blank" rel="noopener noreferrer">OI Wiki: 탐욕 알고리즘</a> · <a href="https://ko.wikipedia.org/wiki/%ED%83%90%EC%9A%95_%EC%95%8C%EA%B3%A0%EB%A6%AC%EC%A6%98" target="_blank" rel="noopener noreferrer">위키백과: 탐욕 알고리즘</a> · <a href="https://en.wikipedia.org/wiki/Greedy_algorithm" target="_blank" rel="noopener noreferrer">Wikipedia: Greedy algorithm</a></p>
+</aside>
+<p>3단계에는 계단이 숨어 있습니다. 소요 시간은 "q 이상인 그래프"로 조회하고, 그래프의 크기는 1, 2, 4, 8, 16, 24 … 로 8마다 하나씩입니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L235-L249" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp</a>, <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cuda_graph_runner.py#L41-L51" target="_blank" rel="noopener noreferrer">cuda_graph_runner.py</a>) 그래서 같은 그래프 안에서는 몇 개를 더 검증하든 덜 검증하든 추정 소요 시간이 완전히 같습니다. 드래프트를 잘라 시간이 줄어드는 것은 총합이 그래프의 경계 아래로 떨어질 때뿐입니다. 기대 토큰 수는 q가 커져도 줄지 않으므로, 선택된 총합은 항상 어떤 그래프의 크기에 놓이거나, 아니면 드래프트를 전부 검증합니다.<span class="ev ev-est">교육용 추정</span></p>
+<p>아래 시뮬레이터는 이 예산 문제를 펼쳐 보여 줍니다. 칸 안의 숫자는 누적곱을 한 확률입니다. 소요 시간도 그래프 크기에 따라 계단처럼 움직이지만, 각 계단의 높이는 실제 곡선 대신 직선으로 정합니다. 총합과 슬롯 분배에는 신뢰도를 한 벌만 씁니다. 이 두 가지는 교육용 단순화입니다.</p>
+<div class="viz" data-viz="di-spec-sched-varlen"><figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="그림 D4-2: 요청 4개, 각 드래프트 5개. 고정 방식은 토큰 24개를 검증하고 24 그래프를 쓰며 기대 10.71개. 신뢰도 방식은 16개만 검증해서 16 그래프에 딱 맞고 기대 9.84개이며, 1밀리초당 기대 토큰이 3.0% 더 많다">
+<text class="f-text" fill="#182f2b" x="105" y="18" font-size="13" font-weight="600" text-anchor="middle">고정 5개: 전부 검증</text>
+<text class="f-text" fill="#182f2b" x="305" y="18" font-size="13" font-weight="600" text-anchor="middle">신뢰도순: 이득인 것만</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="64" font-size="12">A</text><text class="f-muted" fill="#5c6d66" x="8" y="94" font-size="12">B</text><text class="f-muted" fill="#5c6d66" x="8" y="124" font-size="12">C</text><text class="f-muted" fill="#5c6d66" x="8" y="154" font-size="12">D</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="64" font-size="12">A</text><text class="f-muted" fill="#5c6d66" x="208" y="94" font-size="12">B</text><text class="f-muted" fill="#5c6d66" x="208" y="124" font-size="12">C</text><text class="f-muted" fill="#5c6d66" x="208" y="154" font-size="12">D</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="22" y="47" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="35" y="64" font-size="12" text-anchor="middle">주</text>
+<rect class="f-accent" fill="#136d5a" x="50" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="64" font-size="12" text-anchor="middle">.74</text>
+<rect class="f-accent" fill="#136d5a" x="78" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="91" y="64" font-size="12" text-anchor="middle">.55</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="119" y="64" font-size="12" text-anchor="middle">.40</text>
+<rect class="f-accent" fill="#136d5a" x="134" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="147" y="64" font-size="12" text-anchor="middle">.28</text>
+<rect class="f-accent" fill="#136d5a" x="162" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="175" y="64" font-size="12" text-anchor="middle">.17</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="22" y="77" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="35" y="94" font-size="12" text-anchor="middle">주</text>
+<rect class="f-accent" fill="#136d5a" x="50" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="94" font-size="12" text-anchor="middle">.79</text>
+<rect class="f-accent" fill="#136d5a" x="78" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="91" y="94" font-size="12" text-anchor="middle">.57</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="119" y="94" font-size="12" text-anchor="middle">.42</text>
+<rect class="f-accent" fill="#136d5a" x="134" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="147" y="94" font-size="12" text-anchor="middle">.27</text>
+<rect class="f-accent" fill="#136d5a" x="162" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="175" y="94" font-size="12" text-anchor="middle">.16</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="22" y="107" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="35" y="124" font-size="12" text-anchor="middle">주</text>
+<rect class="f-accent" fill="#136d5a" x="50" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="124" font-size="12" text-anchor="middle">.51</text>
+<rect class="f-accent" fill="#136d5a" x="78" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="91" y="124" font-size="12" text-anchor="middle">.23</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="119" y="124" font-size="12" text-anchor="middle">.10</text>
+<rect class="f-accent" fill="#136d5a" x="134" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="147" y="124" font-size="12" text-anchor="middle">.04</text>
+<rect class="f-accent" fill="#136d5a" x="162" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="175" y="124" font-size="12" text-anchor="middle">.01</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="22" y="137" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="35" y="154" font-size="12" text-anchor="middle">주</text>
+<rect class="f-accent" fill="#136d5a" x="50" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="154" font-size="12" text-anchor="middle">.68</text>
+<rect class="f-accent" fill="#136d5a" x="78" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="91" y="154" font-size="12" text-anchor="middle">.41</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="119" y="154" font-size="12" text-anchor="middle">.22</text>
+<rect class="f-accent" fill="#136d5a" x="134" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="147" y="154" font-size="12" text-anchor="middle">.11</text>
+<rect class="f-accent" fill="#136d5a" x="162" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="175" y="154" font-size="12" text-anchor="middle">.05</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="222" y="47" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="235" y="64" font-size="12" text-anchor="middle">주</text>
+<rect class="f-accent" fill="#136d5a" x="250" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="64" font-size="12" text-anchor="middle">.74</text>
+<rect class="f-accent" fill="#136d5a" x="278" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="291" y="64" font-size="12" text-anchor="middle">.55</text>
+<rect class="f-accent" fill="#136d5a" x="306" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="319" y="64" font-size="12" text-anchor="middle">.40</text>
+<rect class="f-accent" fill="#136d5a" x="334" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="347" y="64" font-size="12" text-anchor="middle">.28</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="362" y="47" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="375" y="64" font-size="12" text-anchor="middle">.17</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="222" y="77" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="235" y="94" font-size="12" text-anchor="middle">주</text>
+<rect class="f-accent" fill="#136d5a" x="250" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="94" font-size="12" text-anchor="middle">.79</text>
+<rect class="f-accent" fill="#136d5a" x="278" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="291" y="94" font-size="12" text-anchor="middle">.57</text>
+<rect class="f-accent" fill="#136d5a" x="306" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="319" y="94" font-size="12" text-anchor="middle">.42</text>
+<rect class="f-accent" fill="#136d5a" x="334" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="347" y="94" font-size="12" text-anchor="middle">.27</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="362" y="77" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="375" y="94" font-size="12" text-anchor="middle">.16</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="222" y="107" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="235" y="124" font-size="12" text-anchor="middle">주</text>
+<rect class="f-accent" fill="#136d5a" x="250" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="124" font-size="12" text-anchor="middle">.51</text>
+<rect class="f-accent" fill="#136d5a" x="278" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="291" y="124" font-size="12" text-anchor="middle">.23</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="306" y="107" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="319" y="124" font-size="12" text-anchor="middle">.10</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="334" y="107" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="347" y="124" font-size="12" text-anchor="middle">.04</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="362" y="107" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="375" y="124" font-size="12" text-anchor="middle">.01</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="222" y="137" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="235" y="154" font-size="12" text-anchor="middle">주</text>
+<rect class="f-accent" fill="#136d5a" x="250" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="154" font-size="12" text-anchor="middle">.68</text>
+<rect class="f-accent" fill="#136d5a" x="278" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="291" y="154" font-size="12" text-anchor="middle">.41</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="306" y="137" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="319" y="154" font-size="12" text-anchor="middle">.22</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="334" y="137" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="347" y="154" font-size="12" text-anchor="middle">.11</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="362" y="137" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="375" y="154" font-size="12" text-anchor="middle">.05</text>
+<text class="f-text" fill="#182f2b" x="105" y="190" font-size="12" text-anchor="middle">검증 24개 · 기대 10.71개</text>
+<text class="f-text" fill="#182f2b" x="305" y="190" font-size="12" text-anchor="middle">검증 16개 · 기대 9.84개</text>
+<text class="f-text" fill="#182f2b" x="105" y="210" font-size="12" text-anchor="middle">Graph 24 · 14.80 ms · 0.724/ms</text>
+<text class="f-text" fill="#182f2b" x="305" y="210" font-size="12" font-weight="600" text-anchor="middle">Graph 16 · 13.20 ms · 0.745/ms</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="236" font-size="12" text-anchor="middle">칸 안: 이 드래프트가 쓰일 확률(신뢰도 누적곱)</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="254" font-size="12" text-anchor="middle">가정: 한 스텝 = 10 ms ＋ 0.2 ms × 그래프 크기</text>
+</svg><figcaption>그림 D4-2　같은 요청 4개. 고정 방식은 토큰 24개를 검증하고 24 그래프를 리플레이합니다. 신뢰도 방식은 가망이 가장 작은 드래프트 8개를 잘라 내서 16 그래프에 딱 맞춥니다. 기대 토큰은 0.87개만 줄고, 한 스텝은 1.6 ms 빨라지며, 1밀리초당 기대 토큰은 3.0% 늘어납니다. 17개까지만 자르면 소용없습니다. 여전히 24 그래프가 필요하기 때문입니다. 숫자는 교육용 추정입니다.</figcaption></figure></div>
+<p>식은 <strong>처리량 ＝ (N ＋ Σ 검증한 드래프트의 누적곱 확률) ÷ (10 ＋ t₁ × 그래프 크기)</strong>입니다. 그래프 크기는 이 토큰들이 들어가는 가장 작은 CUDA Graph입니다. 그림 D4-2에서 고정 방식은 10.71 ÷ 14.80 ≈ 0.724, 신뢰도 방식은 9.84 ÷ 13.20 ≈ 0.745입니다.<span class="ev ev-est">교육용 추정</span></p>
+<div class="callout vs"><strong>Strata와 비교하면:</strong> Strata의 MTP 윈도 길이는 시작 인자 <code>--spec</code>으로 고정됩니다. <code>--spec-min-p</code>를 설정했을 때만, 드래프트의 자신감이 문턱 아래로 떨어지면 윈도에 더 이상 드래프트를 넣지 않습니다. 실측 소요 시간으로 "1밀리초당 기대 커밋 토큰 수"를 비교하는 DraftPolicy는 프롬프트 조회 드래프트를 담당합니다(<a href="#chapter/19">19장</a> 19.5절). 이것들은 모두 한 사용자의 윈도 하나에 대한 결정입니다. DeepInfer가 결정해야 하는 것은 수십 개 요청으로 이루어진 배치 전체에서 합쳐서 몇 개를 검증할지, 누구에게 많이 주고 누구에게 적게 줄지입니다. 문턱도 고정이 아니라 "하나 더 검증할 가치가 있는가"에서 그 자리에서 계산됩니다. 비교하는 단위가 "윈도 하나"에서 "CUDA Graph 한 번의 리플레이"로 바뀝니다.</div>
+
+<h2 id="sec-3">4.3 업스트림의 계산: 검증이 3할 줄고, 처리량은 몇 퍼센트포인트 늘어난다</h2>
+<p>Q&amp;A에는 고정 5개 검증과 신뢰도 기반 가변 길이 검증을 비교한 표가 있습니다. 조건은 EP64/DP64입니다. 즉 GPU 64장으로 전문가 병렬을 하고, 어텐션은 <dfn>데이터 병렬</dfn>(DP)로 64개로 나눕니다. 표의 처리량은 이 구성의 벤치마크 데이터로 추산한 추정치이고, 실제 서비스에서 실측한 값이 아닙니다.<span class="ev ev-report">업스트림 보고</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md#L245-L256" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>) 왜 64장에 걸쳐 펼치는지는 <a href="#deepinfer/wide-ep">"와이드 전문가 병렬" 페이지</a>를 보세요.</p>
+<figure class="fig"><svg viewBox="0 0 400 334" role="img" aria-label="그림 D4-3: 업스트림이 추정한 가변 길이 검증의 이득. GPU 한 장당 16개에서는 1.5% 느리고, 60개에서는 5.4% 빠르고, 96개에서는 11.0% 빠르다">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">신뢰도 방식과 고정 5개 방식의 처리량 차이</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="36" font-size="12">EP64/DP64, 업스트림 추정치. 왼쪽: GPU당 동시 요청 수</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M130 48V300"/>
+<text class="f-text" fill="#182f2b" x="10" y="66" font-size="12">16개/GPU</text>
+<rect class="f-warn" fill="#9e5d24" x="100" y="54" width="30" height="16"/>
+<text class="f-text" fill="#182f2b" x="136" y="66" font-size="12">−1.5%</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="86" font-size="12">검증 4.44, 수락 3.24 (고정 5, 3.32)</text>
+<text class="f-text" fill="#182f2b" x="10" y="110" font-size="12">32개/GPU</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="98" width="32" height="16"/>
+<text class="f-text" fill="#182f2b" x="168" y="110" font-size="12">+1.6%</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="130" font-size="12">검증 3.65, 수락 3.17 (고정 5, 3.25)</text>
+<text class="f-text" fill="#182f2b" x="10" y="154" font-size="12">48개/GPU</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="142" width="72" height="16"/>
+<text class="f-text" fill="#182f2b" x="208" y="154" font-size="12">+3.6%</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="174" font-size="12">검증 3.94, 수락 3.26 (고정 5, 3.30)</text>
+<text class="f-text" fill="#182f2b" x="10" y="198" font-size="12" font-weight="600">60개/GPU</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="186" width="108" height="16"/>
+<text class="f-text" fill="#182f2b" x="244" y="198" font-size="12" font-weight="600">+5.4% (프로덕션)</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="218" font-size="12">검증 3.58, 수락 3.21 (고정 5, 3.30)</text>
+<text class="f-text" fill="#182f2b" x="10" y="242" font-size="12">72개/GPU</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="230" width="134" height="16"/>
+<text class="f-text" fill="#182f2b" x="270" y="242" font-size="12">+6.7%</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="262" font-size="12">검증 3.24, 수락 3.12 (고정 5, 3.29)</text>
+<text class="f-text" fill="#182f2b" x="10" y="286" font-size="12">96개/GPU</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="274" width="220" height="16"/>
+<text class="f-text" fill="#182f2b" x="356" y="286" font-size="12">+11%</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="306" font-size="12">검증 3.24, 수락 3.15 (고정 5, 3.30)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="328" font-size="12">막대: 1%p = 20 px. 검증·수락: 요청·스텝당 평균</text>
+</svg><figcaption>그림 D4-3　동시 처리가 많을수록 신뢰도 기반 검증이 더 이득입니다. GPU당 96개에서는 처리량이 11% 늘고, 16개에서는 오히려 1.5% 느립니다. 스텝마다 검증하는 드래프트는 11%–35% 줄고, 평균 수락 길이는 0.04–0.17만 줄어듭니다. 데이터는 업스트림 Q&amp;A에서 가져왔습니다.</figcaption></figure>
+<p>Q&amp;A의 요약은 이렇습니다. 검증하는 드래프트가 약 30% 줄고(5.00이 3.2–4.4로 내려감), 평균 수락 길이는 거의 그대로이며(3.29 대 3.20), GPU당 약 60개인 프로덕션 동작점에서 처리량이 4%–7% 늘어납니다.<span class="ev ev-report">업스트림 보고</span> Q&amp;A는 "수락 길이"에 메인 모델 자신의 토큰 1개가 들어 있는지 밝히지 않았고, 이 페이지도 대신 풀이하지 않습니다.</p>
+<p>동시 처리가 낮으면 왜 이득이 없을까요? 그럴듯한 설명은 이렇습니다. 배치가 작을 때는 디코드가 가중치를 옮기는 데 발목이 잡혀 있어서, 토큰을 몇 개 더 검증해도 시간이 거의 늘지 않습니다. 드래프트를 잘라도 아낄 것이 별로 없고, 수락 길이만 조금 잃습니다(16개에서 3.32가 3.24로 내려감). 배치가 커지면 순전파가 연산 한계에 걸리기 시작합니다. 더 검증하는 토큰마다 시간이 실제로 들기 때문에, 확률이 낮은 드래프트를 잘라 내는 것이 이득이 됩니다.<span class="ev ev-est">교육용 추정</span> "데이터 이동에 걸렸는지 연산에 걸렸는지" 판단하는 방법은 <a href="#chapter/05/c05-roofline">5장 「연산 성능과 루프라인」</a>을 보세요. 위의 시뮬레이터에서 N과 t₁을 함께 키우면 같은 방향의 변화를 볼 수 있습니다.</p>
+<p>시뮬레이터와 실제 시스템에는 차이가 하나 더 있습니다. 시뮬레이터에서는 신뢰도가 곧 진짜 확률이라서, 그것으로 슬롯을 나눠도 절대 손해를 보지 않습니다. 실제 시스템에서는 표의 GPU당 16개 행이 −1.5%입니다. 가능한 원인 중 하나는 신뢰도를 잘못 추정해서, 원래 수락될 드래프트를 잘라 낸 것입니다. 다른 이유도 말이 됩니다. 소요 시간 모델에 오차가 있고, 총합을 정할 때 더 이전 라운드의 신뢰도를 쓰고, 총합을 그래프 크기까지 올림합니다.<span class="ev ev-est">교육용 추정</span> 게다가 이 표 자체가 벤치마크 데이터로 추산한 추정치입니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md#L247" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>)</p>
+
+<h2 id="sec-4">4.4 GPU를 한순간도 멈추지 않게: 제로 오버헤드 배치 스케줄러</h2>
+<p>관점을 바꿔 디코드 한 스텝을 봅시다. Q&amp;A는 N번째 스텝을 네 구간으로 나눕니다. schedule(N) → forward(N) → sample(N) → post-process(N)입니다. 스케줄링과 후처리는 모두 CPU만 쓰는 로직입니다. 후처리 전에 CPU가 GPU와 한 번 동기화해야 sample(N)의 결과를 받을 수 있습니다. 그래서 post-process(N)와 schedule(N+1) 두 구간 동안 GPU는 놀고 있습니다.<span class="ev ev-report">업스트림 보고</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md#L266-L274" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>)</p>
+<p><dfn>비동기 스케줄링</dfn>은 바로 이 빈 시간을 없애려는 것입니다. DeepInfer는 이 구현을 <dfn>제로 오버헤드 배치 스케줄러</dfn>(zero-overhead batch scheduler, 코드에서는 ZOS로 줄여 부름)라고 부릅니다. Q&amp;A에 따르면 <a href="https://github.com/sgl-project/sglang" target="_blank" rel="noopener noreferrer">SGLang</a>과 <a href="https://arxiv.org/abs/2408.12757" target="_blank" rel="noopener noreferrer">NanoFlow</a>의 방식을 참고했습니다. GPU가 forward(N) → sample(N)을 실행하는 동안, CPU는 동시에 schedule(N+1) → forward(N+1) 발행 → post-process(N−1) → sample(N+1) 발행을 합니다.<span class="ev ev-report">업스트림 보고</span></p>
+<p>코드에서는 이 순서가 <code>Worker.execute_model_step</code>의 주석에 적혀 있고, 매 스텝이 똑같은 네 가지 일을 합니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L96-L189" target="_blank" rel="noopener noreferrer">worker.py</a>)</p>
+<ol>
+<li>이번 스텝의 순전파를 발행한다.</li>
+<li><strong>이전 스텝</strong>을 후처리한다. 먼저 이전 스텝의 "샘플링 완료" 이벤트를 기다린 다음 출력을 처리한다.</li>
+<li>이번 스텝의 샘플링을 발행한다.</li>
+<li>이번 스텝의 후처리: 프리필 스텝과 ZOS를 끈 경우에는 그 자리에서 한다. ZOS에서의 디코드 스텝은 다음 스텝으로 미뤄서, 다음 스텝의 순전파와 겹친다.</li>
+</ol>
+<p>"이전 스텝"은 <code>prev_step_state</code>라는 변수 하나에만 들어 있으므로, CPU는 GPU보다 최대 한 스텝만 앞설 수 있습니다. 2번 일의 대기는 이번 스텝의 순전파를 이미 발행한 뒤에 놓여 있어서, CPU가 기다리는 동안 GPU 손에는 일이 있습니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L247-L272" target="_blank" rel="noopener noreferrer">worker.py</a>)</p>
+<p>README는 비동기 스케줄링이 기본으로 켜져 있다고 합니다.<span class="ev ev-report">업스트림 보고</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md#L26" target="_blank" rel="noopener noreferrer">README.md</a>) <code>environ.py</code>만 보면 <code>DEEPINFER_ZERO_OVERHEAD_SCHEDULING</code>의 기본값은 꺼짐입니다. 하지만 엔진을 만들 때 <code>EngineArgs</code>가 엔진 종류에 따라 기본값을 채워 넣습니다. 프리필과 디코드를 모두 하는 NORMAL 엔진과 디코드만 하는 COMPLETION 엔진은 1, 프리필만 하는 PROMPT 엔진은 0으로 둡니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L179" target="_blank" rel="noopener noreferrer">environ.py</a>, <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/arg_utils.py#L51-L55" target="_blank" rel="noopener noreferrer">arg_utils.py</a>, <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/engine_type.py#L15-L17" target="_blank" rel="noopener noreferrer">engine_type.py</a>) 따라서 디코드를 하는 엔진이라면 실제로 기본으로 켜져 있고, README와 일치합니다.</p>
+<p>겹침은 뜻밖의 동기화 한 번에 쉽게 망가집니다. 발행 코드 어딘가에서 GPU 위의 수 하나만 읽어도 CPU는 멈추고 기다려야 하고, GPU는 일을 끝내자마자 다시 비게 됩니다. DeepInfer는 순전파 발행과 샘플링 발행을 각각 <code>forbid_cuda_sync()</code>로 감쌉니다. 함수 주석에는 여기서 어떤 CUDA 동기화도 있으면 안 된다고 대문자로 적혀 있고, 전용 단위 테스트도 있습니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L307-L367" target="_blank" rel="noopener noreferrer">model_runner.py</a>, <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/test_cuda_sync_guards.py" target="_blank" rel="noopener noreferrer">test_cuda_sync_guards.py</a>)</p>
+<p>아래 타임라인을 끌어 보면서 빈틈이 언제 사라지고 언제 돌아오는지 보세요.</p>
+<div class="viz" data-viz="di-spec-sched-zos"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="그림 D4-4: CPU가 스텝당 4밀리초, GPU가 13밀리초일 때 동기 루프는 4스텝에 68밀리초가 걸리고 GPU가 스텝마다 4밀리초 기다린다. 비동기 루프는 56밀리초면 되고 GPU는 한 스텝씩 이어서 간다">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="13" font-weight="600">동기: CPU와 GPU가 번갈아 일함</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="42" font-size="12">CPU</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="70" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="26" width="320" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="54" width="320" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="70" y="26" width="18.8" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="150" y="26" width="18.8" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="230" y="26" width="18.8" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="310" y="26" width="18.8" height="22"/>
+<rect class="f-accent" fill="#136d5a" x="88.8" y="54" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="119.4" y="70" font-size="12" text-anchor="middle">단계 1</text>
+<rect class="f-accent" fill="#136d5a" x="168.8" y="54" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="199.4" y="70" font-size="12" text-anchor="middle">단계 2</text>
+<rect class="f-accent" fill="#136d5a" x="248.8" y="54" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="279.4" y="70" font-size="12" text-anchor="middle">단계 3</text>
+<rect class="f-accent" fill="#136d5a" x="328.8" y="54" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="359.4" y="70" font-size="12" text-anchor="middle">단계 4</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12">GPU가 스텝마다 4 ms 대기: 4스텝에 68 ms</text>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="13" font-weight="600">비동기: CPU가 한 스텝 앞서 준비</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="160" font-size="12">CPU</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="188" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="144" width="320" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="172" width="320" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="70" y="144" width="18.8" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="88.8" y="144" width="18.8" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="150" y="144" width="18.8" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="211.2" y="144" width="18.8" height="22"/>
+<rect class="f-accent" fill="#136d5a" x="88.8" y="172" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="119.4" y="188" font-size="12" text-anchor="middle">단계 1</text>
+<rect class="f-accent" fill="#136d5a" x="150" y="172" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="180.6" y="188" font-size="12" text-anchor="middle">단계 2</text>
+<rect class="f-accent" fill="#136d5a" x="211.2" y="172" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="241.8" y="188" font-size="12" text-anchor="middle">단계 3</text>
+<rect class="f-accent" fill="#136d5a" x="272.4" y="172" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="303" y="188" font-size="12" text-anchor="middle">단계 4</text>
+<text class="f-text" fill="#182f2b" x="10" y="216" font-size="12">GPU 연속 가동: 4스텝을 56 ms에 완료</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="242" font-size="12">짧은 블록: CPU 4 ms(가정) · 긴 블록: GPU 13 ms</text>
+</svg><figcaption>그림 D4-4　같은 일인데, 비동기 루프는 CPU의 4 ms를 GPU의 13 ms 뒤로 숨깁니다. 스텝당 주기가 17 ms에서 13 ms로 줄어듭니다. CPU 시간은 가정한 값이고, GPU의 13 ms는 그림에서 읽어 낸 추정치입니다.</figcaption></figure></div>
+<p>정상 상태에서 동기 루프는 스텝마다 CPU ＋ GPU가 걸리고, 비동기 루프는 max(CPU, GPU)만 걸립니다. 기본 파라미터에서는 (4 ＋ 13) ÷ 13 ≈ 1.31배입니다.<span class="ev ev-est">교육용 추정</span> GPU의 13 ms는 README 디코드 그림에서 읽은 값입니다. GPU당 요청 64개일 때 사용자 한 명당 약 246 token/s이고, 그림 설명의 τ ＝ 3.25로 환산하면 초당 약 76스텝, 한 스텝은 약 13 ms입니다(4.6절에서 이 그림을 자세히 봅니다). CPU가 스텝마다 얼마나 걸리는지는 업스트림이 공개하지 않았고, 4 ms는 순전히 가정입니다.<span class="ev ev-est">교육용 추정</span></p>
+<p>비동기는 공짜가 아닙니다. CPU가 N+1번째 스텝을 줄 세울 때는 N번째 스텝에서 각 요청이 토큰을 몇 개 수락했는지 아직 모릅니다. 그래서 최악의 경우를 가정해 처리 중인 요청마다 1 ＋ 5개 위치를 미리 잡아 두고, 결과가 돌아오면 실제 값으로 고칩니다. 위치 표의 상한에도 그래서 nextn ＋ 1칸의 여유가 있습니다.<span class="ev ev-code">코드 사실</span> (확보: <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L726" target="_blank" rel="noopener noreferrer">scheduler.hpp L726</a>; 먼저 낙관적으로 전진: <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L927" target="_blank" rel="noopener noreferrer">L927</a>; 실제 수락 수로 되채움: <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L999" target="_blank" rel="noopener noreferrer">L999</a>; <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/config.py#L11-L16" target="_blank" rel="noopener noreferrer">config.py</a>) 처리 중에 요청이 선점되면 그 스텝의 출력은 통째로 버려집니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L917-L925" target="_blank" rel="noopener noreferrer">scheduler.hpp</a>)</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 이것은 2단 소프트웨어 파이프라인입니다. CPU가 1단, GPU가 2단이고, 각 단은 한 번에 한 스텝씩 처리합니다. 『컴퓨터 구조』에서 배우는 명령어 파이프라인과 마찬가지로, 파이프라인의 박자는 가장 느린 단이 정합니다. 그래서 CPU가 GPU보다 느려지면 빈틈이 돌아옵니다. 파이프라인의 기초는 <a href="#chapter/16/c16-pipeline">16장 「파이프라인: 여러 공정을 동시에 돌리기」</a>를 보세요.</p>
+<div class="callout vs"><strong>Strata와 비교하면:</strong> Strata의 서버는 기본적으로 락 하나, 큐 하나라서 한 번에 시퀀스 하나만 서비스합니다. "parallel"을 켜면 보통 최대 8개의 배치 슬롯이 함께 디코드합니다(<a href="#chapter/25">25장</a> 25.1절). Strata에도 겹침은 있습니다. 검증 윈도의 커밋은 그래프 실행이 끝나길 기다리지 않고 돌아올 수 있어서, 다음 라운드의 드래프트 생성과 동시에 진행됩니다(<a href="#chapter/14/c14-async">14장 「동기와 비동기」</a>). DeepInfer의 디코드용 GPU에서는 한 스텝에 수십 개의 요청이 있습니다. CPU는 스텝마다 배치 전체의 스케줄링과 후처리를 해야 하고, 이 일은 배치가 커질수록 늘어납니다. 숨기지 않으면 GPU의 시간을 그대로 갉아먹습니다.</div>
+
+<h2 id="sec-5">4.5 두 가지가 부딪힌다: CPU는 이전 스텝에서 몇 개가 수락됐는지 아직 모른다</h2>
+<p>4.2와 4.4를 함께 놓으면 어려운 문제에 부딪힙니다. 가변 길이 검증은 N번째 스텝에서 방금 나온 신뢰도로 N+1번째 스텝에서 각 요청이 몇 개를 검증할지 정해야 합니다. 그런데 비동기 스케줄링에서는 CPU가 N+1번째 스텝을 줄 세울 때 N번째 스텝이 아직 GPU에서 돌고 있어서, 신뢰도가 나오지 않았습니다.</p>
+<p>Q&amp;A가 내놓은 해법은 이렇습니다. CPU는 스케줄링할 때 <strong>총 예산</strong>만 정합니다. 각 요청에 몇 개씩 나눌지는 GPU 위의 TileLang 커널이 다시 계산합니다(누적곱, 전체 순위에서 상위 k개 선택, 겸사겸사 행 번호 다시 매핑). 결과는 고정(pinned) 버퍼에 다시 씁니다.<span class="ev ev-report">업스트림 보고</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md#L262-L264" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>) 코드는 이 설명과 하나하나 들어맞습니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L191-L245" target="_blank" rel="noopener noreferrer">worker.py</a>)</p>
+<ul>
+<li>CPU가 먼저 이번 배치의 요청을 이전 배치와 짝지어 재매핑 표 <code>remap</code>을 만듭니다. 이번 배치의 i번째 요청이 이전 배치의 몇 번째였는지 적고, 새로 온 요청은 −1로 적습니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/zos.cpp#L142-L196" target="_blank" rel="noopener noreferrer">zos.cpp</a>)</li>
+<li>GPU 위의 <code>compute_seqlens_q_by_confidence_rates</code>는 이전 스텝이 GPU 메모리(HBM)에 남긴 신뢰도를 읽습니다. <code>remap</code>에 따라 행을 가져와 누적곱을 하고, 배치 전체에서 순위를 매깁니다. 상위 total_q − N개가 각각 해당 요청에 슬롯을 하나 더해 줍니다. 새로 온 요청의 신뢰도는 0으로 쳐서 맨 뒤에 놓입니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/schedule_mtp_varlen.py#L26-L81" target="_blank" rel="noopener noreferrer">schedule_mtp_varlen.py</a>)</li>
+<li>각 요청의 KV 길이도 GPU 위에서, 이전 스텝이 실제로 수락한 토큰 수에 맞춰 고칩니다(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L220-L227" target="_blank" rel="noopener noreferrer">worker.py</a>의 <code>compute_seqlens_k_zos</code>). 이번 스텝의 입력 토큰은 GPU 메모리에 있는 이전 스텝의 샘플링 결과에서 바로 가져옵니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/input_metadata/prepare_tensor_input_zos.py#L225-L244" target="_blank" rel="noopener noreferrer">prepare_tensor_input_zos.py</a>)</li>
+<li>계산된 각 요청의 길이를 고정(pinned) 메모리로 복사하고 이벤트를 하나 기록합니다. CPU는 순전파를 발행하고 이전 스텝의 후처리를 마친 뒤, 샘플링을 발행하기 직전에 이 이벤트를 기다립니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L146-L152" target="_blank" rel="noopener noreferrer">worker.py</a>)</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 304" role="img" aria-label="그림 D4-5: CPU는 더 이전 라운드의 신뢰도로 총 토큰 수를 정하고 CUDA Graph를 고른다. GPU는 N번째 스텝에서 방금 나온 신뢰도로 총합을 각 요청에 나눈다">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="13" font-weight="600" text-anchor="middle">CPU</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="13" font-weight="600" text-anchor="middle">GPU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="30" width="180" height="62" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="50" font-size="13" font-weight="600" text-anchor="middle">schedule(N+1)</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="68" font-size="12" text-anchor="middle">더 이전 라운드 신뢰도로</text>
+<text class="f-text" fill="#182f2b" x="100" y="85" font-size="12" text-anchor="middle">총 토큰 수만 결정</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="108" width="180" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="127" font-size="12" text-anchor="middle">총합으로 CUDA Graph 선택</text>
+<text class="f-text" fill="#182f2b" x="100" y="145" font-size="12" text-anchor="middle">forward(N+1) 발행</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="170" width="180" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="189" font-size="12" text-anchor="middle">N번째 스텝 후처리</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="207" font-size="12" text-anchor="middle">sample(N) 완료 대기</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="232" width="180" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="251" font-size="12" text-anchor="middle">요청별 길이 읽기</text>
+<text class="f-text" fill="#182f2b" x="100" y="269" font-size="12" text-anchor="middle">sample(N+1) 발행</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="30" width="180" height="62" rx="8"/>
+<text class="f-text" fill="#182f2b" x="300" y="50" font-size="13" font-weight="600" text-anchor="middle">sample(N)</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="68" font-size="12" text-anchor="middle">검증 ＋ 드래프트 모듈</text>
+<text class="f-text" fill="#182f2b" x="300" y="85" font-size="12" text-anchor="middle">새 신뢰도는 HBM에 남음</text>
+<rect class="f-accent" fill="#136d5a" x="210" y="108" width="180" height="62" rx="8"/>
+<text class="f-on" fill="#ffffff" x="300" y="128" font-size="13" font-weight="600" text-anchor="middle">TileLang kernel</text>
+<text class="f-on" fill="#ffffff" x="300" y="146" font-size="12" text-anchor="middle">누적곱, 배치 전체 순위</text>
+<text class="f-on" fill="#ffffff" x="300" y="163" font-size="12" text-anchor="middle">총합을 요청별로 분배</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="186" width="180" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="300" y="205" font-size="12" text-anchor="middle">forward(N+1)</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="223" font-size="12" text-anchor="middle">보정된 길이로 계산</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 92V104M100 154V166M100 216V228M300 92V104M300 170V182"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M190 76H196V128H206"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M210 160H204V255H194"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="298" font-size="12" text-anchor="middle">점선: 총합은 GPU로, 길이는 pinned 버퍼로 CPU에 반환</text>
+</svg><figcaption>그림 D4-5　역할 분담: 총합은 CPU에서 정합니다. CPU가 재생할 CUDA Graph를 고르는 데 총합이 필요하기 때문입니다. 각 요청에 어떻게 나눌지는 GPU 위에서 최신 신뢰도로 그 자리에서 계산하므로, CPU는 기다릴 필요가 없습니다.</figcaption></figure>
+<p>왜 총합은 꼭 CPU에서 정해야 할까요? 코드에는 적어도 직접적인 이유가 하나 있습니다. CPU는 총 토큰 수로 어느 CUDA Graph를 리플레이할지 고르고, 이 일은 발행 전에 일어납니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L202-L207" target="_blank" rel="noopener noreferrer">worker.py</a>, <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cuda_graph_runner.py#L143-L148" target="_blank" rel="noopener noreferrer">cuda_graph_runner.py</a>) 각 그래프의 크기는 녹화할 때 이미 정해집니다. 반면 ZOS에서는 그래프의 입력 버퍼가 GPU 메모리에 있어서, GPU 위의 커널이 CPU를 거치지 않고 고쳐 쓸 수 있습니다. (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cuda_graph_runner.py#L26-L32" target="_blank" rel="noopener noreferrer">cuda_graph_runner.py</a>, <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L75-L79" target="_blank" rel="noopener noreferrer">model_runner.py</a>)</p>
+<p>4.2절에서 총합과 슬롯 분배는 원래 두 벌의 데이터를 쓴다고 했습니다. 총합에는 더 이전 라운드의 신뢰도를, 슬롯 분배에는 가장 최근 라운드의 신뢰도를 씁니다. ZOS를 켜든 끄든 마찬가지입니다. 소스 주석에는 총 예산이 "항상 N−2 라운드의 accept_rate를 쓴다"고, 분배는 N−1 라운드를 쓴다고 적혀 있습니다. 주석의 "N 라운드"는 지금 줄 세우는 그 스텝을 가리킵니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L160-L208" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp</a>) 이 절의 표기로 바꾸면, N+1번째 스텝을 줄 세울 때 총합은 N−1번째 스텝이 낸 신뢰도를 쓰고, 분배는 N번째 스텝의 것을 씁니다. ZOS를 끄면 N번째 스텝의 후처리가 이미 끝났으므로 분배를 CPU에서 할 수 있습니다. ZOS를 켜면 N번째 스텝의 신뢰도가 아직 GPU에 있으므로, 분배가 GPU로 옮겨 갑니다.</p>
+<p class="bridge"><strong>CS를 배운 분께:</strong> 이것은 파이프라인의 <dfn>데이터 해저드</dfn>입니다. 뒤의 명령이 앞 명령의 결과를 쓰려는데, 앞 명령이 아직 계산을 끝내지 못했습니다. CPU의 오래된 대처법은 두 가지입니다. 멈추고 기다리거나(파이프라인 스톨), 결과를 실행 유닛에서 다음 명령으로 곧장 "포워딩"해서 레지스터를 거치지 않는 것입니다. DeepInfer가 고른 것은 포워딩입니다. N번째 스텝의 수락 수와 신뢰도는 CPU로 돌아오지 않고, GPU 메모리 안에서 곧바로 N+1번째 스텝에 넘겨집니다. 더 읽기: <a href="https://en.wikipedia.org/wiki/Hazard_(computer_architecture)" target="_blank" rel="noopener noreferrer">Wikipedia: Hazard (computer architecture)</a> · <a href="https://en.wikipedia.org/wiki/Operand_forwarding" target="_blank" rel="noopener noreferrer">Wikipedia: Operand forwarding</a></p>
+<div class="callout vs"><strong>Strata와 비교하면:</strong> <a href="#chapter/15">15장</a> 15.5절에서 CUDA Graph는 파라미터를 고정해서 녹화한다고 설명했습니다. 그래서 Strata는 스텝마다 바뀌는 위치를 고정 주소의 GPU 메모리에 두고, 호스트가 스텝마다 새 값을 한 번 복사해 넣습니다. DeepInfer는 ZOS에서 한 걸음 더 나아갑니다. 스텝마다 바뀌는 길이와 입력 토큰은 호스트조차 거치지 않고, GPU가 이전 스텝의 결과로 직접 계산합니다. 원칙은 같습니다. 그래프가 기억하는 것은 주소이고, 내용은 스텝마다 다시 씁니다.</div>
+
+<h2 id="sec-6">4.6 벤치마크 숫자는 조심해서 읽자: 전부 수락 기준</h2>
+<p>마지막으로, 숫자를 읽을 때 밟기 쉬운 함정 하나를 말씀드립니다. 저장소에 들어 있는 <code>benchmark.py</code>가 보고하는 디코드 처리량은 "전부 수락 기준"입니다. 드래프트가 실제로 몇 개 수락되었든, 요청마다 스텝당 1 ＋ nextn개의 토큰으로 셉니다. 식은 avg_SPS × 요청 수 × (1 ＋ nextn) ÷ CP 수이고, avg_SPS는 초당 스텝 수입니다. 기본값인 요청 64개, nextn ＝ 5에서는 한 스텝이 384토큰으로 계산됩니다.<span class="ev ev-report">업스트림 보고</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/README.md#L45-L55" target="_blank" rel="noopener noreferrer">examples/README.md</a>) 코드에서도 이 식이 똑같습니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py#L397-L409" target="_blank" rel="noopener noreferrer">benchmark.py</a>)</p>
+<p>이렇게 세는 데는 이유가 있습니다. 가변 길이 검증을 끄면 스텝마다 1 ＋ nextn개의 토큰을 고정으로 검증하므로, 한 스텝의 소요 시간은 수락률과 상관이 없습니다. 측정한 스텝 속도를 임의의 수락률로 다시 환산할 수 있습니다. 그림을 그리는 스크립트가 바로 그렇게 합니다. τ ＝ 1 ＋ nextn × a를 써서 두 축에 모두 τ를 곱합니다. a는 드래프트가 수락된 비율입니다. 스크립트는 데이터에서 가변 길이 검증이 꺼져 있었다는 것도 assert로 확인합니다. 켜져 있었다면 스텝 속도에 이미 수락률이 들어 있어서 다시 곱하면 안 되기 때문입니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/sweep/plot_pareto.py#L58-L68" target="_blank" rel="noopener noreferrer">plot_pareto.py</a>)</p>
+<p>README의 디코드 그림 설명에는 이렇게 적혀 있습니다. EP64DP64, 전문가 384＋64개, 컨텍스트 131,072, nextn ＝ 3 고정, 토큰별 수락률 75%, τ ＝ 3.25. 측정은 SM100 GPU 64장으로, 같은 슈퍼노드 안에서 했습니다.<span class="ev ev-report">업스트림 보고</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md#L77-L83" target="_blank" rel="noopener noreferrer">README.md</a>, <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/images/decode_pareto.png" target="_blank" rel="noopener noreferrer">decode_pareto.png</a>) 그림을 읽으면 GPU당 요청 64개일 때 GPU 한 장당 약 15,700 token/s, 사용자 한 명당 약 246 token/s입니다.<span class="ev ev-report">업스트림 보고</span> (그림에서 읽은 근삿값) 기억할 점이 있습니다. 여기서 75%는 그림을 그릴 때 준 입력이지, 이번에 측정한 수락률이 아닙니다. 4.2절처럼 위치별 조건부 수락률도 아닙니다. 그림 스크립트의 a는 "수락된 드래프트가 전체 드래프트에서 차지하는 비율"이고 τ ＝ 1 ＋ 3 × 0.75입니다.<span class="ev ev-code">코드 사실</span> (<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/sweep/plot_pareto.py#L58-L61" target="_blank" rel="noopener noreferrer">plot_pareto.py</a>) 위치마다 조건부 수락률이 모두 75%라면 누적곱으로 계산할 때 한 스텝의 기대값은 1 ＋ 0.75 ＋ 0.56 ＋ 0.42 ≈ 2.73개뿐입니다.<span class="ev ev-est">교육용 추정</span></p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="그림 D4-6: 요청 하나가 스텝마다 세는 토큰 수. 전부 수락 기준으로 nextn=3은 4개, nextn=5는 6개. 수락률 75%로 환산하면 각각 3.25개와 4.75개">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">요청·스텝당 세는 토큰 수(막대는 비례)</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">전부 수락, nextn=3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="35" width="144" height="18"/>
+<text class="f-text" fill="#182f2b" x="290" y="48" font-size="12">4.00</text>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">README 그림, a=75%</text>
+<rect class="f-accent" fill="#136d5a" x="140" y="75" width="117" height="18"/>
+<text class="f-text" fill="#182f2b" x="263" y="88" font-size="12">3.25</text>
+<text class="f-text" fill="#182f2b" x="10" y="128" font-size="12">전부 수락, nextn=5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="115" width="216" height="18"/>
+<text class="f-text" fill="#182f2b" x="362" y="128" font-size="12">6.00</text>
+<text class="f-text" fill="#182f2b" x="10" y="168" font-size="12">nextn=5, a=75%라면</text>
+<rect class="f-accent" fill="#136d5a" x="140" y="155" width="171" height="18"/>
+<text class="f-text" fill="#182f2b" x="317" y="168" font-size="12">4.75</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="202" font-size="12">τ = 1 + nextn × a, a = 수락된 드래프트 ÷ 전체 드래프트</text>
+</svg><figcaption>그림 D4-6　같은 스텝 속도라도 전부 수락 기준으로 세면 nextn=5에서 요청 하나가 스텝마다 6토큰입니다. 드래프트의 75%만 수락된다면 실제로는 4.75개이고, 약 2할 적습니다. DeepInfer의 디코드 처리량을 보게 되면, 먼저 어떤 τ를 썼는지 물어보세요.</figcaption></figure>
+<p>환산해 보면, nextn ＝ 3일 때 전부 수락 기준은 a ＝ 75% 기준보다 4 ÷ 3.25 − 1 ≈ 23% 더 많이 셉니다. nextn ＝ 5일 때는 6 ÷ 4.75 − 1 ≈ 26% 더 많습니다.<span class="ev ev-est">교육용 추정</span> 4.3절의 벤치마크 추정에서 고정 5개 검증의 평균 수락 길이는 약 3.3입니다. 메인 모델의 토큰 1개를 포함하든 안 하든, 전부 수락 기준의 6(드래프트만 세면 5)에는 훨씬 못 미칩니다. 그래서 전부 수락 기준의 숫자는 상한으로만 봐야 합니다.</p>
+
+<div class="recap"><h3>이 세 가지를 기억하기</h3><ol>
+<li>DeepInfer의 드래프트 모듈은 한 번의 순전파로 토큰 5개를 추측하고 각각에 신뢰도를 붙입니다. <code>DEEPINFER_ENABLE_MTP_VARLEN=1</code>을 켜면 스케줄러가 누적곱 신뢰도가 높은 순서로 검증 슬롯을 나눠 주고, 실측한 소요 시간 곡선에서 "1밀리초당 기대 토큰 수"가 가장 큰 총합을 고릅니다. 업스트림 추정으로는 프로덕션 동작점에서 처리량이 4%–7% 늘고, 동시 처리가 낮을 때는 오히려 조금 손해입니다.</li>
+<li>제로 오버헤드 배치 스케줄러는 CPU가 GPU보다 한 스텝 앞서가게 합니다. GPU가 N번째 스텝을 돌리는 동안 CPU는 이미 N+1번째 스텝을 줄 세우고 있습니다. 정상 상태의 주기는 CPU ＋ GPU에서 max(CPU, GPU)로 바뀝니다. 단, CPU가 스텝마다 하는 일이 GPU 한 스텝을 넘지 않아야 합니다.</li>
+<li>둘을 겹치면 CPU는 최신 신뢰도를 받을 수 없습니다. 그래서 CPU는 총합만 정하고(CUDA Graph를 고르는 데 총합이 필요합니다), 각 요청에 몇 개를 나눌지는 GPU 위의 커널이 최신 신뢰도로 그 자리에서 계산합니다. 디코드 처리량을 읽을 때는 먼저 전부 수락 기준인지 확인하세요.</li>
+</ol></div>
+<div class="myth"><p><strong>흔한 오해: "제로 오버헤드 스케줄링은 CPU 스케줄링에 시간이 안 든다는 뜻이다."</strong></p>
+<p>CPU의 일은 조금도 줄지 않았고, GPU의 일과 겹쳐 놓았을 뿐입니다. CPU가 스텝마다 GPU보다 느리면 비동기 루프의 주기는 CPU의 시간이 되고, GPU는 여전히 놉니다. 위 타임라인에서 CPU를 GPU보다 크게 끌어 보면 확인할 수 있습니다.<span class="ev ev-est">교육용 추정</span> DeepInfer의 스케줄러 본체는 C++에 있고(<code>csrc/engine/scheduler.hpp</code>), 발행 코드는 바깥을 동기화 금지 가드가 감싸고 있습니다.<span class="ev ev-code">코드 사실</span></p></div>
+
+<details class="deep"><summary>한 걸음 더: 디코드 한 스텝의 전체 호출 흐름, 예산 알고리즘의 세부, 관련 스위치</summary>
+<h3>파일 지도</h3>
+<ul>
+<li><code>deepinfer/engine/llm_engine.py</code>: <code>LLMEngine.step()</code>, 한 스텝의 전체 진입점(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L860-L959" target="_blank" rel="noopener noreferrer">L860–L959</a>).</li>
+<li><code>csrc/engine/scheduler.hpp</code>: C++ 스케줄러. 디코드 스케줄링은 <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L622-L660" target="_blank" rel="noopener noreferrer">L622–L660</a>에 있고, 마지막에 <code>_mtp_varlen.schedule</code>을 호출합니다. 드래프트와 신뢰도의 기록은 <code>process_MTPInfo</code>에 있습니다(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L1196-L1262" target="_blank" rel="noopener noreferrer">L1196–L1262</a>).</li>
+<li><code>csrc/engine/mtp_varlen.hpp</code>: 가변 길이 검증의 예산 알고리즘과 두 개의 시간 추정기.</li>
+<li><code>deepinfer/worker/worker.py</code>: ZOS의 4단계 루프와 GPU 쪽 보정.</li>
+<li><code>csrc/engine/zos.cpp</code>, <code>deepinfer/model_executor/input_metadata/prepare_tensor_input_zos.py</code>: ZOS에서의 입력 준비.</li>
+<li><code>deepinfer/model_executor/layers/tilelang_ops/cuda/schedule_mtp_varlen.py</code>: GPU 위에서 슬롯을 나누는 커널. 한 단계 위 폴더에 있는 같은 이름의 파일에 PyTorch 참조 구현과 테스트가 있습니다.</li>
+<li><code>deepinfer/model_executor/models/mtp/dflash.py</code>: 드래프트 모듈과 신뢰도 헤드.</li>
+<li><code>csrc/graph_timer/</code>, <code>deepinfer/timer.py</code>: CUDA Graph 내부의 타이밍 측정.</li>
+</ul>
+<h3>ZOS를 켰을 때 디코드 한 스텝의 순서</h3>
+<ol>
+<li><code>scheduler.schedule()</code>: C++가 이번 배치의 요청을 고르고 길이순으로 정렬합니다. <code>MTPVarlen::schedule</code>이 각 요청의 seqlen_q와 총합을 내놓습니다. 스케줄된 요청마다 <code>schedule_cnt</code>가 1 늘고, 처리 중인 위치를 1 ＋ nextn개 확보합니다(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L667-L736" target="_blank" rel="noopener noreferrer">scheduler.hpp L667–L736</a>).</li>
+<li><code>Worker._correct_seqlens_qk</code>: 이전 배치와 짝을 맞춰 remap을 만들고, GPU 메모리로 복사합니다. 가변 길이가 켜져 있으면 슬롯 분배 커널을 돌립니다. 이전 스텝의 수락 수에 맞춰 KV 길이를 고칩니다. 가변 길이가 켜져 있으면 새 seqlen_q를 고정(pinned) 메모리로 되복사하고 이벤트를 기록합니다(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L191-L245" target="_blank" rel="noopener noreferrer">worker.py L191–L245</a>). 주석에는 "H2D, 보정, D2H는 현재 스트림에서 순서가 보장된다. 이 고정 소스를 고쳐 쓰는 것은 가변 길이뿐이다"라고 적혀 있습니다.</li>
+<li><code>execute_main_model</code>: 그래프를 고르고 순전파를 발행합니다. 바깥을 <code>forbid_cuda_sync()</code>와 타이밍 이벤트 <code>device_forward</code>가 감쌉니다.</li>
+<li><code>_post_process_step(prev)</code>: 이전 스텝의 <code>sample_end_evt</code>를 기다리고, 그래프 내부 타이밍을 갱신하고, 출력을 처리합니다. 드라이버 프로세스에서는 이전 스텝에서 실측한 순전파와 샘플링 시간도 <code>scheduler.update_mtp_runtime</code>에 넘깁니다(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L984-L1015" target="_blank" rel="noopener noreferrer">llm_engine.py L984–L1015</a>).</li>
+<li>D2H 이벤트를 기다립니다. <code>update_metadata_for_sampling_zos</code>가 CPU 쪽 seqlen_q를 GPU가 계산한 값으로 바꿉니다. seqlen_k는 GPU에서 복사해 오지 않고, CPU에서 seqlen_q ＋ 이미 캐시된 토큰 수로 다시 계산합니다(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/zos.cpp#L279-L305" target="_blank" rel="noopener noreferrer">zos.cpp L279–L305</a>).</li>
+<li><code>execute_sample</code>: 이전 스텝의 드래프트를 검증한 다음, 드래프트 모듈을 돌려 다음 스텝의 드래프트와 신뢰도를 냅니다. 마찬가지로 동기화 금지 가드로 감싸져 있습니다.</li>
+<li><code>pre_sampler_sync</code> 콜백: 지난 라운드에서 해제를 미뤄 둔 자원을 해제하고, KV 디스크 기록 등을 처리합니다. 마지막으로 이번 스텝의 상태를 <code>prev_step_state</code>에 저장해 다음 스텝의 후처리에 넘깁니다.</li>
+</ol>
+<h3>예산 알고리즘의 세부</h3>
+<ul>
+<li>요청마다 수락률이 두 벌 있습니다. <code>accept_rates</code>(가장 최근 라운드, 이미 누적곱을 한 것)와 <code>prev_accept_rates</code>(그 전 라운드)입니다. <code>schedule_cnt</code>와 <code>process_cnt</code> 두 카운터로 "가장 최근 라운드"가 N−1인지 N−2인지 판단합니다(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/sequence.hpp#L118-L131" target="_blank" rel="noopener noreferrer">sequence.hpp L118–L131</a>).</li>
+<li>아직 수락률이 없을 때, 드래프트가 있는 요청은 1.0으로, 드래프트가 없는 요청은 0.0으로 채웁니다.</li>
+<li>정렬은 수락률 내림차순이고, 같으면 요청 인덱스가 작은 쪽이 앞입니다. GPU 커널은 "나보다 큰 원소가 몇 개인가"를 세어 순위를 매기고, 같으면 평탄화한 인덱스가 작은 쪽이 앞입니다. 이 커널은 병렬로 세는 것이고, 실제로 정렬을 한 번 돌리는 것이 아닙니다.</li>
+<li>후보 총합은 "메인 모델 토큰만 검증"하는 상태에서 시작합니다. 후보마다 소요 시간은 곡선에서 그 이상인 그래프의 기준 시간 ＋ 기울기 × 그래프 크기 ＋ 샘플링 시간입니다. 비교는 엄격한 "보다 크다"를 쓰므로, 처리량이 같으면 더 작은 총합을 고릅니다. 같은 그래프 안에서는 추정 소요 시간이 같으므로, 선택된 총합은 항상 그래프 크기이거나 드래프트 전부입니다.</li>
+<li>CUDA Graph의 크기는 토큰 수로 셉니다. 1, 2, 4, 그다음부터는 <code>DEEPINFER_CUDAGRAPH_BATCH_SIZE_INTERVAL</code>(기본 8)마다 하나씩이고, 최대는 max_num_seqs × (1 ＋ nextn)입니다(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cuda_graph_runner.py#L41-L51" target="_blank" rel="noopener noreferrer">cuda_graph_runner.py L41–L51</a>, <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L72-L79" target="_blank" rel="noopener noreferrer">model_runner.py L72–L79</a>).</li>
+</ul>
+<h3>시간 모델의 온라인 보정</h3>
+<ul>
+<li>시작 곡선: 그래프마다 워밍업 1번, 측정 5번을 하고, 가장 높은 것과 가장 낮은 것을 하나씩 빼고 평균을 낸 다음, 전문가 병렬 그룹 안에서 다시 평균을 냅니다. 결과는 모델과 병렬 구성별로 파일에 캐시되고, 유효 기간은 <code>DEEPINFER_DECODE_PERF_CACHE_TTL_SEC</code>가 정하며 기본값은 3600초입니다.</li>
+<li>순전파 기울기: 주석에 따르면 시작 곡선은 컨텍스트 길이를 고려하지 않으므로, (실측 순전파 − 기준) ÷ 그래프 크기로 기울기를 맞춥니다. 최근 5000스텝을 보관하고, 그래프 크기마다 샘플이 최소 10개는 있어야 인정합니다. 먼저 그래프 크기별로 중앙값을 구하고, 그 중앙값들의 중앙값을 다시 구합니다. 기울기가 0보다 작으면 0으로 칩니다(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L44-L131" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp L44–L131</a>).</li>
+<li>샘플링 시간: 시작 곡선이 없고, 요청 수별로 묶어서 최근 9스텝의 중앙값을 씁니다. 샘플이 5개 미만이면 전체 중앙값으로 되돌아갑니다.</li>
+</ul>
+<h3>신뢰도 헤드</h3>
+<p>식은 sigmoid(이어 붙인[은닉 상태, 보정항 임베딩] · w ÷ 온도)입니다(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/dflash.py#L10-L46" target="_blank" rel="noopener noreferrer">tilelang_ops/dflash.py L10–L46</a>). 온도는 <code>DEEPINFER_DFLASH_CONFIDENCE_HEAD_TEMPERATURE</code>에서 오고 기본값은 1.0이며, 위치별로 nextn개의 값을 쉼표로 구분해 줄 수도 있습니다(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L134-L143" target="_blank" rel="noopener noreferrer">environ.py L134–L143</a>). 주석에 따르면 Hugging Face 형식의 DFlash는 항상 신뢰도 헤드를 가지고 있습니다. 드래프트 모듈의 층 수는 모델 설정의 <code>num_nextn_predict_layers</code>가 정하며, 이 페이지는 그 값을 확인하지 않았습니다.</p>
+<h3>CUDA Graph 안에서 시간 재기: graph_timer</h3>
+<p>가변 길이 검증의 소요 시간 피드백에는 순전파 전체와 샘플링 전체를 감싼 CUDA 이벤트를 씁니다. 따로 <code>graph_timer</code>가 있어서, 그래프 <strong>내부</strong>의 몇몇 구간(예를 들어 어느 한 층의 어텐션이나 MLP)의 소요 시간을 통계용으로 잽니다. 그래프를 녹화할 때 "이벤트 기록" 노드를 끼워 넣고, 녹화가 끝난 뒤 그 노드들을 찾아 둡니다(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/graph_timer/graph_timer_cuda.cpp#L48-L85" target="_blank" rel="noopener noreferrer">graph_timer_cuda.cpp L48–L85</a>). 리플레이 전마다 이 노드들을 다른 한 벌의 이벤트로 바꾸고, 두 벌을 번갈아 씁니다(<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/timer.py#L78-L217" target="_blank" rel="noopener noreferrer">timer.py L78–L217</a>). ZOS에서는 이전 스텝의 시간을 읽을 때 다음 스텝의 그래프가 이미 돌고 있습니다. 두 벌의 이벤트를 번갈아 쓰므로 읽는 쪽은 항상 실행이 끝난 벌이고, 돌고 있는 벌은 영향을 받지 않습니다. 이것이 <a href="#chapter/14">14장</a> 14.4절의 더블 버퍼링입니다.</p>
+<h3>관련 스위치</h3>
+<div class="table-wrap"><table><thead><tr><th>환경 변수</th><th>기본값</th><th>역할</th></tr></thead><tbody>
+<tr><td><code>DEEPINFER_USE_NEXTN_DECODE</code></td><td>5</td><td>스텝당 최대 드래프트 수. 0이면 추측 디코딩을 끔</td></tr>
+<tr><td><code>DEEPINFER_ENABLE_MTP_VARLEN</code></td><td>0</td><td>신뢰도 기반 가변 길이 검증. 결정적 샘플링은 이 값을 꺼야 함</td></tr>
+<tr><td><code>DEEPINFER_ZERO_OVERHEAD_SCHEDULING</code></td><td>엔진 종류에 따름</td><td>NORMAL / COMPLETION 엔진은 기본 1, PROMPT 엔진은 기본 0</td></tr>
+<tr><td><code>DEEPINFER_DFLASH_CONFIDENCE_HEAD_TEMPERATURE</code></td><td>1.0</td><td>신뢰도 헤드의 온도. 위치별로 여러 값을 줄 수 있음</td></tr>
+<tr><td><code>DEEPINFER_MAX_BACKTRACKING_TOKENS</code></td><td>nextn ＋ 1</td><td>설정값과 nextn ＋ 1 중 큰 쪽을 취함. SWA 유계 재생에 필요. <a href="#deepinfer/pd-kv">"E/P/D 분리" 페이지</a>를 보세요</td></tr>
+<tr><td><code>DEEPINFER_ENFORCE_EAGER</code> / <code>DEEPINFER_DFLASH_ENFORCE_EAGER</code></td><td>0</td><td>CUDA Graph를 쓰지 않음. 메인 모델이 그래프를 쓰지 않으면 소요 시간 곡선을 측정할 수 없어서, 가변 길이 검증이 고정 길이로 되돌아감</td></tr>
+<tr><td><code>DEEPINFER_DISABLE_SYNC_GUARD</code></td><td>0</td><td>디버깅용: 동기화 금지 가드를 끔</td></tr>
+</tbody></table></div>
+<h3>이 페이지가 확인하지 않은 것</h3>
+<p>FlashMLA, DeepGEMM, DeepEP 같은 커널 라이브러리는 <code>vendor/</code> 서브모듈에 있습니다. 이번에는 가져오지 않았으므로, 이 페이지는 그 구현을 다루지 않습니다. DeepSeek 내부 버전의 드래프트 모델이 오픈소스 버전과 얼마나 다른지는 Q&amp;A의 "성능 차이는 아주 작다"는 한 문장뿐입니다. "DSpark"와 "DFlash" 두 이름의 유래는 코드에도 문서에도 적혀 있지 않습니다. 저장소의 오픈소스 경계는 <a href="#deepinfer/overview">칼럼 첫 페이지</a>를 보세요.</p>
+</details>
