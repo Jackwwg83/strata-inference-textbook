@@ -178,3 +178,17 @@ SVG 技术约定（测试与打印版依赖这些规则）：
    - `node --test tests/viz-NN.test.cjs`
    - `node scripts/check-links.cjs NN`
 5. 不运行 `git commit`，不启动浏览器。浏览器检查由主任务统一做。
+
+## 12. 专栏页面（content/columns/）
+
+专栏是书旁边的一组短文，介绍另一个推理系统（目前只有 DeepInfer）。每个专栏在 `content/columns.json` 里登记：路由名、id 前缀、导航名、标题、导语、锁定的上游提交和各篇的对照章节。
+
+和章节的区别：
+
+1. 结构仍是 hook → tldr → 小节 → recap → deep，但小节至少 4 个，图至少 3 张（含交互图的静态兜底），交互图至少 1 个；「常见误解」和「基础知识」专栏可选。
+2. 小节编号用篇号：第 P 篇写 `<h2 id="sec-N">P.M 标题</h2>`。图号写成「图 DP-M」，避免和章节图号撞名。
+3. 页面里所有 `id`、交互图名都以 `<前缀>-<篇名>-` 开头，例如 `di-wide-ep-eplb`。
+4. 至少两处 `<div class="callout vs"><strong>对照 Strata：</strong>…</div>`，链回讲这个概念的章节。书已经讲过的基础概念只链接，不重讲。
+5. 证据标签含义不变：代码事实 = 在上游锁定提交的代码里读到；上游报告 = 上游文档或图表的说法（生产数字一律算这类）；教学推演 = 自己的算式。链接上游仓库时必须用锁定提交的完整 SHA，检查脚本会拒绝别的写法。
+6. 自检：`node scripts/check-chapter.cjs deepinfer/<篇名> [--lang xx]`、`node scripts/check-links.cjs deepinfer/<篇名>`。`tests/columns.test.cjs` 对每篇、每种已发布语言都跑一遍检查脚本。
+7. 改钉上游新版本时，同步更新 `columns.json` 的 `upstream.commit`、各篇里的链接和日期，并在更新日志里写一条。

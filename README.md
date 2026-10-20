@@ -16,6 +16,7 @@
 | 交互实验 | 14 个：从采样、量化到 KV、投机提交、SSE 与调度 |
 | 学习路线 | 通识 10 章；系统工程 28 章；研究专题 16 章 |
 | 术语 | 74 项；链接回相关章节 |
+| 专栏 | DeepInfer 专栏 5 篇：同一套概念在集群上怎么做（钉 DeepInfer 774ce244） |
 | 来源地图 | 19 个项目文件阅读窗口、6 项原始资料、8 份逻辑导读 |
 | 授课材料 | 16 周、64 学时（每学时 45 分钟，即 48 实际小时）、考核和课程项目 |
 | CPU 实验 | 标准库 Python 微型随机权重推理链与 10 项测试，不需显卡 |
@@ -70,7 +71,7 @@ python3 -m http.server 3000 --directory dist --bind 127.0.0.1
 | 环境变量 | 不需要 |
 | 数据库 / Functions | 不需要 |
 
-如果仓库根目录外又套了一层 `strata-textbook/`，请把 Root Directory 指向该层。使用 hash 路由，不需要为每个章节添加 SPA rewrite。可直接分享例如 `/#chapter/17` 或 `/#lab/spec`。
+如果仓库根目录外又套了一层 `strata-textbook/`，请把 Root Directory 指向该层。使用 hash 路由，不需要为每个章节添加 SPA rewrite。可直接分享例如 `/#chapter/17`、`/#lab/spec` 或 `/#deepinfer/wide-ep`。
 
 只上传静态成品时，将 `dist` 的内容作为静态项目根目录，选择 Other、跳过构建；不要误用整个源码目录作为公开静态根目录。
 
@@ -91,6 +92,8 @@ Vercel 原始配置说明：
 ```text
 content/chapters/*.html       28 章正文（编辑源，不是构建产物）
 content/chapters.json         标题、课程关联、目标、习题、解析与实验关联
+content/columns.json          专栏登记：路由、锁定的上游提交、各篇标题与对照章节
+content/columns/<专栏>/*.html  专栏正文（编辑源）
 content/labs.json             实验说明、边界、作业
 content/sources.json          固定版本源码窗口与原始资料
 content/teacher.html          教师手册

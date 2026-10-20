@@ -170,3 +170,40 @@ Chapter metadata uses these fixed values:
 | 第 95 百分位 | p95 |
 | 吞吐量 | throughput |
 | 路由尾部跳过 | route tail skip (first use, `<dfn>`) / tail skip |
+
+## 8. Columns (content/columns/)
+
+A column page `content/columns/<column>/<page>.html` is translated to `content/i18n/<lang>/columns/<column>/<page>.html`, and the column and page titles go to `content/i18n/<lang>/columns.json` (`id`, `nav`, `title`, `deck`, `pages: [{id, title, deck}]`). Widget strings in `src/viz/<prefix>-<page>.js` follow §1. Check a page with `node scripts/check-chapter.cjs <column>/<page> --lang <lang>`.
+
+Figure numbers in columns keep their letter: 图 D2-3 → Figure D2-3 / 図 D2-3 / 그림 D2-3 / Figura D2-3 / الشكل D2-3.
+
+Fixed terms of the DeepInfer column:
+
+| 中文 | en | ja | ko | es | ar |
+| --- | --- | --- | --- | --- | --- |
+| 专栏 | column | コラム | 칼럼 | serie | سلسلة |
+| 对照 Strata： | Compared with Strata: | Strata と比べると： | Strata와 비교하면: | Frente a Strata: | مقارنةً بـ Strata: |
+| 数据并行（DP） | data parallelism (DP) | データ並列（DP） | 데이터 병렬(DP) | paralelismo de datos (DP) | توازي البيانات (DP) |
+| 专家并行（EP） | expert parallelism (EP) | エキスパート並列（EP） | 전문가 병렬(EP) | paralelismo de expertos (EP) | توازي الخبراء (EP) |
+| 宽专家并行（Wide-EP） | wide expert parallelism (Wide-EP) | ワイドエキスパート並列（Wide-EP） | 와이드 전문가 병렬(Wide-EP) | paralelismo de expertos amplio (Wide-EP) | توازي الخبراء الواسع (Wide-EP) |
+| 上下文并行（CP） | context parallelism (CP) | コンテキスト並列（CP） | 컨텍스트 병렬(CP) | paralelismo de contexto (CP) | توازي السياق (CP) |
+| 张量并行（TP） | tensor parallelism (TP) | テンソル並列（TP） | 텐서 병렬(TP) | paralelismo de tensores (TP) | توازي الموترات (TP) |
+| 专家负载均衡（EPLB） | expert load balancing (EPLB) | エキスパート負荷分散（EPLB） | 전문가 부하 분산(EPLB) | balanceo de carga de expertos (EPLB) | موازنة حمل الخبراء (EPLB) |
+| 冗余专家 | redundant experts | 冗長エキスパート | 중복 전문가 | expertos redundantes | الخبراء المكرَّرون |
+| 全对全通信（all-to-all） | all-to-all communication | 全対全通信（all-to-all） | 전체 대 전체 통신(all-to-all) | comunicación todos con todos (all-to-all) | الاتصال الكلّي (all-to-all) |
+| 分发 / 合并 | dispatch / combine | ディスパッチ / コンバイン | 디스패치 / 컴바인 | dispatch / combine | التوزيع / التجميع (dispatch / combine) |
+| 视觉编码器（VE） | vision encoder (VE) | ビジョンエンコーダー（VE） | 비전 인코더(VE) | codificador visual (VE) | مُرمِّز الرؤية (VE) |
+| 三段分离（E/P/D 分离） | E/P/D disaggregation | E/P/D 分離 | E/P/D 분리 | desagregación E/P/D | فصل E/P/D |
+| 首 token 延迟（TTFT） | time to first token (TTFT) | 最初のトークンまでの時間（TTFT） | 첫 토큰까지의 시간(TTFT) | tiempo hasta el primer token (TTFT) | زمن الوصول إلى أول رمز (TTFT) |
+| 逐 token 间隔（TBT） | time between tokens (TBT) | トークン間隔（TBT） | 토큰 간 간격(TBT) | tiempo entre tokens (TBT) | الزمن بين الرموز (TBT) |
+| 滑动窗口注意力（SWA） | sliding-window attention (SWA) | スライディングウィンドウ・アテンション（SWA） | 슬라이딩 윈도 어텐션(SWA) | atención de ventana deslizante (SWA) | انتباه النافذة المنزلقة (SWA) |
+| 有界重放 | bounded replay | 有界リプレイ | 유계 재생(bounded replay) | reproducción acotada | إعادة التشغيل المحدودة |
+| 异步调度 | asynchronous scheduling | 非同期スケジューリング | 비동기 스케줄링 | planificación asíncrona | الجدولة غير المتزامنة |
+| 零开销批调度器 | zero-overhead batch scheduler | ゼロオーバーヘッド・バッチスケジューラー | 제로 오버헤드 배치 스케줄러 | planificador de lotes sin sobrecoste | مُجدوِل الدُّفعات عديم الكلفة |
+| 批次不变（batch-invariant） | batch-invariant | バッチ不変（batch-invariant） | 배치 불변(batch-invariant) | invariante al lote (batch-invariant) | الثبات عبر الدُّفعات (batch-invariant) |
+| 确定性采样 | deterministic sampling | 決定的サンプリング | 결정적 샘플링 | muestreo determinista | أخذ العينات الحتمي |
+| 结构化输出 | structured outputs | 構造化出力 | 구조화 출력 | salidas estructuradas | المخرجات المهيكلة |
+| 超节点 | supernode | スーパーノード | 슈퍼노드 | supernodo | العقدة الفائقة (supernode) |
+| 显存（HBM） | GPU memory (HBM) | GPU メモリ（HBM） | GPU 메모리(HBM) | memoria de la GPU (HBM) | ذاكرة GPU (HBM) |
+| 验证 (of drafts) | verification | 検証 | 검증 | verificación | التحقق |
+| 纠删码 | erasure code | 消失訂正符号 | 소거 부호 | código de borrado | ترميز المحو |
