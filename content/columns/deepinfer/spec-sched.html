@@ -1,0 +1,348 @@
+<div class="hook"><span class="eyebrow">从一个人到一桌人</span>
+<p>第 18、19 章里，Strata 服务的是一个人。它的草稿层最多猜 3 个 token；要不要换成从上文里“抄”来的草稿，按一张实测的耗时表来定。</p>
+<p>DeepInfer 的解码卡上，同一步里挤着几十个请求。DeepSeek 说生产工作点大约是每张卡 60 个。<span class="ev ev-report">上游报告</span>这时有两个新问题：一步里几百个草稿 token，哪些值得验？CPU 给下一步排队的那几毫秒，GPU 在干什么？</p></div>
+<p class="tldr"><strong>一句话：</strong>DeepInfer 的草稿模块一次前向猜 5 个 token，还给每个打一个“把握”分；打开变长验证后，调度器把验证名额先给把握最大的草稿，在一条实测的耗时曲线上找“每毫秒期望 token 最多”的总数。零开销批调度器让 CPU 提前一步排好下一批，GPU 不再停下来等。两者叠在一起时，CPU 只定总数，每个请求分几个，由 GPU 上的 kernel 现算。</p>
+
+<h2 id="sec-1">4.1 草稿从哪来：一次前向猜 5 个，外加 5 个把握</h2>
+<p>先复习<a href="#chapter/18/c18-speculation">第 18 章「推测执行」</a>讲的<dfn>投机解码</dfn>：便宜的草稿先猜几个 token，叫<dfn>草稿 token</dfn>；大模型把“上一个定下的 token ＋ 这几个草稿”排成一排，一次前向算完，再逐个<dfn>验证</dfn>，只留下连续的前缀。</p>
+<p>DeepInfer 的草稿模块在 <code>deepinfer/model_executor/models/mtp/dflash.py</code>，类名叫 <code>DFlash</code>。README 和 DeepSeek 的部署问答把这套投机解码叫 <strong>DSpark</strong>，把调度验证的办法叫“按置信度调度验证”（confidence-scheduled verification）。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md#L13-L24" target="_blank" rel="noopener noreferrer">README.md</a>）在代码里，DSpark 这个名字只出现在草稿模块的配置字段上，比如 <code>dspark_target_layer_ids</code>、<code>dspark_noise_token_id</code>、<code>dspark_markov_rank</code>。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L139-L159" target="_blank" rel="noopener noreferrer">dflash.py</a>）代码和文档都没有解释这两个名字的来历，本页也不猜。</p>
+<p>从代码看，这个草稿模块有三个特点。<span class="ev ev-code">代码事实</span></p>
+<ul>
+<li><strong>借主模型的特征。</strong>主模型前向时，草稿模块取主模型几层的隐藏状态，拼起来投影一次，写进自己的 KV 缓存。注释写明，这一步“在主模型前向里面跑”。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L198-L228" target="_blank" rel="noopener noreferrer">dflash.py</a>）</li>
+<li><strong>5 个位置一次算出。</strong>草稿的输入是一排 5 个位置：第 1 个是刚定下的 token，后 4 个都填一个固定的“噪声 token”。这一排过一遍草稿层，5 个位置的隐藏状态就同时有了。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L230-L269" target="_blank" rel="noopener noreferrer">dflash.py</a>）之后逐个位置出 token，每个位置可以再加一个小修正项，它只看前一个 token：第 1 个位置看刚定下的 token，之后各看前一个位置刚抽出的草稿。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L308-L334" target="_blank" rel="noopener noreferrer">dflash.py</a>）</li>
+<li><strong>每个草稿附一个把握。</strong><dfn>置信度头</dfn>（Confidence Head）是一个线性层加 sigmoid，给每个草稿估一个“会被接受的概率”。注释写着：“预测每个草稿 token 的接受概率。”（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L46-L79" target="_blank" rel="noopener noreferrer">dflash.py</a>）</li>
+</ul>
+<p>猜几个由环境变量 <code>DEEPINFER_USE_NEXTN_DECODE</code> 决定，默认 5，设成 0 就关掉投机解码。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L128-L131" target="_blank" rel="noopener noreferrer">environ.py</a>）问答说，生产上草稿模型也是一次出 5 个；内部版本的草稿模型新一些，但性能差别很小。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md#L243-L260" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>）</p>
+<p>验证用的是投机解码的经典规则：草稿按 min(1, p ÷ q) 的概率被接受，p 是主模型的概率，q 是草稿的概率；第一个被拒的位置，从两者之差的“残差分布”里补抽一个。随机数由请求的种子和位置算出。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler.py#L74-L80" target="_blank" rel="noopener noreferrer">sampler.py</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/fused_sample.py#L227-L246" target="_blank" rel="noopener noreferrer">fused_sample.py</a>）种子怎样让结果可复现，见<a href="#deepinfer/determinism">本专栏的“确定性”一页</a>。图 D4-1 把一步解码串起来。</p>
+<figure class="fig"><svg viewBox="0 0 400 384" role="img" aria-label="图 D4-1：DeepInfer 一步解码：主模型一次验完一排 token，草稿模块一次前向给出下一步的 5 个草稿和 5 个置信度">
+<rect class="f-soft" fill="#e5f1df" x="30" y="8" width="340" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="27" font-size="13" text-anchor="middle">输入一排：上一步定下的 1 个 token</text>
+<text class="f-text" fill="#182f2b" x="200" y="45" font-size="13" text-anchor="middle">＋ 本步要验的草稿 token（0–5 个）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 54V68"/>
+<path class="f-muted" fill="#5c6d66" d="M195 68H205L200 74Z"/>
+<rect class="f-accent" fill="#136d5a" x="30" y="76" width="340" height="46" rx="8"/>
+<text class="f-on" fill="#ffffff" x="200" y="95" font-size="13" font-weight="600" text-anchor="middle">主模型前向：这一排一次算完</text>
+<text class="f-on" fill="#ffffff" x="200" y="113" font-size="12" text-anchor="middle">顺手把几层隐藏状态交给草稿模块</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 122V136"/>
+<path class="f-muted" fill="#5c6d66" d="M195 136H205L200 142Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="144" width="340" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="163" font-size="13" font-weight="600" text-anchor="middle">验证：按 min(1, p ÷ q) 逐个接受</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="181" font-size="12" text-anchor="middle">第一个被拒的位置，从残差分布补抽 1 个</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 190V204"/>
+<path class="f-muted" fill="#5c6d66" d="M195 204H205L200 210Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="212" width="340" height="64" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="232" font-size="13" font-weight="600" text-anchor="middle">草稿模块 DFlash：一次前向</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="250" font-size="12" text-anchor="middle">输入 [刚定下的 token, 噪声 token × 4]</text>
+<text class="f-text" fill="#182f2b" x="200" y="268" font-size="12" text-anchor="middle">输出 5 个草稿 token ＋ 5 个置信度</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M200 276V290"/>
+<path class="f-muted" fill="#5c6d66" d="M195 290H205L200 296Z"/>
+<rect class="f-soft" fill="#e5f1df" x="30" y="298" width="340" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="200" y="317" font-size="13" font-weight="600" text-anchor="middle">调度器：按置信度决定</text>
+<text class="f-text" fill="#182f2b" x="200" y="335" font-size="12" text-anchor="middle">下一步验其中几个（变长验证）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M370 321H388V31H376"/>
+<path class="f-muted" fill="#5c6d66" d="M376 26V36L370 31Z"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="370" font-size="12" text-anchor="middle">不开变长验证时，5 个草稿每步全部验证</text>
+</svg><figcaption>图 D4-1　一步解码：主模型一次验完一排 token；草稿模块一次前向，给下一步备好 5 个草稿和它们各自的把握。把握决定下一步验几个。</figcaption></figure>
+<div class="callout vs"><strong>对照 Strata：</strong>Strata 的草稿来自模型自带的一层 MTP 层，最多猜 3 个；默认的验证规则是“草稿和目标的抽样结果完全相等才接受”，经典的 min(1, p ÷ q) 规则要另开开关（<a href="#chapter/18">第 18 章</a> 18.5 节）。DeepInfer 默认就用经典规则，一次猜 5 个，还多输出一列置信度。多出来的这列数，不是为了验证本身，是为了调度：一步里有几十个请求，得有个依据决定先验谁。</div>
+
+<h2 id="sec-2">4.2 验几个最划算：把名额先给把握最大的草稿</h2>
+<p>最省事的做法是每个请求都把 5 个草稿全验。问答说，这样会把验证算力浪费在希望渺茫的草稿上，因为不同请求、不同位置的接受概率差得很多。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md#L243" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>）</p>
+<p>账怎么算，<a href="#chapter/19/c19-expected-value">第 19 章「期望值与几何级数」</a>已经讲过：第 i 个草稿派上用场，要求前 i 个全被接受，概率是各位置条件接受率的连乘；一轮期望提交 1 ＋ c₁ ＋ c₂ ＋ … 个 token，该比的是“期望 token ÷ 一轮的时间”。DeepInfer 的代码把置信度头的输出当作每个位置的条件接受率，调度前先连乘。源码注释说：“modeling 返回的 confidence rate 是每个 token 独立的，使用前要做一个累乘。”<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L1242-L1251" target="_blank" rel="noopener noreferrer">scheduler.hpp</a>）</p>
+<p>不同的是，一步里有很多请求，它们共用同一次前向。这一步的耗时，取决于整批一共验多少个 token。所以 DeepInfer 不再一个请求一个请求地挑，而是把整批当成一个预算问题来解。打开 <code>DEEPINFER_ENABLE_MTP_VARLEN=1</code> 后，<code>MTPVarlen::schedule</code> 这样做：<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L150-L267" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp</a>）</p>
+<ol>
+<li>把所有请求的所有草稿，按连乘后的概率从高到低排成一列。</li>
+<li>从“每个请求只验主模型那 1 个 token”开始，按这一列逐个加名额。每加一个，期望 token 数加上它的概率。</li>
+<li>每个总数 q 都查一次耗时：在启动时测好的耗时曲线上，取不小于 q 的那张 CUDA Graph 的耗时，再加上在线修正的斜率项和采样时间。</li>
+<li>挑“期望 token ÷ 耗时”最大的那个 q，把前 q − N 个名额分给对应的请求，N 是请求数。这里其实排了两列：总数用再早一轮的置信度，分名额用最新一轮；不开 ZOS 也是这样。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L160-L208" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp</a>）</li>
+</ol>
+<p>连乘的概率越往后越小，所以每个请求分到的名额，总是它前面连续的几个草稿。这和“只接受连续前缀”的规则对得上。问答的说法是：按期望接受率排序，选出让有效<dfn>吞吐</dfn>（每秒产出的 token 数）最大的那个前缀子集。<span class="ev ev-report">上游报告</span></p>
+<p>耗时曲线是实测的。引擎预热时，把每一张录好的 CUDA Graph 重放 5 次，去掉最快和最慢的一次取平均，再在<dfn>专家并行</dfn>（EP）的那组卡之间取平均。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L561-L631" target="_blank" rel="noopener noreferrer">model_runner.py</a>）运行时，每个解码步实测的前向和采样耗时会喂回调度器，用滑动窗口的中位数修正这条曲线。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L995-L1002" target="_blank" rel="noopener noreferrer">llm_engine.py</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L19-L148" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp</a>）</p>
+<p>这个开关默认是关的。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L131" target="_blank" rel="noopener noreferrer">environ.py</a>）只有开关打开、而且用上了 CUDA Graph 时，引擎才去测这条曲线；曲线为空时，每个请求固定验 1 ＋ 它手上的草稿数（通常是 5）个 token。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/base.py#L274-L281" target="_blank" rel="noopener noreferrer">base.py</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L153-L157" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp</a>）仓库里的评测脚本会把它设成 1。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/eval/run_eval.py#L118-L121" target="_blank" rel="noopener noreferrer">run_eval.py</a>）README 还写明，要做确定性采样，得把它关掉，原因见<a href="#deepinfer/determinism">“确定性”一页</a>。</p>
+<aside class="primer" id="di-spec-sched-greedy">
+<h3>贪心算法与边际收益</h3>
+<p>直觉：你有 10 张电影票要分给朋友，每个人去的可能性不同。想让到场的人最多，就把票先给最可能去的人，一张一张往下发。每一步都拿眼下收益最大的那一份，这就是<dfn>贪心算法</dfn>。</p>
+<p>定义：贪心算法每一步做局部最好的选择，不回头。它不总是对的，但在“总收益是各份收益之和、各份互不影响”的问题里，它给出的就是最优解：任何一种别的分法，都能把一张票从收益低的人换给收益高的人，结果只会更好。这种证明方法叫“交换论证”。</p>
+<p>一个例子：4 个草稿派上用场的概率是 0.9、0.7、0.4、0.1，只能验 2 个。贪心选 0.9 和 0.7，期望多拿 1.6 个 token；换成任何别的两个，都更少。</p>
+<p>和本页的关系：名额数固定时，DeepInfer 按概率从高到低发名额，就是这个贪心。名额数本身不固定，于是调度器把每个总数都试一遍，比“期望 token ÷ 耗时”，取最大的那个。每多发一个名额，期望多出的那一点，就是它的<dfn>边际收益</dfn>。</p>
+<p class="further">延伸阅读：<a href="https://oi-wiki.org/basic/greedy/" target="_blank" rel="noopener noreferrer">OI Wiki：贪心</a> · <a href="https://zh.wikipedia.org/zh-cn/贪心算法" target="_blank" rel="noopener noreferrer">维基百科：贪心算法</a> · <a href="https://en.wikipedia.org/wiki/Greedy_algorithm" target="_blank" rel="noopener noreferrer">Wikipedia: Greedy algorithm</a></p>
+</aside>
+<p>第 3 步藏着一个台阶。耗时按“不小于 q 的那张图”查，图的大小是 1、2、4、8、16、24……每隔 8 一张。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L235-L249" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cuda_graph_runner.py#L41-L51" target="_blank" rel="noopener noreferrer">cuda_graph_runner.py</a>）所以同一张图里，多验几个、少验几个，估出的耗时完全一样。砍草稿只有在总数跌过一张图的边界时才省时间；期望 token 又随 q 只增不减，选出的总数总是落在某张图的大小上，或者干脆验全部草稿。<span class="ev ev-est">教学推演</span></p>
+<p>下面的模拟器把这个预算问题摊开。格子里的数就是连乘后的概率。耗时也按图的大小走台阶，但每级台阶的高度用一条直线代替真实曲线；总数和分名额只用一份置信度。这两点是教学简化。</p>
+<div class="viz" data-viz="di-spec-sched-varlen"><figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="图 D4-2：4 个请求各 5 个草稿。固定做法验 24 个 token，用 24 那张图，期望得 10.71 个；按置信度只验 16 个，正好用 16 那张图，期望得 9.84 个，每毫秒的期望 token 多 3.0%">
+<text class="f-text" fill="#182f2b" x="105" y="18" font-size="13" font-weight="600" text-anchor="middle">固定 5 个：全部验证</text>
+<text class="f-text" fill="#182f2b" x="305" y="18" font-size="13" font-weight="600" text-anchor="middle">按置信度：只验划算的</text>
+<text class="f-muted" fill="#5c6d66" x="8" y="64" font-size="12">A</text><text class="f-muted" fill="#5c6d66" x="8" y="94" font-size="12">B</text><text class="f-muted" fill="#5c6d66" x="8" y="124" font-size="12">C</text><text class="f-muted" fill="#5c6d66" x="8" y="154" font-size="12">D</text>
+<text class="f-muted" fill="#5c6d66" x="208" y="64" font-size="12">A</text><text class="f-muted" fill="#5c6d66" x="208" y="94" font-size="12">B</text><text class="f-muted" fill="#5c6d66" x="208" y="124" font-size="12">C</text><text class="f-muted" fill="#5c6d66" x="208" y="154" font-size="12">D</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="22" y="47" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="35" y="64" font-size="12" text-anchor="middle">主</text>
+<rect class="f-accent" fill="#136d5a" x="50" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="64" font-size="12" text-anchor="middle">.74</text>
+<rect class="f-accent" fill="#136d5a" x="78" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="91" y="64" font-size="12" text-anchor="middle">.55</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="119" y="64" font-size="12" text-anchor="middle">.40</text>
+<rect class="f-accent" fill="#136d5a" x="134" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="147" y="64" font-size="12" text-anchor="middle">.28</text>
+<rect class="f-accent" fill="#136d5a" x="162" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="175" y="64" font-size="12" text-anchor="middle">.17</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="22" y="77" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="35" y="94" font-size="12" text-anchor="middle">主</text>
+<rect class="f-accent" fill="#136d5a" x="50" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="94" font-size="12" text-anchor="middle">.79</text>
+<rect class="f-accent" fill="#136d5a" x="78" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="91" y="94" font-size="12" text-anchor="middle">.57</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="119" y="94" font-size="12" text-anchor="middle">.42</text>
+<rect class="f-accent" fill="#136d5a" x="134" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="147" y="94" font-size="12" text-anchor="middle">.27</text>
+<rect class="f-accent" fill="#136d5a" x="162" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="175" y="94" font-size="12" text-anchor="middle">.16</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="22" y="107" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="35" y="124" font-size="12" text-anchor="middle">主</text>
+<rect class="f-accent" fill="#136d5a" x="50" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="124" font-size="12" text-anchor="middle">.51</text>
+<rect class="f-accent" fill="#136d5a" x="78" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="91" y="124" font-size="12" text-anchor="middle">.23</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="119" y="124" font-size="12" text-anchor="middle">.10</text>
+<rect class="f-accent" fill="#136d5a" x="134" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="147" y="124" font-size="12" text-anchor="middle">.04</text>
+<rect class="f-accent" fill="#136d5a" x="162" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="175" y="124" font-size="12" text-anchor="middle">.01</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="22" y="137" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="35" y="154" font-size="12" text-anchor="middle">主</text>
+<rect class="f-accent" fill="#136d5a" x="50" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="63" y="154" font-size="12" text-anchor="middle">.68</text>
+<rect class="f-accent" fill="#136d5a" x="78" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="91" y="154" font-size="12" text-anchor="middle">.41</text>
+<rect class="f-accent" fill="#136d5a" x="106" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="119" y="154" font-size="12" text-anchor="middle">.22</text>
+<rect class="f-accent" fill="#136d5a" x="134" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="147" y="154" font-size="12" text-anchor="middle">.11</text>
+<rect class="f-accent" fill="#136d5a" x="162" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="175" y="154" font-size="12" text-anchor="middle">.05</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="222" y="47" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="235" y="64" font-size="12" text-anchor="middle">主</text>
+<rect class="f-accent" fill="#136d5a" x="250" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="64" font-size="12" text-anchor="middle">.74</text>
+<rect class="f-accent" fill="#136d5a" x="278" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="291" y="64" font-size="12" text-anchor="middle">.55</text>
+<rect class="f-accent" fill="#136d5a" x="306" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="319" y="64" font-size="12" text-anchor="middle">.40</text>
+<rect class="f-accent" fill="#136d5a" x="334" y="47" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="347" y="64" font-size="12" text-anchor="middle">.28</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="362" y="47" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="375" y="64" font-size="12" text-anchor="middle">.17</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="222" y="77" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="235" y="94" font-size="12" text-anchor="middle">主</text>
+<rect class="f-accent" fill="#136d5a" x="250" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="94" font-size="12" text-anchor="middle">.79</text>
+<rect class="f-accent" fill="#136d5a" x="278" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="291" y="94" font-size="12" text-anchor="middle">.57</text>
+<rect class="f-accent" fill="#136d5a" x="306" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="319" y="94" font-size="12" text-anchor="middle">.42</text>
+<rect class="f-accent" fill="#136d5a" x="334" y="77" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="347" y="94" font-size="12" text-anchor="middle">.27</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="362" y="77" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="375" y="94" font-size="12" text-anchor="middle">.16</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="222" y="107" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="235" y="124" font-size="12" text-anchor="middle">主</text>
+<rect class="f-accent" fill="#136d5a" x="250" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="124" font-size="12" text-anchor="middle">.51</text>
+<rect class="f-accent" fill="#136d5a" x="278" y="107" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="291" y="124" font-size="12" text-anchor="middle">.23</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="306" y="107" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="319" y="124" font-size="12" text-anchor="middle">.10</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="334" y="107" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="347" y="124" font-size="12" text-anchor="middle">.04</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="362" y="107" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="375" y="124" font-size="12" text-anchor="middle">.01</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="222" y="137" width="26" height="24" rx="3"/><text class="f-text" fill="#182f2b" x="235" y="154" font-size="12" text-anchor="middle">主</text>
+<rect class="f-accent" fill="#136d5a" x="250" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="263" y="154" font-size="12" text-anchor="middle">.68</text>
+<rect class="f-accent" fill="#136d5a" x="278" y="137" width="26" height="24" rx="3"/><text class="f-on" fill="#ffffff" x="291" y="154" font-size="12" text-anchor="middle">.41</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="306" y="137" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="319" y="154" font-size="12" text-anchor="middle">.22</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="334" y="137" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="347" y="154" font-size="12" text-anchor="middle">.11</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="362" y="137" width="26" height="24" rx="3"/><text class="f-muted" fill="#5c6d66" x="375" y="154" font-size="12" text-anchor="middle">.05</text>
+<text class="f-text" fill="#182f2b" x="105" y="190" font-size="12" text-anchor="middle">验 24 个 · 期望 10.71 个</text>
+<text class="f-text" fill="#182f2b" x="305" y="190" font-size="12" text-anchor="middle">验 16 个 · 期望 9.84 个</text>
+<text class="f-text" fill="#182f2b" x="105" y="210" font-size="12" text-anchor="middle">图 24 · 14.80 ms · 0.724/ms</text>
+<text class="f-text" fill="#182f2b" x="305" y="210" font-size="12" font-weight="600" text-anchor="middle">图 16 · 13.20 ms · 0.745/ms</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="236" font-size="12" text-anchor="middle">格内：这个草稿派上用场的概率（置信度连乘）</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="254" font-size="12" text-anchor="middle">教学假设：一步 = 10 ms ＋ 0.2 ms × CUDA Graph 大小</text>
+</svg><figcaption>图 D4-2　同样 4 个请求。固定做法验 24 个 token，要重放 24 那张图；按置信度砍掉 8 个希望最小的草稿，正好落进 16 那张图，期望只少 0.87 个，一步快 1.6 ms，每毫秒的期望 token 多 3.0%。只砍到 17 个就没用：还得用 24 那张图。数字是教学推演。</figcaption></figure></div>
+<p>算式是 <strong>吞吐 ＝ (N ＋ Σ 被验草稿的连乘概率) ÷ (10 ＋ t₁ × 图大小)</strong>，图大小是装得下这些 token 的最小那张 CUDA Graph。图 D4-2 里，固定做法是 10.71 ÷ 14.80 ≈ 0.724，按置信度是 9.84 ÷ 13.20 ≈ 0.745。<span class="ev ev-est">教学推演</span></p>
+<div class="callout vs"><strong>对照 Strata：</strong>Strata 的 MTP 窗口长度由启动参数 <code>--spec</code> 固定；只有设了 <code>--spec-min-p</code>，草稿的把握低于门槛时才不再往窗口里加。按实测耗时比“每毫秒期望提交几个 token”的 DraftPolicy，管的是提示词查找草稿（<a href="#chapter/19">第 19 章</a> 19.5 节）。这些都是为一个用户的一个窗口做决定。DeepInfer 要决定的是一整批几十个请求一共验几个、谁多谁少，门槛也不是固定的，而是由“多验一个值不值”当场算出来；比较的单位从“一个窗口”变成了“一张 CUDA Graph 的一次重放”。</div>
+
+<h2 id="sec-3">4.3 上游的账：少验三成，吞吐多几个百分点</h2>
+<p>问答给了一张表，对比固定验 5 个和按置信度变长验证。条件是 EP64/DP64，也就是 64 张卡做专家并行，注意力按<dfn>数据并行</dfn>（DP）分成 64 份；表里的吞吐是用这套配置的基准数据推算的估计值，不是线上实测。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md#L245-L256" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>）为什么要铺满 64 张卡，见<a href="#deepinfer/wide-ep">“宽专家并行”一页</a>。</p>
+<figure class="fig"><svg viewBox="0 0 400 334" role="img" aria-label="图 D4-3：上游估算的变长验证收益。每卡 16 条时慢 1.5%，60 条时快 5.4%，96 条时快 11.0%">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">按置信度验证比固定验 5 个，吞吐变化</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="36" font-size="12">EP64/DP64，上游用基准数据推算；左列是每卡并发请求数</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M130 48V300"/>
+<text class="f-text" fill="#182f2b" x="10" y="66" font-size="12">16 条/卡</text>
+<rect class="f-warn" fill="#9e5d24" x="100" y="54" width="30" height="16"/>
+<text class="f-text" fill="#182f2b" x="136" y="66" font-size="12">−1.5%</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="86" font-size="12">验 4.44 个，接受 3.24（固定：5 个，3.32）</text>
+<text class="f-text" fill="#182f2b" x="10" y="110" font-size="12">32 条/卡</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="98" width="32" height="16"/>
+<text class="f-text" fill="#182f2b" x="168" y="110" font-size="12">+1.6%</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="130" font-size="12">验 3.65 个，接受 3.17（固定：5 个，3.25）</text>
+<text class="f-text" fill="#182f2b" x="10" y="154" font-size="12">48 条/卡</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="142" width="72" height="16"/>
+<text class="f-text" fill="#182f2b" x="208" y="154" font-size="12">+3.6%</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="174" font-size="12">验 3.94 个，接受 3.26（固定：5 个，3.30）</text>
+<text class="f-text" fill="#182f2b" x="10" y="198" font-size="12" font-weight="600">60 条/卡</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="186" width="108" height="16"/>
+<text class="f-text" fill="#182f2b" x="244" y="198" font-size="12" font-weight="600">+5.4%（生产工作点）</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="218" font-size="12">验 3.58 个，接受 3.21（固定：5 个，3.30）</text>
+<text class="f-text" fill="#182f2b" x="10" y="242" font-size="12">72 条/卡</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="230" width="134" height="16"/>
+<text class="f-text" fill="#182f2b" x="270" y="242" font-size="12">+6.7%</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="262" font-size="12">验 3.24 个，接受 3.12（固定：5 个，3.29）</text>
+<text class="f-text" fill="#182f2b" x="10" y="286" font-size="12">96 条/卡</text>
+<rect class="f-accent" fill="#136d5a" x="130" y="274" width="220" height="16"/>
+<text class="f-text" fill="#182f2b" x="356" y="286" font-size="12">+11%</text>
+<text class="f-muted" fill="#5c6d66" x="70" y="306" font-size="12">验 3.24 个，接受 3.15（固定：5 个，3.30）</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="328" font-size="12">条长：1 个百分点 = 20 像素；验、接受：每请求每步平均长度</text>
+</svg><figcaption>图 D4-3　并发越高，按置信度验证越赚：每卡 96 条时吞吐多 11%；16 条时反而慢 1.5%。每步验的草稿少了 11%–35%，平均接受长度只降了 0.04–0.17。数据来自上游问答。</figcaption></figure>
+<p>问答的总结是：验证的草稿少了约 30%（5.00 降到 3.2–4.4），平均接受长度基本不变（3.29 对 3.20），在每卡约 60 条的生产工作点，吞吐多 4%–7%。<span class="ev ev-report">上游报告</span> 问答没写明“接受长度”里含不含主模型自己的那 1 个 token，本页不替它解释。</p>
+<p>为什么并发低时不赚？一个合理的解释是：批小的时候，解码卡在搬权重上，多验几个 token 几乎不加时间，砍掉草稿省不下什么，却会丢掉一点接受长度（16 条时从 3.32 降到 3.24）。批大了，前向开始受算力限制，每个多验的 token 都实打实地花时间，砍掉低概率草稿才划算。<span class="ev ev-est">教学推演</span> “卡在搬运还是卡在计算”的判断方法，见<a href="#chapter/05/c05-roofline">第 5 章「roofline」</a>。上面的模拟器里，把 N 和 t₁ 一起调大，能看到同样的方向。</p>
+<p>模拟器和真实系统还差一件事：模拟器里的置信度就是真实概率，按它分名额永远不亏。真实系统里，表里 16 条/卡那一行是 −1.5%。可能的原因之一是置信度估错，砍掉了本来能被接受的草稿；另外几种也说得通：耗时模型有误差，定总数用的是更早一轮的置信度，总数还要向上补到一张图的大小。<span class="ev ev-est">教学推演</span> 何况这张表本身也是用基准数据推算的估计。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md#L247" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>）</p>
+
+<h2 id="sec-4">4.4 让 GPU 一刻不停：零开销批调度器</h2>
+<p>换一个角度看一步解码。问答把第 N 步拆成四段：schedule(N) → forward(N) → sample(N) → post-process(N)。调度和后处理都是纯 CPU 逻辑；后处理之前，CPU 要和 GPU 同步一次，才拿得到 sample(N) 的结果。于是在 post-process(N) 和 schedule(N+1) 这两段，GPU 闲着。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md#L266-L274" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>）</p>
+<p><dfn>异步调度</dfn>要消灭的就是这段空闲。DeepInfer 把它的实现叫<dfn>零开销批调度器</dfn>（zero-overhead batch scheduler，代码里简称 ZOS）。问答说，它参照了 <a href="https://github.com/sgl-project/sglang" target="_blank" rel="noopener noreferrer">SGLang</a> 和 <a href="https://arxiv.org/abs/2408.12757" target="_blank" rel="noopener noreferrer">NanoFlow</a> 的做法：GPU 在跑 forward(N) → sample(N) 时，CPU 同时做 schedule(N+1) → 发射 forward(N+1) → post-process(N−1) → 发射 sample(N+1)。<span class="ev ev-report">上游报告</span></p>
+<p>代码里，这个顺序写在 <code>Worker.execute_model_step</code> 的注释里，每一步都走同样四件事：<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L96-L189" target="_blank" rel="noopener noreferrer">worker.py</a>）</p>
+<ol>
+<li>发射本步的前向；</li>
+<li>后处理<strong>上一步</strong>：先等上一步“采样完成”的事件，再处理输出；</li>
+<li>发射本步的采样；</li>
+<li>本步的后处理：预填充步和关掉 ZOS 时当场做；ZOS 下的解码步留到下一步，和下一步的前向重叠。</li>
+</ol>
+<p>“上一步”只存在一个变量 <code>prev_step_state</code> 里，所以 CPU 最多领先 GPU 一步。第 2 件事里的等待，排在本步前向已经发射之后，所以 CPU 等的时候，GPU 手上有活。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L247-L272" target="_blank" rel="noopener noreferrer">worker.py</a>）</p>
+<p>README 说异步调度默认打开。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md#L26" target="_blank" rel="noopener noreferrer">README.md</a>）光看 <code>environ.py</code>，<code>DEEPINFER_ZERO_OVERHEAD_SCHEDULING</code> 的默认值是关；但创建引擎时，<code>EngineArgs</code> 会按引擎类型补一个默认值：既做预填充又做解码的 NORMAL 引擎、只做解码的 COMPLETION 引擎设成 1，只做预填充的 PROMPT 引擎设成 0。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L179" target="_blank" rel="noopener noreferrer">environ.py</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/arg_utils.py#L51-L55" target="_blank" rel="noopener noreferrer">arg_utils.py</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/engine_type.py#L15-L17" target="_blank" rel="noopener noreferrer">engine_type.py</a>）所以凡是要解码的引擎，它确实默认开着，和 README 一致。</p>
+<p>重叠很容易被一次意外的同步毁掉：只要发射代码里有一处要读 GPU 上的数，CPU 就得停下来等，GPU 的活一干完就又空了。DeepInfer 给前向和采样的发射各包了一层 <code>forbid_cuda_sync()</code>，函数注释用大写写着“这里不能有任何 CUDA 同步”，还有专门的单元测试。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L307-L367" target="_blank" rel="noopener noreferrer">model_runner.py</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/test_cuda_sync_guards.py" target="_blank" rel="noopener noreferrer">test_cuda_sync_guards.py</a>）</p>
+<p>拖一拖下面的时间线，看空档什么时候消失、什么时候回来。</p>
+<div class="viz" data-viz="di-spec-sched-zos"><figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="图 D4-4：CPU 每步 4 毫秒、GPU 每步 13 毫秒时，同步循环走 4 步要 68 毫秒，GPU 每步空等 4 毫秒；异步循环只要 56 毫秒，GPU 一步接一步">
+<text class="f-text" fill="#182f2b" x="10" y="16" font-size="13" font-weight="600">同步：CPU 和 GPU 轮流干</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="42" font-size="12">CPU</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="70" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="26" width="320" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="54" width="320" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="70" y="26" width="18.8" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="150" y="26" width="18.8" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="230" y="26" width="18.8" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="310" y="26" width="18.8" height="22"/>
+<rect class="f-accent" fill="#136d5a" x="88.8" y="54" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="119.4" y="70" font-size="12" text-anchor="middle">步 1</text>
+<rect class="f-accent" fill="#136d5a" x="168.8" y="54" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="199.4" y="70" font-size="12" text-anchor="middle">步 2</text>
+<rect class="f-accent" fill="#136d5a" x="248.8" y="54" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="279.4" y="70" font-size="12" text-anchor="middle">步 3</text>
+<rect class="f-accent" fill="#136d5a" x="328.8" y="54" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="359.4" y="70" font-size="12" text-anchor="middle">步 4</text>
+<text class="f-text" fill="#182f2b" x="10" y="98" font-size="12">GPU 每步空等 4 ms：68 ms 走 4 步</text>
+<text class="f-text" fill="#182f2b" x="10" y="134" font-size="13" font-weight="600">异步：CPU 提前一步排好</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="160" font-size="12">CPU</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="188" font-size="12">GPU</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="144" width="320" height="22"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="70" y="172" width="320" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="70" y="144" width="18.8" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="88.8" y="144" width="18.8" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="150" y="144" width="18.8" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="211.2" y="144" width="18.8" height="22"/>
+<rect class="f-accent" fill="#136d5a" x="88.8" y="172" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="119.4" y="188" font-size="12" text-anchor="middle">步 1</text>
+<rect class="f-accent" fill="#136d5a" x="150" y="172" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="180.6" y="188" font-size="12" text-anchor="middle">步 2</text>
+<rect class="f-accent" fill="#136d5a" x="211.2" y="172" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="241.8" y="188" font-size="12" text-anchor="middle">步 3</text>
+<rect class="f-accent" fill="#136d5a" x="272.4" y="172" width="61.2" height="22"/><text class="f-on" fill="#ffffff" x="303" y="188" font-size="12" text-anchor="middle">步 4</text>
+<text class="f-text" fill="#182f2b" x="10" y="216" font-size="12">GPU 一步接一步：56 ms 走完 4 步</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="242" font-size="12">短块：CPU 后处理＋调度 4 ms（假设）· 长块：GPU 13 ms</text>
+</svg><figcaption>图 D4-4　同样的活，异步循环把 CPU 的 4 ms 藏到了 GPU 的 13 ms 后面：每步周期从 17 ms 变成 13 ms。CPU 的时间是假设值，GPU 的 13 ms 是读图估算。</figcaption></figure></div>
+<p>稳态下，同步循环每步要 CPU ＋ GPU，异步循环只要 max(CPU, GPU)。默认参数下是 (4 ＋ 13) ÷ 13 ≈ 1.31 倍。<span class="ev ev-est">教学推演</span> GPU 的 13 ms 是从 README 解码图读出来的：每卡 64 个请求时，每用户约 246 token/s，按图注的 τ ＝ 3.25 折算，每秒约 76 步，一步约 13 ms（4.6 节细讲这张图）。上游没有公布 CPU 每步花多久，4 ms 纯属假设。<span class="ev ev-est">教学推演</span></p>
+<p>异步不是白来的。CPU 排第 N+1 步时，还不知道第 N 步每个请求接受了几个 token，所以它先按最坏情况给每个在途请求预留 1 ＋ 5 个位置，等结果回来再改回实际值；位置表的上限也因此多留了 nextn ＋ 1 格。<span class="ev ev-code">代码事实</span>（预留：<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L726" target="_blank" rel="noopener noreferrer">scheduler.hpp L726</a>；先乐观推进：<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L927" target="_blank" rel="noopener noreferrer">L927</a>；再按实际接受数回填：<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L999" target="_blank" rel="noopener noreferrer">L999</a>；<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/config.py#L11-L16" target="_blank" rel="noopener noreferrer">config.py</a>）一个请求如果在途时被抢占，它那一步的输出整个作废。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L917-L925" target="_blank" rel="noopener noreferrer">scheduler.hpp</a>）</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这就是一条两级的软件流水线：CPU 是第一级，GPU 是第二级，每级一次处理一步。和《计算机组成原理》里的指令流水线一样，流水线的节拍由最慢的那一级决定，所以 CPU 一旦比 GPU 慢，空档就会回来。流水线的基础见<a href="#chapter/16/c16-pipeline">第 16 章「流水线」</a>。</p>
+<div class="callout vs"><strong>对照 Strata：</strong>Strata 的服务端默认是一把锁、一条队，一次只服务一条序列；打开 "parallel" 后，通常最多 8 个批槽位一起解码（<a href="#chapter/25">第 25 章</a> 25.1 节）。它也有重叠：验证窗口的提交可以不等图跑完就返回，让下一轮的草稿生成同时进行（<a href="#chapter/14/c14-async">第 14 章「同步与异步」</a>）。DeepInfer 的解码卡上一步有几十个请求，CPU 每步要为整批做调度和后处理，这份活随批变大，不藏起来就直接吃掉 GPU 的时间。</div>
+
+<h2 id="sec-5">4.5 两件事撞在一起：CPU 还不知道上一步接受了几个</h2>
+<p>把 4.2 和 4.4 放在一起，就撞上了一个难题。变长验证要按第 N 步刚出的置信度，决定第 N+1 步每个请求验几个；可是异步调度下，CPU 排第 N+1 步时，第 N 步还在 GPU 上跑，置信度还没出来。</p>
+<p>问答给的解法是：CPU 调度时只定<strong>总预算</strong>；每个请求分几个，由 GPU 上的一个 TileLang kernel 重新算（连乘、全局排名取前 k、顺手把行号重映射），结果再写回一块锁页缓冲区。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md#L262-L264" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>）代码和这段描述一一对得上：<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L191-L245" target="_blank" rel="noopener noreferrer">worker.py</a>）</p>
+<ul>
+<li>CPU 先把本批请求和上一批对上号，做出一张重映射表 <code>remap</code>：本批第 i 个请求，是上一批的第几个；新来的记 −1。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/zos.cpp#L142-L196" target="_blank" rel="noopener noreferrer">zos.cpp</a>）</li>
+<li>GPU 上的 <code>compute_seqlens_q_by_confidence_rates</code> 读上一步留在显存（HBM）里的置信度，按 <code>remap</code> 取行、连乘，再在全批里排名，前 total_q − N 名各给对应请求加一个名额。新来的请求置信度记 0，排在最后。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/schedule_mtp_varlen.py#L26-L81" target="_blank" rel="noopener noreferrer">schedule_mtp_varlen.py</a>）</li>
+<li>每个请求的 KV 长度，也在 GPU 上按上一步实际接受的 token 数改好（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L220-L227" target="_blank" rel="noopener noreferrer">worker.py</a> 的 <code>compute_seqlens_k_zos</code>）；这一步的输入 token，直接从显存里上一步的采样结果里取。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/input_metadata/prepare_tensor_input_zos.py#L225-L244" target="_blank" rel="noopener noreferrer">prepare_tensor_input_zos.py</a>）</li>
+<li>算好的每个请求长度拷回锁页内存，记一个事件。CPU 发射完前向、做完上一步的后处理，在发射采样前才等这个事件。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L146-L152" target="_blank" rel="noopener noreferrer">worker.py</a>）</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 304" role="img" aria-label="图 D4-5：CPU 用更早一轮的置信度定总 token 数并选好 CUDA Graph；GPU 拿第 N 步刚出的置信度，把总数分给每个请求">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="13" font-weight="600" text-anchor="middle">CPU</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="13" font-weight="600" text-anchor="middle">GPU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="30" width="180" height="62" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="50" font-size="13" font-weight="600" text-anchor="middle">schedule(N+1)</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="68" font-size="12" text-anchor="middle">用更早一轮的置信度</text>
+<text class="f-text" fill="#182f2b" x="100" y="85" font-size="12" text-anchor="middle">只定总 token 数</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="108" width="180" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="127" font-size="12" text-anchor="middle">按总数选一张 CUDA Graph</text>
+<text class="f-text" fill="#182f2b" x="100" y="145" font-size="12" text-anchor="middle">发射 forward(N+1)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="170" width="180" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="189" font-size="12" text-anchor="middle">后处理第 N 步</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="207" font-size="12" text-anchor="middle">等 sample(N) 完成</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="232" width="180" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="100" y="251" font-size="12" text-anchor="middle">读回每个请求的长度</text>
+<text class="f-text" fill="#182f2b" x="100" y="269" font-size="12" text-anchor="middle">发射 sample(N+1)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="30" width="180" height="62" rx="8"/>
+<text class="f-text" fill="#182f2b" x="300" y="50" font-size="13" font-weight="600" text-anchor="middle">sample(N)</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="68" font-size="12" text-anchor="middle">验证 ＋ 草稿模块</text>
+<text class="f-text" fill="#182f2b" x="300" y="85" font-size="12" text-anchor="middle">新置信度留在显存里</text>
+<rect class="f-accent" fill="#136d5a" x="210" y="108" width="180" height="62" rx="8"/>
+<text class="f-on" fill="#ffffff" x="300" y="128" font-size="13" font-weight="600" text-anchor="middle">TileLang kernel</text>
+<text class="f-on" fill="#ffffff" x="300" y="146" font-size="12" text-anchor="middle">连乘、全批排名</text>
+<text class="f-on" fill="#ffffff" x="300" y="163" font-size="12" text-anchor="middle">把总数分给每个请求</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="186" width="180" height="46" rx="8"/>
+<text class="f-text" fill="#182f2b" x="300" y="205" font-size="12" text-anchor="middle">forward(N+1)</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="223" font-size="12" text-anchor="middle">按改好的长度算</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 92V104M100 154V166M100 216V228M300 92V104M300 170V182"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M190 76H196V128H206"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" stroke-dasharray="3 3" d="M210 160H204V255H194"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="298" font-size="12" text-anchor="middle">虚线：总数交给 GPU；每个请求的长度经锁页缓冲回到 CPU</text>
+</svg><figcaption>图 D4-5　分工：总数在 CPU 上定，因为 CPU 要靠它选出要重放的那张 CUDA Graph；怎么分给每个请求，在 GPU 上用最新的置信度现算，CPU 不必等。</figcaption></figure>
+<p>为什么总数非得在 CPU 上定？代码里至少有一个直接原因：CPU 要拿总 token 数去挑重放哪一张 CUDA Graph，这一步发生在发射之前。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L202-L207" target="_blank" rel="noopener noreferrer">worker.py</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cuda_graph_runner.py#L143-L148" target="_blank" rel="noopener noreferrer">cuda_graph_runner.py</a>）每张图的大小在录制时就定死了。而在 ZOS 下，图的输入缓冲直接放在显存里，GPU 上的 kernel 可以改写它，不用经过 CPU。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cuda_graph_runner.py#L26-L32" target="_blank" rel="noopener noreferrer">cuda_graph_runner.py</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L75-L79" target="_blank" rel="noopener noreferrer">model_runner.py</a>）</p>
+<p>4.2 节说过，总数和分名额本来就用两份数据：总数用再早一轮的置信度，分名额用最新一轮，开不开 ZOS 都这样。源码注释写的是：总预算“永远用 N−2 轮的 accept_rate”，分配用 N−1 轮的；注释里的“第 N 轮”指正在排的那一步。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L160-L208" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp</a>）换成本节的记号：排第 N+1 步时，总数用第 N−1 步产出的置信度，分名额用第 N 步的。不开 ZOS 时，第 N 步已经后处理完，分名额在 CPU 上就能做；开了 ZOS，第 N 步的置信度还在 GPU 上，分名额就挪到 GPU 上做。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这是流水线里的<dfn>数据冒险</dfn>：后一条指令要用前一条的结果，可前一条还没算完。CPU 的老办法有两个：停下来等（流水线停顿），或者把结果从执行单元直接“转发”给下一条指令，不绕回寄存器。DeepInfer 选的是转发：第 N 步的接受数和置信度不回 CPU，直接在显存里交给第 N+1 步。延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/冒险_(计算机系统结构)" target="_blank" rel="noopener noreferrer">维基百科：冒险（计算机系统结构）</a> · <a href="https://en.wikipedia.org/wiki/Operand_forwarding" target="_blank" rel="noopener noreferrer">Wikipedia: Operand forwarding</a></p>
+<div class="callout vs"><strong>对照 Strata：</strong><a href="#chapter/15">第 15 章</a> 15.5 节讲过，CUDA Graph 会把参数录死，所以 Strata 把每步都变的位置放进一块固定地址的显存，由主机每步拷一次新值进去。DeepInfer 在 ZOS 下又往前走了一步：每步变的长度和输入 token，连主机都不经手，直接由 GPU 用上一步的结果算出来。原则相同：图记住的是地址，内容每步重写。</div>
+
+<h2 id="sec-6">4.6 读基准数字要小心：满接受口径</h2>
+<p>最后说一个读数时容易踩的坑。仓库自带的 <code>benchmark.py</code> 报的解码吞吐，是“满接受口径”：不管草稿实际被接受了多少，每个请求每步都按 1 ＋ nextn 个 token 记。算式是 avg_SPS × 请求数 × (1 ＋ nextn) ÷ CP 数，avg_SPS 是每秒走的步数。默认 64 个请求、nextn ＝ 5 时，一步记 384 个 token。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/README.md#L45-L55" target="_blank" rel="noopener noreferrer">examples/README.md</a>）代码里这条算式一模一样。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py#L397-L409" target="_blank" rel="noopener noreferrer">benchmark.py</a>）</p>
+<p>这样记有它的道理：关掉变长验证时，每步固定验 1 ＋ nextn 个 token，一步的耗时和接受率无关，测出的步速可以按任意接受率再折算。画图脚本就这么做：用 τ ＝ 1 ＋ nextn × a 把两条轴同乘 τ，a 是草稿被接受的比例；脚本还断言数据里没开变长验证，因为那时步速已经含了接受率，不能再乘。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/sweep/plot_pareto.py#L58-L68" target="_blank" rel="noopener noreferrer">plot_pareto.py</a>）</p>
+<p>README 里那张解码图，图注写着：EP64DP64，384＋64 个专家，上下文 131,072，nextn ＝ 3 固定，逐 token 接受率 75%，τ ＝ 3.25；测量用 64 张 SM100 卡，在同一个超节点内。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md#L77-L83" target="_blank" rel="noopener noreferrer">README.md</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/images/decode_pareto.png" target="_blank" rel="noopener noreferrer">decode_pareto.png</a>）读图：每卡 64 个请求时，约 15,700 token/s/卡，每用户约 246 token/s。<span class="ev ev-report">上游报告</span>（读图约数）要记住，这里的 75% 是画图时给定的输入，不是这次测出来的接受率。它也不是 4.2 节那种逐位置的条件接受率：画图脚本里的 a 是“被接受的草稿占全部草稿的比例”，τ ＝ 1 ＋ 3 × 0.75。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/sweep/plot_pareto.py#L58-L61" target="_blank" rel="noopener noreferrer">plot_pareto.py</a>）如果每个位置的条件接受率都是 75%，按连乘算，一步期望只有 1 ＋ 0.75 ＋ 0.56 ＋ 0.42 ≈ 2.73 个。<span class="ev ev-est">教学推演</span></p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="图 D4-6：每个请求每步记几个 token。满接受口径 nextn=3 记 4 个、nextn=5 记 6 个；按 75% 接受率折算分别是 3.25 个和 4.75 个">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">每个请求每步记几个 token（条长按比例）</text>
+<text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">满接受，nextn=3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="35" width="144" height="18"/>
+<text class="f-text" fill="#182f2b" x="290" y="48" font-size="12">4.00</text>
+<text class="f-text" fill="#182f2b" x="10" y="88" font-size="12">README 图，a=75%</text>
+<rect class="f-accent" fill="#136d5a" x="140" y="75" width="117" height="18"/>
+<text class="f-text" fill="#182f2b" x="263" y="88" font-size="12">3.25</text>
+<text class="f-text" fill="#182f2b" x="10" y="128" font-size="12">满接受，nextn=5</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="140" y="115" width="216" height="18"/>
+<text class="f-text" fill="#182f2b" x="362" y="128" font-size="12">6.00</text>
+<text class="f-text" fill="#182f2b" x="10" y="168" font-size="12">nextn=5，若 a=75%</text>
+<rect class="f-accent" fill="#136d5a" x="140" y="155" width="171" height="18"/>
+<text class="f-text" fill="#182f2b" x="317" y="168" font-size="12">4.75</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="202" font-size="12">τ = 1 + nextn × a，a = 被接受的草稿 ÷ 草稿总数</text>
+</svg><figcaption>图 D4-6　同一组步速，按满接受口径记，nextn=5 时每请求每步 6 个 token；若只有 75% 的草稿被接受，实际是 4.75 个，少了约两成。看到 DeepInfer 的解码吞吐时，先问它用的是哪个 τ。</figcaption></figure>
+<p>折算一下：nextn ＝ 3 时，满接受口径比 a ＝ 75% 的口径多算 4 ÷ 3.25 − 1 ≈ 23%；nextn ＝ 5 时多算 6 ÷ 4.75 − 1 ≈ 26%。<span class="ev ev-est">教学推演</span> 4.3 节的基准估算里，固定验 5 个时平均接受长度约 3.3；无论它含不含主模型那 1 个 token，都远低于满接受口径的 6（只数草稿则是 5）。所以满接受口径的数，只能当上限看。</p>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>DeepInfer 的草稿模块一次前向猜 5 个 token，还给每个打一个置信度。打开 <code>DEEPINFER_ENABLE_MTP_VARLEN=1</code> 后，调度器按连乘后的置信度从高到低发验证名额，在实测的耗时曲线上挑“每毫秒期望 token 最多”的总数。上游估算：生产工作点吞吐多 4%–7%，低并发时反而略亏。</li>
+<li>零开销批调度器让 CPU 领先 GPU 一步：GPU 跑第 N 步时，CPU 已经在排第 N+1 步。稳态周期从 CPU ＋ GPU 变成 max(CPU, GPU)，前提是 CPU 每步的活不超过 GPU 一步。</li>
+<li>两者叠加时，CPU 拿不到最新的置信度，于是只定总数（它要靠总数选 CUDA Graph），每个请求分几个由 GPU 上的 kernel 用最新置信度现算。读解码吞吐时，先看它是不是满接受口径。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“零开销调度，就是 CPU 调度不花时间。”</strong></p>
+<p>CPU 的活一点没少，只是和 GPU 的活叠在了一起。CPU 每步比 GPU 慢时，异步循环的周期就是 CPU 的时间，GPU 照样空等，上面的时间线里把 CPU 拉过 GPU 就能看到。<span class="ev ev-est">教学推演</span> DeepInfer 的调度器本体在 C++ 里（<code>csrc/engine/scheduler.hpp</code>），发射代码外面还套着禁止同步的守卫。<span class="ev ev-code">代码事实</span></p></div>
+
+<details class="deep"><summary>深入一层：一个解码步的完整调用链、预算算法的细节与相关开关</summary>
+<h3>文件地图</h3>
+<ul>
+<li><code>deepinfer/engine/llm_engine.py</code>：<code>LLMEngine.step()</code>，一步的总入口（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L860-L959" target="_blank" rel="noopener noreferrer">L860–L959</a>）。</li>
+<li><code>csrc/engine/scheduler.hpp</code>：C++ 调度器。解码调度在 <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L622-L660" target="_blank" rel="noopener noreferrer">L622–L660</a>，最后调用 <code>_mtp_varlen.schedule</code>；草稿和置信度的记账在 <code>process_MTPInfo</code>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L1196-L1262" target="_blank" rel="noopener noreferrer">L1196–L1262</a>）。</li>
+<li><code>csrc/engine/mtp_varlen.hpp</code>：变长验证的预算算法和两个估时器。</li>
+<li><code>deepinfer/worker/worker.py</code>：ZOS 的四步循环和 GPU 端修正。</li>
+<li><code>csrc/engine/zos.cpp</code>、<code>deepinfer/model_executor/input_metadata/prepare_tensor_input_zos.py</code>：ZOS 下的输入准备。</li>
+<li><code>deepinfer/model_executor/layers/tilelang_ops/cuda/schedule_mtp_varlen.py</code>：GPU 上分名额的 kernel；同名的上一级文件里有 PyTorch 参考实现和测试。</li>
+<li><code>deepinfer/model_executor/models/mtp/dflash.py</code>：草稿模块和置信度头。</li>
+<li><code>csrc/graph_timer/</code>、<code>deepinfer/timer.py</code>：CUDA Graph 内部的计时。</li>
+</ul>
+<h3>ZOS 打开时，一个解码步的顺序</h3>
+<ol>
+<li><code>scheduler.schedule()</code>：C++ 选出本批请求，按长度排序，<code>MTPVarlen::schedule</code> 给出每个请求的 seqlen_q 和总数；每个被调度的请求 <code>schedule_cnt</code> 加 1，并按 1 ＋ nextn 预留在途位置（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L667-L736" target="_blank" rel="noopener noreferrer">scheduler.hpp L667–L736</a>）。</li>
+<li><code>Worker._correct_seqlens_qk</code>：和上一批对号，生成 remap；拷到显存；开变长时跑分名额 kernel；按上一步的接受数改 KV 长度；开变长时把新的 seqlen_q 拷回锁页内存并记事件（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L191-L245" target="_blank" rel="noopener noreferrer">worker.py L191–L245</a>）。注释写着：“H2D、修正、D2H 在当前流上有序；只有变长会改写这块锁页源。”</li>
+<li><code>execute_main_model</code>：选图、发射前向，外面包着 <code>forbid_cuda_sync()</code> 和计时事件 <code>device_forward</code>。</li>
+<li><code>_post_process_step(prev)</code>：等上一步的 <code>sample_end_evt</code>，刷新图内计时，处理输出；驱动进程里还会把上一步实测的前向和采样耗时交给 <code>scheduler.update_mtp_runtime</code>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L984-L1015" target="_blank" rel="noopener noreferrer">llm_engine.py L984–L1015</a>）。</li>
+<li>等 D2H 事件，<code>update_metadata_for_sampling_zos</code> 把 CPU 侧的 seqlen_q 改成 GPU 算出的值；seqlen_k 不从 GPU 拷回，在 CPU 上按 seqlen_q ＋ 已缓存的 token 数重算（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/zos.cpp#L279-L305" target="_blank" rel="noopener noreferrer">zos.cpp L279–L305</a>）。</li>
+<li><code>execute_sample</code>：验证上一步的草稿，再跑草稿模块出下一步的草稿和置信度；同样包着禁止同步的守卫。</li>
+<li><code>pre_sampler_sync</code> 回调：释放上一轮延后释放的资源，处理 KV 落盘等。最后把本步状态存进 <code>prev_step_state</code>，留给下一步后处理。</li>
+</ol>
+<h3>预算算法的细节</h3>
+<ul>
+<li>每个请求有两份接受率：<code>accept_rates</code>（最近一轮，已连乘）和 <code>prev_accept_rates</code>（再上一轮）。用 <code>schedule_cnt</code> 和 <code>process_cnt</code> 两个计数器判断“最近一轮”到底是 N−1 还是 N−2（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/sequence.hpp#L118-L131" target="_blank" rel="noopener noreferrer">sequence.hpp L118–L131</a>）。</li>
+<li>还没有接受率时，有草稿的按 1.0 补，没草稿的按 0.0 补。</li>
+<li>排序按接受率降序，相同时请求下标小的在前；GPU kernel 用“有多少个元素比我大”的计数来排名，相同时扁平下标小的在前。这个 kernel 是并行计数，不是真的跑一次排序。</li>
+<li>候选总数从“只验主模型 token”开始；每个候选的耗时是：曲线上不小于它的那张图的基线耗时 ＋ 斜率 × 图大小 ＋ 采样耗时。比较用严格大于，所以吞吐相同时取较小的总数。同一张图里估出的耗时相同，所以选中的总数总是一张图的大小，或者全部草稿。</li>
+<li>CUDA Graph 的大小按 token 数算：1、2、4，之后每隔 <code>DEEPINFER_CUDAGRAPH_BATCH_SIZE_INTERVAL</code>（默认 8）一张，最大是 max_num_seqs × (1 ＋ nextn)（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cuda_graph_runner.py#L41-L51" target="_blank" rel="noopener noreferrer">cuda_graph_runner.py L41–L51</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L72-L79" target="_blank" rel="noopener noreferrer">model_runner.py L72–L79</a>）。</li>
+</ul>
+<h3>估时模型的在线修正</h3>
+<ul>
+<li>启动曲线：每张图预热 1 次、计时 5 次，去掉最高最低各 1 次取平均，再在专家并行组内取平均；结果按模型和并行配置缓存到文件，有效期由 <code>DEEPINFER_DECODE_PERF_CACHE_TTL_SEC</code> 控制，默认 3600 秒。</li>
+<li>前向斜率：注释说启动曲线没考虑上下文长度，所以用 (实测前向 − 基线) ÷ 图大小 拟合一个斜率。保留最近 5000 步，每种图大小至少 10 个样本才算数，先按图大小取中位数，再对这些中位数取中位数；斜率小于 0 时按 0 算（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L44-L131" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp L44–L131</a>）。</li>
+<li>采样耗时：没有启动曲线，按请求数分组，取最近 9 步的中位数，不足 5 个样本时退回全局的中位数。</li>
+</ul>
+<h3>置信度头</h3>
+<p>公式是 sigmoid(拼接[隐藏状态, 修正项嵌入] · w ÷ 温度)（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/dflash.py#L10-L46" target="_blank" rel="noopener noreferrer">tilelang_ops/dflash.py L10–L46</a>）。温度来自 <code>DEEPINFER_DFLASH_CONFIDENCE_HEAD_TEMPERATURE</code>，默认 1.0，也可以按位置给 nextn 个值，用逗号分开（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L134-L143" target="_blank" rel="noopener noreferrer">environ.py L134–L143</a>）。注释说 Hugging Face 格式的 DFlash 固定带置信度头。草稿模块有几层，由模型配置里的 <code>num_nextn_predict_layers</code> 决定，本页没有核实这个值。</p>
+<h3>CUDA Graph 里怎么计时：graph_timer</h3>
+<p>变长验证的耗时反馈，用的是包在整次前向、整次采样外面的 CUDA 事件。另有一个 <code>graph_timer</code>，专门量图<strong>内部</strong>某几段（比如某一层的注意力、MLP）的耗时，供统计用。它在录图时插入“记录事件”的节点，录好后找出这些节点（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/graph_timer/graph_timer_cuda.cpp#L48-L85" target="_blank" rel="noopener noreferrer">graph_timer_cuda.cpp L48–L85</a>）。每次重放前，它把这些节点换成另一组事件，两组轮流用（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/timer.py#L78-L217" target="_blank" rel="noopener noreferrer">timer.py L78–L217</a>）。ZOS 下，读上一步的计时时下一步的图已经在跑，两组事件轮流，读的就永远是跑完的那组，正在跑的那组不受影响。这就是<a href="#chapter/14">第 14 章</a> 14.4 节的双缓冲。</p>
+<h3>相关开关</h3>
+<div class="table-wrap"><table><thead><tr><th>环境变量</th><th>默认</th><th>作用</th></tr></thead><tbody>
+<tr><td><code>DEEPINFER_USE_NEXTN_DECODE</code></td><td>5</td><td>每步最多几个草稿；0 关闭投机解码</td></tr>
+<tr><td><code>DEEPINFER_ENABLE_MTP_VARLEN</code></td><td>0</td><td>按置信度变长验证；确定性采样要求关闭</td></tr>
+<tr><td><code>DEEPINFER_ZERO_OVERHEAD_SCHEDULING</code></td><td>按引擎类型</td><td>NORMAL / COMPLETION 引擎默认 1，PROMPT 引擎默认 0</td></tr>
+<tr><td><code>DEEPINFER_DFLASH_CONFIDENCE_HEAD_TEMPERATURE</code></td><td>1.0</td><td>置信度头的温度，可按位置给多个值</td></tr>
+<tr><td><code>DEEPINFER_MAX_BACKTRACKING_TOKENS</code></td><td>nextn ＋ 1</td><td>取设定值和 nextn ＋ 1 中较大者；SWA 有界重放要用，见<a href="#deepinfer/pd-kv">“三段分离”一页</a></td></tr>
+<tr><td><code>DEEPINFER_ENFORCE_EAGER</code> / <code>DEEPINFER_DFLASH_ENFORCE_EAGER</code></td><td>0</td><td>不用 CUDA Graph；主模型不用图时测不了耗时曲线，变长验证退回固定长度</td></tr>
+<tr><td><code>DEEPINFER_DISABLE_SYNC_GUARD</code></td><td>0</td><td>调试用：关掉禁止同步的守卫</td></tr>
+</tbody></table></div>
+<h3>本页没有核实的</h3>
+<p>FlashMLA、DeepGEMM、DeepEP 等内核库在 <code>vendor/</code> 子模块里，这次没有取下来，本页不谈它们的实现。DeepSeek 内部版本的草稿模型与开源版差多少，只有问答里的一句“性能差别很小”。“DSpark”“DFlash”两个名字的来历，代码和文档都没写。仓库的开源边界见<a href="#deepinfer/overview">专栏首页</a>。</p>
+</details>
