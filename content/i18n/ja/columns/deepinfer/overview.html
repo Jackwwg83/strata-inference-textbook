@@ -1,0 +1,293 @@
+<div class="hook"><span class="eyebrow">見方を変えてみる</span>
+<p>この本はずっと、ひとつのことをしてきました。普通のコンピュータで大きなモデルを動かし、ひとりの人に使ってもらう、ということです。Strata の README も冒頭でこの目標を掲げています。GPU（グラフィックスカード）は VRAM 12 GB から。<span class="ev ev-report">上流レポート</span>[S01]</p>
+<p>推論のもう一方の端にあるのが、DeepSeek のオンラインサービスです。DeepSeek 自身の説明では、1 つのクラスタが 1 日に 155 兆トークンを処理します。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L17" target="_blank" rel="noopener noreferrer">Q&amp;A ドキュメント 17 行目</a>）2026 年 10 月 20 日、DeepSeek はこのサービスを支える推論フレームワーク DeepInfer をオープンソースにしました。このページでは、3 つの問いに答えます。DeepInfer とは何か、どこまで公開されたのか、Strata とどこが違うのか。</p></div>
+<p class="tldr"><strong>ひとことで：</strong>DeepInfer は、DeepSeek-V4.1-Flash 用のクラスタ推論エンジンです。プリフィル、デコード、ビジョンエンコードを別々のマシンに分け、エキスパートを数十枚のカードに敷き詰めます。今回公開されたのはエンジン本体で、オフライン推論ができます。KV キャッシュシステム、3 つの段階をつなぐ接着コード、データ並列のロードバランサーは、リポジトリに入っていません。</p>
+
+<h2 id="sec-1">1.1 もう一方の端：同じ概念を、数百枚のカードに広げる</h2>
+<p>DeepInfer は<dfn>推論フレームワーク</dfn>です。Strata と同じく、第 1 章で話した「厨房」の層にあたります（<a href="#chapter/01">第 1 章</a>）。README の最初の一文によると、DeepSeek の大規模オンラインサービスを支える高性能な推論フレームワークで、今回公開されたバージョンは、オフライン推論と、大規模サービスに必要なコア機能を提供します。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L3" target="_blank" rel="noopener noreferrer">README 3 行目</a>）対応するモデルは今のところ 1 つだけ、DeepSeek-V4.1-Flash です。</p>
+<p>Strata と同じ概念を扱っています。MoE のエキスパート、KV キャッシュ、<dfn>プリフィル（prefill）</dfn>と<dfn>デコード（decode）</dfn>、投機的デコーディング、バッチ処理です。違いは規模です。Strata は 1 台のコンピュータにモデルを押し込む工夫をします。DeepInfer は、たくさんのマシンでたくさんの人に同時にサービスする工夫をします。DeepSeek の Q&amp;A ドキュメントには、このシステムが最初から掲げた 3 つの目標が書かれています。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L7-L13" target="_blank" rel="noopener noreferrer">Q&amp;A 7–13 行目</a>）</p>
+<ol>
+<li>複数のベンダーのアクセラレータカードに対応し、各プラットフォームの性能を使い切る。</li>
+<li>普通のハードウェアでプリフィルとデコードを組む。プリフィルは普通の 8 カードのマシン、デコードは普通の 64–128 カードの<dfn>スーパーノード</dfn>、つまり高速インターコネクトで 1 つにつないだカードの集まりを使う。</li>
+<li>KV キャッシュを 72 時間以上保持する。古い会話が戻ってきても、キャッシュにヒットすれば、プリフィルをやり直さなくて済む。</li>
+</ol>
+<p>まず規模の差を感じてみましょう。Q&amp;A ドキュメントによると、デコードは EP64 から始めるのがお勧めで、プリフィルとデコードのカード数はおよそ 1:1 です。そのため「最小の効率的なデプロイ単位」は、プリフィル用 64 枚とデコード用 64 枚になります。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L65-L67" target="_blank" rel="noopener noreferrer">Q&amp;A 65–67 行目</a>）EP は<dfn>エキスパート並列（EP）</dfn>のことで、第 2 ページで詳しく扱います。図 D1-1 に両端を並べました。</p>
+<figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="図 D1-1：Strata は 1 台のコンピュータと 1 枚の GPU。DeepInfer の最小の効率的な単位は、プリフィル 64 枚とデコード 64 枚">
+<defs>
+<pattern id="di-overview-gpu-p" width="11" height="11" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="9" height="9" rx="1.5"/></pattern>
+<pattern id="di-overview-gpu-d" width="11" height="11" patternUnits="userSpaceOnUse"><rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" stroke-width=".8" x=".5" y=".5" width="8" height="8" rx="1.5"/></pattern>
+</defs>
+<text class="f-text" fill="#182f2b" x="66" y="22" font-size="13" font-weight="600" text-anchor="middle">Strata：1 台の PC</text>
+<text class="f-text" fill="#182f2b" x="272" y="22" font-size="13" font-weight="600" text-anchor="middle">DeepInfer：最小の効率的な単位</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M134 36V196"/>
+<rect class="f-accent" fill="#136d5a" x="55" y="88" width="22" height="22" rx="3"/>
+<text class="f-text" fill="#182f2b" x="66" y="134" font-size="12" text-anchor="middle">一般向け GPU 1 枚</text>
+<text class="f-muted" fill="#5c6d66" x="66" y="152" font-size="12" text-anchor="middle">VRAM 12 GB から</text>
+<rect fill="url(#di-overview-gpu-p)" x="165" y="55" width="88" height="88"/>
+<rect fill="url(#di-overview-gpu-d)" x="286" y="55" width="88" height="88"/>
+<text class="f-text" fill="#182f2b" x="209" y="164" font-size="12" text-anchor="middle">プリフィル 64 枚</text>
+<text class="f-text" fill="#182f2b" x="330" y="164" font-size="12" text-anchor="middle">デコード 64 枚</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="186" font-size="12" text-anchor="middle">P : D ≈ 1 : 1、デコードは EP64 から</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="218" font-size="12" text-anchor="middle">1 マス = 1 枚のカード</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="234" font-size="12" text-anchor="middle">出典：Strata の README、DeepSeek Q&amp;A 67 行目</text>
+</svg><figcaption>図 D1-1　Strata は 1 枚の GPU で 1 人にサービスします。1P + 1D でもデプロイはできますが、DeepSeek は最小の効率的な単位を 64 + 64 枚と考えています。両側で使う概念は同じで、解くべき問題が変わりました。</figcaption></figure>
+<p>次の表で、両端を並べて比べます。Strata の列はこの本の各章から、DeepInfer の列はその README、Q&amp;A ドキュメント、コードから取りました。</p>
+<div class="table-wrap"><table><thead><tr><th>項目</th><th>Strata</th><th>DeepInfer</th></tr></thead><tbody>
+<tr><td>目標</td><td>自分のコンピュータで 1250 億パラメータのモデルを動かす（<a href="#chapter/01">第 1 章</a>）</td><td>スループットを上げ、同時にレイテンシを下げ、膨大な数のユーザーにサービスする <span class="ev ev-report">上流レポート</span></td></tr>
+<tr><td>規模</td><td>コンピュータ 1 台。2–3 枚のカードで一緒に動かすこともできる（<a href="#chapter/21">第 21 章</a>）。既定では一度に 1 本のシーケンスを処理（<a href="#chapter/25">第 25 章</a>）</td><td>1 つのクラスタで 1 日 155 兆トークン。最小の効率的な単位は 64 + 64 枚 <span class="ev ev-report">上流レポート</span></td></tr>
+<tr><td>ハードウェア</td><td>NVIDIA、AMD の一般向け GPU、VRAM 12–24 GB、RAM 32–64 GB（<a href="#chapter/01">第 1 章</a>）</td><td>NVIDIA SM100 GPU または Huawei Ascend 950 NPU <span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L33-L36" target="_blank" rel="noopener noreferrer">README 33–36 行目</a>）</td></tr>
+<tr><td>モデル</td><td>Qwen3.8-Flash-Next：48 層、各層にルーティング対象のエキスパート 512 個と共有エキスパート 1 個、1 トークンあたり 10 個を選択（<a href="#chapter/10">第 10 章</a>）</td><td>DeepSeek-V4.1-Flash：チェックポイントの設定では 40 層、各層にルーティング対象のエキスパート 384 個と共有エキスパート 1 個、1 トークンあたり 6 個を選択 <span class="ev ev-report">上流レポート</span></td></tr>
+<tr><td>エキスパートの置き場所</td><td>人気のエキスパートは VRAM、全エキスパートは RAM、ミスしたものは CPU がその場で計算（<a href="#chapter/10">第 10 章</a>）</td><td>エキスパート並列で、エキスパートを各カードの GPU メモリ（HBM）に分散し、さらに冗長エキスパートを加える（<a href="#deepinfer/wide-ep">第 2 ページ</a>）</td></tr>
+<tr><td>プリフィルとデコード</td><td>同じカードの上で、先に問題を読み、あとで答えを書く（<a href="#chapter/16">第 16 章</a>）</td><td>別々のマシンに分ける。E/P/D 分離と呼ぶ（<a href="#deepinfer/pd-kv">第 3 ページ</a>）</td></tr>
+<tr><td>KV キャッシュの置き場所</td><td>VRAM と RAM に、ページ単位で管理（<a href="#chapter/17">第 17 章</a>）</td><td>処理中のものは GPU メモリ。ページ化した KV は約 100 PiB の SSD クラスタに保存し、3–7 日保持 <span class="ev ev-report">上流レポート</span></td></tr>
+<tr><td>公開されたもの</td><td>リポジトリ全体、MIT ライセンス（<a href="#chapter/22">第 22 章</a>）</td><td>エンジン本体、オフライン推論 <span class="ev ev-report">上流レポート</span>。Apache-2.0 <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/pyproject.toml#L14" target="_blank" rel="noopener noreferrer">pyproject.toml</a>）</td></tr>
+</tbody></table></div>
+<p>表のモデル形状は、Hugging Face 上のチェックポイント設定（<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/config.json" target="_blank" rel="noopener noreferrer">config.json</a>、2026-10-17 版）から取ったもので、DeepInfer のリポジトリには入っていません。<span class="ev ev-report">上流レポート</span> ハードウェア行の具体的な型番は README から取りました。<span class="ev ev-report">上流レポート</span> ビルドスクリプトが受け付けるアクセラレータカードは <code>nvidia</code> と <code>ascend</code> の 2 種類だけです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/build.sh#L5-L11" target="_blank" rel="noopener noreferrer">build.sh</a>）README には、DeepInfer は当初おもに vLLM をもとに作られた、とも書かれています。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L95" target="_blank" rel="noopener noreferrer">README 95 行目</a>）</p>
+<div class="callout vs"><strong>Strata と比べると：</strong>Strata の難題は「入らない」ことです。12 GB のカードに 34 GB のエキスパートは置けないので、階層に分けて置き、CPU に手伝ってもらいます（<a href="#chapter/10">第 10 章</a>）。DeepInfer の難題は「手が回らない」ことです。カードはいくらでもありますが、1 枚のカードが同時に多くのユーザーを相手にし、しかも数百枚のカードが足並みをそろえなければなりません。だから公開されたコードの大半は、並列、スケジューリング、エキスパートの負荷分散の話で、「入らないときどうするか」はほとんど出てきません。</div>
+
+<h2 id="sec-2">1.2 1 つのリクエストの旅：本番システムの地図</h2>
+<p>DeepSeek は Q&amp;A ドキュメントに参照アーキテクチャ図を載せています。システムは、<dfn>E/P/D 分離</dfn>の計算ノードと、専用のストレージノードでできています。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L41-L43" target="_blank" rel="noopener noreferrer">Q&amp;A 41–43 行目</a>）E は<dfn>ビジョンエンコーダー（VE）</dfn>で、画像をベクトルに変えます。P はプリフィル、D はデコードです。別々にデプロイすると、各段階にリソースを個別に割り当てられ、<dfn>最初のトークンまでの時間（TTFT）</dfn>と<dfn>トークン間隔（TBT）</dfn>も別々に調整できます。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L27-L31" target="_blank" rel="noopener noreferrer">Q&amp;A 27–31 行目</a>）</p>
+<p>アテンションの部分は<dfn>データ並列（DP）</dfn>を使い、DP の数は EP の数と同じです。各カードが自分の担当するリクエストのアテンションを計算し、MoE 層ではエキスパート並列で協力します。レプリカがこれだけ多いと仕事の割り振りが必要なので、DeepSeek は 4 つのロードバランサーを作りました。プリフィル、デコード、VE の 3 つがデータ並列レプリカ間の割り当てを受け持ち、<dfn>エキスパート負荷分散（EPLB）</dfn>がエキスパートをカードにどう配るかを受け持ちます。プリフィルのやり直しを避けるために、KV キャッシュのストレージもあります。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L33" target="_blank" rel="noopener noreferrer">Q&amp;A 33 行目</a>）入口と出口には DeepSeek Recipe もあり、API プロトコルとトークン列の間を変換します。</p>
+<p>下の地図は、そのアーキテクチャ図を描き直し、各部品がオープンソースかどうかをリポジトリで確かめたものです。<strong>ブロックをクリック</strong>すると説明が出ます。<strong>1 歩進む</strong>を押すと、1 つのリクエストが入口から出口まで進む様子を追えます。</p>
+<div class="viz" data-viz="di-overview-arch"><figure class="fig"><svg viewBox="0 0 400 400" role="img" aria-label="図 D1-2：DeepSeek-V4.1-Flash の本番推論システムを作る 10 個の部品と、各部品のコードが今回公開されたリポジトリに入っているかどうか">
+<text class="f-muted" fill="#5c6d66" x="200" y="14" font-size="12" text-anchor="middle">ユーザーのリクエスト ↓　↑ 応答（JSON）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M190 58V76M210 80V62M200 114V136M200 174V196M144 214H131V157H122M62 174V196M118 248H140M256 214H269V157H278M332 174V196M388 198V97H284"/>
+<path class="f-muted" fill="#5c6d66" d="M186 74L190 80L194 74ZM206 64L210 58L214 64ZM196 134L200 140L204 134ZM196 194L200 200L204 194ZM124 153L118 157L124 161ZM58 194L62 200L66 194ZM138 244L144 248L138 252ZM276 153L282 157L276 161ZM328 194L332 200L336 194ZM286 93L280 97L286 101Z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3.2" d="M256 250H276M190 302V278M340 274V298"/>
+<path class="f-muted" fill="#5c6d66" d="M274 245L282 250L274 255ZM185 280L190 272L195 280ZM335 296L340 304L345 296Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#5c6d66" stroke-dasharray="4 3" x="120" y="24" width="160" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="45.5" font-size="12" font-weight="600" text-anchor="middle">DeepSeek Recipe</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="120" y="80" width="160" height="34" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="101.5" font-size="12" font-weight="600" text-anchor="middle">Entrypoint（入口）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="6" y="140" width="112" height="34" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="62" y="153.5" font-size="12" font-weight="600" text-anchor="middle">VE</text><text class="f-muted" fill="#5c6d66" x="62" y="170.5" font-size="12" font-weight="600" text-anchor="middle">ロードバランサー</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="144" y="140" width="112" height="34" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="153.5" font-size="12" font-weight="600" text-anchor="middle">プリフィル</text><text class="f-muted" fill="#5c6d66" x="200" y="170.5" font-size="12" font-weight="600" text-anchor="middle">ロードバランサー</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="282" y="140" width="100" height="34" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="332" y="153.5" font-size="12" font-weight="600" text-anchor="middle">デコード</text><text class="f-muted" fill="#5c6d66" x="332" y="170.5" font-size="12" font-weight="600" text-anchor="middle">ロードバランサー</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="6" y="200" width="112" height="60" rx="7"/>
+<text class="f-text" fill="#182f2b" x="62" y="218.5" font-size="12" font-weight="600" text-anchor="middle">ビジョン</text><text class="f-text" fill="#182f2b" x="62" y="235.5" font-size="12" font-weight="600" text-anchor="middle">エンコーダー</text>
+<text class="f-text" fill="#182f2b" x="62" y="252.5" font-size="12" font-weight="600" text-anchor="middle">（VE）</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="144" y="200" width="112" height="72" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="220" font-size="12" font-weight="600" text-anchor="middle">プリフィル（P）</text>
+<rect class="f-accent" fill="#136d5a" x="156" y="234" width="88" height="26" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="251.5" font-size="12" font-weight="600" text-anchor="middle">EPLB</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="282" y="200" width="112" height="72" rx="7"/>
+<text class="f-text" fill="#182f2b" x="338" y="220" font-size="12" font-weight="600" text-anchor="middle">デコード（D）</text>
+<rect class="f-accent" fill="#136d5a" x="294" y="234" width="88" height="26" rx="7"/>
+<text class="f-on" fill="#ffffff" x="338" y="251.5" font-size="12" font-weight="600" text-anchor="middle">EPLB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="144" y="304" width="250" height="34" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="269" y="325.5" font-size="12" font-weight="600" text-anchor="middle">KV キャッシュストレージ（3FS）</text>
+<rect class="f-accent" fill="#136d5a" x="8" y="345" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="22" y="354" font-size="12">今回公開</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" stroke-width=".8" x="204" y="345" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="218" y="354" font-size="12">エンジンあり・接着コードなし</text>
+<rect class="f-box" fill="#ffffff" stroke="#5c6d66" stroke-dasharray="2 2" x="8" y="361" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="22" y="370" font-size="12">別のリポジトリ</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" stroke-width=".8" x="204" y="361" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="218" y="370" font-size="12">未公開</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="392" font-size="12" text-anchor="middle">細い線：リクエスト　太い線：KV キャッシュ</text>
+</svg><figcaption>図 D1-2　リクエストは、Recipe、Entrypoint、ロードバランサー、プリフィル、デコードの順に通り、結果はデコードから Entrypoint を経て Recipe に戻ります。KV キャッシュは P、D、ストレージクラスタの間を流れます。10 個の部品のうち、今回のリポジトリにコードがあるのは、エンジン本体と EPLB だけです。</figcaption></figure></div>
+<p>この図でいちばん見落としやすいのは、Entrypoint が最初に行う手順です。まず KV ストレージを調べて、このリクエストの先頭部分がどこまでヒットするかを計算し、そのあとでようやくルーティングできます。Q&amp;A ドキュメントは、この手順を別の仕事の陰に隠せないと特に述べています。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L157" target="_blank" rel="noopener noreferrer">Q&amp;A 157 行目</a>）ヒットが長いほどプリフィルで計算する量が減るので、「どこまでヒットするか」で、このリクエストにどれだけ重い仕事を割り当てるかが決まります。各段階にカードをどう割り当てるか、KV をどう保存するか、P から D へどう送るかは、すべて<a href="#deepinfer/pd-kv">第 3 ページ</a>にあります。4 つのロードバランサーのアルゴリズムは<a href="#deepinfer/wide-ep">第 2 ページ</a>にあります。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは Web バックエンドの古典的な階層構造です。ゲートウェイがプロトコルを変換し（Recipe）、ロードバランサーがリクエストをアプリケーションサーバー群（P と D）に振り分け、状態は独立したストレージクラスタ（3FS）に置きます。違うのは、ここでの 1 台の「アプリケーションサーバー」が、数十枚のカードでできた 1 つの通信ドメインだという点です。<a href="https://ja.wikipedia.org/wiki/%E3%82%B5%E3%83%BC%E3%83%90%E3%83%AD%E3%83%BC%E3%83%89%E3%83%90%E3%83%A9%E3%83%B3%E3%82%B9" target="_blank" rel="noopener noreferrer">Wikipedia：サーバロードバランス</a>を参照してください。</p>
+<div class="callout vs"><strong>Strata と比べると：</strong>Strata は、この図を 1 台のコンピュータに押し込みました。<code>serve/server.py</code> が HTTP とキューを担当し、<code>serve/frontend.py</code> がテンプレートの適用と出力の解析を担当します（<a href="#chapter/23">第 23 章</a>）。エンジンは同じカードの上で、先にプリフィル、次にデコードをします（<a href="#chapter/16">第 16 章</a>）。既定の設定では、1 つのロックがリクエストを 1 本の列に並べます（<a href="#chapter/25">第 25 章</a>）。クラスタでは、各層を独立したサービスに分けなければなりません。1 台のマシンはすべてのユーザーを収容できず、かといってすべてのユーザーを 1 本の列に並ばせることもできないからです。</div>
+
+<h2 id="sec-3">1.3 公開の境界：リポジトリにあるもの、ないもの</h2>
+<p>README は境界をはっきり書いています。今回公開された機能は次のとおりです。最適化されたカーネルとモデル、サンプラーのランタイム。アテンションのデータ並列と、均衡のとれた<dfn>コンテキスト並列（CP）</dfn>、MoE のエキスパート並列と EPLB。DSpark と、信頼度に応じてスケジューリングする検証。<dfn>スライディングウィンドウ・アテンション（SWA）</dfn>の<dfn>有界リプレイ</dfn>。<dfn>非同期スケジューリング</dfn>、つまり<dfn>ゼロオーバーヘッド・バッチスケジューラー</dfn>。<dfn>バッチ不変（batch-invariant）</dfn>な推論。<dfn>決定的サンプリング</dfn>。<dfn>構造化出力</dfn>。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L9-L18" target="_blank" rel="noopener noreferrer">README 9–18 行目</a>）</p>
+<p>「完全な推論サービスには必要だが、今回は含まれていない」ものも 3 つ挙げています。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L38-L42" target="_blank" rel="noopener noreferrer">README 38–42 行目</a>）</p>
+<ul>
+<li>KV キャッシュシステム。</li>
+<li>VE / プリフィル / デコードの分離デプロイ（README は、エンジンに必要な機能の大部分はすでに実装済み、と補足しています）。</li>
+<li>プリフィルとデコードの、データ並列レプリカ間のロードバランシング。</li>
+</ul>
+<p>Q&amp;A ドキュメントは理由を挙げています。KV キャッシュの管理とロードバランシングは DeepSeek 社内のインフラと結びつきが強すぎて、いまのところ完全には公開されていない、というものです。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L21" target="_blank" rel="noopener noreferrer">Q&amp;A 21 行目</a>）DeepSeek Recipe は、別のリポジトリ <a href="https://github.com/deepseek-ai/deepseek-recipe" target="_blank" rel="noopener noreferrer">deepseek-recipe</a> として単独で公開されました。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L19" target="_blank" rel="noopener noreferrer">Q&amp;A 19 行目</a>）</p>
+<p>「大部分はすでに実装済み」という言葉は、コードの中に裏づけがあります。エンジンには 3 つのタイプがあります。<code>NORMAL</code> はプリフィルもデコードも行い、<code>PROMPT</code> はプリフィルだけ、<code>COMPLETION</code> はデコードだけを行います。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/engine_type.py#L4-L17" target="_blank" rel="noopener noreferrer">engine_type.py</a>。C++ 側でも <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L37-L43" target="_blank" rel="noopener noreferrer">scheduler.hpp</a> で同じものを定義しています）ところが、メインのエンジンクラス <code>LLMEngine</code> には「ここから先はすべて仮想関数」というコメントがあります。PD 分離の初期化、プリフィル後の KV 保存、KV 保存、処理が終わったリクエストのデコードエンジンへの送信、の各関数には、1 行の説明があるだけで、関数本体がありません。リポジトリには、これらを実装する別のクラスもありません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L800-L858" target="_blank" rel="noopener noreferrer">llm_engine.py 800–858 行目</a>）図 D1-3 に、この境界を描きました。</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="図 D1-3：エンジンにはすでに 3 つのタイプがあり、プリフィルだけ、またはデコードだけを行える。2 つの段階をつなぐ処理と KV 保存の 4 つのフックは、空の関数">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">EngineType：3 種類のエンジン</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="32" width="176" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="24" y="50" font-size="12" font-weight="600">NORMAL</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="68" font-size="12">両方を行う（オフライン）</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="86" width="176" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="24" y="104" font-size="12" font-weight="600">PROMPT</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="122" font-size="12">プリフィルのみ → 本番の P</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="140" width="176" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="24" y="158" font-size="12" font-weight="600">COMPLETION</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="176" font-size="12">デコードのみ → 本番の D</text>
+<text class="f-text" fill="#182f2b" x="300" y="20" font-size="13" font-weight="600" text-anchor="middle">LLMEngine の空フック</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" stroke-dasharray="4 3" x="212" y="32" width="176" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="222" y="47" font-size="12">init_pd_split</text>
+<text class="f-muted" fill="#5c6d66" x="222" y="62" font-size="12">PD 分離の初期化</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" stroke-dasharray="4 3" x="212" y="74" width="176" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="222" y="89" font-size="12">pe_do_save_kvcache</text>
+<text class="f-muted" fill="#5c6d66" x="222" y="104" font-size="12">プリフィルが KV を保存</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" stroke-dasharray="4 3" x="212" y="116" width="176" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="222" y="131" font-size="12">do_save_kvcache</text>
+<text class="f-muted" fill="#5c6d66" x="222" y="146" font-size="12">デコード側が KV を保存</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" stroke-dasharray="4 3" x="212" y="158" width="176" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="222" y="173" font-size="12">send_processed_prompts</text>
+<text class="f-muted" fill="#5c6d66" x="222" y="188" font-size="12">デコードエンジンへ送る</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="212" font-size="12" text-anchor="middle">説明 1 行のみ、本体なし</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="228" width="376" height="52" rx="6"/>
+<text class="f-text" fill="#182f2b" x="24" y="248" font-size="12">オフライン：LLM → NORMAL エンジン → 同じカード群</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="268" font-size="12">本番：PROMPT →（接着コードなし）→ COMPLETION</text>
+</svg><figcaption>図 D1-3　エンジンはすでに「プリフィルだけ」「デコードだけ」を行えます。足りないのは、2 つの段階をつなぎ、KV を保存するいくつかの関数です。デプロイする人が、自分のインフラに合わせて補う必要があります。</figcaption></figure>
+<p>もうひとつ誤解しやすい点があります。リポジトリには <code>deepinfer/entrypoints/</code> というディレクトリがありますが、図 D1-2 の本番の Entrypoint ではありません。中にあるのはオフライン用の <code>LLM</code> クラスだけです。このクラスは、同じプロセスの中でエンジンを作り、プロンプトの束を渡し、すべて終わるまで <code>step()</code> を繰り返し呼びます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py#L23-L195" target="_blank" rel="noopener noreferrer">llm.py</a>）リポジトリにある HTTP サーバーは、既定で無効の性能サンプリング用エンドポイント <code>POST /profile</code> だけで、ユーザーのリクエストは受け付けません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/profile_server.py#L1-L5" target="_blank" rel="noopener noreferrer">profile_server.py</a>）</p>
+<p>Q&amp;A ドキュメントは、本番ではいまのところ<dfn>テンソル並列（TP）</dfn>と CP は使わないと言っていますが、README と例はどちらも CP に対応しています（例には <code>--cp 8</code> があります）。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L53" target="_blank" rel="noopener noreferrer">Q&amp;A 53 行目</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/README.md?plain=1#L6-L8" target="_blank" rel="noopener noreferrer">examples/README 6–8 行目</a>）両者は矛盾しません。一方は本番での構成、もう一方はコードにできることを述べています。</p>
+
+<h2 id="sec-4">1.4 リポジトリの地図：各コードの置き場所</h2>
+<p>固定したコミットのリポジトリには 342 個のファイルがあり、展開されていないサブモジュールが 6 個あります。<span class="ev ev-code">コード上の事実</span> 「ユーザーからの距離」の順に、上から下へ並べると、図 D1-4 のようになります。</p>
+<figure class="fig"><svg viewBox="0 0 400 364" role="img" aria-label="図 D1-4：DeepInfer のリポジトリを上から下へ 7 層に分けたもの。サンプルとテスト、オフライン入口、エンジンのメインループと C++ スケジューラー、カードごとの Worker、モデル実行、カーネル、ハードウェア検出">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="12">上から下へ：下に行くほどハードウェアに近い</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="26" width="384" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="18" y="42" font-size="12" font-weight="600">examples/ · eval/ · tests/</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="58" font-size="12">動かし方、評価の仕方、回帰テストのやり方</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="74" width="384" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="18" y="90" font-size="12" font-weight="600">deepinfer/entrypoints/llm.py</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="106" font-size="12">LLM クラス：オフライン推論の入口</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="8" y="122" width="188" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="18" y="138" font-size="12" font-weight="600">deepinfer/engine/</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="154" font-size="12">Python 主ループ LLMEngine</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="204" y="122" width="188" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="214" y="138" font-size="12" font-weight="600">csrc/engine/</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="154" font-size="12">C++ スケジューラー、ZOS</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="8" y="170" width="384" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="18" y="186" font-size="12" font-weight="600">deepinfer/worker/</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="202" font-size="12">カードごとの Worker：モデル、CUDA Graph、KV 管理</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="8" y="218" width="384" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="18" y="234" font-size="12" font-weight="600">deepinfer/model_executor/</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="250" font-size="12">モデル、サンプラー、EPLB、並列通信</text>
+<rect class="f-accent" fill="#136d5a" x="8" y="266" width="124" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="18" y="282" font-size="12" font-weight="600">tilelang_ops/</text>
+<text class="f-on" fill="#ffffff" x="18" y="298" font-size="12">TileLang 演算子</text>
+<rect class="f-accent" fill="#136d5a" x="138" y="266" width="124" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="148" y="282" font-size="12" font-weight="600">vendor/</text>
+<text class="f-on" fill="#ffffff" x="148" y="298" font-size="12">サブモジュール 6 個</text>
+<rect class="f-accent" fill="#136d5a" x="268" y="266" width="124" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="278" y="282" font-size="12" font-weight="600">pip 依存</text>
+<text class="f-on" fill="#ffffff" x="278" y="298" font-size="12">TileKernels など</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="314" width="384" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="18" y="330" font-size="12" font-weight="600">deep_cluster/</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="346" font-size="12">カードの検出（NVIDIA / Ascend）、NUMA バインド</text>
+</svg><figcaption>図 D1-4　オフライン推論は上から下へ進みます。サンプルが LLM クラスを呼び、LLM クラスがエンジンを動かし、エンジンが各カードの Worker にモデルを実行させ、モデルは最後にカーネルに行き着きます。C++ スケジューラーは Python のメインループと並んで、エンジンの 2 つの半分をなします。</figcaption></figure>
+<p>表 D1-1 で各ディレクトリを 1 つずつ説明します。どの行も、固定したコミットのファイルと突き合わせて確かめました。「読む場所」の列は、そのディレクトリをコラムの中で詳しく扱うページを指します。</p>
+<div class="table-wrap"><table><thead><tr><th>ディレクトリ</th><th>中身</th><th>読む場所</th></tr></thead><tbody>
+<tr><td><code>deepinfer/entrypoints/</code></td><td>オフラインの入口である <code>LLM</code> クラス。<code>generate()</code> がプロンプトの束を受け取る <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py#L23-L142" target="_blank" rel="noopener noreferrer">llm.py</a>）</td><td>このページ</td></tr>
+<tr><td><code>deepinfer/engine/</code></td><td><code>LLMEngine</code> のメインループ、エンジン引数、エンジンタイプ、統計ログ、性能サンプリング用エンドポイント <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L130" target="_blank" rel="noopener noreferrer">llm_engine.py</a>）</td><td><a href="#deepinfer/spec-sched">第 4 ページ</a></td></tr>
+<tr><td><code>csrc/engine/</code></td><td>C++ で書かれたスケジューラー <code>Scheduler</code>、ブロック管理 <code>BlockManager</code>、ゼロオーバーヘッド・スケジューリングの入力準備 <code>zos.cpp</code>、可変長の検証 <code>mtp_varlen.hpp</code>。pybind11 経由で <code>deepinfer._C</code> にビルドされる <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/setup.py#L22-L34" target="_blank" rel="noopener noreferrer">setup.py</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/pybind.cpp#L7-L17" target="_blank" rel="noopener noreferrer">pybind.cpp</a>）</td><td><a href="#deepinfer/spec-sched">第 4 ページ</a></td></tr>
+<tr><td><code>deepinfer/worker/</code></td><td>カードごとの <code>Worker</code>、<code>ModelRunner</code>、CUDA Graph のリプレイ、KV キャッシュを管理する <code>CacheEngine</code> <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cache_engine.py#L4" target="_blank" rel="noopener noreferrer">cache_engine.py</a>）</td><td><a href="#deepinfer/pd-kv">第 3 ページ</a></td></tr>
+<tr><td><code>model_executor/models/</code></td><td>DeepSeek-V4.1-Flash のモデルコード（<code>v4_modules/</code>）、ビジョンエンコーダー（<code>vision_encoder/</code>）、ドラフトモデル（<code>mtp/dflash.py</code>。受理率を予測する <code>ConfidenceHead</code> を含む）<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/__init__.py#L15-L17" target="_blank" rel="noopener noreferrer">models/__init__.py</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L46-L47" target="_blank" rel="noopener noreferrer">dflash.py</a>）</td><td><a href="#deepinfer/spec-sched">第 4 ページ</a></td></tr>
+<tr><td><code>model_executor/eplb/</code></td><td>エキスパート負荷分散：<code>policy.py</code> がエキスパートの配置を再計算し、<code>shuffle.py</code> がエキスパートの重みを移動する <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/policy.py#L1-L7" target="_blank" rel="noopener noreferrer">policy.py</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/shuffle.py#L1-L6" target="_blank" rel="noopener noreferrer">shuffle.py</a>）</td><td><a href="#deepinfer/wide-ep">第 2 ページ</a></td></tr>
+<tr><td><code>model_executor/layers/</code></td><td>線形層、アテンションバックエンド、サンプラー、そして <code>tilelang_ops/</code>（自作の TileLang 演算子）。最上位には 2 つのプラットフォームで共用する 33 個のファイルがあり、プラットフォームごとの <code>cuda/</code> と <code>asc/</code>（Ascend）という 2 つのサブディレクトリがある <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/platform.py#L55-L88" target="_blank" rel="noopener noreferrer">platform.py</a>）</td><td><a href="#deepinfer/determinism">第 5 ページ</a></td></tr>
+<tr><td><code>model_executor/parallel_utils/</code></td><td>プロセスグループ、通信操作、CP の管理 <span class="ev ev-code">コード上の事実</span></td><td><a href="#deepinfer/wide-ep">第 2 ページ</a></td></tr>
+<tr><td><code>deepinfer/structure_output/</code></td><td>構造化出力：xgrammar で形式の制約を文法にコンパイルし、トークンマスクを生成する <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/structure_output/compiler.py#L6-L14" target="_blank" rel="noopener noreferrer">compiler.py</a>）</td><td><a href="#deepinfer/determinism">第 5 ページ</a></td></tr>
+<tr><td><code>deepinfer/ve/</code></td><td>画像の前処理、マルチモーダル入力の準備 <span class="ev ev-code">コード上の事実</span></td><td><a href="#deepinfer/pd-kv">第 3 ページ</a></td></tr>
+<tr><td><code>deepinfer/environ.py</code></td><td>エンジンの <code>DEEPINFER_*</code> スイッチを 1 か所にまとめた定義 <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L97-L210" target="_blank" rel="noopener noreferrer">environ.py</a>）</td><td>各ページ</td></tr>
+<tr><td><code>deep_cluster/</code></td><td>アクセラレータカードのランタイムに依存しないハードウェア検出（NVIDIA / Ascend）と、NUMA によるコアのバインド <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deep_cluster/hardware/device.py#L17-L23" target="_blank" rel="noopener noreferrer">device.py</a>）</td><td>このページ</td></tr>
+<tr><td><code>examples/</code> · <code>eval/</code> · <code>tests/</code></td><td>オフライン推論、ベンチマーク、パラメータスイープのスクリプト。AIME 2026、HLE、GPQA Diamond の評価。PPL のベースラインを含む pytest の回帰テスト <span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/eval/README.md?plain=1#L1-L17" target="_blank" rel="noopener noreferrer">eval/README.md</a>）</td><td><a href="#deepinfer/determinism">第 5 ページ</a></td></tr>
+<tr><td><code>vendor/</code></td><td>6 個の git サブモジュール。ビルド時にだけ取得する <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/.gitmodules#L1-L18" target="_blank" rel="noopener noreferrer">.gitmodules</a>）</td><td>下の表</td></tr>
+</tbody></table></div>
+<p>DeepInfer は、カーネルの大部分をゼロから書いているわけではありません。DeepSeek がすでに公開している一群のカーネルライブラリの上に立っています。README がそれらを挙げています。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L23" target="_blank" rel="noopener noreferrer">README 23 行目</a>）表 D1-2 の「DeepInfer での役割」の列には、DeepInfer がそれらをどう呼び出すかだけを書きました。これらのライブラリ自体のコードは、この本では読んでいません。</p>
+<div class="table-wrap"><table><thead><tr><th>カーネルライブラリ</th><th>DeepInfer での役割</th><th>取り込み方</th></tr></thead><tbody>
+<tr><td><a href="https://github.com/deepseek-ai/FlashMLA" target="_blank" rel="noopener noreferrer">FlashMLA</a></td><td>アテンションの計算：アテンションバックエンドが、KV キャッシュを読むアテンションとスパースアテンションをここからインポートする <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/attention_backend.py#L2-L3" target="_blank" rel="noopener noreferrer">attention_backend.py</a>）</td><td>サブモジュール</td></tr>
+<tr><td><a href="https://github.com/deepseek-ai/DeepGEMM" target="_blank" rel="noopener noreferrer">DeepGEMM</a></td><td>行列積：線形層、MoE 層、アテンションのすべてがインポートする <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/linear.py#L3-L4" target="_blank" rel="noopener noreferrer">linear.py</a>）</td><td>サブモジュール（Ascend は DeepGEMM-Ascend）</td></tr>
+<tr><td><a href="https://github.com/deepseek-ai/DeepEP" target="_blank" rel="noopener noreferrer">DeepEP</a></td><td>エキスパート並列の通信：MoE 層が通信バッファ <code>EPBuffer</code> をここからインポートする <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L17" target="_blank" rel="noopener noreferrer">mlp.py</a>）</td><td>サブモジュール（Ascend は <a href="https://github.com/deepseek-ai/DeepEP-Ascend" target="_blank" rel="noopener noreferrer">DeepEP-Ascend</a>）</td></tr>
+<tr><td><a href="https://github.com/deepseek-ai/DeepSelect" target="_blank" rel="noopener noreferrer">DeepSelect</a></td><td>top-k 選択：サンプラーとインデックス付きアテンションが <code>topk</code> をここからインポートする <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler.py#L12" target="_blank" rel="noopener noreferrer">sampler.py</a>）</td><td>サブモジュール</td></tr>
+<tr><td><a href="https://github.com/deepseek-ai/TileKernels" target="_blank" rel="noopener noreferrer">TileKernels</a></td><td>量子化の変換、回転位置埋め込みなどの小さな演算子 <span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/rotary_embedding.py#L32" target="_blank" rel="noopener noreferrer">rotary_embedding.py</a>）</td><td>pip パッケージ <code>tile-kernels==2.1.0</code></td></tr>
+<tr><td><a href="https://github.com/tile-ai/tilelang" target="_blank" rel="noopener noreferrer">TileLang</a></td><td>カーネルを書くための言語：<code>tilelang_ops/</code> の下の 60 個のファイルがこれをインポートしている。README のいう自作の TileLang カーネルがこれにあたる <span class="ev ev-code">コード上の事実</span></td><td>pip パッケージ <code>tilelang==0.1.15</code></td></tr>
+</tbody></table></div>
+<p>README は TileKernels を他のカーネルライブラリと並べていますが、サブモジュールではなく、<code>requirements.txt</code> にある pip 依存です。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/requirements.txt#L16-L17" target="_blank" rel="noopener noreferrer">requirements.txt</a>）ビルドスクリプトはプラットフォームごとにサブモジュールを選びます。NVIDIA は DeepSelect、FlashMLA、DeepEP、DeepGEMM を使い、Ascend は後ろの 2 つをそれぞれの Ascend 版に置き換えます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/scripts/build_vendor.sh#L7-L22" target="_blank" rel="noopener noreferrer">build_vendor.sh</a>）これらのライブラリは、DeepSeek 社内で使っているものと同じバージョンなのでしょうか。Q&amp;A ドキュメントによると、おおむね同じで、エンドツーエンドの性能差は最大 5% だそうです。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L233-L237" target="_blank" rel="noopener noreferrer">Q&amp;A 233–237 行目</a>）</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは、とてもよくある「スクリプト層とネイティブコア」の構造です。Python が流れと設定を受け持ち、ホットパスは C++ に任せます。毎ステップ実行するスケジューリングと入力準備は <code>csrc/</code> に書かれ、pybind11 で Python に公開されます。行列積やアテンションなどの演算子は、さらにその下の CUDA や Ascend のカーネルに渡されます。データベースやブラウザも、よくこのように層に分けられています。</p>
+
+<h2 id="sec-5">1.5 誰が動かせるか、何枚のカードが要るか、壊れたらどうするか</h2>
+<p>まず、参入のハードルです。ハードウェアは 2 種類だけで、NVIDIA SM100 GPU と Huawei Ascend 950 NPU です。ソフトウェアは Linux、GCC 13 以上、Python 3.12 が必要で、NVIDIA は CUDA 13、Ascend は CANN 9.2 が必要です。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L33-L52" target="_blank" rel="noopener noreferrer">README 33–52 行目</a>）オフラインの例の既定の引数は <code>--ep 8</code> で、8 カードのマシン 1 台を想定して書かれています。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/offline_inference.py#L13" target="_blank" rel="noopener noreferrer">offline_inference.py</a>）ベンチマークの規模は環境で決まります。<code>ep_size = WORLD_SIZE × 見えるカード数</code> で、<code>WORLD_SIZE</code> はノード数です。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/README.md?plain=1#L61" target="_blank" rel="noopener noreferrer">examples/README 61 行目</a>）</p>
+<p>そのため、このコラムの読者の多くは DeepInfer を動かせませんし、この本も動かしていません。下の数字はすべて DeepSeek 自身の報告で、この本では再測定していません。</p>
+<div class="table-wrap"><table><thead><tr><th>数字</th><th>条件</th><th>出典</th></tr></thead><tbody>
+<tr><td>1 日 155 兆トークン</td><td>単一のクラスタ、DeepSeek-V4.1-Flash のオンラインサービス</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L17" target="_blank" rel="noopener noreferrer">Q&amp;A 17 行目</a> <span class="ev ev-report">上流レポート</span></td></tr>
+<tr><td>38 米ドル / GPU・時</td><td>全体の収入。谷時（オフピーク）の料金で計算</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L17" target="_blank" rel="noopener noreferrer">Q&amp;A 17 行目</a> <span class="ev ev-report">上流レポート</span></td></tr>
+<tr><td>プリフィル 約 6 万–9 万 token/s/GPU</td><td>スループットはキャッシュにミスした入力トークンだけを数える。SM100 4 枚、EP4DP4、エキスパート 384 + 32 個、コンテキスト 131,072、DP ランクごとに 1 ステップあたり 4,096–65,536 トークン、デコーダー層の有界リプレイ 140 トークン。1 ステップあたり約 70–730 ms。グラフから読み取った値</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/images/prefill_pareto.png" target="_blank" rel="noopener noreferrer">prefill_pareto.png</a> <span class="ev ev-report">上流レポート</span></td></tr>
+<tr><td>デコード 約 2,600–26,000 token/s/GPU、ユーザーあたり 約 325–103 token/s</td><td>SM100 64 枚、EP64DP64、エキスパート 384 + 64 個、コンテキスト 131,072、ランクごとに 8–256 リクエスト、ドラフト長 3、ドラフト 1 個あたり受理率 75% として換算。グラフから読み取った値</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/images/decode_pareto.png" target="_blank" rel="noopener noreferrer">decode_pareto.png</a> <span class="ev ev-report">上流レポート</span></td></tr>
+<tr><td>約 100 PiB の SSD</td><td>3FS 上で KV キャッシュに割り当てられた容量</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L153" target="_blank" rel="noopener noreferrer">Q&amp;A 153 行目</a> <span class="ev ev-report">上流レポート</span></td></tr>
+<tr><td>約 80%</td><td>本番のロードバランシングが、「完全に均衡したオフラインのベンチマーク」に対して達成できる割合</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L127" target="_blank" rel="noopener noreferrer">Q&amp;A 127 行目</a> <span class="ev ev-report">上流レポート</span></td></tr>
+</tbody></table></div>
+<p>2 つの性能グラフは、どちらも README が述べているベンチマークです。プリフィルは SM100 4 枚、デコードは SM100 64 枚で、それぞれ 1 つのスケールアップドメインの中で測っています。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L83" target="_blank" rel="noopener noreferrer">README 83 行目</a>）デコードのグラフのスループットは、実測の受理率ではなく、仮定した受理率で換算したものです。この計算の仕方は<a href="#deepinfer/spec-sched">第 4 ページ</a>で詳しく扱います。</p>
+<p>155 兆トークンとは、どれくらいの規模でしょうか。1 日 86,400 秒で割ると、155 × 10¹² ÷ 86,400 ≈ 18 億 token/s です。Strata は RTX 5070 1 枚で答えを書くのに約 93 token/s（<a href="#chapter/01">第 1 章</a>）なので、18 億 ÷ 93 ≈ 1900 万です。<span class="ev ev-est">教育用の試算</span> この比は桁数の感覚をつかむためだけのものです。Q&amp;A ドキュメントは、155 兆のうち入力がどれだけ、キャッシュヒットがどれだけかを述べていませんし、Strata の 93 は出力だけを数えています。</p>
+<p><strong>弾力的なスケーリングと耐障害性。</strong>Q&amp;A ドキュメントには、本番でトラフィックの増減や故障したカードにどう対応するかを説明した節があります。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L193-L211" target="_blank" rel="noopener noreferrer">Q&amp;A 193–211 行目</a>）プリフィルは「キャッシュにミスしたトークンの数」で必要な台数を決め、デコードは「実行中のリクエスト数」で調整します。調整のたびに速度が制限され、上限と下限もあります。デコードエンジンは停止の通知を受けると 1 分間の猶予期間があり、終わっていないリクエストは KV キャッシュごとまとめて別のデコードエンジンに渡され、続きが処理されます。普段から余裕を残しています。プールには待機中の空きマシンがあり、オンラインのインスタンスも計算上の需要より多く用意されています。クォータ使用率が 0.8 を超えているときは、縮小が禁止されます。再起動には数分かかるので、耐障害性は、冗長性とリクエスト単位の再ルーティングに頼っており、個々のエンジンの再起動を速くすることには頼っていません。</p>
+<p>ワイドエキスパート並列には、特有の弱点があります。1 つのインスタンスのすべてのカードが 1 つの通信ドメインを作るので、1 枚壊れると、インスタンス全体が使えなくなります。再起動のとき、プラットフォームは正常なカードの数から EP のサイズを決め直します。これに対応するものがコードにあります。冗長エキスパートの数は、「エキスパートの総数が <code>ep_size</code> で割り切れる」まで自動で増やされるので、EP のサイズは 384 の約数でなくてもかまいません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L21-L28" target="_blank" rel="noopener noreferrer">eplb/__init__.py</a>）これと障害復旧との関係は、この本の推論で、Q&amp;A ドキュメントにはそう書かれていません。<span class="ev ev-est">教育用の試算</span></p>
+<div class="callout vs"><strong>Strata と比べると：</strong>Strata にはマシンが 1 台しかなく、引き継いでくれる「別のカード」がありません。ライフサイクルの問題は、プロセスをどう起動し、リクエストをどうキャンセルするか（<a href="#chapter/24/c24-cancel">第 24 章「キャンセル」</a>）で、キューの問題は、1 本の列をどう並べるか（<a href="#chapter/25/c25-queueing">第 25 章「待ち行列理論の入門」</a>）です。クラスタでは、カードの故障が日常なので、「カードが 1 枚減っても、サービスを続けられるか」が設計の一部になります。</div>
+
+<h2 id="sec-6">1.6 このコラムの読み方</h2>
+<p>このあとの 4 ページでは、それぞれ本番システムの一部を取り上げ、その仕組みを説明してから、コードに降りていきます。どのページも、まずこの本で学んだ概念に戻り、そのうえで、クラスタではどこが違うかを説明します。図 D1-5 が道案内です。</p>
+<figure class="fig"><svg viewBox="0 0 400 282" role="img" aria-label="図 D1-5：コラムの後半 4 ページがそれぞれ 2 つの問いに答え、この本の関連する章と対応している">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="12">このページのあとの 4 ページが、それぞれ 2 つの問いに答えます</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="8" y="28" width="188" height="118" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="48" font-size="12">第 2 ページ</text>
+<text class="f-text" fill="#182f2b" x="20" y="68" font-size="13" font-weight="600">ワイドエキスパート並列</text>
+<text class="f-text" fill="#182f2b" x="20" y="92" font-size="12">なぜ 64 枚に敷き詰める？</text>
+<text class="f-text" fill="#182f2b" x="20" y="112" font-size="12">負荷をどうならす？</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="136" font-size="12">対応：第 5、10、12、21 章</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="204" y="28" width="188" height="118" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="216" y="48" font-size="12">第 3 ページ</text>
+<text class="f-text" fill="#182f2b" x="216" y="68" font-size="13" font-weight="600">E/P/D 分離と KV 保存</text>
+<text class="f-text" fill="#182f2b" x="216" y="92" font-size="12">VE、P、D をなぜ分ける？</text>
+<text class="f-text" fill="#182f2b" x="216" y="112" font-size="12">KV を 72 時間以上どう持つ？</text>
+<text class="f-muted" fill="#5c6d66" x="216" y="136" font-size="12">対応：第 8、16、17、20 章</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="8" y="154" width="188" height="118" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="174" font-size="12">第 4 ページ</text>
+<text class="f-text" fill="#182f2b" x="20" y="194" font-size="13" font-weight="600">投機実行とスケジュール</text>
+<text class="f-text" fill="#182f2b" x="20" y="218" font-size="12">推測は何個、検証は何個？</text>
+<text class="f-text" fill="#182f2b" x="20" y="238" font-size="12">CPU の準備中も GPU は動く</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="262" font-size="12">対応：第 14、18、19、25 章</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="204" y="154" width="188" height="118" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="216" y="174" font-size="12">第 5 ページ</text>
+<text class="f-text" fill="#182f2b" x="216" y="194" font-size="13" font-weight="600">バッチ不変と構造化出力</text>
+<text class="f-text" fill="#182f2b" x="216" y="218" font-size="12">同じ入力なのに出力が違う？</text>
+<text class="f-text" fill="#182f2b" x="216" y="238" font-size="12">有効な JSON だけ出すには？</text>
+<text class="f-muted" fill="#5c6d66" x="216" y="262" font-size="12">対応：第 2、23、26 章</text>
+</svg><figcaption>図 D1-5　4 ページは、どの順番で読んでもかまいません。先に対応する章を読み、そのあとコラムのページを読むと、「1 台のマシン」と「1 つのクラスタ」の違いがいちばん見えやすくなります。</figcaption></figure>
+<ul>
+<li><a href="#deepinfer/wide-ep">第 2 ページ ワイドエキスパート並列</a>：アテンションはデータ並列、エキスパートはエキスパート並列で処理する。EP64 が EP8 よりスループットが高い理由。EPLB と 3 つのデータ並列ロードバランサーが、どう仕事を分けるか。先に<a href="#chapter/10">第 10 章</a>と<a href="#chapter/21/c21-parallelism">第 21 章「パイプライン並列とテンソル並列」</a>を読んでください。</li>
+<li><a href="#deepinfer/pd-kv">第 3 ページ E/P/D 分離と 72 時間の KV キャッシュ</a>：VE、P、D をなぜ分けるのか。KV キャッシュを SSD クラスタにどう保存し、ヒットしたあと、ごく一部だけをどう再計算するのか。先に<a href="#chapter/17/c17-paging">第 17 章「ページング管理」</a>と<a href="#chapter/20">第 20 章</a>を読んでください。</li>
+<li><a href="#deepinfer/spec-sched">第 4 ページ DSpark 投機的デコーディングとゼロオーバーヘッド・スケジューリング</a>：ドラフトが一度に何個推測し、信頼度で何個検証するかを決める仕組み。CPU が次のステップを準備している間も GPU が止まらない仕組み。先に<a href="#chapter/18">第 18 章</a>と<a href="#chapter/25/c25-continuous-batching">第 25 章「連続バッチ処理」</a>を読んでください。</li>
+<li><a href="#deepinfer/determinism">第 5 ページ バッチ不変、決定的サンプリング、構造化出力</a>：同じ入力が、サーバーでなぜ変わってしまうのか、どうすれば同じに戻せるのか。モデルに有効な JSON だけを出力させるにはどうするか。先に<a href="#chapter/26">第 26 章</a>と<a href="#chapter/02">第 2 章</a>を読んでください。</li>
+</ul>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>DeepInfer と Strata は同じ概念を扱いますが、難題は正反対です。Strata はモデルを 1 台のコンピュータに押し込まなければならず、DeepInfer は数百枚のカードで多くの人に同時にサービスしなければなりません。</li>
+<li>本番システムは、Recipe、Entrypoint、E/P/D 分離された VE / P / D、4 つのロードバランサー、KV ストレージクラスタでできています。今回公開されたのはエンジン本体と EPLB で、オフライン推論ができます。</li>
+<li>KV キャッシュシステム、3 つの段階をつなぐ接着コード、データ並列ロードバランサーは、リポジトリにありません。エンジンはそれらのためにタイプと空のフックを残してあり、デプロイする人が自分で補う必要があります。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「DeepInfer がオープンソースになったから、持ってくれば DeepSeek のようなオンラインサービスが組める。」</strong></p>
+<p>今回のリポジトリが提供するのはオフライン推論だけです。1 つのプロセスがプロンプトの束を受け取り、計算が終わったら終了します。ユーザーのリクエストを受ける HTTP サービスも、KV キャッシュシステムも、プリフィルとデコードをつなぐ接着コードも、データ並列ロードバランサーもありません。README が挙げるハードウェアは SM100 と Ascend 950 だけで、Q&amp;A ドキュメントが勧める最小の効率的な単位は 128 枚のカードです。いちばんの価値は、本番級のエンジンが内部でどう書かれているかを見られることです。</p></div>
+
+<details class="deep"><summary>もう一歩深く：オフライン推論 1 回の呼び出しの連鎖と、公開の境界を自分で確かめる方法</summary>
+<h3>コマンドラインからカーネルまで</h3>
+<p><code>python examples/offline_inference.py</code> を例にします。下の各ステップは、固定したコミット <code>774ce244</code> のソースと突き合わせて確かめました。</p>
+<ol>
+<li><strong>プロセスを起動する。</strong>例の既定は <code>--ep 8</code> です（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/offline_inference.py#L12-L17" target="_blank" rel="noopener noreferrer">offline_inference.py 12–17 行目</a>）。<code>examples/_launch.py</code> の <code>run_dp</code> は、<code>RANK</code> と <code>WORLD_SIZE</code> に従って、このノードが担当する DP ランクごとに子プロセスを 1 つ起動します（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_launch.py#L26-L40" target="_blank" rel="noopener noreferrer">26–40 行目</a>）。</li>
+<li><strong>エンジンを作る。</strong><code>LLM.__init__</code> は <code>offline_inference=True</code> で <code>EngineArgs</code> を作り、<code>LLMEngine.from_engine_args</code> を呼びます（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py#L70-L84" target="_blank" rel="noopener noreferrer">llm.py 70–84 行目</a>）。<code>EngineArgs</code> のエンジンタイプの既定は <code>NORMAL</code> です（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/arg_utils.py#L41" target="_blank" rel="noopener noreferrer">arg_utils.py 41 行目</a>）。</li>
+<li><strong>ゼロオーバーヘッド・スケジューリングは既定でオン。</strong><code>environ.py</code> の <code>DEEPINFER_ZERO_OVERHEAD_SCHEDULING</code> の元の既定値はオフです（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L179" target="_blank" rel="noopener noreferrer">179 行目</a>）。しかし、ユーザーが設定していなければ、<code>EngineArgs.__post_init__</code> がエンジンタイプに応じてオンにします。<code>NORMAL</code> と <code>COMPLETION</code> はオン、<code>PROMPT</code> はオフです（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/arg_utils.py#L48-L55" target="_blank" rel="noopener noreferrer">arg_utils.py 48–55 行目</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/engine_type.py#L15-L17" target="_blank" rel="noopener noreferrer">engine_type.py 15–17 行目</a>）。そのため、README の「既定で有効」はコードと一致します。</li>
+<li><strong>トークン化と投入。</strong><code>generate()</code> は各プロンプトを <code>_add_request</code> に渡します。トークン ID が与えられていなければ、Hugging Face のトークナイザーでエンコードします（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py#L144-L166" target="_blank" rel="noopener noreferrer">llm.py 144–166 行目</a>）。本番では、この手順は Recipe が行います。</li>
+<li><strong>メインループ。</strong><code>_run_engine</code> は、未完了のリクエストがなくなるまで <code>LLMEngine.step()</code> を繰り返し呼び、最後に処理中の結果を出し切ります（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py#L168-L195" target="_blank" rel="noopener noreferrer">168–195 行目</a>）。<code>LLMEngine</code> は C++ 拡張 <code>deepinfer._C.engine</code> から <code>Scheduler</code>、<code>BlockManager</code> などをインポートします（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L19-L31" target="_blank" rel="noopener noreferrer">llm_engine.py 19–31 行目</a>）。この拡張は、<code>setup.py</code> が <code>csrc/</code> 以下のソースファイルをコンパイルして作るもので、<code>cuda_utils</code>、<code>engine</code>、<code>graph_timer</code> の 3 つのサブモジュールに分かれています（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/pybind.cpp#L7-L17" target="_blank" rel="noopener noreferrer">pybind.cpp</a>）。</li>
+<li><strong>各カードの上で。</strong><code>Worker</code> が毎ステップのフォワード、後処理、サンプリングを進め（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L4" target="_blank" rel="noopener noreferrer">worker.py</a>）、<code>ModelRunner</code> がモデルを実行します（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L53" target="_blank" rel="noopener noreferrer">model_runner.py</a>）。モデルはレジストリで見つけます。アーキテクチャ名 <code>DeepseekV41ForCausalLM</code> は <code>deepseek_vl.DeepseekVLForCausalLM</code> に対応し（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/__init__.py#L15-L17" target="_blank" rel="noopener noreferrer">models/__init__.py 15–17 行目</a>）、これはテキスト専用の <code>DeepseekForCausalLM</code> を継承しています（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/deepseek_vl.py#L26" target="_blank" rel="noopener noreferrer">deepseek_vl.py 26 行目</a>）。</li>
+<li><strong>カーネルに行き着く。</strong>プラットフォームクラスが、どの TileLang 演算子を使うかを決めます。GPU は <code>cuda</code>、NPU は <code>asc</code> です（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/platform.py#L55-L88" target="_blank" rel="noopener noreferrer">platform.py 55–88 行目</a>）。残りの演算子は、表 D1-2 のカーネルライブラリから来ます。</li>
+</ol>
+<h3>各ページで使うスイッチ</h3>
+<p>エンジンのスイッチは <code>deepinfer/environ.py</code> に集められていて、最初に読むときに解析されてキャッシュされます（例、評価スクリプト、一部のデバッグ用スイッチは、環境変数を直接読みます）。下に挙げるのは、README が触れていて、後のページで詳しく扱うものです。</p>
+<div class="table-wrap"><table><thead><tr><th>環境変数</th><th>既定値</th><th>役割</th><th>行</th></tr></thead><tbody>
+<tr><td><code>DEEPINFER_ACCELERATOR</code></td><td><code>nvidia</code></td><td>プラットフォームを選ぶ：<code>nvidia</code> または <code>ascend</code></td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L101" target="_blank" rel="noopener noreferrer">101</a></td></tr>
+<tr><td><code>DEEPINFER_USE_NEXTN_DECODE</code></td><td>5</td><td>ドラフトの最大個数。0 で投機的デコーディングをオフにする</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L129-L130" target="_blank" rel="noopener noreferrer">129–130</a></td></tr>
+<tr><td><code>DEEPINFER_ENABLE_MTP_VARLEN</code></td><td>オフ</td><td>可変長の検証</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L131" target="_blank" rel="noopener noreferrer">131</a></td></tr>
+<tr><td><code>DEEPINFER_ZERO_OVERHEAD_SCHEDULING</code></td><td>上の手順 3 を参照</td><td>ゼロオーバーヘッド・バッチスケジューラー</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L179" target="_blank" rel="noopener noreferrer">179</a></td></tr>
+<tr><td><code>DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE</code></td><td><code>off</code></td><td>SWA の有界リプレイでの切り詰め方</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L188-L194" target="_blank" rel="noopener noreferrer">188–194</a></td></tr>
+<tr><td><code>DEEPINFER_BATCH_INVARIANT</code></td><td>オフ</td><td>バッチ不変の推論</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L197" target="_blank" rel="noopener noreferrer">197</a></td></tr>
+</tbody></table></div>
+<h3>公開の境界を自分で確かめる</h3>
+<p>このページの「公開されていない」という判断は、クローンの中で 3 つのコマンドで再確認できます。</p>
+<ul>
+<li><code>git show 774ce244:deepinfer/engine/llm_engine.py | sed -n '800,858p'</code>：「ここから先はすべて仮想関数」というコメントと、説明だけの関数の並びが見えます。</li>
+<li><code>git grep -n "def send_processed_prompts" 774ce244</code>：定義は <code>llm_engine.py</code> の 1 か所だけで、それを実装するサブクラスはありません。</li>
+<li><code>git grep -n -w "3FS" 774ce244 -- '*.py' '*.cpp' '*.hpp'</code> と <code>git grep -n "kvcache-store\|kvcache_store" 774ce244 -- '*.py' '*.cpp' '*.hpp'</code>：どちらも結果が出ません。3FS と kvcache-store は Q&amp;A ドキュメントにしか出てきません。（<code>-i</code> は付けないでください。大文字小文字を区別しないと、ログの書式文字列にある <code>%.3fs</code> が誤ってマッチします。）</li>
+</ul>
+<h3>このページが確かめていないこと</h3>
+<p><code>vendor/</code> の下の 6 個のサブモジュールは、この本が使ったクローンでは展開されていません。そのため、このページは DeepInfer がそれらをどうインポートするかだけを書き、実装の評価はしていません。deepseek-recipe は別のリポジトリで、このページの説明はすべて Q&amp;A ドキュメントの 19 行目、35 行目、290–312 行目によります。モデルの形状は Hugging Face のコミット <code>1bae0e10</code> の <code>config.json</code> によるもので、DeepInfer の固定したコミットには縛られません。2 つの性能グラフの数値は、この本がグラフから読み取ったもので、精度は目盛りの半分ほどです。</p>
+</details>
