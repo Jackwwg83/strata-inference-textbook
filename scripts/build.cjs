@@ -50,6 +50,7 @@ for (const n of ['chapters', 'sources', 'tracks', 'weeks', 'glossary', 'walkthro
     const c = tr('courses'); if (c) Book.courses = c;
     const p = tr('provenance'); if (p) Object.assign(Book.provenance, p);
   }
+  Book.columns = loadColumns(lang, missing);
   for (const c of Book.chapters) {
     const own = lang === 'zh' ? `content/chapters/${c.id}.html` : `content/i18n/${lang}/chapters/${c.id}.html`;
     if (!exists(own)) missing.push(`chapters/${c.id}.html`);
@@ -87,6 +88,31 @@ for (const n of ['chapters', 'sources', 'tracks', 'weeks', 'glossary', 'walkthro
   return { Book, missing };
 }
 
+// Columns (content/columns.json): short series of pages beside the book, e.g. the DeepInfer column.
+// A translation overlays the titles from content/i18n/<lang>/columns.json and has its own page files.
+// A page whose Chinese master does not exist yet is left out, so a column can grow page by page.
+function loadColumns(lang, missing) {
+  if (!exists('content/columns.json')) return [];
+  const trPath = `content/i18n/${lang}/columns.json`;
+  const tr = lang === 'zh' ? null : (exists(trPath) ? new Map(json(trPath).map(c => [c.id, c])) : (missing.push('columns.json'), new Map()));
+  return json('content/columns.json').map(col => {
+    const t = tr && tr.get(col.id), o = { ...col };
+    if (t) for (const f of ['nav', 'title', 'deck']) if (t[f] !== undefined) o[f] = t[f];
+    const tp = new Map(((t && t.pages) || []).map(p => [p.id, p]));
+    o.pages = col.pages.filter(p => exists(`content/columns/${col.id}/${p.id}.html`)).map(p => {
+      const q = { ...p }, pt = tp.get(p.id);
+      if (pt) for (const f of ['title', 'deck']) if (pt[f] !== undefined) q[f] = pt[f];
+      const own = lang === 'zh' ? `content/columns/${col.id}/${p.id}.html` : `content/i18n/${lang}/columns/${col.id}/${p.id}.html`;
+      if (!exists(own)) missing.push(`columns/${col.id}/${p.id}.html`);
+      q.html = read(exists(own) ? own : `content/columns/${col.id}/${p.id}.html`);
+      if (RTL.has(lang)) q.html = isolateNumbers(q.html);
+      q.plain = plain(q.html);
+      return q;
+    });
+    return o;
+  }).filter(c => c.pages.length);
+}
+
 // Viz widgets: the framework first, then pure math modules, then widgets, all in name order.
 const vizFiles = fs.readdirSync(path.join(root, 'src/viz')).filter(n => n.endsWith('.js') && n !== 'core.js').sort((a, b) => (a.endsWith('.math.js') ? 0 : 1) - (b.endsWith('.math.js') ? 0 : 1) || a.localeCompare(b)).map(n => 'viz/' + n);
 const scripts = ['lab-math.js', 'labs.js', 'i18n.js', 'viz/core.js', ...vizFiles, 'prefs.js', 'app.js'].map(n => `<script>\n${read('src/' + n).replace(/<\/script/gi, '<\\/script')}\n</script>`).join('\n');
@@ -115,7 +141,7 @@ ${labelVars}</style></head><body>
 <button class="skip-link" id="skip-content">${U.bSkip}</button>
 <header class="topbar"><button id="menu-button" class="icon-button menu-button" aria-label="${U.bMenuOpen}" aria-expanded="false" aria-controls="sidebar">☰</button>
 <a class="brand" href="#home" aria-label="${U.bHomeAria}"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span><strong>${U.bBrand.replace(/ · (.+)$/, '<span class="brand-tail"> · $1</span>')}</strong><small>AN OPEN SYSTEMS TEXTBOOK</small></span></a>
-<nav class="top-nav" aria-label="${U.bNavAria}"><a href="#home" data-view="home">${U.navCourse}</a><a href="#labs" data-view="labs">${U.navLabs}</a><a href="#sources" data-view="sources">${U.navSources}</a>${teacherNav}<a href="#notes" data-view="notes">${U.navNotes}</a></nav>
+<nav class="top-nav" aria-label="${U.bNavAria}"><a href="#home" data-view="home">${U.navCourse}</a><a href="#labs" data-view="labs">${U.navLabs}</a>${Book.columns.map(c => `<a href="#${c.id}" data-view="${c.id}">${esc(c.nav)}</a>`).join('')}<a href="#sources" data-view="sources">${U.navSources}</a>${teacherNav}<a href="#notes" data-view="notes">${U.navNotes}</a></nav>
 <span class="readout" aria-hidden="true">READ <b id="read-pct">00%</b></span><div class="top-actions">${langSwitcher(lang, built, U)}<button id="search-button" class="search-button" aria-label="${U.bSearchAria}">${U.bSearch} <kbd>⌘ K</kbd></button><button id="theme-button" class="icon-button" aria-label="${U.bTheme}">◐</button><a class="icon-button github-link" href="${esc(Book.provenance.repoUrl)}" target="_blank" rel="noopener noreferrer" aria-label="${U.bGithub}" title="GitHub">${githubIcon}</a></div><i class="read-progress" id="read-progress" aria-hidden="true"></i></header>
 <aside id="sidebar" class="sidebar"></aside><button id="sidebar-overlay" class="sidebar-overlay" aria-label="${U.bMenuClose}" tabindex="-1"></button>
 <main id="main" class="main" tabindex="-1"></main>
@@ -137,10 +163,12 @@ function staticPage(Book, lang) {
   const wrap = s => refs(s).replace(/<table>/g, '<div class="table-wrap"><table>').replace(/<\/table>/g, '</table></div>').replace(/<details class="deep">/g, '<details class="deep" open>').replace(/href="#chapter\/(\d{2})\/([a-z0-9-]+)"/g, 'href="#$2"').replace(/href="#chapter\/(\d{2})"/g, 'href="#chapter-$1"');
   const toc = Book.chapters.map(c => `<li><a href="#chapter-${c.id}">${c.id} · ${esc(c.title)}</a></li>`).join('');
   const chapters = Book.chapters.map(c => `<section class="chapter-print" id="chapter-${c.id}"><p class="metadata">CHAPTER ${c.id} · ${esc(c.part)} · ${esc(c.level)}</p><h1>${esc(c.title)}</h1><p>${esc(c.deck)}</p><p class="metadata">${U.sCourses}${esc(c.courses.join(' / '))}<br>${U.fullPrereq}${esc(c.prereq)}</p><h3>${U.sGoals}</h3><ul>${c.goals.map(g => `<li>${esc(g)}</li>`).join('')}</ul>${wrap(c.html).replace(/id="sec-(\d+)"/g, `id="c${c.id}-sec-$1"`)}<h2>${U.sQuiz}</h2>${c.quiz.map((q, i) => `<h3>${i + 1}. ${esc(q.text)}</h3><p>${q.choices.map((a, j) => String.fromCharCode(65 + j) + '. ' + esc(a)).join('<br>')}</p><p><strong>${U.fullAnswer(String.fromCharCode(65 + q.correct))}</strong>${esc(q.why)}</p>`).join('')}<h3>${U.fullOpen}</h3><p>${esc(c.problem)}</p><p><strong>${U.fullArgument}</strong>${esc(c.answer)}</p></section>`).join('');
+  const colLinks = s => s.replace(/href="#([a-z]+)\/([a-z0-9-]+)\/([a-z0-9-]+)"/g, (m, c, p, a) => (c === 'chapter' ? m : `href="#${a}"`)).replace(/href="#([a-z]+)\/([a-z0-9-]+)"/g, (m, c, p) => (c === 'chapter' ? m : `href="#${c}-${p}"`));
+  const columns = Book.columns.map(col => col.pages.map((p, i) => `<section class="chapter-print" id="${col.id}-${p.id}"><p class="metadata">${esc(col.title)} · ${i + 1}/${col.pages.length} · ${esc(col.upstream.name)} ${col.upstream.commit}</p><h1>${esc(p.title)}</h1><p>${esc(p.deck)}</p>${colLinks(wrap(p.html)).replace(/id="sec-(\d+)"/g, `id="${col.prefix}-${p.id}-sec-$1"`)}</section>`).join('')).join('');
   const h = U.sWeekHead;
   const weeks = `<div class="table-wrap"><table><thead><tr><th>${h[0]}</th><th>${h[1]}</th><th>${h[2]}</th><th>${h[3]}</th></tr></thead><tbody>` + Book.weeks.map(w => `<tr><td>${w.week}</td><td>${esc(w.chapters)} · ${esc(w.title)}</td><td>${esc(w.lab)}</td><td>${esc(w.deliverable)}</td></tr>`).join('') + '</tbody></table></div>';
   const teacher = Book.teacher ? `<section class="chapter-print"><h1>${U.fullTeacher}</h1>${weeks}${wrap(Book.teacher)}</section>` : '';
-  return `<!doctype html><html lang="${U.htmlLang}"${RTL.has(lang) ? ' dir="rtl"' : ''}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${U.sTitle}</title><style>${staticStyle}</style></head><body><h1>${U.sHeading}</h1><p>${U.sCounts}</p><p class="metadata">${U.sEdition}${Book.provenance.edition} / ${Book.provenance.date}<br>${U.sCommit}${Book.provenance.commit}<br>${esc(Book.provenance.scope)}<br>${esc(Book.provenance.measurements)}<br>${U.sAuthor(esc(Book.provenance.author), esc(Book.provenance.license))}<br>${U.sErrata}<a href="${esc(Book.provenance.issues)}">${esc(Book.provenance.issues)}</a></p><p class="noprint"><a href="index.html">${U.sOpenApp}</a>${U.sPrintable}</p><h2>${U.sToc}</h2><ol>${toc}</ol>${chapters}${teacher}<section class="chapter-print"><h1>${U.sLabs}</h1>${Book.labs.map(l => `<h2>${esc(l.title)}</h2><p>${esc(l.description)}</p><p><strong>${U.labBoundary}</strong>${esc(l.assumptions)}</p><p><strong>${U.sTask}</strong>${esc(l.task)}</p><p class="noprint"><a href="index.html#lab/${l.id}">${U.sOpenLab}</a></p>`).join('')}</section><section class="chapter-print"><h1>${U.sWalk}</h1><p>${U.sWalkHint}</p>${Book.walkthroughs.map(w => `<h2>${w.source} · ${esc(w.title)}</h2><pre><code>${esc(w.code)}</code></pre><ol>${w.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol><p>${esc(w.challenge)}</p>`).join('')}</section><section class="chapter-print"><h1>${U.sideGlossary}</h1>${Book.glossary.map(t => `<h3>${esc(t.en)} · ${esc(t.zh)}</h3><p>${esc(t.meaning)} <a href="#chapter-${t.chapter}">${U.crumbChapter(t.chapter)}</a></p>`).join('')}</section><section class="chapter-print"><h1>${U.sSources}</h1>${Book.sources.map(s => `<h3>${s.id} · ${esc(s.title)}</h3><p>${esc(s.note)}</p><p class="metadata">${s.path ? esc(s.path) + ` · L${s.start}–L${s.end}<br>` : ''}<a href="${esc(s.url)}">${esc(s.url)}</a></p>`).join('')}<p>${U.sDisclaimer}</p><h2>${U.fullLicense}</h2><pre><code>${esc(Book.license)}</code></pre></section></body></html>`;
+  return `<!doctype html><html lang="${U.htmlLang}"${RTL.has(lang) ? ' dir="rtl"' : ''}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${U.sTitle}</title><style>${staticStyle}</style></head><body><h1>${U.sHeading}</h1><p>${U.sCounts}</p><p class="metadata">${U.sEdition}${Book.provenance.edition} / ${Book.provenance.date}<br>${U.sCommit}${Book.provenance.commit}<br>${esc(Book.provenance.scope)}<br>${esc(Book.provenance.measurements)}<br>${U.sAuthor(esc(Book.provenance.author), esc(Book.provenance.license))}<br>${U.sErrata}<a href="${esc(Book.provenance.issues)}">${esc(Book.provenance.issues)}</a></p><p class="noprint"><a href="index.html">${U.sOpenApp}</a>${U.sPrintable}</p><h2>${U.sToc}</h2><ol>${toc}</ol>${chapters}${columns}${teacher}<section class="chapter-print"><h1>${U.sLabs}</h1>${Book.labs.map(l => `<h2>${esc(l.title)}</h2><p>${esc(l.description)}</p><p><strong>${U.labBoundary}</strong>${esc(l.assumptions)}</p><p><strong>${U.sTask}</strong>${esc(l.task)}</p><p class="noprint"><a href="index.html#lab/${l.id}">${U.sOpenLab}</a></p>`).join('')}</section><section class="chapter-print"><h1>${U.sWalk}</h1><p>${U.sWalkHint}</p>${Book.walkthroughs.map(w => `<h2>${w.source} · ${esc(w.title)}</h2><pre><code>${esc(w.code)}</code></pre><ol>${w.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol><p>${esc(w.challenge)}</p>`).join('')}</section><section class="chapter-print"><h1>${U.sideGlossary}</h1>${Book.glossary.map(t => `<h3>${esc(t.en)} · ${esc(t.zh)}</h3><p>${esc(t.meaning)} <a href="#chapter-${t.chapter}">${U.crumbChapter(t.chapter)}</a></p>`).join('')}</section><section class="chapter-print"><h1>${U.sSources}</h1>${Book.sources.map(s => `<h3>${s.id} · ${esc(s.title)}</h3><p>${esc(s.note)}</p><p class="metadata">${s.path ? esc(s.path) + ` · L${s.start}–L${s.end}<br>` : ''}<a href="${esc(s.url)}">${esc(s.url)}</a></p>`).join('')}<p>${U.sDisclaimer}</p><h2>${U.fullLicense}</h2><pre><code>${esc(Book.license)}</code></pre></section></body></html>`;
 }
 
 const dist = path.join(root, 'dist');
