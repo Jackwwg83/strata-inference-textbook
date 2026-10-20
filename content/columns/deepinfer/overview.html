@@ -1,0 +1,293 @@
+<div class="hook"><span class="eyebrow">换个方向看</span>
+<p>这本书一直在做一件事：让一台普通电脑跑起一个大模型，服务一个人。Strata 的 README 开头就写着这个目标，显卡 12 GB 显存起步。<span class="ev ev-report">上游报告</span>[S01]</p>
+<p>推理的另一端是 DeepSeek 的线上服务。按 DeepSeek 自己的说法，一个集群每天要处理 155 万亿个 token。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L17" target="_blank" rel="noopener noreferrer">问答文档第 17 行</a>）2026 年 10 月 20 日，DeepSeek 开源了撑起这个服务的推理框架 DeepInfer。这一页先回答三个问题：它是什么，开源了哪一块，和 Strata 差在哪。</p></div>
+<p class="tldr"><strong>一句话：</strong>DeepInfer 是 DeepSeek-V4.1-Flash 的集群推理引擎：预填充、解码、视觉编码分到不同的机器上，专家铺满几十张卡。这次开源的是引擎本体，能做离线推理；KV 缓存系统、把三段接起来的胶水和数据并行负载均衡器都不在仓库里。</p>
+
+<h2 id="sec-1">1.1 另一端：同样的概念，换成上百张卡</h2>
+<p>DeepInfer 是一个<dfn>推理框架</dfn>，和 Strata 同属第 1 章说的“厨房”那一层（<a href="#chapter/01">第 1 章</a>）。README 第一句话说：它是撑起 DeepSeek 大规模线上服务的高性能推理框架，这次开源的版本提供离线推理，以及大规模服务需要的核心功能。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L3" target="_blank" rel="noopener noreferrer">README 第 3 行</a>）它目前只支持一个模型：DeepSeek-V4.1-Flash。</p>
+<p>它和 Strata 讲的是同一套概念：MoE 专家、KV 缓存、<dfn>预填充（prefill）</dfn>和<dfn>解码（decode）</dfn>、投机解码、批处理。差别在规模。Strata 想办法把一个模型塞进一台电脑；DeepInfer 想办法让很多台机器一起服务很多人。DeepSeek 的问答文档写了这个系统从一开始就定下的三个目标：<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L7-L13" target="_blank" rel="noopener noreferrer">问答第 7–13 行</a>）</p>
+<ol>
+<li>支持多家厂商的加速卡，并把每种平台的性能用足。</li>
+<li>用普通硬件组织预填充和解码：预填充用普通的 8 卡机器，解码用普通的 64–128 卡<dfn>超节点</dfn>，也就是一组用高速互连连成一体的卡。</li>
+<li>KV 缓存保留 72 小时以上：老对话再来时，命中缓存就不用重新预填充。</li>
+</ol>
+<p>先感受一下规模差。问答文档说，解码建议从 EP64 起步，预填充和解码的卡数大约 1:1，所以“最小的高效部署单元”是 64 张卡做预填充、64 张卡做解码。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L65-L67" target="_blank" rel="noopener noreferrer">问答第 65–67 行</a>）EP 是<dfn>专家并行（EP）</dfn>，第 2 页细讲。图 D1-1 把两端放在一起。</p>
+<figure class="fig"><svg viewBox="0 0 400 240" role="img" aria-label="图 D1-1：Strata 一台电脑一张显卡；DeepInfer 的最小高效单元是 64 张卡做预填充加 64 张卡做解码">
+<defs>
+<pattern id="di-overview-gpu-p" width="11" height="11" patternUnits="userSpaceOnUse"><rect class="f-accent" fill="#136d5a" x="0" y="0" width="9" height="9" rx="1.5"/></pattern>
+<pattern id="di-overview-gpu-d" width="11" height="11" patternUnits="userSpaceOnUse"><rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" stroke-width=".8" x=".5" y=".5" width="8" height="8" rx="1.5"/></pattern>
+</defs>
+<text class="f-text" fill="#182f2b" x="66" y="22" font-size="13" font-weight="600" text-anchor="middle">Strata：一台电脑</text>
+<text class="f-text" fill="#182f2b" x="272" y="22" font-size="13" font-weight="600" text-anchor="middle">DeepInfer：最小的高效部署单元</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M134 36V196"/>
+<rect class="f-accent" fill="#136d5a" x="55" y="88" width="22" height="22" rx="3"/>
+<text class="f-text" fill="#182f2b" x="66" y="134" font-size="12" text-anchor="middle">1 张消费级显卡</text>
+<text class="f-muted" fill="#5c6d66" x="66" y="152" font-size="12" text-anchor="middle">显存 12 GB 起步</text>
+<rect fill="url(#di-overview-gpu-p)" x="165" y="55" width="88" height="88"/>
+<rect fill="url(#di-overview-gpu-d)" x="286" y="55" width="88" height="88"/>
+<text class="f-text" fill="#182f2b" x="209" y="164" font-size="12" text-anchor="middle">预填充 64 张</text>
+<text class="f-text" fill="#182f2b" x="330" y="164" font-size="12" text-anchor="middle">解码 64 张</text>
+<text class="f-muted" fill="#5c6d66" x="270" y="186" font-size="12" text-anchor="middle">P : D ≈ 1 : 1，解码建议 EP64 起</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="218" font-size="12" text-anchor="middle">一个方块 = 一张卡</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="234" font-size="12" text-anchor="middle">出处：Strata README；DeepSeek 问答第 67 行</text>
+</svg><figcaption>图 D1-1　Strata 用一张显卡服务一个人；1P + 1D 就能部署，但 DeepSeek 认为最小的高效单元是 64 + 64 张卡。两边用的概念相同，要解决的问题变了。</figcaption></figure>
+<p>下面这张表把两端摆在一起。Strata 一列来自本书各章，DeepInfer 一列来自它的 README、问答文档和代码。</p>
+<div class="table-wrap"><table><thead><tr><th>对比项</th><th>Strata</th><th>DeepInfer</th></tr></thead><tbody>
+<tr><td>目标</td><td>在自己的电脑上跑起一个 1250 亿参数的模型（<a href="#chapter/01">第 1 章</a>）</td><td>同时提高吞吐、降低延迟，服务海量用户 <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>规模</td><td>一台电脑；两三张卡也能一起跑（<a href="#chapter/21">第 21 章</a>）；默认一次服务一条序列（<a href="#chapter/25">第 25 章</a>）</td><td>一个集群每天 155 万亿 token；最小高效单元 64 + 64 张卡 <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>硬件</td><td>NVIDIA、AMD 消费级显卡，显存 12–24 GB，内存 32–64 GB（<a href="#chapter/01">第 1 章</a>）</td><td>NVIDIA SM100 GPU 或华为昇腾 950 NPU <span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L33-L36" target="_blank" rel="noopener noreferrer">README 第 33–36 行</a>）</td></tr>
+<tr><td>模型</td><td>Qwen3.8-Flash-Next：48 层，每层 512 个路由专家加 1 个共享专家，每个 token 选 10 个（<a href="#chapter/10">第 10 章</a>）</td><td>DeepSeek-V4.1-Flash：检查点配置写着 40 层，每层 384 个路由专家加 1 个共享专家，每个 token 选 6 个 <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>专家放在哪</td><td>热门专家在显存，全部专家在内存，没命中的由 CPU 就地算（<a href="#chapter/10">第 10 章</a>）</td><td>用专家并行把专家分到各张卡的显存里，再加冗余专家（<a href="#deepinfer/wide-ep">第 2 页</a>）</td></tr>
+<tr><td>预填充与解码</td><td>同一张卡上先读题、后写答案（<a href="#chapter/16">第 16 章</a>）</td><td>分到不同机器上，叫三段分离（<a href="#deepinfer/pd-kv">第 3 页</a>）</td></tr>
+<tr><td>KV 缓存放在哪</td><td>显存和内存，分页管理（<a href="#chapter/17">第 17 章</a>）</td><td>在途的在显存；分页的 KV 存进约 100 PiB 的 SSD 集群，保留 3–7 天 <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>开源了什么</td><td>整个仓库，MIT 许可（<a href="#chapter/22">第 22 章</a>）</td><td>引擎本体，离线推理 <span class="ev ev-report">上游报告</span>；Apache-2.0 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/pyproject.toml#L14" target="_blank" rel="noopener noreferrer">pyproject.toml</a>）</td></tr>
+</tbody></table></div>
+<p>表里的模型形状来自 Hugging Face 上的检查点配置（<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/config.json" target="_blank" rel="noopener noreferrer">config.json</a>，2026-10-17 版），不在 DeepInfer 仓库里。<span class="ev ev-report">上游报告</span> 硬件一行的具体型号来自 README。<span class="ev ev-report">上游报告</span> 构建脚本只接受 <code>nvidia</code> 和 <code>ascend</code> 两类加速卡。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/build.sh#L5-L11" target="_blank" rel="noopener noreferrer">build.sh</a>）README 还说，DeepInfer 最初主要基于 vLLM 构建。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L95" target="_blank" rel="noopener noreferrer">README 第 95 行</a>）</p>
+<div class="callout vs"><strong>对照 Strata：</strong>Strata 的难题是“装不下”：一张 12 GB 的卡放不下 34 GB 的专家，所以要分层存放、让 CPU 帮忙（<a href="#chapter/10">第 10 章</a>）。DeepInfer 的难题是“忙不过来”：卡有的是，可每张卡要同时伺候很多用户，还要让上百张卡步调一致。所以它开源的代码大半在讲并行、调度和专家负载均衡，很少讲“放不下怎么办”。</div>
+
+<h2 id="sec-2">1.2 一个请求的旅程：生产系统地图</h2>
+<p>DeepSeek 在问答文档里画了一张参考架构图：系统由<dfn>三段分离（E/P/D 分离）</dfn>的计算节点和专门的存储节点组成。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L41-L43" target="_blank" rel="noopener noreferrer">问答第 41–43 行</a>）E 是<dfn>视觉编码器（VE）</dfn>，把图片变成向量；P 是预填充；D 是解码。分开部署的好处是每一段的资源可以单独配，<dfn>首 token 延迟（TTFT）</dfn>和<dfn>逐 token 间隔（TBT）</dfn>也能分开调。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L27-L31" target="_blank" rel="noopener noreferrer">问答第 27–31 行</a>）</p>
+<p>注意力部分用<dfn>数据并行（DP）</dfn>，而且 DP 的份数等于 EP 的份数：每张卡各自服务一批请求的注意力，MoE 层再按专家并行协作。这么多副本要分活，所以 DeepSeek 做了四个负载均衡器：预填充、解码、VE 三个管数据并行副本之间的分配，<dfn>专家负载均衡（EPLB）</dfn>管专家在卡之间的分布。为了不重复预填充，还有一套 KV 缓存存储。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L33" target="_blank" rel="noopener noreferrer">问答第 33 行</a>）进出口还有一个 DeepSeek Recipe，负责在 API 协议和 token 序列之间转换。</p>
+<p>下面的地图按那张架构图重画，并按仓库核对了每一块开没开源。<strong>点一个方块</strong>看它的说明；按<strong>走一步</strong>，跟着一个请求从进门走到出门。</p>
+<div class="viz" data-viz="di-overview-arch"><figure class="fig"><svg viewBox="0 0 400 384" role="img" aria-label="图 D1-2：DeepSeek-V4.1-Flash 生产推理系统的十个部件，以及每个部件的代码是否在这次开源的仓库里">
+<text class="f-muted" fill="#5c6d66" x="200" y="14" font-size="12" text-anchor="middle">用户请求 ↓　↑ 回应（JSON）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M190 58V76M210 80V62M200 114V136M200 174V196M144 214H131V157H122M62 174V196M118 248H140M256 214H269V157H278M332 174V196M388 198V97H284"/>
+<path class="f-muted" fill="#5c6d66" d="M186 74L190 80L194 74ZM206 64L210 58L214 64ZM196 134L200 140L204 134ZM196 194L200 200L204 194ZM124 153L118 157L124 161ZM58 194L62 200L66 194ZM138 244L144 248L138 252ZM276 153L282 157L276 161ZM328 194L332 200L336 194ZM286 93L280 97L286 101Z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="3.2" d="M256 250H276M190 302V278M340 274V298"/>
+<path class="f-muted" fill="#5c6d66" d="M274 245L282 250L274 255ZM185 280L190 272L195 280ZM335 296L340 304L345 296Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#5c6d66" stroke-dasharray="4 3" x="120" y="24" width="160" height="34" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="45.5" font-size="12" font-weight="600" text-anchor="middle">DeepSeek Recipe</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="120" y="80" width="160" height="34" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="101.5" font-size="12" font-weight="600" text-anchor="middle">Entrypoint（入口）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="6" y="140" width="112" height="34" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="62" y="161.5" font-size="12" font-weight="600" text-anchor="middle">VE 负载均衡器</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="144" y="140" width="112" height="34" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="161.5" font-size="12" font-weight="600" text-anchor="middle">预填充负载均衡器</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="282" y="140" width="100" height="34" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="332" y="161.5" font-size="12" font-weight="600" text-anchor="middle">解码负载均衡器</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="6" y="200" width="112" height="60" rx="7"/>
+<text class="f-text" fill="#182f2b" x="62" y="226.5" font-size="12" font-weight="600" text-anchor="middle">视觉编码器</text>
+<text class="f-text" fill="#182f2b" x="62" y="243.5" font-size="12" font-weight="600" text-anchor="middle">（VE）</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="144" y="200" width="112" height="72" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="220" font-size="12" font-weight="600" text-anchor="middle">预填充（P）</text>
+<rect class="f-accent" fill="#136d5a" x="156" y="234" width="88" height="26" rx="7"/>
+<text class="f-on" fill="#ffffff" x="200" y="251.5" font-size="12" font-weight="600" text-anchor="middle">EPLB</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="282" y="200" width="112" height="72" rx="7"/>
+<text class="f-text" fill="#182f2b" x="338" y="220" font-size="12" font-weight="600" text-anchor="middle">解码（D）</text>
+<rect class="f-accent" fill="#136d5a" x="294" y="234" width="88" height="26" rx="7"/>
+<text class="f-on" fill="#ffffff" x="338" y="251.5" font-size="12" font-weight="600" text-anchor="middle">EPLB</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="144" y="304" width="250" height="34" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="269" y="325.5" font-size="12" font-weight="600" text-anchor="middle">KV 缓存存储（3FS）</text>
+<rect class="f-accent" fill="#136d5a" x="8" y="345" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="22" y="354" font-size="12">本次开源</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" stroke-width=".8" x="82" y="345" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="96" y="354" font-size="12">引擎在、胶水不在</text>
+<rect class="f-box" fill="#ffffff" stroke="#5c6d66" stroke-dasharray="2 2" x="204" y="345" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="218" y="354" font-size="12">另一个仓库</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" stroke-width=".8" x="290" y="345" width="10" height="10"/>
+<text class="f-text" fill="#182f2b" x="304" y="354" font-size="12">未开源</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="376" font-size="12" text-anchor="middle">细线：请求　粗线：KV 缓存</text>
+</svg><figcaption>图 D1-2　一个请求依次经过 Recipe、Entrypoint、负载均衡器、预填充、解码，结果再从解码经 Entrypoint 回到 Recipe；KV 缓存在 P、D 和存储集群之间流动。十个部件里，只有引擎本体和 EPLB 的代码在这次的仓库里。</figcaption></figure></div>
+<p>这张图里最容易看漏的是 Entrypoint 前面那一步：它要先查 KV 存储，算出这个请求的前缀能命中多长，然后才能路由。问答文档特意说，这一步没法藏到别的工作后面。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L157" target="_blank" rel="noopener noreferrer">问答第 157 行</a>）命中越长，预填充要算的越少，所以“命中多长”决定了这个请求该分到多重的活。各段怎么配卡、KV 怎么存、怎么从 P 传到 D，都在<a href="#deepinfer/pd-kv">第 3 页</a>；四个负载均衡器的算法在<a href="#deepinfer/wide-ep">第 2 页</a>。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这就是 Web 后端的经典分层：网关做协议转换（Recipe），负载均衡器把请求分给一群应用服务器（P 和 D），状态放进独立的存储集群（3FS）。不同的是，这里的一台“应用服务器”是几十张卡组成的一个通信域。见<a href="https://zh.wikipedia.org/zh-cn/负载均衡" target="_blank" rel="noopener noreferrer">维基百科：负载均衡</a>。</p>
+<div class="callout vs"><strong>对照 Strata：</strong>Strata 把这张图压进了一台电脑：<code>serve/server.py</code> 管 HTTP 和排队，<code>serve/frontend.py</code> 套模板、解析输出（<a href="#chapter/23">第 23 章</a>）；引擎在同一张卡上先预填充、再解码（<a href="#chapter/16">第 16 章</a>）。默认配置下，一把锁让请求排成一队（<a href="#chapter/25">第 25 章</a>）。到了集群上，每一层都要拆成独立的服务，因为一台机器既装不下所有用户，也不能让所有用户排一条队。</div>
+
+<h2 id="sec-3">1.3 开源边界：仓库里有什么，没有什么</h2>
+<p>README 把边界写得很清楚。这次开源的功能有：优化过的内核和模型、采样器运行时；注意力的数据并行和均衡的<dfn>上下文并行（CP）</dfn>、MoE 的专家并行加 EPLB；DSpark 和按置信度调度的验证；<dfn>滑动窗口注意力（SWA）</dfn>的<dfn>有界重放（bounded replay）</dfn>；<dfn>异步调度</dfn>，也就是<dfn>零开销批调度器</dfn>；<dfn>批次不变（batch-invariant）</dfn>推理；<dfn>确定性采样</dfn>；<dfn>结构化输出</dfn>。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L9-L18" target="_blank" rel="noopener noreferrer">README 第 9–18 行</a>）</p>
+<p>它也列了“完整的推理服务还需要、但这次没有包含”的三样：<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L38-L42" target="_blank" rel="noopener noreferrer">README 第 38–42 行</a>）</p>
+<ul>
+<li>一套 KV 缓存系统；</li>
+<li>VE / 预填充 / 解码的拆分部署（README 补了一句：引擎需要的功能大部分已经实现）；</li>
+<li>预填充和解码在数据并行副本之间的负载均衡。</li>
+</ul>
+<p>问答文档给了原因：KV 缓存管理和负载均衡跟 DeepSeek 内部的基础设施绑得太紧，暂时没有完整开源。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L21" target="_blank" rel="noopener noreferrer">问答第 21 行</a>）DeepSeek Recipe 则单独开源成了另一个仓库 <a href="https://github.com/deepseek-ai/deepseek-recipe" target="_blank" rel="noopener noreferrer">deepseek-recipe</a>。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L19" target="_blank" rel="noopener noreferrer">问答第 19 行</a>）</p>
+<p>“大部分已经实现”这句话，能在代码里找到对应。引擎有三种类型：<code>NORMAL</code> 既做预填充也做解码，<code>PROMPT</code> 只做预填充，<code>COMPLETION</code> 只做解码。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/engine_type.py#L4-L17" target="_blank" rel="noopener noreferrer">engine_type.py</a>，C++ 一侧同样定义在 <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L37-L43" target="_blank" rel="noopener noreferrer">scheduler.hpp</a>）可主引擎类 <code>LLMEngine</code> 里有一段注释“这里开始都是虚函数”：初始化 PD 分离、预填充保存 KV、保存 KV、把算完的请求发给解码引擎，这几个函数只有一行说明，没有函数体。仓库里也没有别的类去实现它们。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L800-L858" target="_blank" rel="noopener noreferrer">llm_engine.py 第 800–858 行</a>）图 D1-3 画出了这个边界。</p>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="图 D1-3：引擎已有三种类型，能只做预填充或只做解码；把两段接起来和保存 KV 的四个钩子是空函数">
+<text class="f-text" fill="#182f2b" x="100" y="20" font-size="13" font-weight="600" text-anchor="middle">EngineType：三种引擎</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="32" width="176" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="24" y="50" font-size="12" font-weight="600">NORMAL</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="68" font-size="12">先预填充再解码，离线用它</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="86" width="176" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="24" y="104" font-size="12" font-weight="600">PROMPT</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="122" font-size="12">只做预填充 → 生产里的 P</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="140" width="176" height="44" rx="6"/>
+<text class="f-text" fill="#182f2b" x="24" y="158" font-size="12" font-weight="600">COMPLETION</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="176" font-size="12">只做解码 → 生产里的 D</text>
+<text class="f-text" fill="#182f2b" x="300" y="20" font-size="13" font-weight="600" text-anchor="middle">LLMEngine 的空钩子</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" stroke-dasharray="4 3" x="212" y="32" width="176" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="222" y="47" font-size="12">init_pd_split</text>
+<text class="f-muted" fill="#5c6d66" x="222" y="62" font-size="12">初始化 PD 分离</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" stroke-dasharray="4 3" x="212" y="74" width="176" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="222" y="89" font-size="12">pe_do_save_kvcache</text>
+<text class="f-muted" fill="#5c6d66" x="222" y="104" font-size="12">预填充保存 KV</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" stroke-dasharray="4 3" x="212" y="116" width="176" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="222" y="131" font-size="12">do_save_kvcache</text>
+<text class="f-muted" fill="#5c6d66" x="222" y="146" font-size="12">解码侧保存 KV</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" stroke-dasharray="4 3" x="212" y="158" width="176" height="36" rx="6"/>
+<text class="f-text" fill="#182f2b" x="222" y="173" font-size="12">send_processed_prompts</text>
+<text class="f-muted" fill="#5c6d66" x="222" y="188" font-size="12">把请求交给解码引擎</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="212" font-size="12" text-anchor="middle">只有一行说明，没有函数体</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="228" width="376" height="52" rx="6"/>
+<text class="f-text" fill="#182f2b" x="24" y="248" font-size="12">离线例子：LLM 类 → NORMAL 引擎 → 同一组卡先预填充再解码</text>
+<text class="f-muted" fill="#5c6d66" x="24" y="268" font-size="12">生产：PROMPT 引擎 →（缺的胶水）→ COMPLETION 引擎</text>
+</svg><figcaption>图 D1-3　引擎已经会“只做预填充”和“只做解码”，缺的是把两段接起来、把 KV 存起来的那几个函数。部署者要按自己的基础设施补上它们。</figcaption></figure>
+<p>还有一样容易误会的：仓库里有个目录叫 <code>deepinfer/entrypoints/</code>，可它不是图 D1-2 里的生产 Entrypoint。里面只有一个离线用的 <code>LLM</code> 类：在本进程里建好引擎，把一批提示词塞进去，循环调用 <code>step()</code> 直到全部做完。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py#L23-L195" target="_blank" rel="noopener noreferrer">llm.py</a>）仓库里唯一的 HTTP 服务是一个默认关闭的性能采样接口 <code>POST /profile</code>，不接用户请求。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/profile_server.py#L1-L5" target="_blank" rel="noopener noreferrer">profile_server.py</a>）</p>
+<p>问答文档说生产上暂时不用<dfn>张量并行（TP）</dfn>和 CP，可 README 和例子都支持 CP（例子里有 <code>--cp 8</code>）。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L53" target="_blank" rel="noopener noreferrer">问答第 53 行</a>，<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/README.md?plain=1#L6-L8" target="_blank" rel="noopener noreferrer">examples/README 第 6–8 行</a>）两者不矛盾：一个说线上怎么配，一个说代码能做什么。</p>
+
+<h2 id="sec-4">1.4 仓库地图：每块代码住在哪</h2>
+<p>固定提交的仓库里有 342 个文件，外加 6 个没有展开的子模块。<span class="ev ev-code">代码事实</span> 按“离用户多远”从上往下排，见图 D1-4。</p>
+<figure class="fig"><svg viewBox="0 0 400 364" role="img" aria-label="图 D1-4：DeepInfer 仓库从上到下分七层：例子与测试、离线入口、引擎主循环与 C++ 调度器、每卡的 Worker、模型执行、内核、硬件探测">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="12">从上到下：越往下越接近硬件</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="26" width="384" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="18" y="42" font-size="12" font-weight="600">examples/ · eval/ · tests/</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="58" font-size="12">怎么跑、怎么评测、怎么做回归</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="8" y="74" width="384" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="18" y="90" font-size="12" font-weight="600">deepinfer/entrypoints/llm.py</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="106" font-size="12">LLM 类：离线推理的入口</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="8" y="122" width="188" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="18" y="138" font-size="12" font-weight="600">deepinfer/engine/</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="154" font-size="12">Python 主循环 LLMEngine</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="204" y="122" width="188" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="214" y="138" font-size="12" font-weight="600">csrc/engine/</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="154" font-size="12">C++ 调度器、块管理、ZOS</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="8" y="170" width="384" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="18" y="186" font-size="12" font-weight="600">deepinfer/worker/</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="202" font-size="12">每张卡一个 Worker：跑模型、CUDA Graph、KV 缓存</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="8" y="218" width="384" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="18" y="234" font-size="12" font-weight="600">deepinfer/model_executor/</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="250" font-size="12">模型、采样器、EPLB、并行通信</text>
+<rect class="f-accent" fill="#136d5a" x="8" y="266" width="124" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="18" y="282" font-size="12" font-weight="600">tilelang_ops/</text>
+<text class="f-on" fill="#ffffff" x="18" y="298" font-size="12">TileLang 算子</text>
+<rect class="f-accent" fill="#136d5a" x="138" y="266" width="124" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="148" y="282" font-size="12" font-weight="600">vendor/</text>
+<text class="f-on" fill="#ffffff" x="148" y="298" font-size="12">6 个内核子模块</text>
+<rect class="f-accent" fill="#136d5a" x="268" y="266" width="124" height="40" rx="6"/>
+<text class="f-on" fill="#ffffff" x="278" y="282" font-size="12" font-weight="600">pip 依赖</text>
+<text class="f-on" fill="#ffffff" x="278" y="298" font-size="12">TileKernels 等</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="314" width="384" height="40" rx="6"/>
+<text class="f-text" fill="#182f2b" x="18" y="330" font-size="12" font-weight="600">deep_cluster/</text>
+<text class="f-muted" fill="#5c6d66" x="18" y="346" font-size="12">探测加速卡（NVIDIA / 昇腾）、NUMA 绑核</text>
+</svg><figcaption>图 D1-4　一次离线推理从上往下走：例子调 LLM 类，LLM 类驱动引擎，引擎让每张卡上的 Worker 跑模型，模型最后落到内核上。C++ 调度器和 Python 主循环并排，是引擎的两半。</figcaption></figure>
+<p>表 D1-1 逐个目录说明，每一行都对照了固定提交里的文件。“去哪读”一列指向专栏里细讲它的页面。</p>
+<div class="table-wrap"><table><thead><tr><th>目录</th><th>里面是什么</th><th>去哪读</th></tr></thead><tbody>
+<tr><td><code>deepinfer/entrypoints/</code></td><td>离线入口 <code>LLM</code> 类，<code>generate()</code> 收一批提示词 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py#L23-L142" target="_blank" rel="noopener noreferrer">llm.py</a>）</td><td>本页</td></tr>
+<tr><td><code>deepinfer/engine/</code></td><td><code>LLMEngine</code> 主循环、引擎参数、引擎类型、统计日志、性能采样接口 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L130" target="_blank" rel="noopener noreferrer">llm_engine.py</a>）</td><td><a href="#deepinfer/spec-sched">第 4 页</a></td></tr>
+<tr><td><code>csrc/engine/</code></td><td>C++ 写的调度器 <code>Scheduler</code>、块管理 <code>BlockManager</code>、零开销调度的输入准备 <code>zos.cpp</code>、变长验证 <code>mtp_varlen.hpp</code>，经 pybind11 编进 <code>deepinfer._C</code> <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/setup.py#L22-L34" target="_blank" rel="noopener noreferrer">setup.py</a>，<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/pybind.cpp#L7-L17" target="_blank" rel="noopener noreferrer">pybind.cpp</a>）</td><td><a href="#deepinfer/spec-sched">第 4 页</a></td></tr>
+<tr><td><code>deepinfer/worker/</code></td><td>每张卡的 <code>Worker</code>、<code>ModelRunner</code>、CUDA Graph 回放、管 KV 缓存的 <code>CacheEngine</code> <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cache_engine.py#L4" target="_blank" rel="noopener noreferrer">cache_engine.py</a>）</td><td><a href="#deepinfer/pd-kv">第 3 页</a></td></tr>
+<tr><td><code>model_executor/models/</code></td><td>DeepSeek-V4.1-Flash 的模型代码（<code>v4_modules/</code>）、视觉编码器（<code>vision_encoder/</code>）、草稿模型（<code>mtp/dflash.py</code>，含预测接受率的 <code>ConfidenceHead</code>）<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/__init__.py#L15-L17" target="_blank" rel="noopener noreferrer">models/__init__.py</a>，<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L46-L47" target="_blank" rel="noopener noreferrer">dflash.py</a>）</td><td><a href="#deepinfer/spec-sched">第 4 页</a></td></tr>
+<tr><td><code>model_executor/eplb/</code></td><td>专家负载均衡：<code>policy.py</code> 重算专家放置，<code>shuffle.py</code> 搬运专家权重 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/policy.py#L1-L7" target="_blank" rel="noopener noreferrer">policy.py</a>，<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/shuffle.py#L1-L6" target="_blank" rel="noopener noreferrer">shuffle.py</a>）</td><td><a href="#deepinfer/wide-ep">第 2 页</a></td></tr>
+<tr><td><code>model_executor/layers/</code></td><td>线性层、注意力后端、采样器，以及 <code>tilelang_ops/</code>：自写的 TileLang 算子。顶层有 33 个两个平台共用的文件，另有按平台分开的 <code>cuda/</code> 和 <code>asc/</code>（昇腾）两个子目录 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/platform.py#L55-L88" target="_blank" rel="noopener noreferrer">platform.py</a>）</td><td><a href="#deepinfer/determinism">第 5 页</a></td></tr>
+<tr><td><code>model_executor/parallel_utils/</code></td><td>进程组、通信操作、CP 管理 <span class="ev ev-code">代码事实</span></td><td><a href="#deepinfer/wide-ep">第 2 页</a></td></tr>
+<tr><td><code>deepinfer/structure_output/</code></td><td>结构化输出：用 xgrammar 把格式约束编译成语法，再生成 token 掩码 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/structure_output/compiler.py#L6-L14" target="_blank" rel="noopener noreferrer">compiler.py</a>）</td><td><a href="#deepinfer/determinism">第 5 页</a></td></tr>
+<tr><td><code>deepinfer/ve/</code></td><td>图片预处理、多模态输入准备 <span class="ev ev-code">代码事实</span></td><td><a href="#deepinfer/pd-kv">第 3 页</a></td></tr>
+<tr><td><code>deepinfer/environ.py</code></td><td>引擎的 <code>DEEPINFER_*</code> 开关的集中定义 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L97-L210" target="_blank" rel="noopener noreferrer">environ.py</a>）</td><td>各页</td></tr>
+<tr><td><code>deep_cluster/</code></td><td>不依赖加速卡运行时的硬件探测（NVIDIA / 昇腾）和 NUMA 绑核 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deep_cluster/hardware/device.py#L17-L23" target="_blank" rel="noopener noreferrer">device.py</a>）</td><td>本页</td></tr>
+<tr><td><code>examples/</code> · <code>eval/</code> · <code>tests/</code></td><td>离线推理、基准测试和扫参脚本；AIME 2026、HLE、GPQA Diamond 评测；pytest 回归，包括 PPL 基线 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/eval/README.md?plain=1#L1-L17" target="_blank" rel="noopener noreferrer">eval/README.md</a>）</td><td><a href="#deepinfer/determinism">第 5 页</a></td></tr>
+<tr><td><code>vendor/</code></td><td>6 个 git 子模块，构建时才拉取 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/.gitmodules#L1-L18" target="_blank" rel="noopener noreferrer">.gitmodules</a>）</td><td>下表</td></tr>
+</tbody></table></div>
+<p>DeepInfer 自己不从零写大部分内核，它站在 DeepSeek 已经开源的一组内核库上。README 列了这些库。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L23" target="_blank" rel="noopener noreferrer">README 第 23 行</a>）表 D1-2 的“在 DeepInfer 里做什么”一列，只写 DeepInfer 怎样调用它们；这些库自己的代码本书没有读。</p>
+<div class="table-wrap"><table><thead><tr><th>内核库</th><th>在 DeepInfer 里做什么</th><th>怎么进来的</th></tr></thead><tbody>
+<tr><td><a href="https://github.com/deepseek-ai/FlashMLA" target="_blank" rel="noopener noreferrer">FlashMLA</a></td><td>注意力计算：注意力后端从它导入读 KV 缓存的注意力和稀疏注意力 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/attention_backend.py#L2-L3" target="_blank" rel="noopener noreferrer">attention_backend.py</a>）</td><td>子模块</td></tr>
+<tr><td><a href="https://github.com/deepseek-ai/DeepGEMM" target="_blank" rel="noopener noreferrer">DeepGEMM</a></td><td>矩阵乘：线性层、MoE 层、注意力都导入它 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/linear.py#L3-L4" target="_blank" rel="noopener noreferrer">linear.py</a>）</td><td>子模块（昇腾用 DeepGEMM-Ascend）</td></tr>
+<tr><td><a href="https://github.com/deepseek-ai/DeepEP" target="_blank" rel="noopener noreferrer">DeepEP</a></td><td>专家并行通信：MoE 层从它导入通信缓冲区 <code>EPBuffer</code> <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L17" target="_blank" rel="noopener noreferrer">mlp.py</a>）</td><td>子模块（昇腾用 <a href="https://github.com/deepseek-ai/DeepEP-Ascend" target="_blank" rel="noopener noreferrer">DeepEP-Ascend</a>）</td></tr>
+<tr><td><a href="https://github.com/deepseek-ai/DeepSelect" target="_blank" rel="noopener noreferrer">DeepSelect</a></td><td>top-k 选择：采样器和索引注意力从它导入 <code>topk</code> <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler.py#L12" target="_blank" rel="noopener noreferrer">sampler.py</a>）</td><td>子模块</td></tr>
+<tr><td><a href="https://github.com/deepseek-ai/TileKernels" target="_blank" rel="noopener noreferrer">TileKernels</a></td><td>量化转换、旋转位置编码等小算子 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/rotary_embedding.py#L32" target="_blank" rel="noopener noreferrer">rotary_embedding.py</a>）</td><td>pip 包 <code>tile-kernels==2.1.0</code></td></tr>
+<tr><td><a href="https://github.com/tile-ai/tilelang" target="_blank" rel="noopener noreferrer">TileLang</a></td><td>写内核的语言：<code>tilelang_ops/</code> 下有 60 个文件导入它，就是 README 说的自写 TileLang 内核 <span class="ev ev-code">代码事实</span></td><td>pip 包 <code>tilelang==0.1.15</code></td></tr>
+</tbody></table></div>
+<p>README 把 TileKernels 和其他内核库并列，可它不是子模块，而是 <code>requirements.txt</code> 里的一个 pip 依赖。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/requirements.txt#L16-L17" target="_blank" rel="noopener noreferrer">requirements.txt</a>）构建脚本按平台挑子模块：NVIDIA 用 DeepSelect、FlashMLA、DeepEP、DeepGEMM，昇腾把后两个换成各自的 Ascend 版。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/scripts/build_vendor.sh#L7-L22" target="_blank" rel="noopener noreferrer">build_vendor.sh</a>）这些库是不是 DeepSeek 内部用的同一版？问答文档说大体相同，端到端性能最多差 5%。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L233-L237" target="_blank" rel="noopener noreferrer">问答第 233–237 行</a>）</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这是很常见的“脚本层加原生核心”结构。Python 管流程和配置，热路径交给 C++：每一步都要跑的调度和输入准备写在 <code>csrc/</code>，用 pybind11 暴露给 Python；矩阵乘、注意力这些算子再往下交给 CUDA 或昇腾的内核。数据库、浏览器也常这样分层。</p>
+
+<h2 id="sec-5">1.5 谁能跑、要多少卡、坏了怎么办</h2>
+<p>先说门槛。硬件只有两种：NVIDIA SM100 GPU 和华为昇腾 950 NPU。软件要 Linux、GCC 13 以上、Python 3.12，NVIDIA 要 CUDA 13，昇腾要 CANN 9.2。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L33-L52" target="_blank" rel="noopener noreferrer">README 第 33–52 行</a>）离线例子的默认参数是 <code>--ep 8</code>，也就是按一台 8 卡机器写的。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/offline_inference.py#L13" target="_blank" rel="noopener noreferrer">offline_inference.py</a>）基准测试的规模由环境决定：<code>ep_size = WORLD_SIZE × 可见卡数</code>，<code>WORLD_SIZE</code> 是节点数。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/README.md?plain=1#L61" target="_blank" rel="noopener noreferrer">examples/README 第 61 行</a>）</p>
+<p>所以本专栏的大多数读者跑不了 DeepInfer，本书也没有跑过。下面的每个数字都是 DeepSeek 自己报告的，本书没有复测。</p>
+<div class="table-wrap"><table><thead><tr><th>数字</th><th>条件</th><th>出处</th></tr></thead><tbody>
+<tr><td>每天 155 万亿 token</td><td>单个集群，DeepSeek-V4.1-Flash 线上服务</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L17" target="_blank" rel="noopener noreferrer">问答第 17 行</a> <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>38 美元 / GPU·时</td><td>整体收入，按谷时价格算</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L17" target="_blank" rel="noopener noreferrer">问答第 17 行</a> <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>预填充约 6 万–9 万 token/s/GPU</td><td>吞吐只算未命中缓存的输入 token；4 张 SM100，EP4DP4，384 + 32 个专家，上下文 131,072，每个 DP rank 每步 4,096–65,536 token，解码层有界重放 140 token；每步约 70–730 ms；从图上读数</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/images/prefill_pareto.png" target="_blank" rel="noopener noreferrer">prefill_pareto.png</a> <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>解码约 2,600–26,000 token/s/GPU；每个用户约 325–103 token/s</td><td>64 张 SM100，EP64DP64，384 + 64 个专家，上下文 131,072，每 rank 8–256 个请求，草稿长度 3，按每个草稿 75% 接受率折算；从图上读数</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/images/decode_pareto.png" target="_blank" rel="noopener noreferrer">decode_pareto.png</a> <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>约 100 PiB SSD</td><td>3FS 上留给 KV 缓存的容量</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L153" target="_blank" rel="noopener noreferrer">问答第 153 行</a> <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>约 80%</td><td>线上负载均衡能达到“完美均衡的离线基准”的比例</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L127" target="_blank" rel="noopener noreferrer">问答第 127 行</a> <span class="ev ev-report">上游报告</span></td></tr>
+</tbody></table></div>
+<p>两张性能图都是 README 说的基准：预填充用 4 张、解码用 64 张 SM100，各自在一个 scale-up 域里。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L83" target="_blank" rel="noopener noreferrer">README 第 83 行</a>）解码图的吞吐不是实测接受率，而是按假设的接受率折算的；<a href="#deepinfer/spec-sched">第 4 页</a>细讲这本账怎么记。</p>
+<p>155 万亿 token 是什么量级？按一天 86,400 秒摊开：155 × 10¹² ÷ 86,400 ≈ 18 亿 token/s。Strata 在一张 RTX 5070 上写答案约 93 token/s（<a href="#chapter/01">第 1 章</a>），18 亿 ÷ 93 ≈ 1900 万。<span class="ev ev-est">教学推演</span> 这个比值只给数量级的直觉：问答文档没说这 155 万亿里有多少是输入、多少是缓存命中，而 Strata 的 93 只算输出。</p>
+<p><strong>弹性伸缩和容错。</strong>问答文档用一小节讲了线上怎样应对流量起伏和坏卡。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L193-L211" target="_blank" rel="noopener noreferrer">问答第 193–211 行</a>）预填充按“没命中缓存的 token 数”决定要几台机器，解码按“正在跑的请求数”调整；每次调整都限速，也有上下限。解码引擎收到下线通知后有 1 分钟宽限期，没做完的请求连同 KV 缓存一次性转给别的解码引擎接着做。平时总留一些冗余：池子里有空着待命的机器，在线实例也比算出来的需求多；配额利用率高于 0.8 时禁止缩容。重启要几分钟，所以容错靠冗余和请求级的重新路由，不靠把单个引擎重启得更快。</p>
+<p>宽专家并行有一个特别的弱点：一个实例的所有卡组成一个通信域，坏一张卡，整个实例就不能用。重启时，平台按当前健康的卡数重新决定 EP 大小。代码里有一处和它配套：冗余专家数会自动补到“专家总数能被 <code>ep_size</code> 整除”为止，所以 EP 大小不必是 384 的约数。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L21-L28" target="_blank" rel="noopener noreferrer">eplb/__init__.py</a>）这和故障恢复的关系是本书的推断，问答文档没有这样说。<span class="ev ev-est">教学推演</span></p>
+<div class="callout vs"><strong>对照 Strata：</strong>Strata 只有一台机器，没有“别的卡”可以接手。它的生命周期问题是进程怎么启动、请求怎么取消（<a href="#chapter/24/c24-cancel">第 24 章「取消」</a>），排队问题是一条队怎么排（<a href="#chapter/25/c25-queueing">第 25 章「排队论入门」</a>）。到了集群上，坏卡是常态，所以“少一张卡还能不能接着服务”成了设计的一部分。</div>
+
+<h2 id="sec-6">1.6 这个专栏怎么读</h2>
+<p>后面四页，各挑生产系统里的一块，讲清它的道理，再落到代码上。每页都先回到本书讲过的概念，再说集群上哪里不一样。图 D1-5 是路线图。</p>
+<figure class="fig"><svg viewBox="0 0 400 282" role="img" aria-label="图 D1-5：专栏后四页各回答两个问题，并对照本书的相关章节">
+<text class="f-muted" fill="#5c6d66" x="8" y="16" font-size="12">本页之后的四页，各回答两个问题</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="8" y="28" width="188" height="118" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="48" font-size="12">第 2 页</text>
+<text class="f-text" fill="#182f2b" x="20" y="68" font-size="13" font-weight="600">宽专家并行</text>
+<text class="f-text" fill="#182f2b" x="20" y="92" font-size="12">专家为什么铺满 64 张卡？</text>
+<text class="f-text" fill="#182f2b" x="20" y="112" font-size="12">各卡的负载怎么拉平？</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="136" font-size="12">对照第 5、10、12、21 章</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="204" y="28" width="188" height="118" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="216" y="48" font-size="12">第 3 页</text>
+<text class="f-text" fill="#182f2b" x="216" y="68" font-size="13" font-weight="600">三段分离与 KV 缓存</text>
+<text class="f-text" fill="#182f2b" x="216" y="92" font-size="12">为什么把 VE、P、D 分开？</text>
+<text class="f-text" fill="#182f2b" x="216" y="112" font-size="12">KV 怎样存 72 小时以上？</text>
+<text class="f-muted" fill="#5c6d66" x="216" y="136" font-size="12">对照第 8、16、17、20 章</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="8" y="154" width="188" height="118" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="20" y="174" font-size="12">第 4 页</text>
+<text class="f-text" fill="#182f2b" x="20" y="194" font-size="13" font-weight="600">投机解码与调度</text>
+<text class="f-text" fill="#182f2b" x="20" y="218" font-size="12">草稿猜几个、验几个？</text>
+<text class="f-text" fill="#182f2b" x="20" y="238" font-size="12">CPU 排下一批时 GPU 不停</text>
+<text class="f-muted" fill="#5c6d66" x="20" y="262" font-size="12">对照第 14、18、19、25 章</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="204" y="154" width="188" height="118" rx="7"/>
+<text class="f-muted" fill="#5c6d66" x="216" y="174" font-size="12">第 5 页</text>
+<text class="f-text" fill="#182f2b" x="216" y="194" font-size="13" font-weight="600">批次不变与结构化输出</text>
+<text class="f-text" fill="#182f2b" x="216" y="218" font-size="12">同样输入为什么输出不同？</text>
+<text class="f-text" fill="#182f2b" x="216" y="238" font-size="12">怎样只吐合法的 JSON？</text>
+<text class="f-muted" fill="#5c6d66" x="216" y="262" font-size="12">对照第 2、23、26 章</text>
+</svg><figcaption>图 D1-5　四页可以按任意顺序读。先读对照的章节，再读专栏页，最容易看出“一台机器”和“一个集群”差在哪。</figcaption></figure>
+<ul>
+<li><a href="#deepinfer/wide-ep">第 2 页 宽专家并行</a>：注意力按数据并行、专家按专家并行；为什么 EP64 比 EP8 吞吐高；EPLB 和三个数据并行负载均衡器怎么分活。先读<a href="#chapter/10">第 10 章</a>和<a href="#chapter/21/c21-parallelism">第 21 章「流水线并行与张量并行」</a>。</li>
+<li><a href="#deepinfer/pd-kv">第 3 页 三段分离与 72 小时 KV 缓存</a>：VE、P、D 为什么分开；KV 缓存怎样存进 SSD 集群、命中后怎样只重算一小段。先读<a href="#chapter/17/c17-paging">第 17 章「分页式管理」</a>和<a href="#chapter/20">第 20 章</a>。</li>
+<li><a href="#deepinfer/spec-sched">第 4 页 DSpark 投机解码与零开销调度</a>：草稿一次猜几个、按置信度决定验几个；CPU 排下一步时 GPU 不停。先读<a href="#chapter/18">第 18 章</a>和<a href="#chapter/25/c25-continuous-batching">第 25 章「连续批处理」</a>。</li>
+<li><a href="#deepinfer/determinism">第 5 页 批次不变、确定性采样与结构化输出</a>：同样的输入为什么在服务器上会变，怎样把它变回相同；怎样让模型只输出合法的 JSON。先读<a href="#chapter/26">第 26 章</a>和<a href="#chapter/02">第 2 章</a>。</li>
+</ul>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>DeepInfer 和 Strata 讲同一套概念，难题相反：Strata 要把模型塞进一台电脑，DeepInfer 要让上百张卡一起服务很多人。</li>
+<li>生产系统由 Recipe、Entrypoint、三段分离的 VE / P / D、四个负载均衡器和一个 KV 存储集群组成。这次开源的是引擎本体和 EPLB，能做离线推理。</li>
+<li>KV 缓存系统、把三段接起来的胶水、数据并行负载均衡器都不在仓库里；引擎为它们留了类型和空钩子，要部署者自己补。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“DeepInfer 开源了，拿来就能搭出 DeepSeek 那样的在线服务。”</strong></p>
+<p>这次的仓库只提供离线推理：一个进程收一批提示词，算完就退。没有接用户请求的 HTTP 服务，没有 KV 缓存系统，没有把预填充和解码接起来的胶水，也没有数据并行负载均衡器。README 列出的硬件只有 SM100 和昇腾 950，问答文档建议的最小高效单元是 128 张卡。它最大的价值，是让人看清一个生产级引擎内部怎么写。</p></div>
+
+<details class="deep"><summary>深入一层：一次离线推理的调用链，以及怎样自己核对开源边界</summary>
+<h3>从命令行到内核</h3>
+<p>以 <code>python examples/offline_inference.py</code> 为例，下面每一步都对照了固定提交 <code>774ce244</code> 的源码。</p>
+<ol>
+<li><strong>启动进程。</strong>例子默认 <code>--ep 8</code>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/offline_inference.py#L12-L17" target="_blank" rel="noopener noreferrer">offline_inference.py 第 12–17 行</a>）。<code>examples/_launch.py</code> 的 <code>run_dp</code> 按 <code>RANK</code> 和 <code>WORLD_SIZE</code> 给本节点负责的每个 DP rank 起一个子进程（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_launch.py#L26-L40" target="_blank" rel="noopener noreferrer">第 26–40 行</a>）。</li>
+<li><strong>建引擎。</strong><code>LLM.__init__</code> 用 <code>offline_inference=True</code> 构造 <code>EngineArgs</code>，再调 <code>LLMEngine.from_engine_args</code>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py#L70-L84" target="_blank" rel="noopener noreferrer">llm.py 第 70–84 行</a>）。<code>EngineArgs</code> 的引擎类型默认是 <code>NORMAL</code>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/arg_utils.py#L41" target="_blank" rel="noopener noreferrer">arg_utils.py 第 41 行</a>）。</li>
+<li><strong>零开销调度默认开。</strong><code>environ.py</code> 里 <code>DEEPINFER_ZERO_OVERHEAD_SCHEDULING</code> 的原始默认值是关（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L179" target="_blank" rel="noopener noreferrer">第 179 行</a>），但 <code>EngineArgs.__post_init__</code> 会在用户没设时，按引擎类型把它设成开：<code>NORMAL</code> 和 <code>COMPLETION</code> 开，<code>PROMPT</code> 关（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/arg_utils.py#L48-L55" target="_blank" rel="noopener noreferrer">arg_utils.py 第 48–55 行</a>，<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/engine_type.py#L15-L17" target="_blank" rel="noopener noreferrer">engine_type.py 第 15–17 行</a>）。所以 README 说“默认开启”，和代码一致。</li>
+<li><strong>分词和提交。</strong><code>generate()</code> 把每个提示词交给 <code>_add_request</code>；没给 token 编号时，用 Hugging Face 分词器编码（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py#L144-L166" target="_blank" rel="noopener noreferrer">llm.py 第 144–166 行</a>）。生产上这一步由 Recipe 做。</li>
+<li><strong>主循环。</strong><code>_run_engine</code> 反复调 <code>LLMEngine.step()</code>，直到没有未完成的请求，再把在途的结果冲出来（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py#L168-L195" target="_blank" rel="noopener noreferrer">第 168–195 行</a>）。<code>LLMEngine</code> 从 C++ 扩展 <code>deepinfer._C.engine</code> 导入 <code>Scheduler</code>、<code>BlockManager</code> 等（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L19-L31" target="_blank" rel="noopener noreferrer">llm_engine.py 第 19–31 行</a>）。这个扩展由 <code>setup.py</code> 把 <code>csrc/</code> 下的源文件编译而成，分成 <code>cuda_utils</code>、<code>engine</code>、<code>graph_timer</code> 三个子模块（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/pybind.cpp#L7-L17" target="_blank" rel="noopener noreferrer">pybind.cpp</a>）。</li>
+<li><strong>每张卡上。</strong><code>Worker</code> 驱动每一步的前向、后处理和采样（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L4" target="_blank" rel="noopener noreferrer">worker.py</a>），<code>ModelRunner</code> 跑模型（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L53" target="_blank" rel="noopener noreferrer">model_runner.py</a>）。模型由注册表找到：架构名 <code>DeepseekV41ForCausalLM</code> 对应 <code>deepseek_vl.DeepseekVLForCausalLM</code>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/__init__.py#L15-L17" target="_blank" rel="noopener noreferrer">models/__init__.py 第 15–17 行</a>），它继承自纯文本的 <code>DeepseekForCausalLM</code>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/deepseek_vl.py#L26" target="_blank" rel="noopener noreferrer">deepseek_vl.py 第 26 行</a>）。</li>
+<li><strong>落到内核。</strong>平台类决定用哪一套 TileLang 算子：GPU 用 <code>cuda</code>，NPU 用 <code>asc</code>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/platform.py#L55-L88" target="_blank" rel="noopener noreferrer">platform.py 第 55–88 行</a>）。其余算子来自表 D1-2 的内核库。</li>
+</ol>
+<h3>各页会用到的开关</h3>
+<p>引擎的开关集中在 <code>deepinfer/environ.py</code>，第一次读取时解析并缓存（例子、评测脚本和个别调试开关另外直接读环境变量）。下面几个是 README 提到、后面几页会细讲的：</p>
+<div class="table-wrap"><table><thead><tr><th>环境变量</th><th>默认</th><th>作用</th><th>行号</th></tr></thead><tbody>
+<tr><td><code>DEEPINFER_ACCELERATOR</code></td><td><code>nvidia</code></td><td>选平台：<code>nvidia</code> 或 <code>ascend</code></td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L101" target="_blank" rel="noopener noreferrer">101</a></td></tr>
+<tr><td><code>DEEPINFER_USE_NEXTN_DECODE</code></td><td>5</td><td>草稿最多几个，0 关掉投机解码</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L129-L130" target="_blank" rel="noopener noreferrer">129–130</a></td></tr>
+<tr><td><code>DEEPINFER_ENABLE_MTP_VARLEN</code></td><td>关</td><td>变长验证</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L131" target="_blank" rel="noopener noreferrer">131</a></td></tr>
+<tr><td><code>DEEPINFER_ZERO_OVERHEAD_SCHEDULING</code></td><td>见上文第 3 步</td><td>零开销批调度器</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L179" target="_blank" rel="noopener noreferrer">179</a></td></tr>
+<tr><td><code>DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE</code></td><td><code>off</code></td><td>SWA 有界重放的截断方式</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L188-L194" target="_blank" rel="noopener noreferrer">188–194</a></td></tr>
+<tr><td><code>DEEPINFER_BATCH_INVARIANT</code></td><td>关</td><td>批次不变推理</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L197" target="_blank" rel="noopener noreferrer">197</a></td></tr>
+</tbody></table></div>
+<h3>自己核对开源边界</h3>
+<p>本页关于“没有开源”的判断，可以在一份克隆里用三条命令复查：</p>
+<ul>
+<li><code>git show 774ce244:deepinfer/engine/llm_engine.py | sed -n '800,858p'</code>：看到“这里开始都是虚函数”和一串只有说明的函数。</li>
+<li><code>git grep -n "def send_processed_prompts" 774ce244</code>：只有 <code>llm_engine.py</code> 一处定义，没有子类实现它。</li>
+<li><code>git grep -n -w "3FS" 774ce244 -- '*.py' '*.cpp' '*.hpp'</code> 和 <code>git grep -n "kvcache-store\|kvcache_store" 774ce244 -- '*.py' '*.cpp' '*.hpp'</code>：都没有结果。3FS 和 kvcache-store 只出现在问答文档里。（别加 <code>-i</code>：不分大小写时，日志格式串里的 <code>%.3fs</code> 会被误匹配。）</li>
+</ul>
+<h3>本页没有核对的东西</h3>
+<p><code>vendor/</code> 下的 6 个子模块在本书使用的克隆里没有展开，所以本页只写 DeepInfer 怎样导入它们，不评价它们的实现。deepseek-recipe 是另一个仓库，本页对它的描述全部来自问答文档第 19、35 行和第 290–312 行。模型形状来自 Hugging Face 上提交 <code>1bae0e10</code> 的 <code>config.json</code>，它不受 DeepInfer 固定提交的约束。两张性能图的数值是本书从图上读的，精度约为刻度的一半。</p>
+</details>
