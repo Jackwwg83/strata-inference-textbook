@@ -1,0 +1,246 @@
+<div class="hook"><span class="eyebrow">从一台电脑到一个超节点</span>
+<p>第 10 章算过一笔账：Strata 在一台电脑上生成一个 token，要读约 664 MB 的专家数据。显存装不下全部专家，就只缓存热门的那些，剩下的交给 CPU。那是“一个人、一台机器”的做法。</p>
+<p>DeepSeek 的线上服务面对的是成千上万个同时在聊的人。它的解码不放在一张卡上，而是放在 64 到 128 张卡组成的<dfn>超节点</dfn>里：这些卡之间有高速互连，可以当成一个整体来用。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L11" target="_blank" rel="noopener noreferrer">Q&amp;A 第 11 行</a>）这一页回答三个问题：几百个专家怎样摊到几十张卡上？为什么卡越多，解码反而越划算？热门专家扎堆在一张卡上时怎么办？</p></div>
+<p class="tldr"><strong>一句话：</strong>DeepInfer 解码时，注意力按数据并行（DP），每张卡管自己的一批请求；路由专家按专家并行（EP），摊到 64–128 张卡上，每张卡每层只放几个。卡越多，每张卡每步要读的专家权重越少，读一次服务的 token 越多。代价是每层两次全对全通信（all-to-all），而且最忙的那张卡决定整组的速度，所以要用专家负载均衡（EPLB）把热门专家复制、摊开。</p>
+
+<h2 id="sec-1">2.1 两种切法叠在一起：注意力按请求切，专家按编号切</h2>
+<p>第 21 章讲过三种多卡分工：层切分、张量并行、请求并行，Strata 选了层切分。DeepInfer 只用了其中的数据并行（只用于注意力），再叠上第 21 章没讲的一种：专家并行。见图 D2-1。</p>
+<ul>
+<li><strong>注意力用<a href="#chapter/21/c21-parallelism">数据并行（DP）</a>。</strong>每张卡有一份完整的注意力，各自处理不同的请求。上游说：和 DeepSeek-V3 / R1 一样，注意力的数据并行份数等于专家并行份数（#DP = #EP），目前不用张量并行（TP），也不用上下文并行（CP）。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L33-L53" target="_blank" rel="noopener noreferrer">Q&amp;A 第 33–53 行</a>）代码里有上下文并行，README 也列出了它，只是上游的部署配置不用。</li>
+<li><strong>MoE 用<dfn>专家并行（EP）</dfn>。</strong>每一层的路由专家按编号切成 EP 份，每张卡只放其中一份。路由器和共享专家每张卡各有一份完整的。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/moe.py#L24-L67" target="_blank" rel="noopener noreferrer">moe.py 第 24–67 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/moe.py#L77-L110" target="_blank" rel="noopener noreferrer">第 77–110 行</a>）</li>
+</ul>
+<figure class="fig"><svg viewBox="0 0 400 290" role="img" aria-label="图 D2-1：四张卡的示意。每张卡有自己的请求、一份完整的注意力、路由器和共享专家，路由专家按卡切开，中间靠全对全通信交换 token">
+<text class="f-muted" fill="#5c6d66" x="200" y="16" font-size="12" text-anchor="middle">示意：4 张卡，16 个路由专家（EP4，DP4）</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="8" y="26" width="90" height="214" rx="6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="105" y="26" width="90" height="214" rx="6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="202" y="26" width="90" height="214" rx="6"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="299" y="26" width="90" height="214" rx="6"/>
+<rect class="f-soft" fill="#e5f1df" x="15" y="34" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="53" y="50" font-size="12" text-anchor="middle">卡 0 的请求</text>
+<rect class="f-soft" fill="#e5f1df" x="112" y="34" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="150" y="50" font-size="12" text-anchor="middle">卡 1 的请求</text>
+<rect class="f-soft" fill="#e5f1df" x="209" y="34" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="247" y="50" font-size="12" text-anchor="middle">卡 2 的请求</text>
+<rect class="f-soft" fill="#e5f1df" x="306" y="34" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="344" y="50" font-size="12" text-anchor="middle">卡 3 的请求</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="15" y="66" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="53" y="82" font-size="12" text-anchor="middle">注意力</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="112" y="66" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="150" y="82" font-size="12" text-anchor="middle">注意力</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="209" y="66" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="247" y="82" font-size="12" text-anchor="middle">注意力</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="306" y="66" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="344" y="82" font-size="12" text-anchor="middle">注意力</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="15" y="98" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="53" y="114" font-size="12" text-anchor="middle">路由器</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="112" y="98" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="150" y="114" font-size="12" text-anchor="middle">路由器</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="209" y="98" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="247" y="114" font-size="12" text-anchor="middle">路由器</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="306" y="98" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="344" y="114" font-size="12" text-anchor="middle">路由器</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="15" y="130" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="53" y="146" font-size="12" text-anchor="middle">共享专家</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="112" y="130" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="150" y="146" font-size="12" text-anchor="middle">共享专家</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="209" y="130" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="247" y="146" font-size="12" text-anchor="middle">共享专家</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="306" y="130" width="76" height="24" rx="4"/><text class="f-text" fill="#182f2b" x="344" y="146" font-size="12" text-anchor="middle">共享专家</text>
+<rect class="f-box" fill="#ffffff" stroke="#5c6d66" stroke-dasharray="4 3" x="4" y="164" width="392" height="32" rx="6"/>
+<text class="f-text" fill="#182f2b" x="200" y="185" font-size="12" text-anchor="middle">全对全：token 去找选中的专家，结果再送回来</text>
+<rect class="f-accent" fill="#136d5a" x="15" y="206" width="76" height="24" rx="4"/><text class="f-on" fill="#ffffff" x="53" y="222" font-size="12" text-anchor="middle">专家 0–3</text>
+<rect class="f-accent" fill="#136d5a" x="112" y="206" width="76" height="24" rx="4"/><text class="f-on" fill="#ffffff" x="150" y="222" font-size="12" text-anchor="middle">专家 4–7</text>
+<rect class="f-accent" fill="#136d5a" x="209" y="206" width="76" height="24" rx="4"/><text class="f-on" fill="#ffffff" x="247" y="222" font-size="12" text-anchor="middle">专家 8–11</text>
+<rect class="f-accent" fill="#136d5a" x="306" y="206" width="76" height="24" rx="4"/><text class="f-on" fill="#ffffff" x="344" y="222" font-size="12" text-anchor="middle">专家 12–15</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="260" font-size="12" text-anchor="middle">上面四行每张卡各一份；最下面一行按卡切开</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="280" font-size="12" text-anchor="middle">每一步全组一起走：要么都做预填充，要么都做解码</text>
+</svg><figcaption>图 D2-1　注意力按请求切，每张卡算自己那批；路由专家按编号切，每张卡只放一份。每层 MoE 都要跨卡交换 token，所以同一组卡必须步调一致。</figcaption></figure>
+<p>专家的个数要能被卡数整除。DeepInfer 区分三个数：模型定义的<strong>逻辑专家</strong>，路由器从中挑选；实际分配了权重的<strong>物理专家</strong> = 逻辑专家 + 冗余副本；每张卡上的<strong>本地专家</strong> = 物理专家 ÷ EP。代码要求物理专家数能被 EP 整除，否则直接报错。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/moe.py#L91-L95" target="_blank" rel="noopener noreferrer">moe.py 第 91–95 行</a>）冗余副本是 2.4 节的主角。</p>
+<p>因为每层 MoE 都要跨卡交换 token，一组卡里有人做预填充、有人做解码是不行的。在同时做预填充和解码的引擎里，调度器每到一个检查点就让全组投票，统一这一步的类型；组里有卡做预填充时，没活的卡也要陪着跑一个空的预填充步。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L295-L340" target="_blank" rel="noopener noreferrer">scheduler.hpp 第 295–340 行</a>：“dp 内必须同型，靠投票统一”）</p>
+<p>上游的部署里，两个阶段的宽度差得很远：预填充用 EP2–8，在显存（HBM）装得下的前提下越小越好；解码用 EP64–128，在卡够用的前提下越大越好，上游把它叫作<dfn>宽专家并行（Wide-EP）</dfn>。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L45-L53" target="_blank" rel="noopener noreferrer">Q&amp;A 第 45–53 行</a>）为什么两个阶段要分开部署，见<a href="#deepinfer/pd-kv">第 3 页「三段分离与 72 小时 KV 缓存」</a>。下一节解释解码为什么要铺宽。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这就是并行计算里的“整体同步”模式：各自算一段，全体交换一次数据，再一起进入下一段。它好写、好推理，代价是每一段都要等最慢的那个人。</p>
+<div class="callout vs"><strong>对照 Strata：</strong>Strata 有两张卡时按层切成前后两段（<a href="#chapter/21">第 21 章</a>），卡之间只在交界处传一次数据，因为家用电脑的卡之间通常只有 PCIe。DeepInfer 在超节点里有高速互连，才敢每层都让所有卡互相交换数据。互连的代价决定了切法。</div>
+
+<h2 id="sec-2">2.2 卡越多越划算：每张卡每步要读的专家变少了</h2>
+<p>先回忆<a href="#chapter/05/c05-roofline">第 5 章的 roofline</a>：解码时每一步都要把用到的权重读一遍，读权重的时间往往比计算还长。一份权重读一次，服务的 token 越多，越划算。</p>
+<p>现在站在<strong>一张卡</strong>上看一个 MoE 层的一步解码。批次够大时，本卡负责的每个专家几乎都会被至少一个 token 选中，所以本卡要把自己的专家全读一遍。本卡放几个专家，就读几个专家的权重。<span class="ev ev-est">教学推演</span></p>
+<p>DeepSeek-V4.1-Flash 每层有多少个路由专家？DeepInfer 从 Hugging Face 上的模型 <code>config.json</code> 读这个数，仓库里没有这个文件，也没有写死这个数。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/hugging_face/config.py#L164-L174" target="_blank" rel="noopener noreferrer">config.py 第 164–174 行</a>）仓库里的对比图写着“384+64 experts”，Q&amp;A 也说 EP64 时取整后每卡 7 个专家。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/images/wide_ep_decode_pareto.png" target="_blank" rel="noopener noreferrer">wide_ep_decode_pareto.png</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L103" target="_blank" rel="noopener noreferrer">Q&amp;A 第 103 行</a>）这两处对得上：384 ÷ 64 = 6，再加 1 个冗余，正好 7。本页就按 384 算。每个专家占多少字节、每个 token 选几个专家，仓库里查不到，本页不写具体数，只用 S 和 k 表示。</p>
+<p>于是有一个很简单的式子：<strong>每卡每层专家数 = (384 + 冗余数) ÷ EP</strong>，每卡每步要读的专家权重 ≈ 这个数 × S。<span class="ev ev-est">教学推演</span> 按“每卡至少 1 个冗余”取整，EP8 是 49 个，EP64 是 7 个，EP128 是 4 个。从 EP8 到 EP64，每张卡每步读的专家权重降到约 1/7。</p>
+<div class="viz" data-viz="di-wide-ep-width"><figure class="fig"><svg viewBox="0 0 400 230" role="img" aria-label="图 D2-2：每张卡每层放几个专家。EP8 是 49 个，EP16 是 25 个，EP32 是 13 个，EP64 是 7 个，EP128 是 4 个">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">每张卡每层放几个专家</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="36" font-size="12">384 个路由专家，每卡至少 1 个冗余，取整到能被 EP 整除</text>
+<text class="f-text" fill="#182f2b" x="10" y="64" font-size="12">EP8</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="51" width="280" height="18"/>
+<text class="f-text" fill="#182f2b" x="350" y="64" font-size="12">49 个</text>
+<text class="f-text" fill="#182f2b" x="10" y="94" font-size="12">EP16</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="81" width="142.9" height="18"/>
+<text class="f-text" fill="#182f2b" x="212" y="94" font-size="12">25 个</text>
+<text class="f-text" fill="#182f2b" x="10" y="124" font-size="12">EP32</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="111" width="74.3" height="18"/>
+<text class="f-text" fill="#182f2b" x="144" y="124" font-size="12">13 个</text>
+<text class="f-text" fill="#182f2b" x="10" y="154" font-size="12">EP64</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="141" width="40" height="18"/>
+<text class="f-text" fill="#182f2b" x="110" y="154" font-size="12">7 个</text>
+<text class="f-text" fill="#182f2b" x="10" y="184" font-size="12">EP128</text>
+<rect class="f-accent" fill="#136d5a" x="64" y="171" width="22.9" height="18"/>
+<text class="f-text" fill="#182f2b" x="93" y="184" font-size="12">4 个</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="212" font-size="12">条长按比例。每卡每步要读的专家权重和条长成正比</text>
+</svg><figcaption>图 D2-2　卡越多，每张卡每层放的专家越少：EP64 每卡 7 个，只有 EP8 的约 1/7。每卡每步要读的专家权重跟着降。</figcaption></figure></div>
+<p>下面的推演器把三件事放在一起：每卡放几个专家，一份专家权重读一次平均服务多少 token，每卡每步要发出多少个隐藏向量。点 EP8、EP64、EP128，看哪个数在变、哪个几乎不动。每卡每步的 token 数 T 默认取 384：示例 benchmark 默认每卡 64 个请求，每个请求每步按 1 + 5 个 token 计。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/README.md?plain=1#L45" target="_blank" rel="noopener noreferrer">examples/README 第 45 行</a>）</p>
+<p>省下来的不只是读的字节。批次固定为每卡 T 个 token 时，全组一步一共有 EP × T 个 token、EP × T × k 次专家选择。负载均匀时，每张卡分到 T × k 次，摊到本卡的专家上，每份权重服务 T × k ÷ 每卡专家数 个 token。<span class="ev ev-est">教学推演</span> EP64 是 EP8 的 7 倍。这正是第 5 章说的“一桌人吃饭”：同一盘菜，吃的人越多越划算。</p>
+<p>上游的实测图支持这个方向。<span class="ev ev-report">上游报告</span> 条件：DeepSeek-V4.1-Flash，上下文 131,072，草稿长度固定为 3，按每个草稿 token 75% 的接受率折算（图上写 τ = 3.25）；EP64DP64 用 384+64 个专家，EP8DP8 用 384+32 个；这张图没写卡的型号，README 给它的性能图写的条件是 SM100，每组卡都在一个 scale-up 域内（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L83" target="_blank" rel="noopener noreferrer">README 第 83 行</a>）。每个 DP rank 跑 64 个请求时，从图上读：EP64 约每卡每秒 1.57 万个 token、每个用户每秒约 246 个；EP8 约 1.27 万、约 198 个。也就是吞吐和单用户速度同时更好。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L55-L59" target="_blank" rel="noopener noreferrer">Q&amp;A 第 55–59 行</a>）</p>
+<p>读这张图要注意一点：仓库的 benchmark 脚本无条件设置 <code>DEEPINFER_FORCE_LOAD_BALANCE=1</code>，把每个 token 的路由分数换成随机数，专家负载天然均匀。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py#L158-L168" target="_blank" rel="noopener noreferrer">benchmark.py 第 158–168 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/input_metadata/input_metadata.py#L48-L50" target="_blank" rel="noopener noreferrer">input_metadata.py 第 48–50 行</a>）所以这是“负载完全均衡”时的上限。上游说，线上的负载均衡大约能做到这个离线上限的 80%。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L125-L127" target="_blank" rel="noopener noreferrer">Q&amp;A 第 125–127 行</a>）</p>
+<div class="callout vs"><strong>对照 Strata：</strong>Strata 一次只服务很少几段对话，一个 token 要读约 480 个专家（<a href="#chapter/10">第 10 章</a>）。它也按专家分组，可一份权重只能在一个验证窗口的几个 token 之间共享（<a href="#chapter/16">第 16 章</a>）。所以它的重点是让热门专家住进显存，少走慢路（<a href="#chapter/12">第 12 章</a>）。DeepInfer 反过来：让一张卡只管几个专家，再把成百上千个 token 攒成一批，让每份权重读一次就用满。</div>
+
+<h2 id="sec-3">2.3 每层两次全对全：分发与合并</h2>
+<p>专家分散在不同的卡上，token 就得去找专家。每个 MoE 层，DeepInfer 做四件事：<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L565-L616" target="_blank" rel="noopener noreferrer">mlp.py 第 565–616 行</a>）</p>
+<ol>
+<li><strong>路由。</strong>本卡的路由器给本卡的每个 token 挑专家。路由器拿到一张“逻辑专家 → 物理副本”的映射表，选中的是逻辑专家，发往哪个副本由这张表决定。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L359-L401" target="_blank" rel="noopener noreferrer">第 359–401 行</a>）在几个副本之间怎么选，写在内核库里，本书没有核实。</li>
+<li><strong><dfn>分发（dispatch）</dfn>。</strong>每个 token 的隐藏向量发往它选中的专家所在的卡。这一步由 <a href="https://github.com/deepseek-ai/DeepEP" target="_blank" rel="noopener noreferrer">DeepEP</a> 的 <code>EPBuffer.dispatch</code> 完成。它顺便给本卡每个专家累加“这一步收到多少 token”，这就是 2.4 节 EPLB 的原始数据。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L461-L490" target="_blank" rel="noopener noreferrer">第 461–490 行</a>）</li>
+<li><strong>专家计算。</strong>本卡把收到的 token 按专家分组，做分组矩阵乘（<a href="#chapter/16">第 16 章</a>讲过“按专家分组”）。路由权重在这一步就乘进去了。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L406-L459" target="_blank" rel="noopener noreferrer">第 406–459 行</a>）接着，本卡用共享专家算一遍本卡自己的 token。</li>
+<li><strong><dfn>合并（combine）</dfn>。</strong>专家的结果送回 token 原来所在的卡，加在一起，再加上共享专家的结果。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L493-L511" target="_blank" rel="noopener noreferrer">第 493–511 行</a>）</li>
+</ol>
+<p>分发和合并都是<dfn>全对全通信（all-to-all）</dfn>：每张卡都要给其他每张卡发一份不同的数据。</p>
+<aside class="primer" id="di-wide-ep-all-to-all">
+<h3>集合通信：all-to-all</h3>
+<p>直觉：一个办公室有 4 个人，每人手里有一摞信，收件人是另外几个人。all-to-all 就是“所有人同时把信投到所有人的信箱里”，结束时每人手里只剩写给自己的信。</p>
+<p>定义：一组 P 个进程，每个进程准备 P 份数据，第 j 份发给进程 j。它是集合通信的一种。别的常见操作还有广播（一人发给所有人）、all-reduce（所有人的数据加起来，人人拿到总和）、all-gather（每人一份，最后人人拿到全部）。</p>
+<p>例子：4 张卡、每卡 8 个 token、每个 token 选 2 个专家，并且专家均匀分布。每张卡要发出 16 份向量，其中约 12 份发往别的卡（3/4）。卡数变成 64，发往别的卡的比例变成 63/64，总份数不变。所以变宽之后，每张卡的通信量几乎不涨，涨的是参与的卡数和“等最慢那张卡”的风险。</p>
+<p>和 DeepInfer 的关系：每个 MoE 层一次分发、一次合并，各是一次 all-to-all。DeepInfer 统计负载时还用到了 all-reduce 和 all-gather（2.4 节）。</p>
+<p class="further">延伸阅读：<a href="https://en.wikipedia.org/wiki/All-to-all_(parallel_pattern)" target="_blank" rel="noopener noreferrer">维基百科：All-to-all (parallel pattern)</a> · <a href="https://en.wikipedia.org/wiki/Collective_operation" target="_blank" rel="noopener noreferrer">维基百科：Collective operation</a> · <a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html" target="_blank" rel="noopener noreferrer">NCCL 文档：集合通信操作</a> · <a href="https://pytorch.org/docs/stable/distributed.html" target="_blank" rel="noopener noreferrer">PyTorch 文档：torch.distributed</a></p>
+</aside>
+<p>当整个 EP 组都在同一个高速互连域里时（NVIDIA 卡上就是同一个 NVLink 域），DeepInfer 走另一条路：<strong>Mega MoE</strong>。<span class="ev ev-code">代码事实</span> 这条路在 Python 侧只有一次调用：把路由结果、两组专家权重和一块对称显存交给 <a href="https://github.com/deepseek-ai/DeepGEMM" target="_blank" rel="noopener noreferrer">DeepGEMM</a> 的 <code>fp8_fp4_mega_moe</code>（激活是 BF16 时换成 <code>bf16_mega_moe</code>，<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L254-L256" target="_blank" rel="noopener noreferrer">mlp.py 第 254–256 行</a>），拿回这一层的输出，中间没有单独的分发、合并调用；共享专家也一起交进去。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L184-L188" target="_blank" rel="noopener noreferrer">mlp.py 第 184–188 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L528-L563" target="_blank" rel="noopener noreferrer">第 528–563 行</a>）上游说，在一个 scale-up 域里，不管 EP 多宽、批多大，Mega MoE 都明显快于不融合的做法。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L229-L231" target="_blank" rel="noopener noreferrer">Q&amp;A 第 229–231 行</a>）这个内核内部怎么把通信和计算叠在一起，DeepGEMM 的代码不在这次的仓库里，本书没有核实。</p>
+<figure class="fig"><svg viewBox="0 0 400 268" role="img" aria-label="图 D2-3：一层 MoE 的两条路。普通路径分四步：路由、分发、专家计算、合并；Mega MoE 在路由之后只有一次调用">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="13" font-weight="600" text-anchor="middle">普通路径</text>
+<text class="f-muted" fill="#5c6d66" x="100" y="35" font-size="12" text-anchor="middle">EP 组超出 NVLink 域时</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="13" font-weight="600" text-anchor="middle">Mega MoE</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="35" font-size="12" text-anchor="middle">EP 组在 NVLink 域内时</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="46" width="180" height="32" rx="6"/>
+<text class="f-text" fill="#182f2b" x="100" y="67" font-size="12" text-anchor="middle">路由：给 token 挑专家</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="94" width="180" height="32" rx="6"/>
+<text class="f-text" fill="#182f2b" x="100" y="115" font-size="12" text-anchor="middle">分发：token 发往专家所在卡</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="142" width="180" height="32" rx="6"/>
+<text class="f-on" fill="#ffffff" x="100" y="163" font-size="12" text-anchor="middle">本卡专家做分组矩阵乘</text>
+<rect class="f-soft" fill="#e5f1df" x="10" y="190" width="180" height="32" rx="6"/>
+<text class="f-text" fill="#182f2b" x="100" y="211" font-size="12" text-anchor="middle">合并：送回，加共享专家</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M100 78V92M100 126V140M100 174V188"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="210" y="46" width="180" height="32" rx="6"/>
+<text class="f-text" fill="#182f2b" x="300" y="67" font-size="12" text-anchor="middle">路由：给 token 挑专家</text>
+<rect class="f-accent" fill="#136d5a" x="210" y="94" width="180" height="128" rx="6"/>
+<text class="f-on" fill="#ffffff" x="300" y="132" font-size="13" font-weight="600" text-anchor="middle">一次调用</text>
+<text class="f-on" fill="#ffffff" x="300" y="154" font-size="12" text-anchor="middle">fp8_fp4_mega_moe</text>
+<text class="f-on" fill="#ffffff" x="300" y="176" font-size="12" text-anchor="middle">分发、计算、合并都在里面</text>
+<text class="f-on" fill="#ffffff" x="300" y="198" font-size="12" text-anchor="middle">内部做法本书未核实</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M300 78V92"/>
+<text class="f-muted" fill="#5c6d66" x="200" y="246" font-size="12" text-anchor="middle">两条路都在 mlp.py 里</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="262" font-size="12" text-anchor="middle">走哪条，看 EP 组是否在同一个 NVLink 域</text>
+</svg><figcaption>图 D2-3　一层 MoE 的两条路。普通路径要经过两次全对全；EP 组在 NVLink 域内时，DeepInfer 把这一层整个交给一次 Mega MoE 调用。</figcaption></figure>
+
+<h2 id="sec-4">2.4 热门专家扎堆：EPLB 复制热门、重新摆放</h2>
+<p>全组每一步一起走，所以一步的耗时由<strong>最忙的那张卡</strong>决定。如果几个热门专家恰好都放在同一张卡上，这张卡要算的 token 是别人的好几倍，其他卡只能等。DeepInfer 用一个数衡量这件事：<code>moe_lb</code> = 最忙那张卡收到的 token ÷ 平均每卡收到的 token。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L167-L193" target="_blank" rel="noopener noreferrer">eplb/__init__.py 第 167–193 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/stats_logger.py#L238-L241" target="_blank" rel="noopener noreferrer">stats_logger.py 第 238–241 行</a>）1.0 是完全均衡。</p>
+<p>办法是<dfn>专家负载均衡（EPLB）</dfn>。物理槽位比逻辑专家多出几个，多出来的叫<dfn>冗余专家</dfn>，用来放热门专家的副本。上游的说法是：每张卡除了自己负责的专家，再放几个冗余专家。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L97" target="_blank" rel="noopener noreferrer">Q&amp;A 第 97 行</a>）一个热门专家有了 3 份副本，它的 token 最多能分给 3 张卡；摆放时两份副本也可能落在同一张卡上。EPLB 的运行过程是这样的：<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L131-L165" target="_blank" rel="noopener noreferrer">eplb/__init__.py 第 131–165 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L222-L278" target="_blank" rel="noopener noreferrer">第 222–278 行</a>）</p>
+<ol>
+<li><strong>统计。</strong>每一步，分发时给本卡每个专家累加收到的 token 数，存进一个滑动窗口。</li>
+<li><strong>定期重排。</strong>每隔 M 步，全组把窗口里的计数 all-reduce 加起来，交给重排策略。第一次重排提前到 M/4 步，尽早纠正冷启动时的不均。</li>
+<li><strong>复制热门。</strong>策略一轮给一个副本：每轮都给“多一份副本后，最大的单份负载下降最多”的那个专家。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/policy.py#L105-L123" target="_blank" rel="noopener noreferrer">policy.py 第 105–123 行</a>）</li>
+<li><strong>重新摆放。</strong>所有副本按负载从大到小排队，逐个放到“放下之后，各步里最忙的卡加起来最不忙”的那张卡上，每张卡放满为止。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/policy.py#L12-L70" target="_blank" rel="noopener noreferrer">policy.py 第 12–70 行</a>）这是<a href="https://zh.wikipedia.org/zh-cn/贪心算法" target="_blank" rel="noopener noreferrer">贪心算法</a>：每次只做眼下最好的选择，不保证全局最优，但快。</li>
+<li><strong>搬权重。</strong>按新旧映射在卡之间搬专家权重：GPU 并且在同一个 NVLink 域内，直接读对端卡上的镜像；否则用 torch.distributed 的点对点收发（NVIDIA 上是 NCCL，昇腾上不走镜像这条路）。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L195-L202" target="_blank" rel="noopener noreferrer">eplb/__init__.py 第 195–202 行</a>）搬完再换映射表。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/shuffle.py#L1-L6" target="_blank" rel="noopener noreferrer">shuffle.py 第 1–6 行</a>）</li>
+</ol>
+<p>注意第 3、4 步的一个假设：一个专家有几份副本，它的负载就平均分成几份。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/policy.py#L31-L37" target="_blank" rel="noopener noreferrer">policy.py 第 31–37 行</a>）下面的模拟器按同样的算法移植，规模缩小到 16 个专家、4 张卡。</p>
+<div class="viz" data-viz="di-wide-ep-eplb"><figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 D2-4：重排前，热门专家都在卡 1，四张卡的平均负载是 89、432、146、91，moe_lb 2.28；重排后是 189、188、201、180，moe_lb 1.09">
+<text class="f-text" fill="#182f2b" x="100" y="18" font-size="13" font-weight="600" text-anchor="middle">重排前：moe_lb 2.28</text>
+<text class="f-text" fill="#182f2b" x="300" y="18" font-size="13" font-weight="600" text-anchor="middle">重排后：moe_lb 1.09</text>
+<rect class="f-accent" fill="#136d5a" x="18" y="170.4" width="30" height="20.6"/>
+<rect class="f-warn" fill="#9e5d24" x="58" y="91" width="30" height="100"/>
+<rect class="f-accent" fill="#136d5a" x="98" y="157.2" width="30" height="33.8"/>
+<rect class="f-accent" fill="#136d5a" x="138" y="169.9" width="30" height="21.1"/>
+<text class="f-text" fill="#182f2b" x="33" y="164" font-size="12" text-anchor="middle">89</text>
+<text class="f-text" fill="#182f2b" x="73" y="85" font-size="12" text-anchor="middle">432</text>
+<text class="f-text" fill="#182f2b" x="113" y="151" font-size="12" text-anchor="middle">146</text>
+<text class="f-text" fill="#182f2b" x="153" y="164" font-size="12" text-anchor="middle">91</text>
+<rect class="f-accent" fill="#136d5a" x="218" y="147.2" width="30" height="43.8"/>
+<rect class="f-accent" fill="#136d5a" x="258" y="147.5" width="30" height="43.5"/>
+<rect class="f-accent" fill="#136d5a" x="298" y="144.5" width="30" height="46.5"/>
+<rect class="f-accent" fill="#136d5a" x="338" y="149.3" width="30" height="41.7"/>
+<text class="f-text" fill="#182f2b" x="233" y="141" font-size="12" text-anchor="middle">189</text>
+<text class="f-text" fill="#182f2b" x="273" y="141" font-size="12" text-anchor="middle">188</text>
+<text class="f-text" fill="#182f2b" x="313" y="138" font-size="12" text-anchor="middle">201</text>
+<text class="f-text" fill="#182f2b" x="353" y="143" font-size="12" text-anchor="middle">180</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M10 191H190M210 191H390"/>
+<text class="f-muted" fill="#5c6d66" x="33" y="208" font-size="12" text-anchor="middle">卡 0</text>
+<text class="f-muted" fill="#5c6d66" x="73" y="208" font-size="12" text-anchor="middle">卡 1</text>
+<text class="f-muted" fill="#5c6d66" x="113" y="208" font-size="12" text-anchor="middle">卡 2</text>
+<text class="f-muted" fill="#5c6d66" x="153" y="208" font-size="12" text-anchor="middle">卡 3</text>
+<text class="f-muted" fill="#5c6d66" x="233" y="208" font-size="12" text-anchor="middle">卡 0</text>
+<text class="f-muted" fill="#5c6d66" x="273" y="208" font-size="12" text-anchor="middle">卡 1</text>
+<text class="f-muted" fill="#5c6d66" x="313" y="208" font-size="12" text-anchor="middle">卡 2</text>
+<text class="f-muted" fill="#5c6d66" x="353" y="208" font-size="12" text-anchor="middle">卡 3</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="230" font-size="12" text-anchor="middle">每卡平均每步收到的 token（教学数据，16 个专家、4 张卡）</text>
+</svg><figcaption>图 D2-4　热门专家扎堆在卡 1 时，它要算的 token 是平均的 2 倍多，整组都在等它。复制热门、重新摆放之后，四张卡差不多一样忙。</figcaption></figure></div>
+<p>代码里 EPLB 默认是关着的：重排间隔 <code>DEEPINFER_EXPERT_REARRANGEMENT_STEP_INTERVAL</code> 默认 0，表示不重排；冗余下限 <code>DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS</code> 默认 0；统计窗口默认 100 步。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L113-L121" target="_blank" rel="noopener noreferrer">environ.py 第 113–121 行</a>）冗余下限是全组的总数，不是每卡的数，代码会把它向上取整到“384 + 冗余”能被 EP 整除。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L21-L28" target="_blank" rel="noopener noreferrer">eplb/__init__.py 第 21–28 行</a>）上游公布的设置和实测如下。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L93-L103" target="_blank" rel="noopener noreferrer">Q&amp;A 第 93–103 行</a>）</p>
+<div class="table-wrap"><table><thead><tr><th>阶段</th><th>冗余起点</th><th>统计窗口</th><th>重排间隔</th><th>上游实测 moe_lb</th></tr></thead><tbody>
+<tr><td>预填充</td><td>每卡 4 个，取整</td><td>100 步</td><td>每 1,000 步</td><td>1.074（EP4DP4）· 1.045（EP2DP2）</td></tr>
+<tr><td>解码</td><td>每卡 1 个，取整</td><td>1,000 步</td><td>每 10,000 步</td><td>1.090</td></tr>
+</tbody></table></div>
+<p>“每卡 1 个”换成代码里的写法，就是把冗余下限设成 EP。<span class="ev ev-est">教学推演</span> EP64 时 384 + 64 = 448，正好整除，每卡 7 个，和上游的说法一致。</p>
+<div class="callout vs"><strong>对照 Strata：</strong>Strata 的专家缓存也在跟踪“谁最近热门”，每 4 轮按衰减计数把热门专家换进显存（<a href="#chapter/12">第 12 章</a>）。它要解决的是“在哪里算”：显存还是 CPU。EPLB 要解决的是“谁最忙”：热门专家多复制几份，摊给几张卡。两者都拿过去预测未来，也都先把权重拷完再切换映射。</div>
+
+<h2 id="sec-5">2.5 请求怎么分到卡上：三个数据并行负载均衡器</h2>
+<p>EPLB 只管 MoE 部分。注意力部分的忙闲，取决于每张卡分到多少请求、这些请求的上下文有多长。这由 DP 层面的负载均衡器负责。它们和线上系统耦合很紧，这次没有开源：README 把预填充和解码的 DP 负载均衡列在“不包含”里，Q&amp;A 说负载均衡组件和内部基础设施耦合紧，还没有完全开源，视觉编码器的负载均衡器也在其中。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md?plain=1#L38-L42" target="_blank" rel="noopener noreferrer">README 第 38–42 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L21" target="_blank" rel="noopener noreferrer">Q&amp;A 第 21 行</a>）下面三条都只来自 Q&amp;A 的描述。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L105-L127" target="_blank" rel="noopener noreferrer">Q&amp;A 第 105–127 行</a>）</p>
+<ul>
+<li><strong>预填充负载均衡器。</strong>请求按总上下文长度分成四档：16K 以下、16–64K、64–256K、256K 以上。每档分到多少引擎，按上一轮各档的算力需求动态调整。引擎按剩余的算力额度主动来取活。因为任何引擎都能命中任何前缀（块 KV 缓存存在独立的 3FS 存储集群上，<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L141" target="_blank" rel="noopener noreferrer">Q&amp;A 第 141 行</a>，见<a href="#deepinfer/pd-kv">第 3 页</a>），所以不按前缀亲和性分配。进了 DP 组，每个请求交给当前额度负载最低的 rank。</li>
+<li><strong>解码负载均衡器。</strong>在所有解码实例的所有卡之间统一分配，同时平衡两个量：请求数（决定每步的批大小）和 KV 缓存总长度（决定注意力的开销）。经验做法是：短请求发给并发低、但 KV 总长大的卡，长请求发给 KV 总长小的卡。</li>
+<li><strong>视觉编码器负载均衡器。</strong>预填充机器随机挑一台部署了视觉编码器（VE）的机器，再把图片交给这台机器上当前处理图块最少的卡。图块数直接按尺寸算：(宽 ÷ 图块边长) × (高 ÷ 图块边长)。</li>
+</ul>
+<p>两层均衡缺一不可：DP 负载均衡器让每张卡的注意力差不多忙，EPLB 让每张卡的 MoE 差不多忙。上游说，整体能做到完全均衡的离线基准的大约 80%。<span class="ev ev-report">上游报告</span></p>
+<p>宽也有代价。一个解码实例的所有卡是一个通信域，坏一张卡，整个实例就不能用了。重启时，平台按当时健康的卡数重新决定 EP 宽度。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L209-L211" target="_blank" rel="noopener noreferrer">Q&amp;A 第 209–211 行</a>）扩缩容和其他容错手段，见<a href="#deepinfer/overview">第 1 页</a>。</p>
+
+<h2 id="sec-6">2.6 专家权重用 FP4：每步要读的字节再少一半</h2>
+<p>每卡每步要读的专家权重 = 专家个数 × 每个专家的字节数。2.2 节减少了前者，FP4 减少后者。上游说，路由专家的权重用 MXFP4：每 32 个权重共用一个 ue8m0 缩放系数。主 KV 和索引 KV 也用了 FP4，那是<a href="#deepinfer/pd-kv">第 3 页</a>的话题。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md?plain=1#L213-L221" target="_blank" rel="noopener noreferrer">Q&amp;A 第 213–221 行</a>）</p>
+<p>代码和这段描述一致：加载模型时，<code>config.json</code> 的量化配置必须写明专家用 FP4、缩放系数用 ue8m0，否则拒绝加载。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/hugging_face/config.py#L253-L264" target="_blank" rel="noopener noreferrer">config.py 第 253–264 行</a>）专家权重以 e2m1 格式两个一组塞进一个字节，缩放系数另存。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/hugging_face/weights.py#L281-L288" target="_blank" rel="noopener noreferrer">weights.py 第 281–288 行</a>）矩阵乘时，激活用 FP8、专家权重用 FP4。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L177-L182" target="_blank" rel="noopener noreferrer">mlp.py 第 177–182 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L109-L128" target="_blank" rel="noopener noreferrer">第 109–128 行</a>）</p>
+<p>算一下每个权重占几位：32 个权重 × 4 位，加 1 个 8 位的缩放系数，共 136 位，平均每个 4.25 位。<span class="ev ev-est">教学推演</span> 和 FP8 的 8 位比，每步要读的专家字节差不多减半。</p>
+<figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 D2-5：MXFP4 一块 32 个权重，每个 4 位，共用一个 8 位缩放系数，平均 4.25 位。对比 BF16 16 位、FP8 8 位、Strata Q2_0 2.25 位">
+<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">MXFP4 的一块：32 个权重共用一个缩放系数</text>
+<rect class="f-accent" fill="#136d5a" x="10" y="30" width="256" height="22"/>
+<rect class="f-warn" fill="#9e5d24" x="272" y="30" width="16" height="22"/>
+<path class="f-line" fill="none" stroke="#ffffff" stroke-width="1" d="M42 30V52M74 30V52M106 30V52M138 30V52M170 30V52M202 30V52M234 30V52"/>
+<text class="f-muted" fill="#5c6d66" x="10" y="70" font-size="12">32 × 4 位（e2m1，每格 4 个权重）</text>
+<text class="f-muted" fill="#5c6d66" x="296" y="46" font-size="12">8 位缩放</text>
+<text class="f-text" fill="#182f2b" x="10" y="92" font-size="12">(32 × 4 + 8) ÷ 32 = 4.25 位 / 权重</text>
+<text class="f-text" fill="#182f2b" x="10" y="124" font-size="12">BF16</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="112" width="270" height="16"/>
+<text class="f-text" fill="#182f2b" x="364" y="124" font-size="12" text-anchor="end">16 位</text>
+<text class="f-text" fill="#182f2b" x="10" y="152" font-size="12">FP8</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="100" y="140" width="135" height="16"/>
+<text class="f-text" fill="#182f2b" x="241" y="152" font-size="12">8 位</text>
+<text class="f-text" fill="#182f2b" x="10" y="180" font-size="12">MXFP4</text>
+<rect class="f-accent" fill="#136d5a" x="100" y="168" width="71.7" height="16"/>
+<text class="f-text" fill="#182f2b" x="178" y="180" font-size="12">4.25 位</text>
+<text class="f-text" fill="#182f2b" x="10" y="208" font-size="12">Strata Q2_0</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="100" y="196" width="38" height="16"/>
+<text class="f-text" fill="#182f2b" x="144" y="208" font-size="12">2.25 位（第 4 章）</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="230" font-size="12">条长按每个权重的平均位数，含缩放系数</text>
+</svg><figcaption>图 D2-5　MXFP4 每个权重平均 4.25 位，比 FP8 少一半。Strata 为了塞进一张家用显卡压得更狠，每个权重 2.25 位。</figcaption></figure>
+<div class="callout vs"><strong>对照 Strata：</strong>Strata 的 Q2_0 每个权重 2.25 位（<a href="#chapter/04/c04-quant">第 4 章「量化」</a>），目标是让 34 GB 的专家尽量多地住进 12 GB 显存，没住进去的由 CPU 算。DeepInfer 的专家全在卡上：一边把专家摊到几十张卡，一边用 4 位格式，两头一起减少每张卡每步要读的字节。</div>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>注意力按数据并行，每张卡管自己的请求；路由专家按专家并行，摊到 EP 张卡上。每层 MoE 都要分发、合并两次全对全，所以全组每一步一起走。</li>
+<li>解码时卡越多，每张卡每层的专家越少（EP8 每卡 49 个，EP64 每卡 7 个），每步要读的专家权重越少，一份权重服务的 token 越多；每卡的通信量几乎不变。</li>
+<li>最忙的那张卡决定整组的速度。EPLB 统计每个专家的负载，定期给热门专家加副本、重新摆放，再在卡之间搬权重；上游在解码上报告的 moe_lb 是 1.090。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“EP 越宽越好，卡越多越快，可以一直加下去。”</strong></p>
+<p>加卡省下的读带宽越来越少：从 EP8 到 EP64，每卡专家从 49 个降到 7 个；再翻一倍到 EP128，只从 7 个降到 4 个。<span class="ev ev-est">教学推演</span> EP 组超出 NVLink 域时还有普通的 DeepEP 路径可走，但 Mega MoE 和单机内的权重镜像搬运都只在域内使用；通信域越大，等最慢那张卡的风险越高，坏一张卡停掉的卡也越多。上游给的解码宽度是 EP64–128，对应一个 64–128 卡的超节点。<span class="ev ev-report">上游报告</span></p></div>
+
+<details class="deep"><summary>深入一层：EPLB 的代码路径、环境变量与 benchmark 口径</summary>
+<h3>专家怎么编号</h3>
+<p><code>FusedExperts</code> 的文档字符串定义了四个数：logical = <code>n_routed_experts</code>，路由器从中挑选；extra = <code>n_redundant_experts</code>，由 <code>model_loader._configure_moe_redundancy</code> 写入；physical = logical + extra，必须能被 <code>ep_size</code> 整除；local = physical // ep_size。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/moe.py#L1-L8" target="_blank" rel="noopener noreferrer">moe.py 第 1–8 行</a>）取整由 <code>resolve_num_extra_experts</code> 完成：<code>padding = -(num_routed_experts + min_num_extra_experts) % ep_size</code>。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L21-L28" target="_blank" rel="noopener noreferrer">eplb/__init__.py 第 21–28 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/model_loader.py#L83-L106" target="_blank" rel="noopener noreferrer">model_loader.py 第 83–106 行</a>）初始布局是 <code>[0 … n−1, 然后 0, 1, 2 … 的副本]</code>，所有层用同一份。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L31-L39" target="_blank" rel="noopener noreferrer">第 31–39 行</a>）加载权重时，每个 rank 按这份初始布局只读自己那几个专家，冗余副本复用同一份 HF 权重。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/hugging_face/weights.py#L248-L272" target="_blank" rel="noopener noreferrer">weights.py 第 248–272 行</a>）权重形状相同的 MoE 层合成一组，每组一个 <code>ExpertLoadBalancer</code>。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/deepseek.py#L323-L365" target="_blank" rel="noopener noreferrer">deepseek.py 第 323–365 行</a>）</p>
+<h3>每一步做什么</h3>
+<p><code>ExpertLoadBalancer.step</code> 由采样阶段每步调用一次，EP 只有 1 时直接返回。它做三件事：把本步的 <code>expert_count</code> 存进窗口、需要时重排；累计负载统计；把 <code>expert_count</code> 清零。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L131-L165" target="_blank" rel="noopener noreferrer">第 131–165 行</a>）NORMAL 引擎（同时做预填充和解码）默认跳过预填充步：这一步的计数不进窗口，也不推进重排计数；设 <code>DEEPINFER_REARRANGE_AFTER_PREFILL_IN_NORMAL_ENGINE=1</code> 后，预填充步的计数进窗口，下一个非预填充步立即重排。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L83-L84" target="_blank" rel="noopener noreferrer">第 83–84 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L146-L165" target="_blank" rel="noopener noreferrer">第 146–165 行</a>）负载统计每 <code>DEEPINFER_MOE_LB_STAT_INTERVAL</code>（默认 128）步做一次 all-gather，得到各卡 token 数的平均值和最大值，两者之比就是日志里的 <code>moe_lb</code>。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L167-L193" target="_blank" rel="noopener noreferrer">第 167–193 行</a>）</p>
+<h3>策略的两段贪心</h3>
+<p><code>rebalance_experts_global</code> 先复制、后摆放。复制阶段每轮对每个候选专家 j 算：“给 j 加一份副本后，每一步里最大的单份负载”，按步求和，取最小的那个 j。分数里加了 <code>j × 1e-4</code>，保证各专家的分数互不相同。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/policy.py#L73-L140" target="_blank" rel="noopener noreferrer">policy.py 第 73–140 行</a>）摆放阶段的目标写在注释里：让“各步里最忙那张卡的负载”之和尽量小，同分时选编号小的卡。仓库的单元测试检查两张映射表互为逆、副本总数等于物理槽位数，以及同样输入两次结果完全相同。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_eplb_policy.py#L27-L62" target="_blank" rel="noopener noreferrer">test_eplb_policy.py 第 27–62 行</a>）本页的模拟器把它简化成单层、双精度浮点，同分的处理可能和 PyTorch 的单精度版本略有不同。</p>
+<h3>权重怎么搬</h3>
+<p>第一次重排时先清空 PyTorch 的显存缓存，防止显存不够。EP 组在 NVLink 域内、并且是 GPU 时，建一块只装一层权重的对称显存镜像，逐层刷新；每张卡直接从配对的发送方镜像里拷贝缺的专家。否则走 torch.distributed 的批量点对点收发（NVIDIA 上是 NCCL），按 <code>DEEPINFER_REARRANGE_P2P_GROUPS</code> 分桶。同一个专家有多个发送方时，接收方按固定规则均分给发送方，收发两端用同一个函数配对，保证对得上。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L195-L220" target="_blank" rel="noopener noreferrer">eplb/__init__.py 第 195–220 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/shuffle.py#L47-L53" target="_blank" rel="noopener noreferrer">shuffle.py 第 47–53 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/shuffle.py#L94-L147" target="_blank" rel="noopener noreferrer">第 94–147 行</a>）搬完权重，才用 <code>copy_</code> 换上新的映射表。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L261-L278" target="_blank" rel="noopener noreferrer">第 261–278 行</a>）</p>
+<h3>环境变量</h3>
+<div class="table-wrap"><table><thead><tr><th>变量</th><th>代码默认</th><th>示例脚本</th><th>作用</th></tr></thead><tbody>
+<tr><td><code>DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS</code></td><td>0</td><td>32</td><td>冗余专家总数的下限，向上取整</td></tr>
+<tr><td><code>DEEPINFER_EXPERT_COUNT_WINDOW_SIZE</code></td><td>100</td><td>3</td><td>统计窗口步数；开重排时必须在 1 和间隔之间</td></tr>
+<tr><td><code>DEEPINFER_EXPERT_REARRANGEMENT_STEP_INTERVAL</code></td><td>0（不重排）</td><td>30（加 <code>--enable_eplb</code> 时）</td><td>每隔几步重排一次</td></tr>
+<tr><td><code>DEEPINFER_MOE_LB_STAT_INTERVAL</code></td><td>128</td><td>10（benchmark）</td><td>每隔几步汇总一次 moe_lb</td></tr>
+<tr><td><code>DEEPINFER_FORCE_LOAD_BALANCE</code></td><td>关</td><td>开（benchmark）</td><td>路由分数换成随机数，负载天然均匀</td></tr>
+<tr><td><code>DEEPINFER_FORCE_IMBALANCE_RATIO</code></td><td>0</td><td>—</td><td>人为制造不均衡：让第一张卡收到其他卡平均值的这么多倍</td></tr>
+</tbody></table></div>
+<p>来源：<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py#L113-L121" target="_blank" rel="noopener noreferrer">environ.py 第 113–121 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_config.py#L77-L83" target="_blank" rel="noopener noreferrer">examples/_config.py 第 77–83 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py#L158-L168" target="_blank" rel="noopener noreferrer">examples/benchmark.py 第 158–168 行</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L347-L371" target="_blank" rel="noopener noreferrer">mlp.py 第 347–371 行</a>。examples/README 说冗余下限“默认 32”，指的是示例脚本里的默认，引擎自己的默认是 0。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/README.md?plain=1#L63" target="_blank" rel="noopener noreferrer">examples/README 第 63 行</a>）引擎启动时用假数据跑一遍来估算显存，这一遍把不均衡比例临时设成 1.8。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L509-L512" target="_blank" rel="noopener noreferrer">model_runner.py 第 509–512 行</a>）</p>
+<h3>benchmark 口径</h3>
+<p>benchmark 的解码吞吐按“满接受”计：每个请求每步算 1 + nextn 个 token，不管草稿实际接受了几个。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/README.md?plain=1#L55" target="_blank" rel="noopener noreferrer">examples/README 第 55 行</a>）README 首页的解码图和宽度对比图用的是另一个口径：出图脚本把两根轴都乘以 τ = 1 + nextn × 接受率，副标题写着按 75% 接受率折算、τ = 3.25。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/sweep/plot_pareto.py#L58-L67" target="_blank" rel="noopener noreferrer">plot_pareto.py 第 58–67 行</a>）所以 benchmark 直接打印的满接受吞吐，比图上的数要高。加上 <code>DEEPINFER_FORCE_LOAD_BALANCE=1</code>，这些图都是“负载完全均衡”下的数字。这些口径细节，<a href="#deepinfer/spec-sched">第 4 页</a>还会讲到。</p>
+<h3>本页没有核实的</h3>
+<ul>
+<li>DeepEP、DeepGEMM 的子模块不在这次的仓库检出里：分发、合并、Mega MoE 内部怎么做，路由器在几个副本之间怎么选，本书都没有核实。</li>
+<li>384 个路由专家来自上游图例和 Q&amp;A 的推算，模型的 <code>config.json</code> 不在仓库里；每个专家的字节数、每个 token 选几个专家、MoE 层数，本页都没有写。</li>
+<li>三个 DP 负载均衡器没有开源，只有 Q&amp;A 的文字描述。</li>
+</ul>
+</details>
