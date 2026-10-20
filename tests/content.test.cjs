@@ -147,6 +147,8 @@ test('every interactive figure in the chapters has a registered widget and a sta
   const opened=(html.match(/<div class="viz"/g)||[]).length,closed=[...html.matchAll(/<div class="viz" data-viz="[a-z0-9-]+"><figure class="fig">[\s\S]*?<\/figure><\/div>/g)].length;
   assert.equal(opened,closed,c.id+' viz blocks must be <div class="viz" data-viz="…"><figure class="fig">…</figure></div>');
  }
+ // Column pages (content/columns.json) host widgets too.
+ for(const col of load('columns'))for(const p of col.pages){const f=path.join(root,'content/columns',col.id,p.id+'.html');if(fs.existsSync(f))for(const m of fs.readFileSync(f,'utf8').matchAll(/<div class="viz" data-viz="([a-z0-9-]+)">/g))used.add(m[1]);}
  for(const name of globalThis.Viz.names())assert.ok(used.has(name),'widget '+name+' is registered but no chapter uses it');
 });
 
