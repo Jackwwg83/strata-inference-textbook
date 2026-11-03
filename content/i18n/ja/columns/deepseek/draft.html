@@ -8,33 +8,40 @@
 <p><strong>内部の構造。</strong>エンジンに付属する検証スクリプトは、DeepSeek のチェックポイントと 1 行ずつ突き合わせるもので、その中にこう書いてあります。ドラフトモデルは 3 ブロックで、各ブロックはウィンドウアテンションと、128 エキスパートから 1 トークンあたり 3 個を選ぶ小さな MoE からなり、入力はバックボーンの 37〜39 層の状態から取る。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/dspark_ref.py#L10-L14" target="_blank" rel="noopener noreferrer">dspark_ref.py の 10–14 行目</a>）ドラフトモデルは自分では履歴を持ちません。エンジンがブロックごとにウィンドウリングを 1 つ持たせ、リングにはバックボーン KV の射影を入れます。バックボーンが行の束を 1 つ残すたびに、その行から出した 3 層分の状態でリングに「シード」を入れます（seed）。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7677-L7681" target="_blank" rel="noopener noreferrer">ds4_model.cu の 7677–7681 行目</a>）</p>
 <p><strong>1 ラウンドの起草の入力。</strong>起草のとき、エンジンはドラフトモデルに 1 つのブロックを渡します。0 行目は、いま決まったばかりでまだバックボーンに入れていないトークン（y と書きます）で、残りの行はすべて同じ固定の「ノイズトークン」で埋めます。ブロックの行数は pack の dspark_block_size に等しくなります。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7761-L7766" target="_blank" rel="noopener noreferrer">ds4_model.cu の 7761–7766 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/pack_gguf.py#L222" target="_blank" rel="noopener noreferrer">pack_gguf.py の 222 行目</a>）この数はエンジンのコードには書かれていません。3 か所のコメントが 5 だと言っています。検証スクリプトはブロックを「[y, noise x 4]」と書き、エンジンのコメントは「the drafter's fixed T=5」と書き、setup のコメントは「6 行の検証ウィンドウ」（ドラフト 5 個と y）と書いています。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/dspark_ref.py#L10-L14" target="_blank" rel="noopener noreferrer">dspark_ref.py の 10–14 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9620-L9625" target="_blank" rel="noopener noreferrer">ds4_model.cu の 9620–9625 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tests/terminal/test_dsv41_async_t.py#L3-L5" target="_blank" rel="noopener noreferrer">test_dsv41_async_t.py の 3–5 行目</a>）カーネルファイル ds4_attn_split.cuh の冒頭コメントには「DSpark verify T = 2..5」とも書かれていて、6 行とは合いません。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_attn_split.cuh#L3-L4" target="_blank" rel="noopener noreferrer">ds4_attn_split.cuh の 3–4 行目</a>）このページでは verify の T = n + 1 を基準にし、これは直し忘れた古いコメントとして扱います。</p>
 <p><strong>5 個のドラフトはどう出てくるか。</strong>ブロックが 3 つのブロックを通ると、隠れ状態が 5 行得られます。各行はさらにバックボーンの出力ヘッドを通り、Markov バイアスを 1 項足して、argmax を取ります。それがその行のドラフトです。バイアスは直前のトークンだけを見ます。0 行目は y を見て、以降の各行は前の行がいま出したドラフトを見ます。つまり 5 個のドラフトは、ブロックのフォワード 1 回と、ごく小さな 5 段のしりとりから来ています。完全なフォワード 5 回ではありません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7877-L7886" target="_blank" rel="noopener noreferrer">ds4_model.cu の 7877–7886 行目</a>）ドラフトは既定では argmax を取ります。環境変数 DS4_DSPARK_SAMPLE=1 を指定したときだけ、ドラフトモデルの分布から抽選するようになり、これはテスト用のスイッチです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.hpp#L128-L134" target="_blank" rel="noopener noreferrer">ds4_model.hpp の 128–134 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1052" target="_blank" rel="noopener noreferrer">ds4_model.cu の 1052 行目</a>）</p>
-<figure class="fig"><svg viewBox="0 0 640 250" role="img" aria-label="図 DS5-1：1 ラウンドの起草のデータの流れ。ブロック入力の 5 行が 3 つのブロック、バックボーンの出力ヘッド、Markov バイアスを通り、ドラフト 5 個と信頼度 5 個が得られる。検証後に残した行はウィンドウリングへ書き戻される">
-<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">1 ラウンドの起草：ブロック入力 5 行、フォワード 1 回で、ドラフト 5 個と信頼度 5 個が同時に出る</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="10" y="34" width="120" height="72" rx="4"/>
-<text class="f-text" fill="#182f2b" x="70" y="60" font-size="13" text-anchor="middle">入力 5 行</text>
-<text class="f-muted" fill="#5c6d66" x="70" y="82" font-size="12" text-anchor="middle">[y, ノイズ ×4]</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M130 70 H156 M150 64 L156 70 L150 76"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="160" y="34" width="170" height="72" rx="4"/>
-<text class="f-text" fill="#182f2b" x="245" y="56" font-size="13" text-anchor="middle">DSpark の 3 ブロック</text>
-<text class="f-muted" fill="#5c6d66" x="245" y="75" font-size="12" text-anchor="middle">ウィンドウアテンション</text>
-<text class="f-muted" fill="#5c6d66" x="245" y="93" font-size="12" text-anchor="middle">MoE（128 個から 3 個）</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M330 70 H356 M350 64 L356 70 L350 76"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="360" y="34" width="130" height="72" rx="4"/>
-<text class="f-text" fill="#182f2b" x="425" y="56" font-size="13" text-anchor="middle">出力ヘッド</text>
-<text class="f-muted" fill="#5c6d66" x="425" y="75" font-size="12" text-anchor="middle">+ Markov バイアス</text>
-<text class="f-muted" fill="#5c6d66" x="425" y="93" font-size="12" text-anchor="middle">位置ごとに argmax</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M490 70 H516 M510 64 L516 70 L510 76"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="520" y="34" width="110" height="72" rx="4"/>
-<text class="f-text" fill="#182f2b" x="575" y="63" font-size="13" text-anchor="middle">ドラフト 5 個</text>
-<text class="f-text" fill="#182f2b" x="575" y="85" font-size="13" text-anchor="middle">信頼度 5 個</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="160" y="140" width="170" height="52" rx="4"/>
-<text class="f-text" fill="#182f2b" x="245" y="162" font-size="13" text-anchor="middle">ブロックごとのリング</text>
-<text class="f-muted" fill="#5c6d66" x="245" y="181" font-size="12" text-anchor="middle">37–39 層の状態を保持</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M245 140 V110 M239 116 L245 110 L251 116"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M575 106 V166 H336 M342 160 L336 166 L342 172"/>
-<text class="f-muted" fill="#5c6d66" x="455" y="158" font-size="12" text-anchor="middle">検証後：残した行を書き戻す</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="218" font-size="12">5 行は一度に計算。ドラフトは順にしりとりで出し、各段は小さなバイアス 1 項だけ（直前のトークンのみ参照）</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="238" font-size="12">信頼度 = sigmoid（学習で得た内積）。後の 2 つのしきい値を決め、検証には関与しない</text>
+<figure class="fig"><svg viewBox="0 0 440 400" role="img" aria-label="図 DS5-1：1 ラウンドの起草のデータの流れ。ブロック入力の 5 行が 3 つのブロック、バックボーンの出力ヘッド、Markov バイアスを通り、ドラフト 5 個と信頼度 5 個が得られる。検証後に残した行はウィンドウリングへ書き戻される">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">1 ラウンドの起草：ブロック入力 5 行を 1 回の前向き計算で</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="200" y="28" width="228" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="314" y="50" font-size="12" text-anchor="middle">ブロック入力 5 行</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="68" font-size="12" text-anchor="middle">[y, ノイズ ×4]</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M314 76V84"/>
+<path class="f-muted" fill="#5c6d66" d="M310 84L314 92L318 84Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="92" width="228" height="68" rx="4"/>
+<text class="f-text" fill="#182f2b" x="314" y="114" font-size="12" text-anchor="middle">DSpark の 3 ブロック</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="132" font-size="12" text-anchor="middle">ウィンドウアテンション</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="150" font-size="12" text-anchor="middle">128 から 3 を選ぶ MoE</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M314 160V168"/>
+<path class="f-muted" fill="#5c6d66" d="M310 168L314 176L318 168Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="176" width="228" height="68" rx="4"/>
+<text class="f-text" fill="#182f2b" x="314" y="198" font-size="12" text-anchor="middle">本体の出力ヘッド</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="216" font-size="12" text-anchor="middle">+ Markov バイアス</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="234" font-size="12" text-anchor="middle">位置ごとに argmax</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M314 244V252"/>
+<path class="f-muted" fill="#5c6d66" d="M310 252L314 260L318 252Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="200" y="260" width="228" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="314" y="280" font-size="12" text-anchor="middle">ドラフト 5 個</text>
+<text class="f-text" fill="#182f2b" x="314" y="298" font-size="12" text-anchor="middle">信頼度 5 個</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="12" y="92" width="140" height="68" rx="4"/>
+<text class="f-text" fill="#182f2b" x="82" y="114" font-size="12" text-anchor="middle">ウィンドウリング</text>
+<text class="f-muted" fill="#5c6d66" x="82" y="132" font-size="12" text-anchor="middle">本体 37–39 層の</text>
+<text class="f-muted" fill="#5c6d66" x="82" y="150" font-size="12" text-anchor="middle">状態を保存</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M152 126H190M184 120L190 126L184 132"/>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M200 284H82V168M76 174L82 168L88 174"/>
+<text class="f-muted" fill="#5c6d66" x="92" y="214" font-size="12" text-anchor="start">検証後に残す行を</text>
+<text class="f-muted" fill="#5c6d66" x="92" y="232" font-size="12" text-anchor="start">リングへ書き戻す</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="334" font-size="12" text-anchor="start">5 行は 1 回で計算；5 個のドラフトは順につながり、</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="350" font-size="12" text-anchor="start">各ステップで小さなバイアスを 1 つ足す（直前の token だけ）</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="372" font-size="12" text-anchor="start">信頼度 = sigmoid（学習した内積）；</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="388" font-size="12" text-anchor="start">後の 2 つの関門を決め、検証には使わない</text>
 </svg><figcaption>図 DS5-1　1 ラウンドの起草。ブロック入力は [y, ノイズ ×4] の 5 行で、3 つのブロックを通って一度に計算され、ドラフトと信頼度が同時に得られます。ウィンドウリングに入るのはバックボーンの 37–39 層の状態の射影で、検証のあと、残した行でシードし直します。</figcaption></figure>
 <p><strong>5 つの信頼度はどう計算するか。</strong>各行はさらに信頼度を 1 つ出します。ブロックが出したその行に、直前のトークンの Markov 埋め込み行をつなぎ、学習で得た重みベクトルと内積を取り、sigmoid に通します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L278" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh の 278 行目</a>）エンジンの作者はこれを「このドラフトが残る確率」として扱っています。main.cpp のコメントには、ドラフトを検証する価値があるのは、前のすべてのドラフトとあわせて残る確率がまだ十分高いからだ、と書かれています。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L169-L175" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 169–175 行目</a>）これは作者の使い方です。信頼度が本当に較正されているかどうか、このページにはデータがないので、結論は出しません。</p>
 <p><strong>起草はタダではありません。</strong>エンジンのコメントに所要時間の記録が 1 組あります。ドラフトブロック（固定 T=5）の出力ヘッドが 4.55 ms から 2.83 ms に、1 ラウンド全体が 14.49 ms から 13.46 ms に下がりました。マシンは書かれていません。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9620-L9625" target="_blank" rel="noopener noreferrer">ds4_model.cu の 9620–9625 行目</a>）各マシンのデコード速度は 4.7 から 80 token/s までまちまちで、1 トークンあたりに直すと 12.5〜213 ms です。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L63" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 63 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L64-L65" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 64–65 行目</a>）<span class="ev ev-est">教育用の試算</span>（1000 ÷ 80 = 12.5 ms；1000 ÷ 4.7 ≈ 213 ms）この 2 組の数字は、別のマシン・別の測り方から来ているので、そのまま比べることはできません。ここで言えるのは、1 ラウンドの起草に十数ミリ秒かかる、ということだけです。だから「当たる」だけでは足りず、「推測する価値がある」ことが要ります。このあとの 2 つのしきい値は、そのために設けられています。</p>
@@ -57,48 +64,52 @@
 <p><strong>1 つ目のしきい値：各ドラフト自身の下限。</strong>dspark_conf の既定は 0.5 で、--dspark-conf でもリクエストの dspark_conf キーでも変えられます。ドラフトの信頼度がこれを下回ったら、そこで止めます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.hpp#L52-L55" target="_blank" rel="noopener noreferrer">ds4_model.hpp の 52–55 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L281-L286" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 281–286 行目</a>）<strong>2 つ目のしきい値：累積積。</strong>前のドラフトの信頼度を順にかけ合わせ、積がしきい値を下回ったら止めます。多くのマシンでは既定値は 0、つまり無効です。RDNA4 は例外で、次の段落で述べます。エンジンの中では、これは同じ 1 つのループです。1 個目のドラフトから数え、最初に基準を満たさないものにぶつかったら止め、それ以降はまとめて捨てます。理由は単純です。3 個目のドラフトが役に立つには、前の 2 個がどちらも受理されなければならないからです。ループにはハードな上限が 2 つあります。このリクエストがあと生成できるトークン数とコンテキストの余裕のうち小さいほうから 1 を引いた数と、--dspark-depth（既定は 64 で、実際には使われません）です。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L238-L244" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 238–244 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L165" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 165 行目</a>）この小さいほうの値が 1 トークンしか残っていないとき、エンジンはそもそも起草しません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L223-L224" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 223–224 行目</a>）</p>
 <p><strong>累積しきい値の既定値は、ハードウェアによって変わります。</strong>RDNA4 のグラフィックスカード（gfx1200、gfx1201：R9700、RX 9000）は既定 0.5、そのほかはすべて 0 です。環境変数 STRATA_DS4_DSPARK_CUM はどのマシンでも優先され、DS4_DEFAULTS=026 を指定すると 0.2.6 の 0 に戻ります。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_experts_rule.hpp#L197-L201" target="_blank" rel="noopener noreferrer">ds4_experts_rule.hpp の 197–201 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tests/dsv41/experts_rule_test.cpp#L283-L287" target="_blank" rel="noopener noreferrer">experts_rule_test.cpp の 283–287 行目</a>）コメントには、RDNA4 だけをオンにした理由が書かれています。4× R9700、2.25 bpw、各組 128 トークンのデコード 6 回、同じ id の組で、71.7 → 76.9 token/s（中央値）。Project Maya は Radeon 8065S（Strix Halo）で +6.5% を測りましたが、それは 1 台のマシンの 1 つのデータ点にすぎません。CUDA では同等でした。そのため Strix と CUDA は 0 のままです。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L169-L175" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 169–175 行目</a>）下限も、どこでも 0.5 というわけではありません。Strix Halo の Windows ドキュメントは起動引数を --dspark auto --dspark-conf 0.65 と書いていて、チューナーが「強制オン」の設定を試すときも 0.65 を渡します。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/STRIX_HALO_WINDOWS.md#L78" target="_blank" rel="noopener noreferrer">STRIX_HALO_WINDOWS.md の 78 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/tune.py#L121-L122" target="_blank" rel="noopener noreferrer">tune.py の 121–122 行目</a>）</p>
 <p><strong>試してみよう。</strong>下のシミュレーターは、教育用の数字の組で、3 つの量をドラッグして動かせます。1 ラウンドあたりのドラフト数（1〜5）、受理率（各ドラフトが残る条件付き確率の大きさ）、信頼度しきい値（下限と累積積）です。1 ラウンドの検証ウィンドウが最終的に何トークン出すかを表示します。式は E = 1 + c₁ + c₁c₂ + … + c₁…c<sub>k</sub> で、k はしきい値を通ったドラフト数、cᵢ には信頼度を使います。<span class="ev ev-est">教育用の試算</span>（E = 1 + Σᵢ₌₁..k ∏ⱼ₌₁..i cⱼ；期待値の導出は第 19 章 19.2 節）信頼度を条件付き受理率とみなすのは、このページの教育上の仮定で、エンジンが測った事実ではありません。</p>
-<div class="viz" data-viz="ds-draft-window"><figure class="fig"><svg viewBox="0 0 640 316" role="img" aria-label="図 DS5-2：5 個のドラフトと 3 通りの切り方。信頼度は 0.80、0.62、0.45、0.35、0.28。切り詰めなしなら 5 個を検証し、1 ラウンドの期待値は 2.62 トークン。下限 0.5 だけなら 2 個で 2.30 トークン。さらに累積しきい値 0.5 を加えると 1 個で 1.80 トークン">
-<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">例：5 個のドラフトと 3 通りの切り方（教育用の数字で、実測ではありません）</text>
+<div class="viz" data-viz="ds-draft-window"><figure class="fig"><svg viewBox="0 0 440 380" role="img" aria-label="図 DS5-2：5 個のドラフトと 3 通りの切り方。信頼度は 0.80、0.62、0.45、0.35、0.28。切り詰めなしなら 5 個を検証し、1 ラウンドの期待値は 2.62 トークン。下限 0.5 だけなら 2 個で 2.30 トークン。さらに累積しきい値 0.5 を加えると 1 個で 1.80 トークン">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">例：5 個のドラフト、3 通りの切り方（教育用の数字、実測ではない）</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="36" font-size="12">棒の高さ = 信頼度；破線 = 下限 0.5</text>
-<rect class="f-accent" fill="#136d5a" x="150" y="86" width="40" height="64" rx="2"/>
-<rect class="f-accent" fill="#136d5a" x="220" y="100" width="40" height="50" rx="2"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="290" y="114" width="40" height="36" rx="2"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="360" y="122" width="40" height="28" rx="2"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="430" y="128" width="40" height="22" rx="2"/>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-dasharray="4 3" d="M130 110 H490"/>
-<text class="f-muted" fill="#5c6d66" x="496" y="114" font-size="12">下限 0.5</text>
-<text class="f-text" fill="#182f2b" x="170" y="168" font-size="13" text-anchor="middle">ドラフト 1</text>
-<text class="f-text" fill="#182f2b" x="240" y="168" font-size="13" text-anchor="middle">ドラフト 2</text>
-<text class="f-text" fill="#182f2b" x="310" y="168" font-size="13" text-anchor="middle">ドラフト 3</text>
-<text class="f-text" fill="#182f2b" x="380" y="168" font-size="13" text-anchor="middle">ドラフト 4</text>
-<text class="f-text" fill="#182f2b" x="450" y="168" font-size="13" text-anchor="middle">ドラフト 5</text>
+<rect class="f-accent" fill="#136d5a" x="108" y="86" width="36" height="64" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="166" y="100" width="36" height="50" rx="2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="224" y="114" width="36" height="36" rx="2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="282" y="122" width="36" height="28" rx="2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="340" y="128" width="36" height="22" rx="2"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-dasharray="4 3" d="M104 110 H380"/>
+<text class="f-muted" fill="#5c6d66" x="386" y="114" font-size="12">下限 0.5</text>
+<text class="f-text" fill="#182f2b" x="126" y="168" font-size="12" text-anchor="middle">1</text>
+<text class="f-text" fill="#182f2b" x="184" y="168" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="242" y="168" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="300" y="168" font-size="12" text-anchor="middle">4</text>
+<text class="f-text" fill="#182f2b" x="358" y="168" font-size="12" text-anchor="middle">5</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="168" font-size="12">ドラフト</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="188" font-size="12">信頼度 c</text>
-<text class="f-text" fill="#182f2b" x="170" y="188" font-size="12" text-anchor="middle">0.80</text>
-<text class="f-text" fill="#182f2b" x="240" y="188" font-size="12" text-anchor="middle">0.62</text>
-<text class="f-text" fill="#182f2b" x="310" y="188" font-size="12" text-anchor="middle">0.45</text>
-<text class="f-text" fill="#182f2b" x="380" y="188" font-size="12" text-anchor="middle">0.35</text>
-<text class="f-text" fill="#182f2b" x="450" y="188" font-size="12" text-anchor="middle">0.28</text>
+<text class="f-text" fill="#182f2b" x="126" y="188" font-size="12" text-anchor="middle">0.80</text>
+<text class="f-text" fill="#182f2b" x="184" y="188" font-size="12" text-anchor="middle">0.62</text>
+<text class="f-text" fill="#182f2b" x="242" y="188" font-size="12" text-anchor="middle">0.45</text>
+<text class="f-text" fill="#182f2b" x="300" y="188" font-size="12" text-anchor="middle">0.35</text>
+<text class="f-text" fill="#182f2b" x="358" y="188" font-size="12" text-anchor="middle">0.28</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">累積積</text>
-<text class="f-text" fill="#182f2b" x="170" y="206" font-size="12" text-anchor="middle">0.800</text>
-<text class="f-text" fill="#182f2b" x="240" y="206" font-size="12" text-anchor="middle">0.496</text>
-<text class="f-text" fill="#182f2b" x="310" y="206" font-size="12" text-anchor="middle">0.223</text>
-<text class="f-text" fill="#182f2b" x="380" y="206" font-size="12" text-anchor="middle">0.078</text>
-<text class="f-text" fill="#182f2b" x="450" y="206" font-size="12" text-anchor="middle">0.022</text>
+<text class="f-text" fill="#182f2b" x="126" y="206" font-size="12" text-anchor="middle">0.800</text>
+<text class="f-text" fill="#182f2b" x="184" y="206" font-size="12" text-anchor="middle">0.496</text>
+<text class="f-text" fill="#182f2b" x="242" y="206" font-size="12" text-anchor="middle">0.223</text>
+<text class="f-text" fill="#182f2b" x="300" y="206" font-size="12" text-anchor="middle">0.078</text>
+<text class="f-text" fill="#182f2b" x="358" y="206" font-size="12" text-anchor="middle">0.022</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">下限のみ</text>
-<text class="f-text" fill="#182f2b" x="170" y="228" font-size="12" text-anchor="middle">検証</text>
-<text class="f-text" fill="#182f2b" x="240" y="228" font-size="12" text-anchor="middle">検証</text>
-<text class="f-text" fill="#182f2b" x="310" y="228" font-size="12" text-anchor="middle">停止</text>
-<text class="f-muted" fill="#5c6d66" x="380" y="228" font-size="12" text-anchor="middle">—</text>
-<text class="f-muted" fill="#5c6d66" x="450" y="228" font-size="12" text-anchor="middle">—</text>
+<text class="f-text" fill="#182f2b" x="126" y="228" font-size="12" text-anchor="middle">検証</text>
+<text class="f-text" fill="#182f2b" x="184" y="228" font-size="12" text-anchor="middle">検証</text>
+<text class="f-text" fill="#182f2b" x="242" y="228" font-size="12" text-anchor="middle">停止</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="228" font-size="12" text-anchor="middle">—</text>
+<text class="f-muted" fill="#5c6d66" x="358" y="228" font-size="12" text-anchor="middle">—</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="246" font-size="12">さらに累積 0.5</text>
-<text class="f-text" fill="#182f2b" x="170" y="246" font-size="12" text-anchor="middle">検証</text>
-<text class="f-text" fill="#182f2b" x="240" y="246" font-size="12" text-anchor="middle">停止</text>
-<text class="f-muted" fill="#5c6d66" x="310" y="246" font-size="12" text-anchor="middle">—</text>
-<text class="f-muted" fill="#5c6d66" x="380" y="246" font-size="12" text-anchor="middle">—</text>
-<text class="f-muted" fill="#5c6d66" x="450" y="246" font-size="12" text-anchor="middle">—</text>
-<text class="f-text" fill="#182f2b" x="10" y="272" font-size="13">切り詰めなし：5 個を検証、ウィンドウ 6 行、期待値 1 + 1.62 ≈ 2.62 トークン</text>
-<text class="f-text" fill="#182f2b" x="10" y="290" font-size="13">下限のみ：2 個を検証、ウィンドウ 3 行、期待値 1 + 0.80 + 0.496 ≈ 2.30 トークン</text>
-<text class="f-text" fill="#182f2b" x="10" y="308" font-size="13">累積 0.5 も追加：1 個を検証、ウィンドウ 2 行、期待値 1 + 0.80 = 1.80 トークン</text>
+<text class="f-text" fill="#182f2b" x="126" y="246" font-size="12" text-anchor="middle">検証</text>
+<text class="f-text" fill="#182f2b" x="184" y="246" font-size="12" text-anchor="middle">停止</text>
+<text class="f-muted" fill="#5c6d66" x="242" y="246" font-size="12" text-anchor="middle">—</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="246" font-size="12" text-anchor="middle">—</text>
+<text class="f-muted" fill="#5c6d66" x="358" y="246" font-size="12" text-anchor="middle">—</text>
+<text class="f-text" fill="#182f2b" x="10" y="272" font-size="12">切り詰めなし：5 個を検証、ウィンドウ 6 行、</text>
+<text class="f-text" fill="#182f2b" x="10" y="288" font-size="12">期待値 1 + 1.62 ≈ 2.62 トークン</text>
+<text class="f-text" fill="#182f2b" x="10" y="312" font-size="12">下限のみ：2 個を検証、ウィンドウ 3 行、</text>
+<text class="f-text" fill="#182f2b" x="10" y="328" font-size="12">期待値 1 + 0.80 + 0.496 ≈ 2.30 トークン</text>
+<text class="f-text" fill="#182f2b" x="10" y="352" font-size="12">累積 0.5 も追加：1 個を検証、ウィンドウ 2 行、</text>
+<text class="f-text" fill="#182f2b" x="10" y="368" font-size="12">期待値 1 + 0.80 = 1.80 トークン</text>
 </svg><figcaption>図 DS5-2　シミュレーターの静止画面。3 つのつまみは、1 ラウンドあたりのドラフト数、受理率、信頼度しきい値で、読み取り値は 1 ラウンドの検証ウィンドウが出すトークン数です。検証 = 検証ウィンドウに入る；停止 = ここで止められる；— = 順番が来ない。この信頼度の組では、5 個のドラフトのうち合計で約 1.6 個が受理され、コードのコメントにある 31–32% と同じオーダーです。累積しきい値でさらに 0.5 トークン減らす代わりに、検証する行が 1 行減ります。数字は教育上の仮定です。</figcaption></figure></div>
 <p><strong>この例で見るところ。</strong>5 個のドラフトの信頼度は 0.80、0.62、0.45、0.35、0.28 です。累積積は順に 0.800、0.496、0.223、0.078、0.022 です。<span class="ev ev-est">教育用の試算</span>（0.80 × 0.62 = 0.496；0.496 × 0.45 ≈ 0.223；0.223 × 0.35 ≈ 0.078；0.078 × 0.28 ≈ 0.022）下限 0.5 だけを設定すると、3 個目のドラフト（0.45）が止められ、検証は 2 個です。さらに累積しきい値 0.5 を加えると、2 個目のドラフトの累積積は 0.496 で、ほんの少し足りず、これも止められ、検証は 1 個だけになります。3 通りの期待値は 2.62、2.30、1.80 トークン、ウィンドウは 6、3、2 行です。<span class="ev ev-est">教育用の試算</span>（1 + 0.800 + 0.496 + 0.223 + 0.078 + 0.022 ≈ 2.62；1 + 0.800 + 0.496 ≈ 2.30；1 + 0.800 = 1.80）そこで問いはこうなります。検証を減らした行で浮くコストは、失う 0.3〜0.8 トークンに見合うのか。この勘定はマシンによって違います。RDNA4 では見合い、CUDA では同等なので、既定値が違います。上流の実測は最後の token/s までしか与えず、1 ラウンドあたりのトークン数は与えません。</p>
 <p><strong>上限を決めるつまみがもう 1 つあります。</strong>--dspark-block N は、1 ラウンドのドラフト数を N 個に頭打ちにします。pack のブロックサイズが上限です。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2350" target="_blank" rel="noopener noreferrer">ds4_model.cu の 2350 行目</a>）チューナーは N = 3 を試します。標準設定より速度が 5% 以上上がったときだけ、この設定を残します。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L137-L140" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 137–140 行目</a>）つまり「5 個」は出荷時の上限であり、すべてのマシンにとっての最適ではありません。</p>
@@ -111,38 +122,40 @@
 <p><strong>q が点なので、ルールが簡単になります。</strong>ドラフトは argmax を取っているので、q は d の上に落ちる点で、確率は 1 です。エンジンはここで q をそのまま 1 にします。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7979-L7992" target="_blank" rel="noopener noreferrer">ds4_model.cu の 7979–7992 行目</a>）残る確率は min(1, p(d) ÷ 1) = p(d) になります。バックボーンが（top-k、top-p、min-p、温度というサンプリングのチェーンを通したあとで）このトークンにどれだけの確率を与えるか、ドラフトはその確率で残されます。<span class="ev ev-est">教育用の試算</span>（q(d) = 1 → min(1, p(d) ÷ 1) = p(d)）ドラフトがサンプリングチェーンの打ち切りの外に落ちたときは、p(d) = 0 で、決して残りません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7979-L7992" target="_blank" rel="noopener noreferrer">ds4_model.cu の 7979–7992 行目</a>）サービング層の既定のリクエストはサンプリングのリクエスト（温度 1.0、top_p 1.0）なので、ふだん通るのはこちらの道です。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L115" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 115 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/test_dsv41.py#L419" target="_blank" rel="noopener noreferrer">test_dsv41.py の 419 行目</a>）</p>
 <p><strong>信頼度はここには出てきません。</strong>信頼度が決めるのは、どのドラフトがウィンドウに入るかだけで、「残すかどうか」には関わりません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L238-L244" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 238–244 行目</a>）残すかどうかを決めるのは、バックボーンだけです。</p>
 <p><strong>1 ラウンドで何トークン出るか。</strong>m は連続して残ったドラフトの数です。このラウンドの出力は、その m 個のドラフトに、最初に「違った」行でバックボーンが自分で選んだトークンを足した、合計 m + 1 個です。全部拒否されたとき m = 0 でも 1 個出るので、推測しない場合と同じ数です。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8011-L8012" target="_blank" rel="noopener noreferrer">ds4_model.cu の 8011–8012 行目</a>）このトークンはこのラウンドの状態には入らず、次のラウンドの y になります。</p>
-<figure class="fig"><svg viewBox="0 0 640 274" role="img" aria-label="図 DS5-3：検証ウィンドウは 4 行。最初の 2 個のドラフトは受理され、3 個目は拒否される。このラウンドは d1、d2 とバックボーン自身の t の計 3 トークンを出す。ウィンドウは先頭 3 行を残し、4 行目はロールバックされる">
-<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">検証ウィンドウ：残したドラフトは k = 3 個、ウィンドウ T = k + 1 = 4 行</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="30" width="115" height="46" rx="4"/>
-<text class="f-muted" fill="#5c6d66" x="87" y="48" font-size="12" text-anchor="middle">行 0</text>
-<text class="f-text" fill="#182f2b" x="87" y="67" font-size="13" text-anchor="middle">y</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="185" y="30" width="115" height="46" rx="4"/>
-<text class="f-muted" fill="#5c6d66" x="242" y="48" font-size="12" text-anchor="middle">行 1</text>
-<text class="f-text" fill="#182f2b" x="242" y="67" font-size="13" text-anchor="middle">ドラフト d1</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="340" y="30" width="115" height="46" rx="4"/>
-<text class="f-muted" fill="#5c6d66" x="397" y="48" font-size="12" text-anchor="middle">行 2</text>
-<text class="f-text" fill="#182f2b" x="397" y="67" font-size="13" text-anchor="middle">ドラフト d2</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="495" y="30" width="115" height="46" rx="4"/>
-<text class="f-muted" fill="#5c6d66" x="552" y="48" font-size="12" text-anchor="middle">行 3</text>
-<text class="f-text" fill="#182f2b" x="552" y="67" font-size="13" text-anchor="middle">ドラフト d3</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M87 76 V96 M82 90 L87 96 L92 90 M242 76 V96 M237 90 L242 96 L247 90 M397 76 V96 M392 90 L397 96 L402 90 M552 76 V96 M547 90 L552 96 L557 90"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="30" y="100" width="115" height="56" rx="4"/>
-<text class="f-text" fill="#182f2b" x="87" y="122" font-size="13" text-anchor="middle">選択は d1</text>
-<text class="f-muted" fill="#5c6d66" x="87" y="142" font-size="12" text-anchor="middle">ドラフトと同じ</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="185" y="100" width="115" height="56" rx="4"/>
-<text class="f-text" fill="#182f2b" x="242" y="122" font-size="13" text-anchor="middle">選択は d2</text>
-<text class="f-muted" fill="#5c6d66" x="242" y="142" font-size="12" text-anchor="middle">ドラフトと同じ</text>
-<rect class="f-box" fill="#ffffff" stroke="#5c6d66" x="340" y="100" width="115" height="56" rx="4"/>
-<text class="f-text" fill="#182f2b" x="397" y="122" font-size="13" text-anchor="middle">選択は t</text>
-<text class="f-muted" fill="#5c6d66" x="397" y="142" font-size="12" text-anchor="middle">d3 と違う</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="495" y="100" width="115" height="56" rx="4"/>
-<text class="f-text" fill="#182f2b" x="552" y="122" font-size="13" text-anchor="middle">無効</text>
-<text class="f-muted" fill="#5c6d66" x="552" y="142" font-size="12" text-anchor="middle">最初の不一致以降</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M30 168 V176 H455 V168"/>
-<text class="f-text" fill="#182f2b" x="242" y="196" font-size="13" text-anchor="middle">先頭 m + 1 = 3 行を残す：y、d1、d2</text>
-<text class="f-text" fill="#182f2b" x="10" y="222" font-size="13">このラウンドが出すのは d1、d2、t の m + 1 = 3 トークン。t が次のラウンドの y になる</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="243" font-size="12">ロールバック：リングの行 3 はバックアップから、圧縮器はスナップショットから復元して再生</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="263" font-size="12">そのあと、ドラフトモデルは残した 3 行でシードし直す（seed）</text>
+<figure class="fig"><svg viewBox="0 0 440 312" role="img" aria-label="Figure DS5-3: a verify window of 4 rows. The first two drafts are accepted and the third is rejected. The round yields d1, d2 and the backbone's own t, 3 tokens in all. The window keeps its first 3 rows, and row 3 is rolled back">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">検証ウィンドウ：ドラフト k = 3 個、T = k + 1 = 4 行</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="30" width="94" height="46" rx="4"/>
+<text class="f-muted" fill="#5c6d66" x="59" y="48" font-size="12" text-anchor="middle">行 0</text>
+<text class="f-text" fill="#182f2b" x="59" y="67" font-size="12" text-anchor="middle">y</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="118" y="30" width="94" height="46" rx="4"/>
+<text class="f-muted" fill="#5c6d66" x="165" y="48" font-size="12" text-anchor="middle">行 1</text>
+<text class="f-text" fill="#182f2b" x="165" y="67" font-size="12" text-anchor="middle">ドラフト d1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="224" y="30" width="94" height="46" rx="4"/>
+<text class="f-muted" fill="#5c6d66" x="271" y="48" font-size="12" text-anchor="middle">行 2</text>
+<text class="f-text" fill="#182f2b" x="271" y="67" font-size="12" text-anchor="middle">ドラフト d2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="330" y="30" width="94" height="46" rx="4"/>
+<text class="f-muted" fill="#5c6d66" x="377" y="48" font-size="12" text-anchor="middle">行 3</text>
+<text class="f-text" fill="#182f2b" x="377" y="67" font-size="12" text-anchor="middle">ドラフト d3</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M59 76 V96 M54 90 L59 96 L64 90 M165 76 V96 M160 90 L165 96 L170 90 M271 76 V96 M266 90 L271 96 L276 90 M377 76 V96 M372 90 L377 96 L382 90"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="100" width="94" height="56" rx="4"/>
+<text class="f-text" fill="#182f2b" x="59" y="122" font-size="12" text-anchor="middle">選択は d1</text>
+<text class="f-muted" fill="#5c6d66" x="59" y="142" font-size="12" text-anchor="middle">ドラフトと同じ</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="118" y="100" width="94" height="56" rx="4"/>
+<text class="f-text" fill="#182f2b" x="165" y="122" font-size="12" text-anchor="middle">選択は d2</text>
+<text class="f-muted" fill="#5c6d66" x="165" y="142" font-size="12" text-anchor="middle">ドラフトと同じ</text>
+<rect class="f-box" fill="#ffffff" stroke="#5c6d66" x="224" y="100" width="94" height="56" rx="4"/>
+<text class="f-text" fill="#182f2b" x="271" y="122" font-size="12" text-anchor="middle">選択は t</text>
+<text class="f-muted" fill="#5c6d66" x="271" y="142" font-size="12" text-anchor="middle">d3 と違う</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="330" y="100" width="94" height="56" rx="4"/>
+<text class="f-text" fill="#182f2b" x="377" y="122" font-size="12" text-anchor="middle">無効</text>
+<text class="f-muted" fill="#5c6d66" x="377" y="142" font-size="12" text-anchor="middle">不一致以降</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M12 168 V176 H318 V168"/>
+<text class="f-text" fill="#182f2b" x="165" y="196" font-size="12" text-anchor="middle">先頭 m + 1 = 3 行を残す：y、d1、d2</text>
+<text class="f-text" fill="#182f2b" x="12" y="222" font-size="12" text-anchor="start">このラウンドが出すのは d1、d2、t の m + 1 = 3 トークン。</text>
+<text class="f-text" fill="#182f2b" x="12" y="238" font-size="12" text-anchor="start">t が次のラウンドの y になる</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="262" font-size="12" text-anchor="start">ロールバック：リングの行 3 はバックアップから、</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="278" font-size="12" text-anchor="start">圧縮器はスナップショットから復元して再生</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="298" font-size="12" text-anchor="start">そのあと、ドラフトモデルは残した 3 行でシードし直す（seed）</text>
 </svg><figcaption>図 DS5-3　1 回の検証。i 行目の出力は、i + 1 行目のドラフトと比べるために使います。0 行目は d1 と、1 行目は d2 と、2 行目は d3 と比べます。最初の 2 つは同じで、3 つ目は違うので、バックボーンが 2 行目で選んだ t がこのラウンドの最後のトークンになり、3 行目は無効になります。</figcaption></figure>
 <p><strong>ロールバックは何を取り消すか。</strong>バックボーンは k + 1 行すべてに状態を書きましたが、有効なのは先頭の m + 1 行だけです。y と、受理された m 個のドラフトです。残りは取り消す必要があります。ウィンドウリングのうち新しい行に上書きされた行は、検証ウィンドウの始まる前にバックアップしておき、ロールバックのときに復元します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10104" target="_blank" rel="noopener noreferrer">ds4_model.cu の 10104 行目</a>）圧縮器の部分グループは先にスナップショットを 1 つ取っておき、ロールバックで復元し、残した行を再生します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10137-L10140" target="_blank" rel="noopener noreferrer">ds4_model.cu の 10137–10140 行目</a>）位置ごとに保存される圧縮 KV の行とインデックスキーは触らなくて構いません。その位置が次に来たとき、書き直されるからです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8027-L8028" target="_blank" rel="noopener noreferrer">ds4_model.cu の 8027–8028 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8015" target="_blank" rel="noopener noreferrer">ds4_model.cu の 8015 行目</a>）最後に、ドラフトモデルは残した m + 1 行でシードし直します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8016" target="_blank" rel="noopener noreferrer">ds4_model.cu の 8016 行目</a>）</p>
 <p class="bridge"><strong>CS を学んだ人へ：</strong>先に推測して、あとで検証するのは、CPU の分岐予測とパイプラインのフラッシュにあたります。ウィンドウの中の k 個のドラフトは「予測した分岐」、検証は「分岐の解決」、ロールバックは「パイプラインのフラッシュ」です。ロールバックが使うのは、データベースの古い手でもあります。変更の前にバックアップかスナップショットを残し、失敗したら戻し、成功したらコミットします。状態の種類によってバックアップの方法は違います。リングの行はバックアップ、圧縮器はスナップショットと再生、位置ごとに保存される行は上書きに任せます。これは<a href="#chapter/18/sec-4">第 18 章 18.4 節</a>で説明しました。ただしメインラインの Qwen の「ホワイトボード」は GDN の再帰状態で、ここでは材料がウィンドウリングと圧縮器に置き換わっています。</p>
@@ -153,39 +166,47 @@
 <p><strong>問題。</strong>検証ウィンドウの中のエキスパートは 2 種類に分かれます。VRAMにあるものは GPU が自分で計算し、ないものは CPU レーンを通って、RAM のスロットか SSD から読まれ、CPU が計算します。分け方は<a href="#deepseek/experts">第 2 ページ</a>で説明しました。各層のルーティング結果が出るまでは、その層のどのエキスパートがどちら側にあるか、だれにも分かりません。CPU の分と GPU の分を、どうすれば重ねられるでしょうか。</p>
 <p><strong>同期経路：GPU は待ちぼうけ。</strong>GPU はまずルーティングを計算し、選ばれたエキスパート番号と入力をホストにコピーします。ホストはイベントの完了を待ち、それから計画を立て、CPU レーンのエキスパートを計算します。この間、GPU は共有エキスパートを先に計算して、あとは待つしかありません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10430" target="_blank" rel="noopener noreferrer">ds4_model.cu の 10430 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10455" target="_blank" rel="noopener noreferrer">ds4_model.cu の 10455 行目</a>）</p>
 <p><strong>非同期メールボックス：GPU は待たない。</strong>デバイスは、各層のルーティング結果と FFN の入力を、ホストにマップされたリングメモリに書き込みます。これがメールボックスで、全部で 64 スロットあります。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L218" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh の 218 行目</a>）データを書き終えたら、まずシステムフェンスを通し、最後にシーケンス番号を書きます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L215-L217" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh の 215–217 行目</a>）ホストにはサービススレッドが 1 ついて、新しいシーケンス番号を見つけると、その層の CPU レーンのエキスパートの重みつきの部分を計算し、返信スロットに書きます。GPU はその間も共有エキスパートとVRAM上のエキスパートの計算を続け、エキスパートの合計を取る直前になって初めて返信を待ちます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1117-L1119" target="_blank" rel="noopener noreferrer">ds4_model.cu の 1117–1119 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10302-L10305" target="_blank" rel="noopener noreferrer">ds4_model.cu の 10302–10305 行目</a>）</p>
-<figure class="fig"><svg viewBox="0 0 640 256" role="img" aria-label="図 DS5-4：1 層の中の 2 通りの編成。非同期メールボックスでは、GPU が共有エキスパートとVRAM上のエキスパートを計算している間に、ホストが CPU レーンのエキスパートを計算する。同期経路では、GPU は共有エキスパートの計算が終わるとホストを待つ">
-<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13">非同期メールボックス：ウィンドウの行数 ≤ DS4_ASYNC_T</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="48" font-size="12">GPU</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="30" width="40" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="100" y="49" font-size="12" text-anchor="middle">ルータ</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="120" y="30" width="170" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="205" y="49" font-size="12" text-anchor="middle">共有 + GPU 側エキスパート</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="290" y="30" width="26" height="28" rx="3"/>
-<text class="f-muted" fill="#5c6d66" x="303" y="49" font-size="12" text-anchor="middle">待</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="316" y="30" width="64" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="348" y="49" font-size="12" text-anchor="middle">合計</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="82" font-size="12">ホスト</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="125" y="64" width="170" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="210" y="83" font-size="12" text-anchor="middle">CPU レーンのエキスパート</text>
-<text class="f-muted" fill="#5c6d66" x="392" y="48" font-size="12">ルーティングと入力をメールボックスへ</text>
-<text class="f-muted" fill="#5c6d66" x="392" y="82" font-size="12">返信は合計の直前に受け取る</text>
-<text class="f-text" fill="#182f2b" x="10" y="122" font-size="13">同期（ホストでルーティング）：ウィンドウの行数 &gt; DS4_ASYNC_T</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="152" font-size="12">GPU</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="134" width="50" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="105" y="153" font-size="12" text-anchor="middle">ルータ</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="130" y="134" width="60" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="160" y="153" font-size="12" text-anchor="middle">共有</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="190" y="134" width="100" height="28" rx="3"/>
-<text class="f-muted" fill="#5c6d66" x="240" y="153" font-size="12" text-anchor="middle">ホスト待ち</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="134" width="90" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="335" y="153" font-size="12" text-anchor="middle">合算</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="186" font-size="12">ホスト</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="130" y="168" width="160" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="210" y="187" font-size="12" text-anchor="middle">選択を見て CPU 計算</text>
-<text class="f-muted" fill="#5c6d66" x="392" y="152" font-size="12">選択結果と入力をホストへコピー</text>
-<text class="f-muted" fill="#5c6d66" x="392" y="186" font-size="12">GPU はホストの計算完了を待つ</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="222" font-size="12">2 本の時間軸は位置合わせのため同じ長さに描いています。これは模式図で、実測の比率ではありません。</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="242" font-size="12">どちらが速いかはマシンによる：Strix Halo では同期のほうが速い（コードの回答で約 3 割）。</text>
+<figure class="fig"><svg viewBox="0 0 440 306" role="img" aria-label="Figure DS5-4: two ways to arrange one layer. With the async mailbox, the host computes the CPU-lane experts while the GPU computes the shared expert and the experts in VRAM. On the synchronous path, the GPU waits for the host after the shared expert is done">
+<text class="f-text" fill="#182f2b" x="12" y="18" font-size="12" text-anchor="start">非同期メールボックス：ウィンドウの行数 ≤ DS4_ASYNC_T</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="52" font-size="12" text-anchor="start">GPU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="44" y="28" width="44" height="40" rx="3"/>
+<text class="f-text" fill="#182f2b" x="66" y="52" font-size="12" text-anchor="middle">ルータ</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="88" y="28" width="136" height="40" rx="3"/>
+<text class="f-text" fill="#182f2b" x="156" y="45" font-size="12" text-anchor="middle">共有 +</text>
+<text class="f-text" fill="#182f2b" x="156" y="61" font-size="12" text-anchor="middle">GPU 側エキスパート</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="224" y="28" width="34" height="40" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="241" y="52" font-size="12" text-anchor="middle">待</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="258" y="28" width="44" height="40" rx="3"/>
+<text class="f-text" fill="#182f2b" x="280" y="52" font-size="12" text-anchor="middle">合計</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="93" font-size="12" text-anchor="start">ホスト</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="88" y="74" width="136" height="40" rx="3"/>
+<text class="f-text" fill="#182f2b" x="156" y="91" font-size="12" text-anchor="middle">CPU レーンの</text>
+<text class="f-text" fill="#182f2b" x="156" y="107" font-size="12" text-anchor="middle">エキスパート</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="44" font-size="12" text-anchor="start">ルーティングと入力を</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="60" font-size="12" text-anchor="start">メールボックスへ</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="86" font-size="12" text-anchor="start">返信は合計の直前に</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="102" font-size="12" text-anchor="start">受け取る</text>
+<text class="f-text" fill="#182f2b" x="12" y="132" font-size="12" text-anchor="start">同期（ホストでルーティング）：ウィンドウの行数 &gt; DS4_ASYNC_T</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="162" font-size="12" text-anchor="start">GPU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="44" y="144" width="46" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="67" y="163" font-size="12" text-anchor="middle">ルータ</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="90" y="144" width="56" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="118" y="163" font-size="12" text-anchor="middle">共有</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="146" y="144" width="90" height="28" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="191" y="163" font-size="12" text-anchor="middle">ホスト待ち</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="236" y="144" width="66" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="269" y="163" font-size="12" text-anchor="middle">合算</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="196" font-size="12" text-anchor="start">ホスト</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="90" y="178" width="146" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="163" y="197" font-size="12" text-anchor="middle">選択を見て CPU 計算</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="158" font-size="12" text-anchor="start">選択結果と入力を</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="174" font-size="12" text-anchor="start">ホストへコピー</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="196" font-size="12" text-anchor="start">GPU はホストの</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="212" font-size="12" text-anchor="start">計算完了を待つ</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="240" font-size="12" text-anchor="start">2 本の時間軸は位置合わせのため同じ長さに描いています。</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="256" font-size="12" text-anchor="start">これは模式図で、実測の比率ではありません。</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="278" font-size="12" text-anchor="start">どちらが速いかはマシンによる：</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="294" font-size="12" text-anchor="start">Strix Halo では同期のほうが速い（コードの回答で約 3 割）。</text>
 </svg><figcaption>図 DS5-4　1 層の MoE の中の 2 通りの編成。メールボックスを使うと、CPU レーンのエキスパートが、GPU 上の共有エキスパートやVRAMのエキスパートと同時に計算されます。同期経路では、GPU がホストと重ねられるのは共有エキスパートだけです。どちらの編成が速いかは、マシンで決まります。</figcaption></figure>
 <p class="bridge"><strong>CS を学んだ人へ：</strong>メールボックスは、プロデューサー 1 つ・コンシューマー 1 つのロックフリーのリングキューです。プロデューサーはまずデータを書き、フェンスを通し、最後にシーケンス番号を公開します。コンシューマーはシーケンス番号をポーリングし、新しい番号を見てはじめて読みます。番号を最後に書くので、コンシューマーが番号を見た時点でデータはそろっています。これは<a href="#chapter/14/sec-3">第 14 章 14.3 節</a>の「コミット済みは完了済みではない」と同じ種類の問題で、ここでは「完了」をシーケンス番号が宣言するだけです。</p>
 <p><strong>メールボックスにはルーティングだけではありません。</strong>デバイスは、次の層の選択の予想も、この層のルーティングといっしょに公開します。サービススレッドはそれを見て、先にそれらのエキスパートを読みに行き、この層の計算と同時に SSD の読み込みを始めさせます。この先読みはページキャッシュにしか影響せず、出力は変わらず、既定でオンです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1137-L1143" target="_blank" rel="noopener noreferrer">ds4_model.cu の 1137–1143 行目</a>）<a href="#deepseek/experts">第 2 ページ</a>で説明した lookahead がこれです。</p>
@@ -198,35 +219,45 @@
 <p><strong>駐車のしかた。</strong>リクエストが来ると、エンジンはまず、それが現在の会話の続きかどうかを見ます（トークンの先頭部分が一致していて、より長い）。続きなら、その場でそのまま続け、駐車は要りません。そうでなければ、まず現在の会話を駐車し、次に、駐車中の会話にこのプロンプトを続けられるものがないか探します。あれば取り戻し、なければ直近のチェックポイントに戻るか、最初から読みます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L795-L812" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 795–812 行目</a>）</p>
 <p><strong>何を駐車するか。</strong>位置、トークンのリスト、各層のウィンドウリング（ドラフトモデルの各ブロックのリングも含む）、圧縮器の部分グループ、そして KV の各ソースの圧縮 KV とインデックスキーです。駐車するのはテキストの会話だけです。画像を含む会話は駐車せず、画像つきのプロンプトも取り戻しません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5786-L5794" target="_blank" rel="noopener noreferrer">ds4_model.cu の 5786–5794 行目</a>）状態の大きさについて、ドキュメントに数字が 1 つあります。6.5K トークンの会話 1 つで約 17 MB です。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L116-L119" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 116–119 行目</a>）<span class="ev ev-est">教育用の試算</span>（17 × 10⁶ ÷ 6,500 ≈ 2.6 KB / トークン）この数字で線形に外挿します。<span class="ev ev-est">教育用の試算</span>（70,000 × 2.6 KB ≈ 183 MB；185,000 × 2.6 KB ≈ 484 MB）128 行のリングは固定サイズで、1 トークンあたりの限界コストはもっと小さいので、これは上界です。RTX 5070 のマシンの 3.6 GB/s の NVMe で計算すると、183 MB を読み戻すのに約 0.05 s です。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L63" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 63 行目</a>）<span class="ev ev-est">教育用の試算</span>（0.183 GB ÷ 3.6 GB/s ≈ 0.05 s）読み直しの 75 s とは、桁が 3 つ違います。実際の取り戻しには、データをVRAMにコピーし、各リングに書き戻す時間も要ります。エンジンはログに「took back a N-token conversation … (X s)」と出力します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L638-L642" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 638–642 行目</a>）このページにはこの実測の数字がなく、下界までしか示せません。</p>
 <p><strong>プロンプトが変わっても、読む量は減らせます。</strong>クライアントが会話を続けるとき、履歴全体をプロンプトとして描画し直します。このプロンプトは、エンジンに残っているトークン列と、一字一句同じとは限りません。たとえば、描画のときに、もっと前の思考のテキストが付いていないことがあります。エンジンには 2 つの備えがあります。プロンプトを読むとき、プロンプトの末尾の 1 トークン前と末尾に、チェックポイントを 1 つずつ保存します。次のラウンドで描画し直されたプロンプトは、少なくともどちらかの点より前の部分が一致します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L856-L857" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 856–857 行目</a>）駐車した会話を取り戻すとき、プロンプトがその一部としか合わなければ、プロンプトがまだ合っている、いちばん近いチェックポイントまで取り戻します。プロンプトの末尾、末尾の 1 つ前の位置、またはこの連続したプロンプトが始まるアンカーです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L586-L590" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 586–590 行目</a>）だから、全体を続けられなくても、読み直すのは後ろの違う部分だけです。</p>
-<figure class="fig"><svg viewBox="0 0 640 280" role="img" aria-label="図 DS5-5：会話の駐車。モデルの中の会話が押し出されると、まずメモリのスロットに保存される。メモリのスロットが 4 個を超えると、いちばん長く使われていないものがファイルに書き出される。新しいプロンプトが続けられるときは、メモリまたはファイルから取り戻す">
-<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">会話の駐車：保存、あふれ、取り戻し</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="10" y="30" width="160" height="70" rx="4"/>
-<text class="f-text" fill="#182f2b" x="90" y="54" font-size="13" text-anchor="middle">モデルの中の会話</text>
-<text class="f-muted" fill="#5c6d66" x="90" y="74" font-size="12" text-anchor="middle">状態はVRAM</text>
-<text class="f-muted" fill="#5c6d66" x="90" y="92" font-size="12" text-anchor="middle">（現在の 1 つ）</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="240" y="30" width="160" height="70" rx="4"/>
-<text class="f-text" fill="#182f2b" x="320" y="54" font-size="13" text-anchor="middle">メモリのスロット</text>
-<text class="f-muted" fill="#5c6d66" x="320" y="74" font-size="12" text-anchor="middle">最大 4 個</text>
-<text class="f-muted" fill="#5c6d66" x="320" y="92" font-size="12" text-anchor="middle">1024 token 未満は対象外</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="470" y="30" width="160" height="70" rx="4"/>
-<text class="f-text" fill="#182f2b" x="550" y="54" font-size="13" text-anchor="middle">ds4-slots フォルダ</text>
-<text class="f-muted" fill="#5c6d66" x="550" y="74" font-size="12" text-anchor="middle">会話ごとにファイル 2 つ</text>
-<text class="f-muted" fill="#5c6d66" x="550" y="92" font-size="12" text-anchor="middle">.bin + .meta</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M170 52 H236 M230 46 L236 52 L230 58"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M400 52 H466 M460 46 L466 52 L460 58"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M236 84 H174 M180 78 L174 84 L180 90"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M466 84 H404 M410 78 L404 84 L410 90"/>
-<text class="f-text" fill="#182f2b" x="203" y="44" font-size="13" text-anchor="middle">1</text>
-<text class="f-text" fill="#182f2b" x="433" y="44" font-size="13" text-anchor="middle">2</text>
-<text class="f-text" fill="#182f2b" x="205" y="108" font-size="13" text-anchor="middle">3</text>
-<text class="f-text" fill="#182f2b" x="435" y="108" font-size="13" text-anchor="middle">3</text>
-<text class="f-text" fill="#182f2b" x="10" y="140" font-size="13">1 保存：別の会話がモデルを使うとき、いまの会話の状態をまずメモリのスロットに保存する</text>
-<text class="f-text" fill="#182f2b" x="10" y="160" font-size="13">2 あふれ：メモリに 4 個を超えたら、いちばん長く使われていないものをファイルに書き出す</text>
-<text class="f-text" fill="#182f2b" x="10" y="180" font-size="13">3 取り戻し：続けられるスロットがあれば、メモリかファイルから戻し、増えたトークンだけ読む</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">ファイルの書き出し：まず .tmp に書いて改名；空き容量が 8 GiB 未満なら書かない</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">フォルダ上限：サービング層 2 GiB（エンジン既定 16 GiB）。超過時は古い順に削除（書いたばかりは残す）</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="246" font-size="12">起動時に削除：このモデルのものでない、壊れている、7 日以上使われていないもの</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="264" font-size="12">エンジン終了時、メモリのスロットはすべてフォルダに書き出され、次回の起動で続けて使われる</text>
+<figure class="fig"><svg viewBox="0 0 440 398" role="img" aria-label="Figure DS5-5: conversation parking. When a conversation in the model is pushed out, it is first stored in a RAM slot. When RAM holds more than 4, the least recently used is written to a file. When a new prompt can continue one, it is taken back from RAM or from the file">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">会話の駐車：保存、あふれ、取り戻し</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="30" width="124" height="88" rx="4"/>
+<text class="f-text" fill="#182f2b" x="74" y="50" font-size="12" text-anchor="middle">モデルの中の</text>
+<text class="f-muted" fill="#5c6d66" x="74" y="68" font-size="12" text-anchor="middle">会話</text>
+<text class="f-muted" fill="#5c6d66" x="74" y="86" font-size="12" text-anchor="middle">状態は VRAM</text>
+<text class="f-muted" fill="#5c6d66" x="74" y="104" font-size="12" text-anchor="middle">（現在の 1 つ）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="158" y="30" width="124" height="88" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="50" font-size="12" text-anchor="middle">メモリのスロット</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="68" font-size="12" text-anchor="middle">最大 4 個</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="86" font-size="12" text-anchor="middle">1024 token 未満は</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="104" font-size="12" text-anchor="middle">対象外</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="304" y="30" width="124" height="88" rx="4"/>
+<text class="f-text" fill="#182f2b" x="366" y="50" font-size="12" text-anchor="middle">ds4-slots フォルダ</text>
+<text class="f-muted" fill="#5c6d66" x="366" y="68" font-size="12" text-anchor="middle">会話ごとに</text>
+<text class="f-muted" fill="#5c6d66" x="366" y="86" font-size="12" text-anchor="middle">ファイル 2 つ</text>
+<text class="f-muted" fill="#5c6d66" x="366" y="104" font-size="12" text-anchor="middle">.bin + .meta</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M136 56H156M151 50L156 56L151 62"/>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M282 56H302M297 50L302 56L297 62"/>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M156 96H138M143 90L138 96L143 102"/>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M302 96H284M289 90L284 96L289 102"/>
+<text class="f-text" fill="#182f2b" x="147" y="48" font-size="12" text-anchor="middle">1</text>
+<text class="f-text" fill="#182f2b" x="293" y="48" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="147" y="116" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="293" y="116" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="12" y="146" font-size="12" text-anchor="start">1 保存：別の会話がモデルを使うとき、</text>
+<text class="f-text" fill="#182f2b" x="12" y="162" font-size="12" text-anchor="start">いまの会話の状態をまずメモリのスロットに保存する</text>
+<text class="f-text" fill="#182f2b" x="12" y="182" font-size="12" text-anchor="start">2 あふれ：メモリに 4 個を超えたら、</text>
+<text class="f-text" fill="#182f2b" x="12" y="198" font-size="12" text-anchor="start">いちばん長く使われていないものをファイルに書き出す</text>
+<text class="f-text" fill="#182f2b" x="12" y="218" font-size="12" text-anchor="start">3 取り戻し：続けられるスロットがあれば、</text>
+<text class="f-text" fill="#182f2b" x="12" y="234" font-size="12" text-anchor="start">メモリかファイルから戻し、増えたトークンだけ読む</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="262" font-size="12" text-anchor="start">ファイルの書き出し：まず .tmp に書いて改名；</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="278" font-size="12" text-anchor="start">空き容量が 8 GiB 未満なら書かない</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="298" font-size="12" text-anchor="start">フォルダ上限：サービング層 2 GiB（エンジン既定 16 GiB）；</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="314" font-size="12" text-anchor="start">超過時は古い順に削除（書いたばかりは残す）</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="334" font-size="12" text-anchor="start">起動時に削除：このモデルのものでない、</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="350" font-size="12" text-anchor="start">壊れている、7 日以上使われていないもの</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="370" font-size="12" text-anchor="start">エンジン終了時、メモリのスロットはすべてフォルダに</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="386" font-size="12" text-anchor="start">書き出され、次回の起動で続けて使われる</text>
 </svg><figcaption>図 DS5-5　駐車の 3 ステップと 3 つの決まり。メモリが第 1 層、フォルダが第 2 層です。フォルダの容量は、サービング層では 2 GiB、エンジンでは 16 GiB です。</figcaption></figure>
 <p><strong>2 層の置き場。</strong>まずメモリに置き、そこからフォルダへあふれさせます。メモリは最大 4 個（STRATA_DS4_SLOT_CAP）で、超えた分は、いちばん長く使われていないものがファイルに書き出されます。エンジンが終了するときは、メモリのものをすべて書き出し、次回の起動で続けて使います。1024 トークン未満の会話は駐車しません。読み直す時間は取り戻しとあまり変わらず、駐車する価値がないからです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L549-L575" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 549–575 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L1025-L1028" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 1025–1028 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L417-L423" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 417–423 行目</a>）ファイルは、まず .tmp に書いてから改名します。.meta には、モデルの識別情報、トークン、サイズを記録します。空き容量が 8 GiB 未満のときは書きません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L512-L541" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 512–541 行目</a>）</p>
 <p><strong>容量と掃除：2 層で既定値が違います。</strong>エンジン自身は既定で駐車を無効にしていて、フォルダの上限は 16 GiB です。サービング層は既定で有効にし、上限を 2 GiB にして、フォルダは実行ログのそばの ds4-slots に置きます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L417-L423" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 417–423 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L3653-L3667" target="_blank" rel="noopener noreferrer">server.py の 3653–3667 行目</a>）サービング層が設定したのは 2 GiB と有効化で、1 週間という期間はエンジン自身の既定であり、サービング層は設定していません。上限を超えたら、いちばん長く使われていないものから削除し、書いたばかりのものは削除しないので、上限より大きい 1 つの会話でも残せます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L489-L490" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 489–490 行目</a>）起動時、エンジンはフォルダを 1 回走査します。このモデルのものでないもの、壊れているもの、7 日を超えて使われていないものは、すべて削除します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L679" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 679 行目</a>）2 GiB にどれだけ入るか：<span class="ev ev-est">教育用の試算</span>（2 GiB ÷ 17 MB ≈ 126 個の 6.5K トークンの会話；17 MB はドキュメントの元の値）</p>
@@ -239,31 +270,35 @@
 <p><strong>強さは、モデルに宛てた 1 行です。</strong>low、medium、high、max は、それぞれ 50、62、75、100 に対応し、1〜100 の整数を直接渡すこともできます。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L108-L109" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 108–109 行目</a>）この 4 つの数はテンプレートの中の 1 つの表です。描画のとき、思考モードのシステム部の先頭に "Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)" という行を書きます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/fixtures/deepseek41/chat_template.jinja#L23-L29" target="_blank" rel="noopener noreferrer">chat_template.jinja の 23–29 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/fixtures/deepseek41/chat_template.jinja#L209" target="_blank" rel="noopener noreferrer">chat_template.jinja の 209 行目</a>）サービング層のテストは、この行を 1 つずつ確認します。low は 50、medium は 62、xhigh は 100、40 を渡せば 40 と書き、extreme を渡すと 400 を返します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/test_dsv41.py#L424-L434" target="_blank" rel="noopener noreferrer">test_dsv41.py の 424–434 行目</a>）この数は、モデルに見せる言葉にすぎません。エンジンが受け取るのはトークン ID だけで（<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L9-L12" target="_blank" rel="noopener noreferrer">ds4_main.cpp の 9–12 行目</a>））、エンジンの中に思考の予算はありません。サービング層には別のものがあります。DeepSeek-V4.1 は、リクエストにも設定にも書かれていないとき、既定の予算が 32,768 トークンです。予算に達すると、サービング層は強制的に締めくくり、思考を閉じます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L218" target="_blank" rel="noopener noreferrer">server.py の 218 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L5856" target="_blank" rel="noopener noreferrer">server.py の 5856 行目</a>）reasoning_budget_tokens でこの値を変えられ、0 は予算なしを意味します。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/release-notes-0.2.4.md#L41" target="_blank" rel="noopener noreferrer">release-notes-0.2.4.md の 41 行目</a>）だから、強さの数は数えません。数えるのは予算です。</p>
 <p><strong>既定のサンプリング。</strong>リクエストにパラメータがないときは、温度 1.0、top_p 1.0 です。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L115" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 115 行目</a>）だから既定のリクエストはサンプリングのリクエストで、検証は 5.3 節の p(d) のルールを通ります。</p>
 <p><strong>ツール呼び出し：DSML から OpenAI と Anthropic へ。</strong>モデル自身が書くツール呼び出しは DSML 形式です。<code>&lt;｜DSML｜ calls&gt;</code> が複数の <code>&lt;｜DSML｜ invoke name="…"&gt;</code> を包み、パラメータ 1 つごとに <code>&lt;｜DSML｜ parameter name="…" string="true"&gt;</code> があります。サービング層はこれらを、OpenAI の tool_calls と Anthropic の tool_use に変換します。tool_choice、ストリーミングされるパラメータ、思考の中に書かれた呼び出しも含みます。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L112-L114" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 112–114 行目</a>）変換は別に作り直していません。DsmlTranslator が、DSML のテキストをストリームしながら、メインラインの Qwen が使うツール呼び出しテキストへ書き換え、それを共有の OutputParser に渡します。そのため、2 通りの出力の形、tool_choice、ストリーミングされるパラメータ、思考と答えの振り分けは、DeepSeek でもほかのモデルでも同じように動き、「DSML をどう綴るか」を知っている場所は 1 か所だけです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L1-L19" target="_blank" rel="noopener noreferrer">dsml.py の 1–19 行目</a>）</p>
-<figure class="fig"><svg viewBox="0 0 640 218" role="img" aria-label="図 DS5-6：DSML ツール呼び出しの変換。モデルが DSML のテキストを書き、DsmlTranslator がストリームしながら Qwen 形式の呼び出しテキストへ書き換え、共有の OutputParser が OpenAI と Anthropic の 2 つの形を出す">
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="24" width="190" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="105" y="48" font-size="13" text-anchor="middle">モデルが書くテキスト</text>
-<text class="f-muted" fill="#5c6d66" x="105" y="68" font-size="12" text-anchor="middle">&lt;｜DSML｜ invoke …&gt;</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M200 54 H226 M220 48 L226 54 L220 60"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="230" y="24" width="200" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="330" y="48" font-size="13" text-anchor="middle">DsmlTranslator</text>
-<text class="f-muted" fill="#5c6d66" x="330" y="68" font-size="12" text-anchor="middle">書き換え中、未完のタグは保留</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M430 54 H456 M450 48 L456 54 L450 60"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="460" y="24" width="170" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="545" y="48" font-size="13" text-anchor="middle">Qwen 形式の呼び出し</text>
-<text class="f-muted" fill="#5c6d66" x="545" y="68" font-size="12" text-anchor="middle">tool_call / function=…</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M545 84 V108 H330 V126 M324 120 L330 126 L336 120"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="230" y="130" width="200" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="330" y="154" font-size="13" text-anchor="middle">共有の OutputParser</text>
-<text class="f-muted" fill="#5c6d66" x="330" y="174" font-size="12" text-anchor="middle">ストリーム引数、思考内の呼び出し</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M230 160 H204 M210 154 L204 160 L210 166"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M430 160 H456 M450 154 L456 160 L450 166"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="130" width="190" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="105" y="154" font-size="13" text-anchor="middle">OpenAI tool_calls</text>
-<text class="f-muted" fill="#5c6d66" x="105" y="174" font-size="12" text-anchor="middle">tool_choice を含む</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="460" y="130" width="170" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="545" y="154" font-size="13" text-anchor="middle">Anthropic tool_use</text>
-<text class="f-muted" fill="#5c6d66" x="545" y="174" font-size="12" text-anchor="middle">同じ解析結果</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">string="true" のパラメータは文字列のまま；DSML の綴りを知っているのはここだけ</text>
+<figure class="fig"><svg viewBox="0 0 440 412" role="img" aria-label="Figure DS5-6: converting DSML tool calls. The model writes DSML text, DsmlTranslator rewrites it as it streams into Qwen-style call text, and the shared OutputParser then produces both the OpenAI and the Anthropic shapes">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="24" width="320" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="46" font-size="12" text-anchor="middle">モデルが書くテキスト</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="64" font-size="12" text-anchor="middle">&lt;｜DSML｜ invoke …&gt;</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 72V88"/>
+<path class="f-muted" fill="#5c6d66" d="M216 88L220 96L224 88Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="60" y="96" width="320" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="118" font-size="12" text-anchor="middle">DsmlTranslator</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="136" font-size="12" text-anchor="middle">書き換え中、未完のタグは保留</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 144V160"/>
+<path class="f-muted" fill="#5c6d66" d="M216 160L220 168L224 160Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="168" width="320" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="190" font-size="12" text-anchor="middle">Qwen 形式の呼び出し</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="208" font-size="12" text-anchor="middle">tool_call / function=…</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 216V232"/>
+<path class="f-muted" fill="#5c6d66" d="M216 232L220 240L224 232Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="60" y="240" width="320" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="262" font-size="12" text-anchor="middle">共有の OutputParser</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="280" font-size="12" text-anchor="middle">ストリーム引数、思考内の呼び出し</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M220 288V300M112 300H328M112 300V312M328 300V312"/>
+<path class="f-muted" fill="#5c6d66" d="M108 304L112 312L116 304ZM324 304L328 312L332 304Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="314" width="200" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="112" y="336" font-size="12" text-anchor="middle">OpenAI tool_calls</text>
+<text class="f-muted" fill="#5c6d66" x="112" y="354" font-size="12" text-anchor="middle">tool_choice を含む</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="228" y="314" width="200" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="328" y="336" font-size="12" text-anchor="middle">Anthropic tool_use</text>
+<text class="f-muted" fill="#5c6d66" x="328" y="354" font-size="12" text-anchor="middle">同じ解析結果</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="386" font-size="12" text-anchor="start">string="true" のパラメータは文字列のまま；</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="402" font-size="12" text-anchor="start">DSML の綴りを知っているのはここだけ</text>
 </svg><figcaption>図 DS5-6　ツール呼び出しの翻訳チェーン。新しいのは、最初の箱から 2 つ目の箱へのこの 1 段だけです。そのあとの解析と 2 通りの出力の形は、メインラインと共用です。</figcaption></figure>
 <p><strong>ストリーミングの細部。</strong>書き換えのとき、「タグになるかもしれない」断片だけを保留します。たとえば <code>&lt;</code> や <code>&lt;｜DS</code> で、そのほかの文字はそのまま通します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L39-L45" target="_blank" rel="noopener noreferrer">dsml.py の 39–45 行目</a>）パラメータに string="true" が付いているとき、値は文字列のままで、"123" が数字として扱われることはありません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L183-L197" target="_blank" rel="noopener noreferrer">dsml.py の 183–197 行目</a>）ストリームのイベントをどう切り、どうためるかは、<a href="#chapter/23/sec-5">第 23 章 23.5 節</a>を見てください。</p>
 <p><strong>2-bit 量子化が残した 2 つのパッチ。</strong>1 つ目。2-bit のファイルセットは、&lt;think&gt; のあとで答えを全部書いて止まり、&lt;/think&gt; を書かないことがよくあります。すると全体が思考として扱われ、答えが空になります。コメントによると、4 つのプロンプトのうち 4 つともそうでした。パーサーは、ターンが stop で終わり、答えも呼び出しもないとき、思考のテキストを答えとして渡します。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L172-L175" target="_blank" rel="noopener noreferrer">dsml.py の 172–175 行目</a>）2 つ目。テンプレートの綴りです。V4.1 モデルは "&lt;｜DSML｜ calls&gt;"（calls の前に空白あり）と書きますが、ほかの一部の pack は V4-Flash のテンプレートを持っていて、"&lt;｜DSML｜tool_calls&gt;" と書きます。モデルはプロンプトで一方を見て、自分では別のほうを書いてしまい、11 回のツール呼び出しのうち本物の呼び出しになったのは 2 回だけでした。同じ pack で、コメントに記録されているのは 0/4 対 6/6 で、後者は空白入りのテンプレートに替えたあとです。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L226-L232" target="_blank" rel="noopener noreferrer">dsml.py の 226–232 行目</a>）そこでサービング層は pack 付属のテンプレートを検査し、綴りが違えば、自分が持っているほうに替えます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L226-L232" target="_blank" rel="noopener noreferrer">dsml.py の 226–232 行目</a>）</p>

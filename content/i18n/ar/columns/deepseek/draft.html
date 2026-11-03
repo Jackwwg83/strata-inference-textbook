@@ -8,33 +8,40 @@
 <p><strong>بنيته الداخلية.</strong> يقارن سكربت التحقق المرفق بالمحرك نقطة حفظ DeepSeek سطرًا بسطر، وفيه أن لنموذج المسودة ثلاث كتل، في كل كتلة انتباه بنافذة ثم MoE صغير فيه 128 خبيرًا يُختار منهم 3 لكل رمز، ومدخلها حالات الطبقات من 37 إلى 39 في النموذج الرئيسي. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/dspark_ref.py#L10-L14" target="_blank" rel="noopener noreferrer">dspark_ref.py، السطور 10–14</a>) لا يحفظ نموذج المسودة تاريخًا بنفسه. يُنشئ المحرك لكل كتلة حلقة نافذة، وفيها إسقاطات من KV في النموذج الرئيسي: كلما أبقى النموذج الرئيسي دفعة من الصفوف، «زُرعت» (seed) الحلقة بحالات هذه الصفوف في تلك الطبقات الثلاث. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7677-L7681" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطور 7677–7681</a>)</p>
 <p><strong>مدخل جولة التخمين.</strong> عند التخمين يعطي المحرك نموذج المسودة كتلة واحدة. الصف 0 هو الرمز الذي حُسم للتو ولم يُغذَّ بعد إلى النموذج الرئيسي (نسمّيه y)، وتُملأ بقية الصفوف كلها برمز «ضجيج» ثابت واحد. وعدد صفوف الكتلة يساوي dspark_block_size في الحزمة. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7761-L7766" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطور 7761–7766</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/pack_gguf.py#L222" target="_blank" rel="noopener noreferrer">pack_gguf.py، السطر 222</a>) هذا الرقم غير مكتوب في شيفرة المحرك. وتقول ثلاثة تعليقات إنه 5: يكتب سكربت التحقق الكتلة هكذا «[y, noise x 4]»، ويكتب تعليق المحرك «the drafter's fixed T=5»، ويكتب تعليق setup «نافذة تحقق من 6 صفوف» (5 مسودات مع y). <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/dspark_ref.py#L10-L14" target="_blank" rel="noopener noreferrer">dspark_ref.py، السطور 10–14</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9620-L9625" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطور 9620–9625</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tests/terminal/test_dsv41_async_t.py#L3-L5" target="_blank" rel="noopener noreferrer">test_dsv41_async_t.py، السطور 3–5</a>) ويكتب التعليق في رأس ملف النواة ds4_attn_split.cuh «DSpark verify T = 2..5»، وهذا لا يطابق 6 صفوف. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_attn_split.cuh#L3-L4" target="_blank" rel="noopener noreferrer">ds4_attn_split.cuh، السطران 3–4</a>) نعتمد في هذه الصفحة T = n + 1 كما في verify، ونعدّه تعليقًا قديمًا لم يُحدَّث.</p>
 <p><strong>كيف تخرج المسودات الخمس.</strong> تمر الكتلة بالكتل الثلاث فتعطي 5 صفوف من الحالات المخفية. يمر كل صف بعد ذلك برأس المخرجات في النموذج الرئيسي، ويُضاف إليه حد انحياز Markov، ثم يُؤخذ argmax، فتكون النتيجة مسودة هذا الصف. لا ينظر الانحياز إلا إلى الرمز السابق: الصف 0 ينظر إلى y، وكل صف بعده ينظر إلى المسودة التي خرجت للتو من الصف الذي قبله. فالمسودات الخمس تأتي من تمريرة كتلة واحدة مع خمس خطوات تسلسل صغيرة، وليست خمس تمريرات أمامية كاملة. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7877-L7886" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطور 7877–7886</a>) تؤخذ المسودة افتراضيًا بـ argmax؛ ولا يتحول المحرك إلى السحب من توزيع نموذج المسودة إلا إذا ضُبط متغير البيئة DS4_DSPARK_SAMPLE=1، وهو مفتاح اختبار. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.hpp#L128-L134" target="_blank" rel="noopener noreferrer">ds4_model.hpp، السطور 128–134</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1052" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطر 1052</a>)</p>
-<figure class="fig"><svg viewBox="0 0 640 250" role="img" aria-label="الشكل DS5-1: تدفق البيانات في جولة تخمين واحدة. يمرّ مدخل الكتلة المؤلف من 5 صفوف بالكتل الثلاث ورأس مخرجات النموذج الرئيسي وانحياز Markov، فتخرج 5 مسودات و5 درجات ثقة؛ وبعد التحقق تُكتب الصفوف المحتفَظ بها في حلقة النافذة">
-<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">جولة تخمين: كتلة مدخلة من 5 صفوف، تمريرة واحدة، فتخرج 5 مسودات و5 درجات ثقة معًا</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="10" y="34" width="120" height="72" rx="4"/>
-<text class="f-text" fill="#182f2b" x="70" y="60" font-size="13" text-anchor="middle">5 صفوف مدخلة</text>
-<text class="f-muted" fill="#5c6d66" x="70" y="82" font-size="12" text-anchor="middle">y + ضجيج ×4</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M130 70 H156 M150 64 L156 70 L150 76"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="160" y="34" width="170" height="72" rx="4"/>
-<text class="f-text" fill="#182f2b" x="245" y="56" font-size="13" text-anchor="middle">كتل DSpark الثلاث</text>
-<text class="f-muted" fill="#5c6d66" x="245" y="75" font-size="12" text-anchor="middle">انتباه بنافذة</text>
-<text class="f-muted" fill="#5c6d66" x="245" y="93" font-size="12" text-anchor="middle">MoE: 3 من 128 خبيرًا</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M330 70 H356 M350 64 L356 70 L350 76"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="360" y="34" width="130" height="72" rx="4"/>
-<text class="f-text" fill="#182f2b" x="425" y="56" font-size="13" text-anchor="middle">رأس مخرجات النموذج</text>
-<text class="f-muted" fill="#5c6d66" x="425" y="75" font-size="12" text-anchor="middle">+ انحياز Markov</text>
-<text class="f-muted" fill="#5c6d66" x="425" y="93" font-size="12" text-anchor="middle">argmax لكل موضع</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M490 70 H516 M510 64 L516 70 L510 76"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="520" y="34" width="110" height="72" rx="4"/>
-<text class="f-text" fill="#182f2b" x="575" y="63" font-size="13" text-anchor="middle">5 مسودات</text>
-<text class="f-text" fill="#182f2b" x="575" y="85" font-size="13" text-anchor="middle">5 درجات ثقة</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="160" y="140" width="170" height="52" rx="4"/>
-<text class="f-text" fill="#182f2b" x="245" y="162" font-size="13" text-anchor="middle">حلقة نافذة لكل كتلة</text>
-<text class="f-muted" fill="#5c6d66" x="245" y="181" font-size="12" text-anchor="middle">حالات الطبقات 37–39</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M245 140 V110 M239 116 L245 110 L251 116"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M575 106 V166 H336 M342 160 L336 166 L342 172"/>
-<text class="f-muted" fill="#5c6d66" x="455" y="158" font-size="12" text-anchor="middle">ما بقي بعد التحقق يُكتب في الحلقة</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="218" font-size="12">تُحسب الصفوف الخمسة معًا، ثم تتسلسل المسودات بالترتيب، وكل خطوة تضيف حد انحياز صغيرًا (للرمز السابق فقط)</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="238" font-size="12">درجة الثقة = sigmoid (جداء نقطي متعلَّم)؛ تحدد العتبتين لاحقًا ولا تدخل في التحقق</text>
+<figure class="fig"><svg viewBox="0 0 440 400" role="img" aria-label="الشكل DS5-1: تدفق البيانات في جولة تخمين واحدة. يمرّ مدخل الكتلة المؤلف من 5 صفوف بالكتل الثلاث ورأس مخرجات النموذج الرئيسي وانحياز Markov، فتخرج 5 مسودات و5 درجات ثقة؛ وبعد التحقق تُكتب الصفوف المحتفَظ بها في حلقة النافذة">
+<text class="f-muted" fill="#5c6d66" x="428" y="18" font-size="12" text-anchor="end">جولة تخمين: 5 صفوف في تمريرة أمامية واحدة</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="200" y="28" width="228" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="314" y="50" font-size="12" text-anchor="middle">مدخل الكتلة: 5 صفوف</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="68" font-size="12" text-anchor="middle">[y، ضجيج ×4]</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M314 76V84"/>
+<path class="f-muted" fill="#5c6d66" d="M310 84L314 92L318 84Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="92" width="228" height="68" rx="4"/>
+<text class="f-text" fill="#182f2b" x="314" y="114" font-size="12" text-anchor="middle">ثلاث كتل DSpark</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="132" font-size="12" text-anchor="middle">انتباه النافذة</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="150" font-size="12" text-anchor="middle">MoE: 3 من 128 خبيرًا</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M314 160V168"/>
+<path class="f-muted" fill="#5c6d66" d="M310 168L314 176L318 168Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="176" width="228" height="68" rx="4"/>
+<text class="f-text" fill="#182f2b" x="314" y="198" font-size="12" text-anchor="middle">رأس إخراج النموذج الرئيسي</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="216" font-size="12" text-anchor="middle">+ انحياز Markov</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="234" font-size="12" text-anchor="middle">argmax لكل موضع</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M314 244V252"/>
+<path class="f-muted" fill="#5c6d66" d="M310 252L314 260L318 252Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="200" y="260" width="228" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="314" y="280" font-size="12" text-anchor="middle">5 مسودات</text>
+<text class="f-text" fill="#182f2b" x="314" y="298" font-size="12" text-anchor="middle">5 درجات ثقة</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="12" y="92" width="140" height="68" rx="4"/>
+<text class="f-text" fill="#182f2b" x="82" y="114" font-size="12" text-anchor="middle">حلقة النافذة</text>
+<text class="f-muted" fill="#5c6d66" x="82" y="132" font-size="12" text-anchor="middle">تحفظ حالة الطبقات 37–39</text>
+<text class="f-muted" fill="#5c6d66" x="82" y="150" font-size="12" text-anchor="middle">من النموذج الرئيسي</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M152 126H190M184 120L190 126L184 132"/>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M200 284H82V168M76 174L82 168L88 174"/>
+<text class="f-muted" fill="#5c6d66" x="190" y="214" font-size="12" text-anchor="end">بعد التحقق: الصفوف</text>
+<text class="f-muted" fill="#5c6d66" x="190" y="232" font-size="12" text-anchor="end">المقبولة تعود للحلقة</text>
+<text class="f-muted" fill="#5c6d66" x="428" y="334" font-size="12" text-anchor="end">تُحسب الصفوف الخمسة مرة واحدة؛ ثم تتسلسل المسودات،</text>
+<text class="f-muted" fill="#5c6d66" x="428" y="350" font-size="12" text-anchor="end">وكل خطوة تضيف انحيازًا صغيرًا (يرى الرمز السابق فقط)</text>
+<text class="f-muted" fill="#5c6d66" x="428" y="372" font-size="12" text-anchor="end">الثقة = sigmoid (ضرب نقطي مُتعلَّم)؛</text>
+<text class="f-muted" fill="#5c6d66" x="428" y="388" font-size="12" text-anchor="end">تحدد البوابتين اللاحقتين، ولا تدخل في التحقق</text>
 </svg><figcaption>الشكل DS5-1  جولة تخمين. مدخل الكتلة [y + ضجيج ×4] أي 5 صفوف، تُحسب كلها دفعة واحدة عبر الكتل الثلاث؛ فتخرج المسودات ودرجات الثقة معًا. تحمل حلقة النافذة إسقاطات حالات الطبقات 37–39 في النموذج الرئيسي، وبعد التحقق تُزرع من جديد بالصفوف التي بقيت.</figcaption></figure>
 <p><strong>كيف تُحسب درجات الثقة الخمس.</strong> يُخرج كل صف درجة ثقة أيضًا: يُلصق صف مخرجات الكتلة بصف تضمين Markov للرمز السابق، ثم يُضرب نقطيًا في متجه أوزان متعلَّم، ثم يمر بـ sigmoid. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L278" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh، السطر 278</a>) ويعدّها مؤلف المحرك «احتمال أن تبقى هذه المسودة»: يقول تعليق في main.cpp إن المسودة تستحق التحقق لأن احتمال بقائها مع كل المسودات التي قبلها ما زال مرتفعًا بما يكفي. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L169-L175" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 169–175</a>) هذا هو استخدام المؤلف. ولا بيانات عندنا في هذه الصفحة تبيّن هل درجات الثقة معايَرة فعلًا، فلا نحكم.</p>
 <p><strong>التخمين ليس مجانيًا.</strong> يسجّل تعليق في المحرك مجموعة أزمنة: نزل زمن رأس المخرجات لكتلة المسودة (T=5 ثابتة) من 4.55 ms إلى 2.83 ms، ونزل زمن الجولة كلها من 14.49 ms إلى 13.46 ms؛ ولم يُذكر الجهاز. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9620-L9625" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطور 9620–9625</a>) وتتراوح سرعة فك الترميز بين الأجهزة من 4.7 إلى 80 token/s، أي من 12.5 إلى 213 ms لكل رمز. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L63" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md، السطر 63</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L64-L65" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md، السطور 64–65</a>) <span class="ev ev-est">تقدير تعليمي</span> (<span dir="ltr">1000 ÷ 80 = 12.5 ms</span>؛ <span dir="ltr">1000 ÷ 4.7 ≈ 213 ms</span>) المجموعتان من أجهزة مختلفة وبمعايير مختلفة، فلا تصح المقارنة بينهما مباشرة. كل ما يمكن قوله هنا إن جولة تخمين واحدة تستغرق بضع عشرات من الميلي ثانية. فلا يكفي أن يكون التخمين دقيقًا، بل يجب أن يكون مجديًا. وقد وُضعت العتبتان التاليتان لهذا الغرض.</p>
@@ -57,48 +64,52 @@
 <p><strong>العتبة الأولى: حد أدنى لكل مسودة.</strong> قيمة dspark_conf الافتراضية 0.5، ويمكن تغييرها بـ <span dir="ltr">--dspark-conf</span> أو بمفتاح dspark_conf في الطلب. إذا كانت درجة ثقة المسودة دونه، توقّف الفحص عندها. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.hpp#L52-L55" target="_blank" rel="noopener noreferrer">ds4_model.hpp، السطور 52–55</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L281-L286" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 281–286</a>) <strong>العتبة الثانية: الضرب التراكمي.</strong> تُضرب درجات ثقة المسودات السابقة بعضها في بعض، فإذا نزل الحاصل دون العتبة توقّف الفحص. القيمة الافتراضية في معظم الأجهزة 0، أي أنها مُعطَّلة؛ والاستثناء RDNA4 كما في الفقرة التالية. وهما في المحرك حلقة واحدة: يعدّ المحرك من المسودة الأولى، وعند أول مسودة لا تجتاز يتوقف، فتُسقَط البقية كلها. والسبب بسيط: كي تفيد المسودة الثالثة يجب أن تُقبل المسودتان الأوليان كلتاهما. وللحلقة سقفان صارمان: الأصغر بين عدد الرموز التي يمكن توليدها لهذا الطلب وهامش السياق، ناقص 1؛ و<span dir="ltr">--dspark-depth</span> (الافتراضي 64، ولا يُستخدم عمليًا). <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L238-L244" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 238–244</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L165" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطر 165</a>) وإذا لم يبقَ لهذه القيمة الأصغر إلا رمز واحد، فلا يخمّن المحرك أصلًا. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L223-L224" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطران 223–224</a>)</p>
 <p><strong>القيمة الافتراضية للضرب التراكمي تتبع العتاد.</strong> بطاقات RDNA4 (gfx1200 وgfx1201: R9700 وRX 9000) قيمتها الافتراضية 0.5، وغيرها 0؛ ويتقدّم متغير البيئة STRATA_DS4_DSPARK_CUM على أي جهاز، أما DS4_DEFAULTS=026 فيعيد القيمة 0 كما في الإصدار 0.2.6. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_experts_rule.hpp#L197-L201" target="_blank" rel="noopener noreferrer">ds4_experts_rule.hpp، السطور 197–201</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tests/dsv41/experts_rule_test.cpp#L283-L287" target="_blank" rel="noopener noreferrer">experts_rule_test.cpp، السطور 283–287</a>) ويسجّل التعليق سبب تفعيلها في RDNA4 وحدها: 4 بطاقات R9700، و2.25 bpw، وفي كل مجموعة 6 عمليات فك ترميز من 128 رمزًا، ومن المعرّفات نفسها، فارتفعت السرعة من 71.7 إلى 76.9 token/s (الوسيط). وقاس Project Maya على Radeon 8065S (Strix Halo) <span dir="ltr">+6.5%</span>، لكنها نقطة بيانات واحدة من جهاز واحد؛ وقيست على CUDA فكانت متعادلة. لذلك بقيت القيمة 0 في Strix وCUDA. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L169-L175" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 169–175</a>) والحد الأدنى كذلك ليس 0.5 في كل مكان: فوثيقة Strix Halo لنظام Windows تكتب معاملات التشغيل <span dir="ltr">--dspark auto --dspark-conf 0.65</span>، والموالِف (tuner) يمرّر 0.65 نفسها حين يجرّب فئة «فرض التشغيل». <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/STRIX_HALO_WINDOWS.md#L78" target="_blank" rel="noopener noreferrer">STRIX_HALO_WINDOWS.md، السطر 78</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/tune.py#L121-L122" target="_blank" rel="noopener noreferrer">tune.py، السطور 121–122</a>)</p>
 <p><strong>جرّب بنفسك.</strong> يتيح لك المحاكي أدناه، بأرقام تعليمية، أن تحرّك ثلاث قيم: عدد المسودات في الجولة (من 1 إلى 5)، ومعدل القبول (حجم احتمال بقاء كل مسودة شرطيًا)، وعتبات الثقة (الحد الأدنى والضرب التراكمي). ويعرض عدد الرموز التي تخرج في النهاية من نافذة التحقق في كل جولة. الصيغة <span dir="ltr">E = 1 + c₁ + c₁c₂ + … + c₁…c<sub>k</sub></span>، حيث k عدد المسودات التي اجتازت العتبتين، وcᵢ درجة الثقة. <span class="ev ev-est">تقدير تعليمي</span> (<span dir="ltr">E = 1 + Σᵢ₌₁..k ∏ⱼ₌₁..i cⱼ</span>؛ اشتقاق القيمة المتوقعة في الفصل 19، القسم 19.2) اعتبار درجة الثقة معدل قبول شرطيًا فرضية تعليمية في هذه الصفحة، وليست حقيقة قاسها المحرك.</p>
-<div class="viz" data-viz="ds-draft-window"><figure class="fig"><svg viewBox="0 0 640 316" role="img" aria-label="الشكل DS5-2: خمس مسودات وثلاث طرق للتقصير. درجات الثقة 0.80 و0.62 و0.45 و0.35 و0.28؛ بلا تقصير يُتحقَّق من 5 مسودات والمتوقع 2.62 رمزًا في الجولة؛ وبحد أدنى 0.5 فقط يُتحقَّق من مسودتين والمتوقع 2.30 رمزًا؛ ومع عتبة الضرب التراكمي 0.5 يُتحقَّق من مسودة واحدة والمتوقع 1.80 رمزًا">
-<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">مثال: خمس مسودات وثلاث طرق للتقصير (أرقام تعليمية، وليست قياسًا)</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="36" font-size="12">ارتفاع العمود = درجة الثقة؛ الخط المتقطع = الحد الأدنى 0.5</text>
-<rect class="f-accent" fill="#136d5a" x="150" y="86" width="40" height="64" rx="2"/>
-<rect class="f-accent" fill="#136d5a" x="220" y="100" width="40" height="50" rx="2"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="290" y="114" width="40" height="36" rx="2"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="360" y="122" width="40" height="28" rx="2"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="430" y="128" width="40" height="22" rx="2"/>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-dasharray="4 3" d="M130 110 H490"/>
-<text class="f-muted" fill="#5c6d66" x="496" y="114" font-size="12">الحد الأدنى 0.5</text>
-<text class="f-text" fill="#182f2b" x="170" y="168" font-size="13" text-anchor="middle">المسودة 1</text>
-<text class="f-text" fill="#182f2b" x="240" y="168" font-size="13" text-anchor="middle">المسودة 2</text>
-<text class="f-text" fill="#182f2b" x="310" y="168" font-size="13" text-anchor="middle">المسودة 3</text>
-<text class="f-text" fill="#182f2b" x="380" y="168" font-size="13" text-anchor="middle">المسودة 4</text>
-<text class="f-text" fill="#182f2b" x="450" y="168" font-size="13" text-anchor="middle">المسودة 5</text>
+<div class="viz" data-viz="ds-draft-window"><figure class="fig"><svg viewBox="0 0 440 380" role="img" aria-label="الشكل DS5-2: خمس مسودات وثلاث طرق للتقصير. درجات الثقة 0.80 و0.62 و0.45 و0.35 و0.28؛ بلا تقصير يُتحقَّق من 5 مسودات والمتوقع 2.62 رمزًا في الجولة؛ وبحد أدنى 0.5 فقط يُتحقَّق من مسودتين والمتوقع 2.30 رمزًا؛ ومع عتبة الضرب التراكمي 0.5 يُتحقَّق من مسودة واحدة والمتوقع 1.80 رمزًا">
+<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">مثال: خمس مسودات وثلاث طرق للتقصير (أرقام تعليمية، لا قياس)</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="36" font-size="12">ارتفاع العمود = درجة الثقة؛ المتقطع = الحد الأدنى 0.5</text>
+<rect class="f-accent" fill="#136d5a" x="108" y="86" width="36" height="64" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="166" y="100" width="36" height="50" rx="2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="224" y="114" width="36" height="36" rx="2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="282" y="122" width="36" height="28" rx="2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="340" y="128" width="36" height="22" rx="2"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-dasharray="4 3" d="M104 110 H380"/>
+<text class="f-muted" fill="#5c6d66" x="386" y="114" font-size="12">الحد 0.5</text>
+<text class="f-text" fill="#182f2b" x="126" y="168" font-size="12" text-anchor="middle">1</text>
+<text class="f-text" fill="#182f2b" x="184" y="168" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="242" y="168" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="300" y="168" font-size="12" text-anchor="middle">4</text>
+<text class="f-text" fill="#182f2b" x="358" y="168" font-size="12" text-anchor="middle">5</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="168" font-size="12">المسودة</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="188" font-size="12">درجة الثقة c</text>
-<text class="f-text" fill="#182f2b" x="170" y="188" font-size="12" text-anchor="middle">0.80</text>
-<text class="f-text" fill="#182f2b" x="240" y="188" font-size="12" text-anchor="middle">0.62</text>
-<text class="f-text" fill="#182f2b" x="310" y="188" font-size="12" text-anchor="middle">0.45</text>
-<text class="f-text" fill="#182f2b" x="380" y="188" font-size="12" text-anchor="middle">0.35</text>
-<text class="f-text" fill="#182f2b" x="450" y="188" font-size="12" text-anchor="middle">0.28</text>
+<text class="f-text" fill="#182f2b" x="126" y="188" font-size="12" text-anchor="middle">0.80</text>
+<text class="f-text" fill="#182f2b" x="184" y="188" font-size="12" text-anchor="middle">0.62</text>
+<text class="f-text" fill="#182f2b" x="242" y="188" font-size="12" text-anchor="middle">0.45</text>
+<text class="f-text" fill="#182f2b" x="300" y="188" font-size="12" text-anchor="middle">0.35</text>
+<text class="f-text" fill="#182f2b" x="358" y="188" font-size="12" text-anchor="middle">0.28</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">الضرب التراكمي</text>
-<text class="f-text" fill="#182f2b" x="170" y="206" font-size="12" text-anchor="middle">0.800</text>
-<text class="f-text" fill="#182f2b" x="240" y="206" font-size="12" text-anchor="middle">0.496</text>
-<text class="f-text" fill="#182f2b" x="310" y="206" font-size="12" text-anchor="middle">0.223</text>
-<text class="f-text" fill="#182f2b" x="380" y="206" font-size="12" text-anchor="middle">0.078</text>
-<text class="f-text" fill="#182f2b" x="450" y="206" font-size="12" text-anchor="middle">0.022</text>
+<text class="f-text" fill="#182f2b" x="126" y="206" font-size="12" text-anchor="middle">0.800</text>
+<text class="f-text" fill="#182f2b" x="184" y="206" font-size="12" text-anchor="middle">0.496</text>
+<text class="f-text" fill="#182f2b" x="242" y="206" font-size="12" text-anchor="middle">0.223</text>
+<text class="f-text" fill="#182f2b" x="300" y="206" font-size="12" text-anchor="middle">0.078</text>
+<text class="f-text" fill="#182f2b" x="358" y="206" font-size="12" text-anchor="middle">0.022</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">حد أدنى فقط</text>
-<text class="f-text" fill="#182f2b" x="170" y="228" font-size="12" text-anchor="middle">تحقق</text>
-<text class="f-text" fill="#182f2b" x="240" y="228" font-size="12" text-anchor="middle">تحقق</text>
-<text class="f-text" fill="#182f2b" x="310" y="228" font-size="12" text-anchor="middle">توقف</text>
-<text class="f-muted" fill="#5c6d66" x="380" y="228" font-size="12" text-anchor="middle">—</text>
-<text class="f-muted" fill="#5c6d66" x="450" y="228" font-size="12" text-anchor="middle">—</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="246" font-size="12">مع ضرب تراكمي 0.5</text>
-<text class="f-text" fill="#182f2b" x="170" y="246" font-size="12" text-anchor="middle">تحقق</text>
-<text class="f-text" fill="#182f2b" x="240" y="246" font-size="12" text-anchor="middle">توقف</text>
-<text class="f-muted" fill="#5c6d66" x="310" y="246" font-size="12" text-anchor="middle">—</text>
-<text class="f-muted" fill="#5c6d66" x="380" y="246" font-size="12" text-anchor="middle">—</text>
-<text class="f-muted" fill="#5c6d66" x="450" y="246" font-size="12" text-anchor="middle">—</text>
-<text class="f-text" fill="#182f2b" x="10" y="272" font-size="13">بلا تقصير: يُتحقَّق من 5، النافذة 6 صفوف، المتوقع <tspan direction="ltr" unicode-bidi="isolate">1 + 1.62 ≈ 2.62</tspan> رمزًا</text>
-<text class="f-text" fill="#182f2b" x="10" y="290" font-size="13">حد أدنى فقط: يُتحقَّق من 2، النافذة 3 صفوف، المتوقع <tspan direction="ltr" unicode-bidi="isolate">1 + 0.80 + 0.496 ≈ 2.30</tspan> رمزًا</text>
-<text class="f-text" fill="#182f2b" x="10" y="308" font-size="13">مع ضرب تراكمي 0.5: يُتحقَّق من 1، النافذة صفان، المتوقع <tspan direction="ltr" unicode-bidi="isolate">1 + 0.80 = 1.80</tspan> رمزًا</text>
+<text class="f-text" fill="#182f2b" x="126" y="228" font-size="12" text-anchor="middle">تحقق</text>
+<text class="f-text" fill="#182f2b" x="184" y="228" font-size="12" text-anchor="middle">تحقق</text>
+<text class="f-text" fill="#182f2b" x="242" y="228" font-size="12" text-anchor="middle">توقف</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="228" font-size="12" text-anchor="middle">—</text>
+<text class="f-muted" fill="#5c6d66" x="358" y="228" font-size="12" text-anchor="middle">—</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="246" font-size="12">+ تراكمي 0.5</text>
+<text class="f-text" fill="#182f2b" x="126" y="246" font-size="12" text-anchor="middle">تحقق</text>
+<text class="f-text" fill="#182f2b" x="184" y="246" font-size="12" text-anchor="middle">توقف</text>
+<text class="f-muted" fill="#5c6d66" x="242" y="246" font-size="12" text-anchor="middle">—</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="246" font-size="12" text-anchor="middle">—</text>
+<text class="f-muted" fill="#5c6d66" x="358" y="246" font-size="12" text-anchor="middle">—</text>
+<text class="f-text" fill="#182f2b" x="10" y="272" font-size="12">بلا تقصير: يُتحقَّق من 5، النافذة 6 صفوف،</text>
+<text class="f-text" fill="#182f2b" x="10" y="288" font-size="12">المتوقع <tspan direction="ltr" unicode-bidi="isolate">1 + 1.62 ≈ 2.62</tspan> رمزًا</text>
+<text class="f-text" fill="#182f2b" x="10" y="312" font-size="12">حد أدنى فقط: يُتحقَّق من 2، النافذة 3 صفوف،</text>
+<text class="f-text" fill="#182f2b" x="10" y="328" font-size="12">المتوقع <tspan direction="ltr" unicode-bidi="isolate">1 + 0.80 + 0.496 ≈ 2.30</tspan> رمزًا</text>
+<text class="f-text" fill="#182f2b" x="10" y="352" font-size="12">مع ضرب تراكمي 0.5: يُتحقَّق من 1، النافذة صفان،</text>
+<text class="f-text" fill="#182f2b" x="10" y="368" font-size="12">المتوقع <tspan direction="ltr" unicode-bidi="isolate">1 + 0.80 = 1.80</tspan> رمزًا</text>
 </svg><figcaption>الشكل DS5-2  اللقطة الثابتة للمحاكي: المقابض الثلاثة هي عدد المسودات في الجولة ومعدل القبول وعتبات الثقة، والقراءة هي عدد الرموز التي تخرج من نافذة التحقق في كل جولة. «تحقق» = دخلت نافذة التحقق؛ «توقف» = مُنعت عند هذه المسودة؛ «—» = لم يصل إليها الدور. هذه الدرجات تجعل المقبول من المسودات الخمس نحو 1.6 في المجموع، وهو من رتبة 31–32% الواردة في تعليق الشيفرة نفسها؛ ويخسر الضرب التراكمي 0.5 رمز إضافية، مقابل التحقق من صف واحد أقل. الأرقام فرضيات تعليمية.</figcaption></figure></div>
 <p><strong>ما الذي نراه في هذا المثال.</strong> درجات ثقة المسودات الخمس 0.80 و0.62 و0.45 و0.35 و0.28. والضرب التراكمي بالترتيب 0.800 و0.496 و0.223 و0.078 و0.022. <span class="ev ev-est">تقدير تعليمي</span> (<span dir="ltr">0.80 × 0.62 = 0.496</span>؛ <span dir="ltr">0.496 × 0.45 ≈ 0.223</span>؛ <span dir="ltr">0.223 × 0.35 ≈ 0.078</span>؛ <span dir="ltr">0.078 × 0.28 ≈ 0.022</span>) عند حد أدنى 0.5 فقط تُمنع المسودة الثالثة (0.45)، فيُتحقَّق من 2. وعند إضافة الضرب التراكمي 0.5 يكون الحاصل عند المسودة الثانية 0.496، أي أقل بقليل جدًا، فتُمنع هي أيضًا ويُتحقَّق من 1 فقط. والمتوقع في الطرق الثلاث 2.62 و2.30 و1.80 رمزًا، والنوافذ 6 و3 و2 صفوف. <span class="ev ev-est">تقدير تعليمي</span> (<span dir="ltr">1 + 0.800 + 0.496 + 0.223 + 0.078 + 0.022 ≈ 2.62</span>؛ <span dir="ltr">1 + 0.800 + 0.496 ≈ 2.30</span>؛ <span dir="ltr">1 + 0.800 = 1.80</span>) فيصير السؤال: هل تساوي التكلفة التي وُفّرت من الصفوف التي لم نتحقق منها ما فُقد من 0.3 إلى 0.8 رمز؟ والحساب يختلف من جهاز إلى آخر: يستحق في RDNA4، ويتعادل في CUDA، ولذلك تختلف القيمتان الافتراضيتان. أما قياسات المصدر الأصلي فلا تعطي إلا token/s النهائية، ولا تعطي عدد الرموز في كل جولة.</p>
 <p><strong>ومقبض آخر يضع سقفًا.</strong> يحدّ <span dir="ltr">--dspark-block N</span> عدد المسودات في الجولة بـ N، وحجم الكتلة في الحزمة هو السقف الأعلى. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2350" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطر 2350</a>) ويجرّب الموالِف (tuner) القيمة N = 3: ولا يُبقي هذا الإعداد إلا إذا زادت السرعة بأكثر من 5% عن الإعداد القياسي. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L137-L140" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md، السطور 137–140</a>) فالرقم «5 مسودات» سقف المصنع، وليس الأمثل لكل جهاز.</p>
@@ -111,38 +122,42 @@
 <p><strong>q نقطة واحدة، فتتبسّط القاعدة.</strong> المسودة مأخوذة بـ argmax، فـ q نقطة واحدة تقع على d، واحتمالها 1. ويضع المحرك هنا q = 1 مباشرة. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7979-L7992" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطور 7979–7992</a>) فيصير احتمال البقاء <span dir="ltr">min(1, p(d) ÷ 1) = p(d)</span>: بقدر ما يعطي النموذج الرئيسي لهذا الرمز من احتمال (بعد سلسلة أخذ العينات: top-k وtop-p وmin-p ودرجة الحرارة) تُبقى المسودة بالاحتمال نفسه. <span class="ev ev-est">تقدير تعليمي</span> (<span dir="ltr">q(d) = 1 → min(1, p(d) ÷ 1) = p(d)</span>) وإذا وقعت المسودة خارج اقتطاع سلسلة أخذ العينات فإن p(d) = 0، ولا تُبقى أبدًا. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7979-L7992" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطور 7979–7992</a>) والطلب الافتراضي في طبقة الخدمة طلب أخذ عينات (درجة الحرارة 1.0 وtop_p 1.0)، فهذا هو المسار اليومي. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L115" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md، السطر 115</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/test_dsv41.py#L419" target="_blank" rel="noopener noreferrer">test_dsv41.py، السطر 419</a>)</p>
 <p><strong>درجة الثقة لا تظهر هنا.</strong> فهي تحدّد فقط أي المسودات تدخل النافذة، ولا شأن لها بقرار «تبقى أو لا تبقى». <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L238-L244" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 238–244</a>) والقرار يعود إلى النموذج الرئيسي وحده.</p>
 <p><strong>كم رمزًا تخرج الجولة.</strong> m عدد المسودات المتصلة التي بقيت. ومخرجات هذه الجولة هي هذه المسودات الـ m، مع الرمز الذي اختاره النموذج الرئيسي بنفسه عند أول صف «مختلف»، فالمجموع m + 1. وعند رفض الجميع m = 0، وتخرج الجولة رمزًا واحدًا، بقدر ما كان يخرج دون تخمين. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8011-L8012" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطران 8011–8012</a>) وهذا الرمز لا يدخل في حالة هذه الجولة، بل هو y الجولة التالية.</p>
-<figure class="fig"><svg viewBox="0 0 640 274" role="img" aria-label="الشكل DS5-3: نافذة تحقق من 4 صفوف؛ قُبلت المسودتان الأولى والثانية ورُفضت الثالثة؛ تخرج الجولة d1 وd2 ورمز t اختاره النموذج الرئيسي بنفسه، أي 3 رموز؛ تُبقى الصفوف الثلاثة الأولى من النافذة ويُتراجع عن الصف الرابع">
-<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">نافذة التحقق: تُبقى <tspan direction="ltr" unicode-bidi="isolate">k = 3</tspan> مسودات، فالنافذة <tspan direction="ltr" unicode-bidi="isolate">T = k + 1 = 4</tspan> صفوف</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="30" width="115" height="46" rx="4"/>
-<text class="f-muted" fill="#5c6d66" x="87" y="48" font-size="12" text-anchor="middle">الصف 0</text>
-<text class="f-text" fill="#182f2b" x="87" y="67" font-size="13" text-anchor="middle">y</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="185" y="30" width="115" height="46" rx="4"/>
-<text class="f-muted" fill="#5c6d66" x="242" y="48" font-size="12" text-anchor="middle">الصف 1</text>
-<text class="f-text" fill="#182f2b" x="242" y="67" font-size="13" text-anchor="middle">المسودة d1</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="340" y="30" width="115" height="46" rx="4"/>
-<text class="f-muted" fill="#5c6d66" x="397" y="48" font-size="12" text-anchor="middle">الصف 2</text>
-<text class="f-text" fill="#182f2b" x="397" y="67" font-size="13" text-anchor="middle">المسودة d2</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="495" y="30" width="115" height="46" rx="4"/>
-<text class="f-muted" fill="#5c6d66" x="552" y="48" font-size="12" text-anchor="middle">الصف 3</text>
-<text class="f-text" fill="#182f2b" x="552" y="67" font-size="13" text-anchor="middle">المسودة d3</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M87 76 V96 M82 90 L87 96 L92 90 M242 76 V96 M237 90 L242 96 L247 90 M397 76 V96 M392 90 L397 96 L402 90 M552 76 V96 M547 90 L552 96 L557 90"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="30" y="100" width="115" height="56" rx="4"/>
-<text class="f-text" fill="#182f2b" x="87" y="122" font-size="13" text-anchor="middle">الاختيار: d1</text>
-<text class="f-muted" fill="#5c6d66" x="87" y="142" font-size="12" text-anchor="middle">يطابق المسودة</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="185" y="100" width="115" height="56" rx="4"/>
-<text class="f-text" fill="#182f2b" x="242" y="122" font-size="13" text-anchor="middle">الاختيار: d2</text>
-<text class="f-muted" fill="#5c6d66" x="242" y="142" font-size="12" text-anchor="middle">يطابق المسودة</text>
-<rect class="f-box" fill="#ffffff" stroke="#5c6d66" x="340" y="100" width="115" height="56" rx="4"/>
-<text class="f-text" fill="#182f2b" x="397" y="122" font-size="13" text-anchor="middle">الاختيار: t</text>
-<text class="f-muted" fill="#5c6d66" x="397" y="142" font-size="12" text-anchor="middle">يخالف d3</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="495" y="100" width="115" height="56" rx="4"/>
-<text class="f-text" fill="#182f2b" x="552" y="122" font-size="13" text-anchor="middle">مُلغى</text>
-<text class="f-muted" fill="#5c6d66" x="552" y="142" font-size="12" text-anchor="middle">بعد أول اختلاف</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M30 168 V176 H455 V168"/>
-<text class="f-text" fill="#182f2b" x="242" y="196" font-size="13" text-anchor="middle">تُبقى أول <tspan direction="ltr" unicode-bidi="isolate">m + 1 = 3</tspan> صفوف: y وd1 وd2</text>
-<text class="f-text" fill="#182f2b" x="10" y="222" font-size="13">تخرج هذه الجولة d1 وd2 وt، أي <tspan direction="ltr" unicode-bidi="isolate">m + 1 = 3</tspan> رموز؛ ويصير t هو y الجولة التالية</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="243" font-size="12">التراجع: يُستعاد ما كتبه الصف 3 في الحلقة من النسخة الاحتياطية، والضاغط من اللقطة، ثم يُعاد المحتفَظ به</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="263" font-size="12">بعد ذلك يُعيد نموذج المسودة زرع (seed) حلقته بالصفوف الثلاثة المحتفَظ بها</text>
+<figure class="fig"><svg viewBox="0 0 440 344" role="img" aria-label="الشكل DS5-3: نافذة تحقق من 4 صفوف؛ قُبلت المسودتان الأولى والثانية ورُفضت الثالثة؛ تخرج الجولة d1 وd2 ورمز t اختاره النموذج الرئيسي بنفسه، أي 3 رموز؛ تُبقى الصفوف الثلاثة الأولى من النافذة ويُتراجع عن الصف الرابع">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">نافذة التحقق: <tspan direction="ltr" unicode-bidi="isolate">k = 3</tspan> مسودات، فالنافذة <tspan direction="ltr" unicode-bidi="isolate">T = k + 1 = 4</tspan> صفوف</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="30" width="94" height="46" rx="4"/>
+<text class="f-muted" fill="#5c6d66" x="59" y="48" font-size="12" text-anchor="middle">الصف 0</text>
+<text class="f-text" fill="#182f2b" x="59" y="67" font-size="12" text-anchor="middle">y</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="118" y="30" width="94" height="46" rx="4"/>
+<text class="f-muted" fill="#5c6d66" x="165" y="48" font-size="12" text-anchor="middle">الصف 1</text>
+<text class="f-text" fill="#182f2b" x="165" y="67" font-size="12" text-anchor="middle">المسودة d1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="224" y="30" width="94" height="46" rx="4"/>
+<text class="f-muted" fill="#5c6d66" x="271" y="48" font-size="12" text-anchor="middle">الصف 2</text>
+<text class="f-text" fill="#182f2b" x="271" y="67" font-size="12" text-anchor="middle">المسودة d2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="330" y="30" width="94" height="46" rx="4"/>
+<text class="f-muted" fill="#5c6d66" x="377" y="48" font-size="12" text-anchor="middle">الصف 3</text>
+<text class="f-text" fill="#182f2b" x="377" y="67" font-size="12" text-anchor="middle">المسودة d3</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M59 76 V96 M54 90 L59 96 L64 90 M165 76 V96 M160 90 L165 96 L170 90 M271 76 V96 M266 90 L271 96 L276 90 M377 76 V96 M372 90 L377 96 L382 90"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="100" width="94" height="56" rx="4"/>
+<text class="f-text" fill="#182f2b" x="59" y="122" font-size="12" text-anchor="middle">الاختيار: d1</text>
+<text class="f-muted" fill="#5c6d66" x="59" y="142" font-size="12" text-anchor="middle">يطابق المسودة</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="118" y="100" width="94" height="56" rx="4"/>
+<text class="f-text" fill="#182f2b" x="165" y="122" font-size="12" text-anchor="middle">الاختيار: d2</text>
+<text class="f-muted" fill="#5c6d66" x="165" y="142" font-size="12" text-anchor="middle">يطابق المسودة</text>
+<rect class="f-box" fill="#ffffff" stroke="#5c6d66" x="224" y="100" width="94" height="56" rx="4"/>
+<text class="f-text" fill="#182f2b" x="271" y="122" font-size="12" text-anchor="middle">الاختيار: t</text>
+<text class="f-muted" fill="#5c6d66" x="271" y="142" font-size="12" text-anchor="middle">يخالف d3</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="330" y="100" width="94" height="56" rx="4"/>
+<text class="f-text" fill="#182f2b" x="377" y="122" font-size="12" text-anchor="middle">مُلغى</text>
+<text class="f-muted" fill="#5c6d66" x="377" y="142" font-size="12" text-anchor="middle">بعد أول اختلاف</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M12 168 V176 H318 V168"/>
+<text class="f-text" fill="#182f2b" x="165" y="196" font-size="12" text-anchor="middle">تُبقى أول <tspan direction="ltr" unicode-bidi="isolate">m + 1 = 3</tspan> صفوف: y وd1 وd2</text>
+<text class="f-text" fill="#182f2b" x="12" y="222" font-size="12" text-anchor="start">تخرج هذه الجولة d1 وd2 وt، أي <tspan direction="ltr" unicode-bidi="isolate">m + 1 = 3</tspan> رموز؛</text>
+<text class="f-text" fill="#182f2b" x="12" y="238" font-size="12" text-anchor="start">ويصير t هو y الجولة التالية</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="262" font-size="12" text-anchor="start">التراجع: يُستعاد ما كتبه الصف 3 في الحلقة</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="278" font-size="12" text-anchor="start">من النسخة الاحتياطية، والضاغط من اللقطة،</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="294" font-size="12" text-anchor="start">ثم يُعاد المحتفَظ به</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="314" font-size="12" text-anchor="start">بعد ذلك يُعيد نموذج المسودة زرع (seed) حلقته</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="330" font-size="12" text-anchor="start">بالصفوف الثلاثة المحتفَظ بها</text>
 </svg><figcaption>الشكل DS5-3  تحقق واحد. يُقارَن مخرج الصف i بمسودة الصف i + 1: الصف 0 مع d1، والصف 1 مع d2، والصف 2 مع d3. تطابق الأوليان واختلفت الثالثة، فكان الرمز t الذي اختاره النموذج الرئيسي في الصف 2 آخر رموز هذه الجولة، وأُلغي الصف 3.</figcaption></figure>
 <p><strong>ما الذي يلغيه التراجع.</strong> كتب النموذج الرئيسي حالة k + 1 صفًا، لكن الصالح منها أول m + 1 صفًا فقط: y مع m مسودة مقبولة. والباقي يجب التراجع عنه. صفوف حلقة النافذة التي كُتب فوقها صف جديد تُنسخ احتياطيًا قبل بدء نافذة التحقق، وتُستعاد عند التراجع. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10104" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطر 10104</a>) أما المجموعة الجزئية في الضاغط فتُحفظ منها لقطة أولًا، وتُستعاد عند التراجع، ثم تُعاد الصفوف المحتفَظ بها. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10137-L10140" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطور 10137–10140</a>) وصفوف KV المضغوطة ومفاتيح المُفهرِس المخزَّنة بحسب الموضع لا تحتاج إلى عناية، لأنها ستُكتب من جديد عند عودة تلك المواضع. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8027-L8028" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطران 8027–8028</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8015" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطر 8015</a>) وأخيرًا يعيد نموذج المسودة زرع حلقته بالصفوف الـ m + 1 المحتفَظ بها. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8016" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطر 8016</a>)</p>
 <p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> «خمّن ثم تحقق» هو تنبؤ التفرع في المعالج مع تفريغ خط الأنابيب. المسودات الـ k في النافذة «فروع متنبَّأ بها»، والتحقق «حسم الفرع»، والتراجع «تفريغ خط الأنابيب». ويستخدم التراجع أيضًا حيلة قواعد البيانات القديمة: نحتفظ بنسخة احتياطية أو لقطة قبل التعديل، فإن فشل استعدنا، وإن نجح أودعنا (commit). والحالات المختلفة تُحفظ بطرق مختلفة: الصفوف في الحلقة بنسخة احتياطية، والضاغط بلقطة مع إعادة تشغيل، والصفوف المخزَّنة بحسب الموضع بالكتابة فوقها. شرحنا هذا في <a href="#chapter/18/sec-4">الفصل 18، القسم 18.4</a>، لكن «اللوح» في المسار الرئيسي Qwen هو حالة التكرار في GDN، وهنا استُبدلت به حلقة النافذة والضاغط.</p>
@@ -153,39 +168,46 @@
 <p><strong>المشكلة.</strong> خبراء نافذة التحقق نوعان: من هم في VRAM يحسبهم GPU بنفسه؛ ومن ليسوا فيها يذهبون إلى مسار CPU، فيُقرأون من خانات في RAM أو من SSD ويحسبهم المعالج. شرحنا كيف يُقسَّمون في <a href="#deepseek/experts">الصفحة 2</a>. ولا أحد يعرف قبل خروج نتيجة التوجيه في كل طبقة أي خبير في هذه الطبقة على أي جانب. فكيف نجعل حصة CPU وحصة GPU تتداخلان في الزمن؟</p>
 <p><strong>المسار المتزامن: GPU ينتظر بلا عمل.</strong> يحسب GPU التوجيه أولًا، وينسخ أرقام الخبراء المختارين والمدخل إلى المضيف، ثم ينتظر المضيف حتى يكتمل الحدث، فيخطّط، ثم يحسب خبراء مسار CPU. وفي هذه المدة لا يجد GPU إلا أن يحسب الخبير المشترك ثم ينتظر. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10430" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطر 10430</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10455" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطر 10455</a>)</p>
 <p><strong>صندوق البريد غير المتزامن: GPU لا ينتظر.</strong> يكتب الجهاز نتيجة التوجيه ومدخل FFN لكل طبقة في ذاكرة حلقية معيَّنة على المضيف، تسمى صندوق البريد، وفيها 64 خانة. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L218" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh، السطر 218</a>) وبعد كتابة البيانات يمرّ بحاجز على مستوى النظام، ثم يكتب الرقم التسلسلي أخيرًا. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L215-L217" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh، السطور 215–217</a>) وعلى المضيف خيط خدمة، فإذا رأى رقمًا جديدًا حسب الجزء الموزون من خبراء مسار CPU لهذه الطبقة، وكتبه في خانة الرد. ويواصل GPU في هذه الأثناء حساب الخبير المشترك والخبراء الموجودين في VRAM، ولا ينتظر الرد إلا قبل جمع الخبراء. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1117-L1119" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطور 1117–1119</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10302-L10305" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطور 10302–10305</a>)</p>
-<figure class="fig"><svg viewBox="0 0 640 256" role="img" aria-label="الشكل DS5-4: طريقتان لترتيب العمل في طبقة واحدة. مع صندوق البريد غير المتزامن يحسب المضيف خبراء مسار CPU بينما يحسب GPU الخبير المشترك وخبراء VRAM؛ وفي المسار المتزامن ينتظر GPU المضيف بعد انتهاء الخبير المشترك">
-<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13">صندوق بريد غير متزامن: عدد صفوف النافذة ≤ DS4_ASYNC_T</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="48" font-size="12">GPU</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="30" width="40" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="100" y="49" font-size="12" text-anchor="middle">توجيه</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="120" y="30" width="170" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="205" y="49" font-size="12" text-anchor="middle">المشترك + خبراء VRAM</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="290" y="30" width="40" height="28" rx="3"/>
-<text class="f-muted" fill="#5c6d66" x="310" y="49" font-size="12" text-anchor="middle">انتظار</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="330" y="30" width="50" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="355" y="49" font-size="12" text-anchor="middle">جمع</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="82" font-size="12">المضيف</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="125" y="64" width="170" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="210" y="83" font-size="12" text-anchor="middle">خبراء مسار CPU</text>
-<text class="f-muted" fill="#5c6d66" x="392" y="48" font-size="12">يُكتب التوجيه والمدخل في الصندوق</text>
-<text class="f-muted" fill="#5c6d66" x="392" y="82" font-size="12">يُؤخذ الرد قبل الجمع فقط</text>
-<text class="f-text" fill="#182f2b" x="10" y="122" font-size="13">متزامن (توجيه على المضيف): عدد صفوف النافذة &gt; DS4_ASYNC_T</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="152" font-size="12">GPU</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="134" width="50" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="105" y="153" font-size="12" text-anchor="middle">توجيه</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="130" y="134" width="80" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="170" y="153" font-size="12" text-anchor="middle">خبير مشترك</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="210" y="134" width="80" height="28" rx="3"/>
-<text class="f-muted" fill="#5c6d66" x="250" y="153" font-size="12" text-anchor="middle">ينتظر المضيف</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="134" width="90" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="335" y="153" font-size="12" text-anchor="middle">دمج</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="186" font-size="12">المضيف</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="110" y="168" width="180" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="200" y="187" font-size="12" text-anchor="middle">يرى الاختيار ويحسب مسار CPU</text>
-<text class="f-muted" fill="#5c6d66" x="392" y="152" font-size="12">الخبراء المختارون والمدخل ← المضيف</text>
-<text class="f-muted" fill="#5c6d66" x="392" y="186" font-size="12">GPU تنتظر المضيف</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="222" font-size="12">الخطان الزمنيان مرسومان بالطول نفسه لغرض المحاذاة فقط؛ رسم توضيحي وليس مقياسًا مقيسًا.</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="242" font-size="12">أيهما أسرع يتوقف على الجهاز: في Strix Halo المتزامن أسرع (نحو الثلث في جواب الشيفرة).</text>
+<figure class="fig"><svg viewBox="0 0 440 306" role="img" aria-label="الشكل DS5-4: طريقتان لترتيب العمل في طبقة واحدة. مع صندوق البريد غير المتزامن يحسب المضيف خبراء مسار CPU بينما يحسب GPU الخبير المشترك وخبراء VRAM؛ وفي المسار المتزامن ينتظر GPU المضيف بعد انتهاء الخبير المشترك">
+<text class="f-text" fill="#182f2b" x="12" y="18" font-size="12" text-anchor="start">صندوق بريد غير متزامن: عدد صفوف النافذة ≤ DS4_ASYNC_T</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="52" font-size="12" text-anchor="start">GPU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="44" y="28" width="44" height="40" rx="3"/>
+<text class="f-text" fill="#182f2b" x="66" y="52" font-size="12" text-anchor="middle">توجيه</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="88" y="28" width="136" height="40" rx="3"/>
+<text class="f-text" fill="#182f2b" x="156" y="45" font-size="12" text-anchor="middle">المشترك +</text>
+<text class="f-text" fill="#182f2b" x="156" y="61" font-size="12" text-anchor="middle">خبراء VRAM</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="224" y="28" width="34" height="40" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="241" y="52" font-size="12" text-anchor="middle">انتظر</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="258" y="28" width="44" height="40" rx="3"/>
+<text class="f-text" fill="#182f2b" x="280" y="52" font-size="12" text-anchor="middle">جمع</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="93" font-size="12" text-anchor="start">المضيف</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="88" y="74" width="136" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="156" y="93" font-size="12" text-anchor="middle">خبراء مسار CPU</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="44" font-size="12" text-anchor="start">يُكتب التوجيه</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="60" font-size="12" text-anchor="start">والمدخل في الصندوق</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="86" font-size="12" text-anchor="start">يُؤخذ الرد قبل</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="102" font-size="12" text-anchor="start">الجمع فقط</text>
+<text class="f-text" fill="#182f2b" x="12" y="132" font-size="12" text-anchor="start">متزامن (توجيه على المضيف): عدد صفوف النافذة &gt; DS4_ASYNC_T</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="162" font-size="12" text-anchor="start">GPU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="44" y="144" width="46" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="67" y="163" font-size="12" text-anchor="middle">توجيه</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="90" y="144" width="56" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="118" y="163" font-size="12" text-anchor="middle">المشترك</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="146" y="144" width="90" height="28" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="191" y="163" font-size="12" text-anchor="middle">ينتظر المضيف</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="236" y="144" width="66" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="269" y="163" font-size="12" text-anchor="middle">دمج</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="196" font-size="12" text-anchor="start">المضيف</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="90" y="178" width="146" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="163" y="197" font-size="12" text-anchor="middle">يحسب مسار CPU</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="158" font-size="12" text-anchor="start">الخبراء المختارون</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="174" font-size="12" text-anchor="start">والمدخل ← المضيف</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="196" font-size="12" text-anchor="start">GPU تنتظر انتهاء</text>
+<text class="f-muted" fill="#5c6d66" x="310" y="212" font-size="12" text-anchor="start">المضيف</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="240" font-size="12" text-anchor="start">الخطان الزمنيان مرسومان بالطول نفسه لغرض</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="256" font-size="12" text-anchor="start">المحاذاة فقط؛ رسم توضيحي وليس مقياسًا مقيسًا.</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="278" font-size="12" text-anchor="start">أيهما أسرع يتوقف على الجهاز: في Strix Halo</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="294" font-size="12" text-anchor="start">المتزامن أسرع (نحو الثلث في جواب الشيفرة).</text>
 </svg><figcaption>الشكل DS5-4  طريقتان لترتيب العمل في طبقة MoE واحدة. يتيح صندوق البريد لخبراء مسار CPU أن يُحسبوا في الوقت نفسه مع الخبير المشترك وخبراء VRAM على GPU؛ أما في المسار المتزامن فلا يتداخل مع المضيف إلا الخبير المشترك. وأيّ الترتيبين أسرع يقرره الجهاز.</figcaption></figure>
 <p class="bridge"><strong>إن درستَ علوم الحاسوب:</strong> صندوق البريد طابور حلقي بلا أقفال بمنتج واحد ومستهلك واحد: يكتب المنتج البيانات أولًا، ثم يمرّ بحاجز، ثم ينشر الرقم التسلسلي أخيرًا؛ ويستطلع المستهلك الرقم، ولا يقرأ إلا حين يرى رقمًا جديدًا. وكتابة الرقم في الآخر تضمن أن البيانات اكتملت حين يراه المستهلك. وهذه مشكلة من النوع نفسه الذي في عبارة «أُودع لا يعني اكتمل» في <a href="#chapter/14/sec-3">الفصل 14، القسم 14.3</a>، إلا أن «الاكتمال» هنا يعلنه الرقم التسلسلي.</p>
 <p><strong>في صندوق البريد أكثر من التوجيه.</strong> ينشر الجهاز أيضًا مع توجيه هذه الطبقة تخمينه لاختيارات الطبقة التالية؛ فيبدأ خيط الخدمة بقراءة هؤلاء الخبراء مسبقًا، ويبدأ SSD بالقراءة أثناء حساب هذه الطبقة. وهذه القراءة المسبقة لا تؤثر إلا في ذاكرة الصفحات المؤقتة، ولا يتغير الناتج، وهي مفعّلة افتراضيًا. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1137-L1143" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطور 1137–1143</a>) وlookahead الذي شرحناه في <a href="#deepseek/experts">الصفحة 2</a> هو هذه القراءة.</p>
@@ -198,35 +220,45 @@
 <p><strong>طريقة الإيقاف المؤقت.</strong> حين يصل طلب، ينظر المحرك أولًا هل هو امتداد للمحادثة الحالية (بادئة رموز متطابقة وأطول): إن كان كذلك واصل في مكانه ولا حاجة إلى الإيقاف. وإن لم يكن أوقف المحادثة الحالية أولًا، ثم نظر في المحادثات الموقوفة: هل فيها ما تستطيع هذه المُطالبة أن تكمل منه؟ إن وجد استردّه، وإلا رجع إلى أقرب نقطة حفظ (checkpoint)، أو بدأ القراءة من أولها. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L795-L812" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 795–812</a>)</p>
 <p><strong>ما الذي يُحفظ.</strong> الموضع، وقائمة الرموز، وحلقة النافذة في كل طبقة (بما فيها حلقات كتل نموذج المسودة)، والمجموعة الجزئية في الضاغط، وKV المضغوطة ومفاتيح المُفهرِس لكل مصدر KV. ولا يوقَف إلا المحادثة النصية: لا تُوقَف المحادثة التي فيها صور، ولا تُسترد مُطالبة فيها صور. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5786-L5794" target="_blank" rel="noopener noreferrer">ds4_model.cu، السطور 5786–5794</a>) وفي حجم الحالة رقم واحد في الوثيقة: نحو 17 MB لمحادثة من 6.5K رمز. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L116-L119" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md، السطور 116–119</a>) <span class="ev ev-est">تقدير تعليمي</span> (<span dir="ltr">17 × 10⁶ ÷ 6,500 ≈ 2.6 KB</span> لكل رمز) فإذا استقرأنا خطيًا بهذا الرقم: <span class="ev ev-est">تقدير تعليمي</span> (<span dir="ltr">70,000 × 2.6 KB ≈ 183 MB</span>؛ <span dir="ltr">185,000 × 2.6 KB ≈ 484 MB</span>) فهذا حد أعلى، لأن حلقة الـ 128 صفًا حجمها ثابت، فالتكلفة الهامشية لكل رمز أقل. وبقرص NVMe بسرعة 3.6 GB/s في جهاز RTX 5070 تستغرق إعادة قراءة 183 MB نحو 0.05 s. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L63" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md، السطر 63</a>) <span class="ev ev-est">تقدير تعليمي</span> (<span dir="ltr">0.183 GB ÷ 3.6 GB/s ≈ 0.05 s</span>) وهذا يبعد عن 75 s لإعادة القراءة ثلاث رتب من الحجم. وفي الاسترداد الفعلي يجب أيضًا نسخ البيانات إلى VRAM وكتابتها في الحلقات، ويطبع المحرك في السجل «took back a N-token conversation … (X s)». <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L638-L642" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 638–642</a>) وليس عندنا في هذه الصفحة هذا الرقم المقيس، فلا نعطي إلا الحد الأدنى.</p>
 <p><strong>وإن تغيّرت المُطالبة، فالقراءة أقل أيضًا.</strong> حين يكمل العميل المحادثة يعيد تصيير التاريخ كله مُطالبةً، وهذه المُطالبة لا تطابق بالضرورة حرفًا بحرف مجرى الرموز المخزَّن في المحرك، كأن لا يحمل التصيير نص التفكير السابق. وللمحرك عدّتان لذلك. عند قراءة المُطالبة يحفظ نقطة حفظ (checkpoint) عند الرمز السابق لآخر المُطالبة، ونقطة أخرى عند آخرها، فتتفق المُطالبة التي يُعاد تصييرها في الجولة التالية مع جزء قبل إحدى النقطتين على الأقل. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L856-L857" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطران 856–857</a>) وحين تُسترد محادثة موقوفة، إذا لم تطابق المُطالبة إلا جزءًا منها، استُردّت إلى أقرب نقطة حفظ ما زالت المُطالبة تطابقها: آخر المُطالبة، أو الموضع الذي قبله، أو نقطة الارتكاز التي بدأ منها هذا المقطع المتصل من المُطالبة. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L586-L590" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 586–590</a>) فإن لم يمكن إكمال المحادثة كلها لم يُعَد إلا المقطع الأخير المختلف.</p>
-<figure class="fig"><svg viewBox="0 0 640 280" role="img" aria-label="الشكل DS5-5: إيقاف المحادثة مؤقتًا. حين تُزاح محادثة من النموذج تُحفظ أولًا في خانة بالذاكرة؛ وإذا زادت الخانات على 4 كُتب الأقدم استخدامًا في ملف؛ وحين تكمل مُطالبة جديدة إحداها تُستردّ من الذاكرة أو من الملف">
-<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">إيقاف المحادثة مؤقتًا: حفظ، وفيض، واسترداد</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="10" y="30" width="160" height="70" rx="4"/>
-<text class="f-text" fill="#182f2b" x="90" y="54" font-size="13" text-anchor="middle">المحادثة في النموذج</text>
-<text class="f-muted" fill="#5c6d66" x="90" y="74" font-size="12" text-anchor="middle">حالتها في VRAM</text>
-<text class="f-muted" fill="#5c6d66" x="90" y="92" font-size="12" text-anchor="middle">(الحالية فقط)</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="240" y="30" width="160" height="70" rx="4"/>
-<text class="f-text" fill="#182f2b" x="320" y="54" font-size="13" text-anchor="middle">خانات الذاكرة</text>
-<text class="f-muted" fill="#5c6d66" x="320" y="74" font-size="12" text-anchor="middle">4 على الأكثر</text>
-<text class="f-muted" fill="#5c6d66" x="320" y="92" font-size="12" text-anchor="middle">ما دون 1024 رمز لا يُوقَف</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="470" y="30" width="160" height="70" rx="4"/>
-<text class="f-text" fill="#182f2b" x="550" y="54" font-size="13" text-anchor="middle">مجلد ds4-slots</text>
-<text class="f-muted" fill="#5c6d66" x="550" y="74" font-size="12" text-anchor="middle">زوج ملفات لكل محادثة</text>
-<text class="f-muted" fill="#5c6d66" x="550" y="92" font-size="12" text-anchor="middle"><tspan direction="ltr" unicode-bidi="isolate">.bin + .meta</tspan></text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M170 52 H236 M230 46 L236 52 L230 58"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M400 52 H466 M460 46 L466 52 L460 58"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M236 84 H174 M180 78 L174 84 L180 90"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M466 84 H404 M410 78 L404 84 L410 90"/>
-<text class="f-text" fill="#182f2b" x="203" y="44" font-size="13" text-anchor="middle">1</text>
-<text class="f-text" fill="#182f2b" x="433" y="44" font-size="13" text-anchor="middle">2</text>
-<text class="f-text" fill="#182f2b" x="205" y="108" font-size="13" text-anchor="middle">3</text>
-<text class="f-text" fill="#182f2b" x="435" y="108" font-size="13" text-anchor="middle">3</text>
-<text class="f-text" fill="#182f2b" x="10" y="140" font-size="13">1 حفظ: حين تحتاج محادثة أخرى النموذج، تُحفظ حالة المحادثة الحالية في خانة بالذاكرة</text>
-<text class="f-text" fill="#182f2b" x="10" y="160" font-size="13">2 فيض: إذا زادت الخانات في الذاكرة على 4، يُكتب الأقدم استخدامًا في ملف</text>
-<text class="f-text" fill="#182f2b" x="10" y="180" font-size="13">3 استرداد: إذا أكملت مُطالبة جديدة خانة، تُستردّ من الذاكرة أو الملف، ولا تُقرأ إلا الرموز الجديدة</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">كتابة الملف: يُكتب <tspan direction="ltr" unicode-bidi="isolate">.tmp</tspan> أولًا ثم تُغيَّر تسميته؛ ولا يُكتب إن قلّت المساحة الحرة عن 8 GiB</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">سقف المجلد: 2 GiB في طبقة الخدمة (16 GiB في المحرك)؛ عند التجاوز يُحذف الأقدم، لا ما كُتب للتو</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="246" font-size="12">عند التشغيل يُحذف: ما ليس لهذا النموذج، والتالف، وما مضى 7 أيام دون استخدام</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="264" font-size="12">عند إنهاء المحرك تُكتب كل خانات الذاكرة في المجلد، ويكمل التشغيل التالي منها</text>
+<figure class="fig"><svg viewBox="0 0 440 398" role="img" aria-label="الشكل DS5-5: إيقاف المحادثة مؤقتًا. حين تُزاح محادثة من النموذج تُحفظ أولًا في خانة بالذاكرة؛ وإذا زادت الخانات على 4 كُتب الأقدم استخدامًا في ملف؛ وحين تكمل مُطالبة جديدة إحداها تُستردّ من الذاكرة أو من الملف">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">إيقاف المحادثة مؤقتًا: حفظ، وفيض، واسترداد</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="30" width="124" height="88" rx="4"/>
+<text class="f-text" fill="#182f2b" x="74" y="50" font-size="12" text-anchor="middle">المحادثة</text>
+<text class="f-muted" fill="#5c6d66" x="74" y="68" font-size="12" text-anchor="middle">في النموذج</text>
+<text class="f-muted" fill="#5c6d66" x="74" y="86" font-size="12" text-anchor="middle">حالتها في VRAM</text>
+<text class="f-muted" fill="#5c6d66" x="74" y="104" font-size="12" text-anchor="middle">(الحالية فقط)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="158" y="30" width="124" height="88" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="50" font-size="12" text-anchor="middle">خانات الذاكرة</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="68" font-size="12" text-anchor="middle">4 على الأكثر</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="86" font-size="12" text-anchor="middle">ما دون 1024 رمز</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="104" font-size="12" text-anchor="middle">لا يُوقَف</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="304" y="30" width="124" height="88" rx="4"/>
+<text class="f-text" fill="#182f2b" x="366" y="50" font-size="12" text-anchor="middle">مجلد ds4-slots</text>
+<text class="f-muted" fill="#5c6d66" x="366" y="68" font-size="12" text-anchor="middle">زوج ملفات</text>
+<text class="f-muted" fill="#5c6d66" x="366" y="86" font-size="12" text-anchor="middle">لكل محادثة</text>
+<text class="f-muted" fill="#5c6d66" x="366" y="104" font-size="12" text-anchor="middle"><tspan direction="ltr" unicode-bidi="isolate">.bin + .meta</tspan></text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M136 56H156M151 50L156 56L151 62"/>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M282 56H302M297 50L302 56L297 62"/>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M156 96H138M143 90L138 96L143 102"/>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M302 96H284M289 90L284 96L289 102"/>
+<text class="f-text" fill="#182f2b" x="147" y="48" font-size="12" text-anchor="middle">1</text>
+<text class="f-text" fill="#182f2b" x="293" y="48" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="147" y="116" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="293" y="116" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="12" y="146" font-size="12" text-anchor="start">1 حفظ: حين تحتاج محادثة أخرى النموذج،</text>
+<text class="f-text" fill="#182f2b" x="12" y="162" font-size="12" text-anchor="start">تُحفظ حالة المحادثة الحالية في خانة بالذاكرة</text>
+<text class="f-text" fill="#182f2b" x="12" y="182" font-size="12" text-anchor="start">2 فيض: إذا زادت الخانات في الذاكرة على 4،</text>
+<text class="f-text" fill="#182f2b" x="12" y="198" font-size="12" text-anchor="start">يُكتب الأقدم استخدامًا في ملف</text>
+<text class="f-text" fill="#182f2b" x="12" y="218" font-size="12" text-anchor="start">3 استرداد: إذا أكملت مُطالبة جديدة خانة، تُستردّ</text>
+<text class="f-text" fill="#182f2b" x="12" y="234" font-size="12" text-anchor="start">من الذاكرة أو الملف، ولا تُقرأ إلا الرموز الجديدة</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="262" font-size="12" text-anchor="start">كتابة الملف: يُكتب <tspan direction="ltr" unicode-bidi="isolate">.tmp</tspan> أولًا ثم تُغيَّر تسميته؛</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="278" font-size="12" text-anchor="start">ولا يُكتب إن قلّت المساحة الحرة عن 8 GiB</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="298" font-size="12" text-anchor="start">سقف المجلد: 2 GiB في طبقة الخدمة (16 GiB في المحرك)؛</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="314" font-size="12" text-anchor="start">عند التجاوز يُحذف الأقدم، لا ما كُتب للتو</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="334" font-size="12" text-anchor="start">عند التشغيل يُحذف: ما ليس لهذا النموذج، والتالف،</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="350" font-size="12" text-anchor="start">وما مضى 7 أيام دون استخدام</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="370" font-size="12" text-anchor="start">عند إنهاء المحرك تُكتب كل خانات الذاكرة في المجلد،</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="386" font-size="12" text-anchor="start">ويكمل التشغيل التالي منها</text>
 </svg><figcaption>الشكل DS5-5  ثلاث خطوات وثلاث قواعد للإيقاف المؤقت. الذاكرة هي الطبقة الأولى والمجلد هو الثانية؛ وسعة المجلد في طبقة الخدمة 2 GiB، وفي المحرك 16 GiB.</figcaption></figure>
 <p><strong>طبقتا حفظ.</strong> نحفظ أولًا في الذاكرة، ثم نفيض إلى مجلد. في الذاكرة 4 محادثات على الأكثر (STRATA_DS4_SLOT_CAP)، وما زاد عليها يُكتب أقدمها استخدامًا في ملف؛ وعند إنهاء المحرك تُكتب كل محادثات الذاكرة، ويكمل التشغيل التالي منها. والمحادثة الأقصر من 1024 رمز لا تُوقَف، لأن زمن إعادة قراءتها يقارب زمن استردادها، فلا يستحق الأمر. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L549-L575" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 549–575</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L1025-L1028" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 1025–1028</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L417-L423" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 417–423</a>) ويُكتب الملف بصيغة <span dir="ltr">.tmp</span> أولًا ثم تُغيَّر تسميته، ويسجّل <span dir="ltr">.meta</span> هوية النموذج والرموز والحجم؛ ولا يُكتب الملف إن قلّت المساحة الحرة عن 8 GiB. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L512-L541" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 512–541</a>)</p>
 <p><strong>السعة والتنظيف، والقيمتان الافتراضيتان في الطبقتين مختلفتان.</strong> المحرك نفسه يعطّل الإيقاف المؤقت افتراضيًا، وسقف مجلده 16 GiB. أما طبقة الخدمة فتفعّله افتراضيًا، وتضبط السقف على 2 GiB، وتضع المجلد ds4-slots بجوار سجلات التشغيل. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L417-L423" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 417–423</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L3653-L3667" target="_blank" rel="noopener noreferrer">server.py، السطور 3653–3667</a>) فطبقة الخدمة ضبطت 2 GiB وفعّلت الإيقاف؛ أما الأسبوع فهو افتراضي المحرك نفسه، ولم تضبطه طبقة الخدمة. وإذا تجاوز المجلد السقف حُذف الأقدم استخدامًا أولًا، ولا يُحذف الملف الذي كُتب للتو، فتبقى حتى المحادثة الواحدة الأكبر من السقف. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L489-L490" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطران 489–490</a>) وعند التشغيل يفحص المحرك المجلد: فيحذف ما ليس لهذا النموذج، والتالف، وما مضى عليه 7 أيام دون استخدام. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L679" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطر 679</a>) وكم تتسع 2 GiB: <span class="ev ev-est">تقدير تعليمي</span> (<span dir="ltr">2 GiB ÷ 17 MB ≈ 126</span> محادثة من 6.5K رمز؛ والرقم 17 MB هو ما في الوثيقة)</p>
@@ -239,31 +271,35 @@
 <p><strong>الجهد سطر يُكتب للنموذج.</strong> تقابل low وmedium وhigh وmax القيم 50 و62 و75 و100، ويمكن أيضًا إعطاء عدد صحيح من 1 إلى 100 مباشرة. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L108-L109" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md، السطران 108–109</a>) هذه الأرقام الأربعة جدول في القالب؛ وعند التصيير يُكتب في مطلع الجزء النظامي في وضع التفكير سطر <span dir="ltr">"Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)"</span>. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/fixtures/deepseek41/chat_template.jinja#L23-L29" target="_blank" rel="noopener noreferrer">chat_template.jinja، السطور 23–29</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/fixtures/deepseek41/chat_template.jinja#L209" target="_blank" rel="noopener noreferrer">chat_template.jinja، السطر 209</a>) وتفحص اختبارات طبقة الخدمة هذا السطر واحدًا واحدًا: low يكتب 50، وmedium يكتب 62، وxhigh يكتب 100، وإذا مُرّر 40 كُتب 40؛ وإذا مُرّر extreme أُعيد 400. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/test_dsv41.py#L424-L434" target="_blank" rel="noopener noreferrer">test_dsv41.py، السطور 424–434</a>) وهذا الرقم كلام يُكتب للنموذج ليقرأه فقط. ولا يتلقى المحرك إلا أرقام الرموز (<span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L9-L12" target="_blank" rel="noopener noreferrer">ds4_main.cpp، السطور 9–12</a>))، فليس في المحرك ميزانية للتفكير. وفي طبقة الخدمة ميزانية: ميزانية DeepSeek-V4.1 الافتراضية إذا لم يكتب الطلب ولا الإعدادات شيئًا هي 32,768 رمزًا. وعند بلوغها تنهي طبقة الخدمة التفكير قسرًا وتغلقه. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L218" target="_blank" rel="noopener noreferrer">server.py، السطر 218</a>، <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L5856" target="_blank" rel="noopener noreferrer">server.py، السطر 5856</a>) ويمكن لـ reasoning_budget_tokens أن يغيّر هذه القيمة، والقيمة 0 تعني ألا ميزانية. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/release-notes-0.2.4.md#L41" target="_blank" rel="noopener noreferrer">release-notes-0.2.4.md، السطر 41</a>) فرقم الجهد لا يحسب شيئًا؛ والذي يحسب هو الميزانية.</p>
 <p><strong>أخذ العينات الافتراضي.</strong> إذا لم يكتب الطلب معاملات فدرجة الحرارة 1.0 وtop_p 1.0. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L115" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md، السطر 115</a>) فالطلب الافتراضي طلب أخذ عينات، ويسير التحقق فيه على قاعدة p(d) في القسم 5.3.</p>
 <p><strong>استدعاء الأدوات: من DSML إلى OpenAI وAnthropic.</strong> استدعاء الأدوات الذي يكتبه النموذج بنفسه بصيغة DSML: <code>&lt;｜DSML｜ calls&gt;</code> تحيط بعدة <code>&lt;｜DSML｜ invoke name="…"&gt;</code>، ولكل معامل <code>&lt;｜DSML｜ parameter name="…" string="true"&gt;</code>. وتحوّلها طبقة الخدمة إلى tool_calls في OpenAI وtool_use في Anthropic، بما فيها tool_choice والمعاملات المتدفقة والاستدعاءات المكتوبة داخل التفكير. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L112-L114" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md، السطور 112–114</a>) ولم تُكتب مجموعة تحويل ثانية. يعيد DsmlTranslator كتابة نص DSML أثناء تدفقه إلى نص استدعاء الأدوات الذي يستخدمه Qwen في المسار الرئيسي، ثم يسلّمه إلى OutputParser المشترك؛ فيتصرف شكلا المخرجات وtool_choice والمعاملات المتدفقة وفصل التفكير عن الإجابة مع DeepSeek كما مع غيره من النماذج، ولا يعرف «كيف تُكتب DSML» إلا موضع واحد. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L1-L19" target="_blank" rel="noopener noreferrer">dsml.py، السطور 1–19</a>)</p>
-<figure class="fig"><svg viewBox="0 0 640 218" role="img" aria-label="الشكل DS5-6: تحويل استدعاءات الأدوات بصيغة DSML. يكتب النموذج نص DSML، ويعيد DsmlTranslator كتابته أثناء التدفق إلى نص استدعاء بصيغة Qwen، ثم يُخرج OutputParser المشترك الشكلين: OpenAI وAnthropic">
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="24" width="190" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="105" y="48" font-size="13" text-anchor="middle">نص يكتبه النموذج</text>
-<text class="f-muted" fill="#5c6d66" x="105" y="68" font-size="12" text-anchor="middle"><tspan direction="ltr" unicode-bidi="isolate">&lt;｜DSML｜ invoke …&gt;</tspan></text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M200 54 H226 M220 48 L226 54 L220 60"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="230" y="24" width="200" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="330" y="48" font-size="13" text-anchor="middle">DsmlTranslator</text>
-<text class="f-muted" fill="#5c6d66" x="330" y="68" font-size="12" text-anchor="middle">يعيد الكتابة ويحبس الوسم الناقص</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M430 54 H456 M450 48 L456 54 L450 60"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="460" y="24" width="170" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="545" y="48" font-size="13" text-anchor="middle">استدعاء بصيغة Qwen</text>
-<text class="f-muted" fill="#5c6d66" x="545" y="68" font-size="12" text-anchor="middle"><tspan direction="ltr" unicode-bidi="isolate">tool_call / function=…</tspan></text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M545 84 V108 H330 V126 M324 120 L330 126 L336 120"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="230" y="130" width="200" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="330" y="154" font-size="13" text-anchor="middle">OutputParser المشترك</text>
-<text class="f-muted" fill="#5c6d66" x="330" y="174" font-size="12" text-anchor="middle">معاملات متدفقة، واستدعاء في التفكير</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M230 160 H204 M210 154 L204 160 L210 166"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M430 160 H456 M450 154 L456 160 L450 166"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="130" width="190" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="105" y="154" font-size="13" text-anchor="middle">OpenAI tool_calls</text>
-<text class="f-muted" fill="#5c6d66" x="105" y="174" font-size="12" text-anchor="middle">ومعه tool_choice</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="460" y="130" width="170" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="545" y="154" font-size="13" text-anchor="middle">Anthropic tool_use</text>
-<text class="f-muted" fill="#5c6d66" x="545" y="174" font-size="12" text-anchor="middle">نتيجة التحليل نفسها</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">المعاملات <tspan direction="ltr" unicode-bidi="isolate">string="true"</tspan> تبقى نصوصًا؛ وطريقة كتابة DSML يعرفها موضع واحد فقط</text>
+<figure class="fig"><svg viewBox="0 0 440 412" role="img" aria-label="الشكل DS5-6: تحويل استدعاءات الأدوات بصيغة DSML. يكتب النموذج نص DSML، ويعيد DsmlTranslator كتابته أثناء التدفق إلى نص استدعاء بصيغة Qwen، ثم يُخرج OutputParser المشترك الشكلين: OpenAI وAnthropic">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="24" width="320" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="46" font-size="12" text-anchor="middle">نص يكتبه النموذج</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="64" font-size="12" text-anchor="middle"><tspan direction="ltr" unicode-bidi="isolate">&lt;｜DSML｜ invoke …&gt;</tspan></text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 72V88"/>
+<path class="f-muted" fill="#5c6d66" d="M216 88L220 96L224 88Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="60" y="96" width="320" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="118" font-size="12" text-anchor="middle">DsmlTranslator</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="136" font-size="12" text-anchor="middle">يعيد الكتابة ويحبس الوسم الناقص</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 144V160"/>
+<path class="f-muted" fill="#5c6d66" d="M216 160L220 168L224 160Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="168" width="320" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="190" font-size="12" text-anchor="middle">استدعاء بصيغة Qwen</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="208" font-size="12" text-anchor="middle"><tspan direction="ltr" unicode-bidi="isolate">tool_call / function=…</tspan></text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 216V232"/>
+<path class="f-muted" fill="#5c6d66" d="M216 232L220 240L224 232Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="60" y="240" width="320" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="262" font-size="12" text-anchor="middle">OutputParser المشترك</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="280" font-size="12" text-anchor="middle">معاملات متدفقة، واستدعاء في التفكير</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M220 288V300M112 300H328M112 300V312M328 300V312"/>
+<path class="f-muted" fill="#5c6d66" d="M108 304L112 312L116 304ZM324 304L328 312L332 304Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="314" width="200" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="112" y="336" font-size="12" text-anchor="middle">OpenAI tool_calls</text>
+<text class="f-muted" fill="#5c6d66" x="112" y="354" font-size="12" text-anchor="middle">ومعه tool_choice</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="228" y="314" width="200" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="328" y="336" font-size="12" text-anchor="middle">Anthropic tool_use</text>
+<text class="f-muted" fill="#5c6d66" x="328" y="354" font-size="12" text-anchor="middle">نتيجة التحليل نفسها</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="386" font-size="12" text-anchor="start">المعاملات <tspan direction="ltr" unicode-bidi="isolate">string="true"</tspan> تبقى نصوصًا؛</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="402" font-size="12" text-anchor="start">وطريقة كتابة DSML يعرفها موضع واحد فقط</text>
 </svg><figcaption>الشكل DS5-6  سلسلة ترجمة استدعاءات الأدوات. المضاف جديدًا هو الحلقة بين المربع الأول والمربع الثاني فقط؛ أما التحليل بعدها وشكلا المخرجات فمشتركة مع المسار الرئيسي.</figcaption></figure>
 <p><strong>تفاصيل التدفق.</strong> عند إعادة الكتابة لا يُحبس إلا المقطع الذي «قد يصير وسمًا»، مثل <code>&lt;</code> أو <code>&lt;｜DS</code>، ويُطلَق باقي النص كما هو. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L39-L45" target="_blank" rel="noopener noreferrer">dsml.py، السطور 39–45</a>) وإذا كان للمعامل <span dir="ltr">string="true"</span> بقيت قيمته نصًا، فلا تُعامَل «123» على أنها رقم. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L183-L197" target="_blank" rel="noopener noreferrer">dsml.py، السطور 183–197</a>) وكيف تُقطَّع أحداث التدفق وكيف تُجمَّع: راجع <a href="#chapter/23/sec-5">الفصل 23، القسم 23.5</a>.</p>
 <p><strong>رقعتان خلّفهما التكميم إلى 2-bit.</strong> الأولى: مجموعات ملفات 2-bit كثيرًا ما تكتب الإجابة كلها بعد &lt;think&gt; ثم تتوقف دون أن تكتب &lt;/think&gt;. فيُعامَل النص كله تفكيرًا وتبقى الإجابة فارغة؛ ويكتب التعليق أن 4 مُطالبات من 4 كانت هكذا. وحين تنتهي الجولة بـ stop ولا إجابة فيها ولا استدعاء، يسلّم المحلل نص التفكير على أنه الإجابة. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L172-L175" target="_blank" rel="noopener noreferrer">dsml.py، السطور 172–175</a>) والثانية: تهجئة القالب. يكتب نموذج V4.1 <span dir="ltr">"&lt;｜DSML｜ calls&gt;"</span> (بمسافة قبل calls)، بينما تحمل حزم أخرى قالب V4-Flash الذي يكتب <span dir="ltr">"&lt;｜DSML｜tool_calls&gt;"</span>. فيرى النموذج في المُطالبة صيغة ويكتب هو أخرى، فلم يصر استدعاءً حقيقيًا إلا 2 من 11 استدعاء أدوات؛ وفي الحزمة نفسها يسجّل التعليق 0/4 مقابل 6/6، والأخير بعد التحول إلى القالب ذي المسافة. <span class="ev ev-report">تقرير المصدر الأصلي</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L226-L232" target="_blank" rel="noopener noreferrer">dsml.py، السطور 226–232</a>) ولذلك تفحص طبقة الخدمة القالب الذي تحمله الحزمة، وإذا كانت تهجئته غير صحيحة استخدمت القالب الذي تحمله هي. <span class="ev ev-code">حقيقة من الشيفرة</span> (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L226-L232" target="_blank" rel="noopener noreferrer">dsml.py، السطور 226–232</a>)</p>
