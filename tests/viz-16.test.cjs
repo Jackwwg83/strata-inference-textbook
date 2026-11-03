@@ -60,3 +60,10 @@ test('upstream dense-pass ratios give the per-token cost of a batch', () => {
   close(m.perTokenCost(8), 3.0 / 8);
   assert.throws(() => m.perTokenCost(10));
 });
+
+test('the batch-reuse hint does not call 8 rows the engine limit (HIP builds hold 16 since v0.2.8)', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/viz/16-prefill.js'), 'utf8');
+  const hints = src.split('\n').filter((l) => /18/.test(l) && /\b8\b/.test(l) && !/bVerdict/.test(l));
+  assert.equal(hints.length, 6);
+  for (const l of hints) assert.match(l, /16/);
+});

@@ -1,0 +1,326 @@
+<div class="hook"><span class="eyebrow">別のエンジンで見てみよう</span>
+<p>第 8 章で、アテンションは「問いを持って本をさかのぼる」ことだと説明しました。新しいトークンはどれも前の文脈すべてを採点するので、文脈が長いほど、めくるページが増えます。Strata の Qwen の経路は、2 つの工夫で手間を減らしていました。24 個のクエリヘッドが 2 組のキーと値を共有し、そのうえで全位置から最大 2051 個だけを選んで見ます。</p>
+<p>DeepSeek-V4.1-Flash は strata-dsv41 の中で別の道を通ります。直近 128 トークンは 1 行も減らさずに残します。それより古いトークンは、R 個ずつ 1 行にまとめます（V4.1 の 20〜39 層では R = 1 で、まとめません。FP4 とソース層の共有だけで領域を節約します）。そのあと小さな採点器が、その行の中から最大 512 行を選びます。文脈が 8K から 1M に伸びても、1 トークン・1 層あたりでアテンションに参加する行数の上限は変わりません。このページは 3 つの問いに答えます。1 つのトークンは、いったいどの行を読むのか。その行はなぜそんなに小さいのか。そして、会話を巻き戻したり一時停止したりできるように、エンジンはどんな状態を保存しておくのか。</p></div>
+
+<p class="tldr"><strong>ひとことで：</strong>各トークンは各層で 3 か所を読みます。直近 128 行（ウィンドウリング、上書き式）、インデクサーが圧縮行から選んだ最大 512 行（追記のみ）、そして softmax の分母に加える、ヘッドごとに学習された sink の値 1 つです。64 個のヘッドは、同じ 1 行の K = V（512 次元）と同じ選択リストを共有します。アテンションが読む行数には上限があり、キャッシュに残るのは圧縮行（R 個の位置につき 1 行）だけです。そのコストはインデクサーに移りました。ソース層と、事前絞り込みを使わないインデクサー層は、1 ステップごとに圧縮行を全部走査します。プロンプトを読み終えるまでには、二乗オーダーの採点が必要です。</p>
+
+<h2 id="sec-1">3.1 トークンは何をさかのぼって見るのか：128 行、選ばれた 512 行、そして sink</h2>
+<p>1 層のアテンションがどう計算されるかは、ds4_model.cu のファイル先頭に「レシピ」として書かれています。p 番目のトークンについて、この層は 5 つのことを順に行います。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8-L10" target="_blank" rel="noopener noreferrer">ds4_model.cu の 8–10 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.hpp#L6-L10" target="_blank" rel="noopener noreferrer">ds4_model.hpp の 6–10 行目</a>）</p>
+<ol>
+<li>隠れ状態を wq_a と wq_b の 2 段の低ランク射影にかけて、64 ヘッド × 各 512 次元の q にします。</li>
+<li>別に、このトークン自身の 1 行 K = V（512 次元）を射影し、FP8 に丸めて、この層のウィンドウリングに書き込みます。</li>
+<li>3 か所を読みます。ウィンドウリングの直近 128 行。インデクサーが圧縮行から選んだ最大 512 行（圧縮比が 0 より大きい層だけ）。ヘッドごとに学習された sink 1 つ。</li>
+<li>各ヘッドは q でこれらの行を採点し、softmax にかけて、重み付き和をとります。64 ヘッドは同じ行の組を読みます。</li>
+<li>出力の回転部分を元に戻し、FP8 に丸めて、グループ化された wo_a と wo_b で射影します。</li>
+</ol>
+<figure class="fig"><svg viewBox="0 0 440 404" role="img" aria-label="図 DS3-1：1 層のアテンションが 1 つのトークンに対して行うこと。q と 1 行の K = V を射影し、ウィンドウリング、選ばれた圧縮行、sink を読み、採点して足し合わせ、出力を射影する">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="8" width="220" height="34" rx="7"/>
+<text fill="currentColor" x="220" y="29" font-size="12" text-anchor="middle">入力：p 番目のトークンの隠れ状態</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 42V54M115 54V66M325 54V66M115 54H325"/>
+<path class="f-muted" fill="#5c6d66" d="M111 62L115 70L119 62ZM321 62L325 70L329 62Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="72" width="205" height="66" rx="7"/>
+<text fill="currentColor" x="115" y="93" font-size="12" text-anchor="middle">q：wq_a、wq_b の低ランク射影</text>
+<text class="f-muted" fill="#5c6d66" x="115" y="111" font-size="12" text-anchor="middle">64 ヘッド × 512 次元</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="223" y="72" width="205" height="66" rx="7"/>
+<text fill="currentColor" x="325" y="93" font-size="12" text-anchor="middle">このトークンの 1 行 K = V</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="111" font-size="12" text-anchor="middle">（512 次元）</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="129" font-size="12" text-anchor="middle">FP8 丸め → スロット p mod 128</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M115 138V150M325 138V150M115 150H325M220 150V164"/>
+<path class="f-muted" fill="#5c6d66" d="M216 160L220 168L224 160Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="170" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="78" y="190" font-size="12" text-anchor="middle">直近 128 行（リング）</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="208" font-size="12" text-anchor="middle">上書き式</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="226" font-size="12" text-anchor="middle">層ごと・FP8</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="170" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="220" y="190" font-size="12" text-anchor="middle">選ばれた行 ≤ 512</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="208" font-size="12" text-anchor="middle">圧縮行：追記のみ</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="226" font-size="12" text-anchor="middle">FP4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="296" y="170" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="362" y="190" font-size="12" text-anchor="middle">sink：各ヘッド 1 つ</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="208" font-size="12" text-anchor="middle">分母のみ、</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="226" font-size="12" text-anchor="middle">行を持たない</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M78 234V246M220 234V246M362 234V246"/>
+<path class="f-muted" fill="#5c6d66" d="M74 242L78 250L82 242ZM216 242L220 250L224 242ZM358 242L362 250L366 242Z"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="252" width="416" height="88" rx="7"/>
+<text fill="currentColor" x="220" y="274" font-size="12" text-anchor="middle">各ヘッド：q で各行を採点</text>
+<text fill="currentColor" x="220" y="292" font-size="12" text-anchor="middle">softmax（分母に sink を加える）→ 重み付き和</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="311" font-size="12" text-anchor="middle">K = V：同じ行を採点にも重み付き和にも使う。</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="329" font-size="12" text-anchor="middle">64 ヘッドは同じ行を読む</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 340V350"/>
+<path class="f-muted" fill="#5c6d66" d="M216 350L220 358L224 350Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="60" y="360" width="320" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="382" font-size="12" text-anchor="middle">出力：逆回転、FP8 に丸め、wo_a・wo_b で射影</text>
+</svg><figcaption>図 DS3-1　1 層のアテンションが 1 つのトークンに対して行うこと。q は低ランク射影から作られ、K と V は同じ 1 行です。各ヘッドは 3 か所を読みます。ウィンドウリングの直近 128 行、インデクサーが選んだ最大 512 行の圧縮行、学習された sink 1 つです。描いているのはレシピの構造で、各ボックスの出典は本文にあります。</figcaption></figure>
+<p>数字の出どころは分けておきましょう。128、512、64 ヘッドは、ファイル先頭とラボ用プログラムのコメントにある数字です。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41_lab/ds4_lab.cu#L1-L4" target="_blank" rel="noopener noreferrer">ds4_lab.cu の 1–4 行目</a>）エンジン自身は、pack の ds4.txt から sliding_window、index_topk、num_attention_heads を読みます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L519-L522" target="_blank" rel="noopener noreferrer">ds4_model.cu の 519–522 行目</a>）コードに固定されているのは 4 つの形状チェックです。head_dim は 512、index_head_dim は 128、1 トークンあたりのエキスパート数は 8 以下、hc は 8 以下でなければなりません。1 つでも満たさないと、pack の読み込みは失敗します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2166-L2169" target="_blank" rel="noopener noreferrer">2166–2169 行目</a>）</p>
+<p><dfn>K = V</dfn> は、2 つを 1 つにまとめるという意味です。第 8 章では、各位置にキー k と値 v を保存しました。k は「どこを見るか」を決め、v は「何が見えるか」を決めます。ここでは同じ 1 行を、まず内積に使い、次に重み付き和に使います。GPU カーネルは同じ行ポインタの組を使っています。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L892-L903" target="_blank" rel="noopener noreferrer">ds4_kernels.cu の 892–903 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L934-L941" target="_blank" rel="noopener noreferrer">934–941 行目</a>）さらに 64 ヘッドがこの 1 行を共有します。これがマルチクエリアテンション（MQA）です。第 8 章の GQA よりもう一歩進んでいます。GQA は 24 ヘッドを 2 組に分け、MQA は全ヘッドで 1 組です。背景は <a href="https://arxiv.org/abs/1911.02150" target="_blank" rel="noopener noreferrer">Shazeer の原論文</a> を見てください。</p>
+<p><dfn>sink</dfn> は、ヘッドごとに学習された 1 つの値です。softmax の分母にだけ入り、対応する値の行はありません。出力 = 各行の重み付き和 ÷（各行の重みの合計 + e^(sink − 最大スコア)）です。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L946-L949" target="_blank" rel="noopener noreferrer">946–949 行目</a>。sink の読み込みは <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4308" target="_blank" rel="noopener noreferrer">ds4_model.cu の 4308 行目</a> にあります）あるヘッドが「どの行も関係ない」と感じたら、重みを sink に渡し、出力は 0 に近づきます。sink は値 1 つなので、キャッシュ行は使いません。softmax にこうした逃げ道がなぜ必要なのかは、<a href="https://arxiv.org/abs/2309.17453" target="_blank" rel="noopener noreferrer">StreamingLLM の論文</a> に分析があります。</p>
+<div class="callout vs"><strong>Qwen の経路と比べると：</strong>第 8 章の Qwen の層には、24 個のクエリヘッドと 2 組のキーと値があります。K と V は別の 2 つで、毎回、全位置から最大 2051 個を選びます（<a href="#chapter/08/c08-attention">第 8 章「アテンション機構：Q、K、V」</a>）。DeepSeek の層では、64 ヘッドが 1 行を共有し、K と V は同じ行です。Qwen は結果にさらに sigmoid の出力ゲートを掛けます。こちらでヘッドを「口数少なく」する方法は、分母の sink です。</div>
+
+<h2 id="sec-2">3.2 128 行のリング：直近のトークンは 1 つも落とさない</h2>
+<p><dfn>ウィンドウリング</dfn>は、層ごとに 1 つある固定サイズのキャッシュで、128 行です。位置 p の行はスロット p mod 128 に書かれ、新しい行は 128 トークン前の古い行を上書きします。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L1297-L1331" target="_blank" rel="noopener noreferrer">ds4_kernels.cu の 1297–1331 行目</a>）1 行は 512 次元で、FP8 のコードとして保存し、32 個の値ごとに 2 のべき乗のスケールが 1 つ付きます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L22-L33" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh の 22–33 行目</a>）FP8 については <a href="#chapter/04/c04-float">第 4 章「2 進数と浮動小数点数：FP32、FP16、BF16」</a> を見てください。</p>
+<p>1 行が何バイトかは、そのまま計算できます。512 個のコードに 512 ÷ 32 = 16 個のスケールを足して 528 バイトです。ちょうど 16 の倍数なので、パディングは要りません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L3209-L3213" target="_blank" rel="noopener noreferrer">ds4_model.cu の 3209–3213 行目</a>）1 層のリングは 128 × 528 = 67,584 バイトです。DeepSeek-V4.1-Flash は 40 層で <span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L3" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 3 行目</a>）、40 層で 2,703,360 バイト、約 2.58 MiB です。<span class="ev ev-est">教育用の試算</span>これは文脈の長さに関係ありません。クラスタのページは、同じ 528 を独立に計算しています（<a href="#deepinfer/pd-kv/sec-4">DeepInfer の第 3 ページ</a>）。</p>
+<figure class="fig"><svg viewBox="0 0 440 242" role="img" aria-label="図 DS3-2：ウィンドウリングへの書き込み。位置 128 はスロット 0 に書かれて位置 0 を上書きし、リングには位置 1 から 128 が残る">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">位置 127 を書いた後：スロット（枠）s に位置 s が入っている</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="44" y="45" font-size="12" text-anchor="middle">枠 0</text>
+<text class="f-muted" fill="#5c6d66" x="44" y="62" font-size="12" text-anchor="middle">位置 0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="86" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="118" y="45" font-size="12" text-anchor="middle">枠 1</text>
+<text class="f-muted" fill="#5c6d66" x="118" y="62" font-size="12" text-anchor="middle">位置 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="160" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="192" y="45" font-size="12" text-anchor="middle">枠 2</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="62" font-size="12" text-anchor="middle">位置 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="322" y="45" font-size="12" text-anchor="middle">枠 126</text>
+<text class="f-muted" fill="#5c6d66" x="322" y="62" font-size="12" text-anchor="middle">位置 126</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="364" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="396" y="45" font-size="12" text-anchor="middle">枠 127</text>
+<text class="f-muted" fill="#5c6d66" x="396" y="62" font-size="12" text-anchor="middle">位置 127</text>
+<text class="f-muted" fill="#5c6d66" x="244" y="53" font-size="12" text-anchor="middle">…</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="104" font-size="12" text-anchor="start">位置 128 が来る：スロット = 128 mod 128 = 0</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="120" font-size="12" text-anchor="start">位置 0 の古い行を上書き</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="12" y="128" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="44" y="147" font-size="12" text-anchor="middle">枠 0</text>
+<text fill="currentColor" x="44" y="164" font-size="12" text-anchor="middle">位置 128</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="86" y="128" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="118" y="147" font-size="12" text-anchor="middle">枠 1</text>
+<text class="f-muted" fill="#5c6d66" x="118" y="164" font-size="12" text-anchor="middle">位置 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="160" y="128" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="192" y="147" font-size="12" text-anchor="middle">枠 2</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="164" font-size="12" text-anchor="middle">位置 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="128" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="322" y="147" font-size="12" text-anchor="middle">枠 126</text>
+<text class="f-muted" fill="#5c6d66" x="322" y="164" font-size="12" text-anchor="middle">位置 126</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="364" y="128" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="396" y="147" font-size="12" text-anchor="middle">枠 127</text>
+<text class="f-muted" fill="#5c6d66" x="396" y="164" font-size="12" text-anchor="middle">位置 127</text>
+<text class="f-muted" fill="#5c6d66" x="244" y="155" font-size="12" text-anchor="middle">…</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M12 184H428M12 178V184M428 178V184"/>
+<text fill="currentColor" x="220" y="204" font-size="12" text-anchor="middle">リングの中身は位置 1 … 128：ちょうど 128 行（いま書いた行を含む）</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="228" font-size="12" text-anchor="middle">書くのは毎回 1 スロットだけ。他の行は動かさず、位置 mod 128 で探す</text>
+</svg><figcaption>図 DS3-2　ウィンドウリングは 128 個のスロットが輪になったものです。位置 p はスロット p mod 128 に書かれ、いちばん古い行が上書きされ、他の行はその場所のままです。128 番目の位置がスロット 0 に書かれると、リングの中身はちょうど位置 1 から 128 になります。</figcaption></figure>
+<p>位置 127 以降、1 つのトークンが見るウィンドウは、自分自身を含めてちょうど 128 行です。それより前のトークンは p + 1 行しかありません。エンジンはまずリングの行を BF16 の作業行にデコードし、新しい行をつなげて、直近 128 位置を取り出します。リングでいちばん古い行は除外され、そのあと新しい行に上書きされます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10090-L10118" target="_blank" rel="noopener noreferrer">ds4_model.cu の 10090–10118 行目</a>）なぜ正確に残すのが 128 トークンだけなのか。上流は理由を書いていません。以下は推論です。<span class="ev ev-est">教育用の試算</span>近くのトークンの影響が最も大きく、文の途中や、さっき定義した変数名は、この数行の中にあります。それらを正確に残すコストは一定です。もっと古いトークンは 3.3 節の圧縮行に任せます。</p>
+<p>リングは上書き式で、上書きしたら元には戻せません。投機的デコーディングで草稿トークンの 1 バッチを検証するとき、各層は上書きされる行を先にバックアップします（最大 16 行）。草稿が棄却されたら書き戻します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4357-L4360" target="_blank" rel="noopener noreferrer">ds4_model.cu の 4357–4360 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L175-L176" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh の 175–176 行目</a>）層ごとのリングのバックアップ領域は 16 × 528 = 8,448 バイトです。<span class="ev ev-est">教育用の試算</span>R &gt; 1 のソース層には、グループバッファと新しい圧縮行のスナップショットの別枠も必要です。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4357-L4361" target="_blank" rel="noopener noreferrer">ds4_model.cu の 4357–4361 行目</a>）バックアップ領域を確保するのは、ドラフトモデル付きの pack だけです。草稿をどう検証するかは、<a href="#deepseek/draft">DSpark と会話の駐車</a> のページで扱います。</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>ウィンドウリングは、リングバッファ（循環キュー）そのものです。容量は固定で、書き込みポインタが輪を回り、新しいデータが最も古いデータを上書きするので、メモリを新しく確保しません。NIC の受信キューや Linux カーネルの kfifo も同じ構造です。スロット番号は位置 mod 128 なので、p 番目の位置の行を読むのにデータを動かす必要はありません。参考：<a href="https://ja.wikipedia.org/wiki/%E3%83%AA%E3%83%B3%E3%82%B0%E3%83%90%E3%83%83%E3%83%95%E3%82%A1" target="_blank" rel="noopener noreferrer">Wikipedia：リングバッファ</a> · <a href="https://en.wikipedia.org/wiki/Circular_buffer" target="_blank" rel="noopener noreferrer">Wikipedia: Circular buffer</a>。</p>
+
+<h2 id="sec-3">3.3 圧縮行：R 個の位置を 1 行にまとめる</h2>
+<p>128 トークンより古い位置は、元の行がすでにリングに上書きされています。それらは圧縮行の形で残ります。R 個の位置につき 1 行です。R を<dfn>圧縮比</dfn>と呼び、層ごとに 1 つの値で、pack の compress_ratios リストに入っています。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L531" target="_blank" rel="noopener noreferrer">ds4_model.cu の 531 行目</a>）R = 0 の層には圧縮行がなく、ウィンドウアテンションだけを行います。DSpark のドラフトモデルのブロックは、この種の層でなければなりません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2383-L2384" target="_blank" rel="noopener noreferrer">2383–2384 行目</a>）</p>
+<p>R 個の位置をどうやって 1 行にまとめるのでしょうか。各位置はまず 512 次元のベクトルの組、kv と score に射影され、スロット p mod R に書かれます。位置 p が (p + 1) mod R = 0 を満たすと、そのグループは埋まります。エンジンは次元ごとに、R 個の score に softmax を 1 回かけ、得られた重みで kv の重み付き和をとり、最後に RMSNorm をかけます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L570-L604" target="_blank" rel="noopener noreferrer">ds4_kernels.cu の 570–604 行目</a>）結果に回転位置埋め込み（RoPE）を加え、FP4 に丸めます。E2M1 のコードで、16 個の値ごとに E4M3 のスケールが 1 つ付きます。1 行は 256 + 32 = 288 バイトです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10223-L10232" target="_blank" rel="noopener noreferrer">ds4_model.cu の 10223–10232 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L22-L33" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh の 22–33 行目</a>）埋まっていないグループは FP32 のバッファに置かれ、kv と score がそれぞれ R × 512 個の float です。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4329-L4331" target="_blank" rel="noopener noreferrer">ds4_model.cu の 4329–4331 行目</a>）</p>
+<figure class="fig"><svg viewBox="0 0 440 312" role="img" aria-label="図 DS3-3：圧縮器。R 個の位置がそれぞれ kv と score の組を出し、次元ごとに softmax で重み付き和をとり、正規化、回転、FP4 への丸めを経て、1 行の圧縮行になる">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">R 個の位置ごとに 1 グループ（図は例示のため R = 4）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="59" y="46" font-size="12" text-anchor="middle">位置 4k</text>
+<text class="f-muted" fill="#5c6d66" x="59" y="63" font-size="12" text-anchor="middle">kv、score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="119" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="166" y="46" font-size="12" text-anchor="middle">位置 4k + 1</text>
+<text class="f-muted" fill="#5c6d66" x="166" y="63" font-size="12" text-anchor="middle">kv、score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="226" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="273" y="46" font-size="12" text-anchor="middle">位置 4k + 2</text>
+<text class="f-muted" fill="#5c6d66" x="273" y="63" font-size="12" text-anchor="middle">kv、score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="333" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="380" y="46" font-size="12" text-anchor="middle">位置 4k + 3</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="63" font-size="12" text-anchor="middle">kv、score</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M59 72V84M166 72V84M273 72V84M380 72V84M59 84H380M220 84V98"/>
+<path class="f-muted" fill="#5c6d66" d="M216 94L220 102L224 94Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="104" width="416" height="48" rx="7"/>
+<text fill="currentColor" x="220" y="125" font-size="12" text-anchor="middle">次元ごとに 1 回：R 個の score を softmax にかける</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="143" font-size="12" text-anchor="middle">その重みで R 個の kv を重み付き和にする</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 152V160"/>
+<path class="f-muted" fill="#5c6d66" d="M216 160L220 168L224 160Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="170" width="320" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="193" font-size="12" text-anchor="middle">RMSNorm → RoPE → FP4 に丸め</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 206V214"/>
+<path class="f-muted" fill="#5c6d66" d="M216 214L220 222L224 214Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="90" y="224" width="260" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="247" font-size="12" text-anchor="middle">圧縮行 1 行：256 + 32 = 288 バイト</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="282" font-size="12" text-anchor="middle">位置 p はスロット p mod R に書く。</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="298" font-size="12" text-anchor="middle">(p + 1) mod R = 0 で 1 グループが埋まる</text>
+</svg><figcaption>図 DS3-3　圧縮器は R 個の位置のグループを 1 行にまとめます。次元ごとの重みは softmax が与えるもので、学習された重み付き平均であり、単純な平均ではありません。図の R = 4 は作図のためだけで、実際の R は層ごとの compress_ratios で決まります。</figcaption></figure>
+<p>R = 1 のときはまとめません。位置ごとに圧縮行が 1 行ありますが、それでも独立した 1 回の射影（compressor.wkv と正規化）であって、ウィンドウの行のコピーではありません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10129-L10135" target="_blank" rel="noopener noreferrer">ds4_model.cu の 10129–10135 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/ref.py#L250-L251" target="_blank" rel="noopener noreferrer">ref.py の 250–251 行目</a>）</p>
+<p>すべての層が自分の圧縮行を保存するわけではありません。kv_source_layer_ids に挙がったソース層だけが、圧縮器を持ち、圧縮キャッシュを所有します。あとの、圧縮比が同じ層は、それを直接読みます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2393-L2412" target="_blank" rel="noopener noreferrer">ds4_model.cu の 2393–2412 行目</a>）読み込み時にはチェックが 1 つあります。ratio が 0 より大きい層の前に、同じ圧縮比のソース層が必ずなければならず、なければエラーです。コードのコメントによると、V4.1 では 20 層目が圧縮比 1 の最初の層で、20〜39 層はその圧縮行と索引キーを読みます。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9261-L9262" target="_blank" rel="noopener noreferrer">9261–9262 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9304-L9306" target="_blank" rel="noopener noreferrer">9304–9306 行目</a>）最初の 20 層の各ソース層の圧縮比は pack の ds4.txt で決まり、固定したリポジトリには値がないので、このページでは一律に R と書きます。クラスタのページは、前の層のキャッシュを読む層を YoCo 消費層と呼んでいます（<a href="#deepinfer/pd-kv/sec-4">DeepInfer の第 3 ページ</a>）。Strata のコードにも yoco という名前があります。</p>
+<p>圧縮キャッシュの容量は、読み込み時の文脈上限で決まります。ソース層ごとに ⌈max_context ÷ R⌉ + 1 行です。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2401" target="_blank" rel="noopener noreferrer">2401 行目</a>）1 行は 288 バイトの圧縮 KV に、80 バイトの索引キーが加わります。128 次元の FP4 は 64 バイトのコードと 4 バイトのスケールで、16 の倍数にそろえて 80 になります。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L29-L33" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh の 29–33 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L3211-L3213" target="_blank" rel="noopener noreferrer">ds4_model.cu の 3211–3213 行目</a>）</p>
+<p>回転位置埋め込みの周波数テーブルも 2 種類あります。圧縮比が 0 より大きい層は長文脈用のスケーリング付きテーブルを使い、ウィンドウ層はスケーリングなしのテーブルを使います。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2171-L2172" target="_blank" rel="noopener noreferrer">ds4_model.cu の 2171–2172 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L544-L565" target="_blank" rel="noopener noreferrer">544–565 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9969" target="_blank" rel="noopener noreferrer">9969 行目</a>）遠くまで見る層だけが、スケーリングしたテーブルを使います。</p>
+<div class="callout vs"><strong>Qwen の経路と比べると：</strong>第 8 章の Qwen の索引キーは、元のキー 4 個の平均を正規化して回転したもので、採点にしか使いません。実際にアテンションを行うのは、あくまで元のキーと値の全部です（<a href="#chapter/08/c08-attention">第 8 章</a>）。DeepSeek の圧縮行は学習された重み付き平均で、しかもそれ自体がアテンションの読む行です。ウィンドウの外の古い位置は、元の行がもうなく、以後は圧縮行を通してしか読めません。</div>
+
+<h2 id="sec-4">3.4 インデクサー：全圧縮行から 512 行を選ぶ</h2>
+<p><dfn>インデクサー</dfn>はとても小さな採点器です。p 番目のトークンについて、圧縮行 i のスコアは <code>Σ_h relu(q_h · k_i) × w_h</code> です。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L131-L134" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh の 131–134 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L626-L689" target="_blank" rel="noopener noreferrer">ds4_kernels.cu の 626–689 行目</a>）q_h はインデクサー自身のクエリで、アテンションの q の低ランク潜在ベクトルからヘッドの組を改めて射影したものです。各ヘッドは 128 次元です。カーネルが対応するヘッド数は最大 32 です。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L2356-L2362" target="_blank" rel="noopener noreferrer">ds4_kernels.cu の 2356–2362 行目</a>）ラボのコメントに書かれたヘッド数も、ちょうど 32 です。<span class="ev ev-report">上流レポート</span>k_i は i 行目の索引キーで、128 次元、FP4 です。w_h はヘッドごとの重みで、このトークンの隠れ状態から射影されます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10156-L10187" target="_blank" rel="noopener noreferrer">ds4_model.cu の 10156–10187 行目</a>）第 8 章の Qwen のインデクサーも relu の和で、softmax はありません。DeepSeek にはこの、内容に応じて変わるヘッドの重みが加わっています。</p>
+<p>スコアが最も高い min(512, n) 個の位置が選ばれます。n = ⌊(p + 1) ÷ R⌋ はその時点での圧縮行の数で、n が 512 以下なら全部選びます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10151-L10155" target="_blank" rel="noopener noreferrer">ds4_model.cu の 10151–10155 行目</a>）選択の結果は位置のリストで、トークンごとに 1 つあり、64 ヘッドが共有します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L840" target="_blank" rel="noopener noreferrer">ds4_kernels.cu の 840 行目</a>：カーネルはヘッドごとではなく、トークンごとにリストを取ります）</p>
+<p>すべての層にインデクサーがあるわけではありません。index_source_layer_ids に挙がった層だけが圧縮行を採点して選択リストを更新し、他の層は直近のリストをそのまま使います。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9582-L9594" target="_blank" rel="noopener noreferrer">ds4_model.cu の 9582–9594 行目</a>）索引キーは、圧縮キャッシュを持つソース層でだけ作られます。圧縮行（回転の前）にもう一度、射影、正規化、回転、FP4 への丸めをかけた結果です。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10156-L10170" target="_blank" rel="noopener noreferrer">10156–10170 行目</a>）</p>
+<p>ソース層のリストには、先に 1 回の事前絞り込みを入れることもできます。候補ブロックと呼びます。candidate_source_layer_id で指定された層（テスト用フィクスチャでは 20 層目）が、まず圧縮行を candidate_block_size 個ずつのブロックにまとめ、各ブロックの最高スコアをとり、そのうえで最高スコアの candidate_topk_blocks 個のブロックを選びます。最新の位置を含むブロックは必ず選ばれます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L798-L812" target="_blank" rel="noopener noreferrer">ds4_kernels.cu の 798–812 行目</a>）後続のインデクサー層はこの結果を使い、これらのブロックの中の位置だけを採点します。ブロック数が candidate_topk_blocks 以下なら、事前絞り込みは働きません。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10188-L10215" target="_blank" rel="noopener noreferrer">ds4_model.cu の 10188–10215 行目</a>）コンバーターのテスト用フィクスチャでは、ブロックサイズは 8、ブロック数は 2048 です（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tests/terminal/test_pack_gguf_engram.py#L173-L177" target="_blank" rel="noopener noreferrer">test_pack_gguf_engram.py の 173–177 行目</a>）。実際の pack も同じ 2 つの値なら、事前絞り込みが働くのは、圧縮行が 8 × 2048 = 16,384 行を超えてからです。<span class="ev ev-est">教育用の試算</span></p>
+<p>下のインタラクティブ図では、文脈の長さを選ぶと、1 つのデコードトークンがこのステップで読む行が見えます。ウィンドウリングの 128 行に、インデクサーが選んだ最大 512 行の圧縮行を足したものです。静的な図は、既定の文脈 8,192、R = 1 の層を描いています。</p>
+<div class="viz" data-viz="ds-attention-state"><figure class="fig"><svg viewBox="0 0 440 368" role="img" aria-label="図 DS3-4：R = 1 の層で文脈が 8,192 のとき、1 つのデコードトークンは、128 行のウィンドウと選ばれた 512 行の圧縮行、合わせて 640 行を読む。文脈が長くなっても、この数は変わらない">
+<text class="f-muted" fill="#5c6d66" x="12" y="16" font-size="12" text-anchor="start">例：R = 1 の層、文脈 8,192（既定）、</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="32" font-size="12" text-anchor="start">8,192 番目のトークンがさかのぼって見る</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="42" width="416" height="30" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="27" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="31" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="35" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="36" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="37" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="40" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="42" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="47" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="49" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="50" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="62" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="74" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="99" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="103" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="110" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="144" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="162" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="174" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="174" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="183" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="186" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="190" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="219" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="231" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="238" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="243" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="248" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="250" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="251" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="269" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="270" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="278" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="348" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="350" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="384" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="400" y="42" width="2" height="30"/>
+<rect class="f-accent" fill="#136d5a" x="419" y="38" width="9" height="38" rx="1"/>
+<rect class="f-warn" fill="#9e5d24" x="12" y="92" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="104" font-size="12" text-anchor="start">縦線：インデクサーが選んだ 512 行</text>
+<text class="f-muted" fill="#5c6d66" x="30" y="120" font-size="12" text-anchor="start">（位置は目安。実際はスコアで決まる）</text>
+<rect class="f-accent" fill="#136d5a" x="12" y="130" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="142" font-size="12" text-anchor="start">ウィンドウ：直近 128 行。リングから来て、選択を通らない</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="12" y="152" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="164" font-size="12" text-anchor="start">その他の圧縮行：このステップでは読まないが、ずっと保持する</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M12 180H428"/>
+<text class="f-muted" fill="#5c6d66" x="12" y="200" font-size="12" text-anchor="start">コンテキスト</text>
+<text class="f-muted" fill="#5c6d66" x="92" y="200" font-size="12" text-anchor="start">ウィンドウ行</text>
+<text class="f-muted" fill="#5c6d66" x="168" y="200" font-size="12" text-anchor="start">圧縮行 n</text>
+<text class="f-muted" fill="#5c6d66" x="250" y="200" font-size="12" text-anchor="start">選択行</text>
+<text class="f-muted" fill="#5c6d66" x="350" y="200" font-size="12" text-anchor="start">読む行</text>
+<text fill="currentColor" x="12" y="224" font-size="12" text-anchor="start">300</text>
+<text fill="currentColor" x="92" y="224" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="224" font-size="12" text-anchor="start">300</text>
+<text fill="currentColor" x="250" y="224" font-size="12" text-anchor="start">300（全選択）</text>
+<text fill="currentColor" x="350" y="224" font-size="12" text-anchor="start">428</text>
+<text fill="currentColor" x="12" y="246" font-size="12" text-anchor="start">8,192</text>
+<text fill="currentColor" x="92" y="246" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="246" font-size="12" text-anchor="start">8,192</text>
+<text fill="currentColor" x="250" y="246" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="246" font-size="12" text-anchor="start">640</text>
+<text fill="currentColor" x="12" y="268" font-size="12" text-anchor="start">262,144</text>
+<text fill="currentColor" x="92" y="268" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="268" font-size="12" text-anchor="start">262,144</text>
+<text fill="currentColor" x="250" y="268" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="268" font-size="12" text-anchor="start">640</text>
+<text fill="currentColor" x="12" y="290" font-size="12" text-anchor="start">1,048,576</text>
+<text fill="currentColor" x="92" y="290" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="290" font-size="12" text-anchor="start">1,048,576</text>
+<text fill="currentColor" x="250" y="290" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="290" font-size="12" text-anchor="start">640</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="320" font-size="12" text-anchor="start">一般に n = ⌊コンテキスト ÷ R⌋、選択行 = min(512, n)、</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="336" font-size="12" text-anchor="start">1 層・1 トークンあたり読む行は最大 128 + 512 = 640 行</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="356" font-size="12" text-anchor="start">読む行数は一定。ただし採点する行数 n は文脈とともに増える</text>
+</svg><figcaption>図 DS3-4　1 つのデコードトークンが R = 1 の層で読む行数。ウィンドウ 128 行に、選ばれた min(512, n) 行を加えたものです。文脈が 300 から 1,048,576 に伸びても、読む行数は最大 640 で増えません。一方、圧縮行 n は増え、インデクサーはそのすべてを採点しなければなりません。教育用の試算で、行数はこの節の式で計算しています。</figcaption></figure></div>
+<p>アテンションが読む行には上限がありますが、インデクサーの走査には共通の上限がありません。デコード時には、ソース層と、事前絞り込みを使わないインデクサー層が、1 ステップごとに全 n 行を採点します。事前絞り込みを使う層は、候補ブロックの中の位置だけを採点します（上を参照）。全行を採点する層は、n × 80 バイトの索引キーを読み、n × 32 × 128 回の積和を行います（ヘッド数はコメントによる）。<span class="ev ev-est">教育用の試算</span>n は文脈に比例して増えます。プロンプトを読み終えるには、各位置を 1 回ずつ採点する必要があります。L トークンのプロンプトは、R = 1 のインデクサー層 1 つで L(L + 1) ÷ 2 組、一般には L²/(2R) 組です。L = 8,192 で約 3.4 × 10⁷ 組、L = 262,144 で約 3.4 × 10¹⁰ 組、L = 1,048,576 で約 5.5 × 10¹¹ 組です。<span class="ev ev-est">教育用の試算</span>262,144 の段は、第 8 章で計算した全アテンションの組数（約 344 億、<a href="#chapter/08/c08-complexity">第 8 章「計算量と O(n²)」</a>）とちょうど同じです。節約できるのは 1 組あたりのコストです。64 ヘッド × 512 次元で全アテンションをすると、1 組あたり 2 × 32,768 回の積和（内積と重み付き和）が必要です。インデクサーは 1 組あたり 32 × 128 = 4,096 回で、softmax もなく、ざっと 16 倍安くなります。<span class="ev ev-est">教育用の試算</span>ドキュメントにも同じことが書かれています。プロンプトが非常に長いと読み込みが遅くなるのは「インデクサーの仕事量が長さの二乗で増えるから」で、512K や 1M では最初の返答まで何分も待つことになります。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L98-L100" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 98–100 行目</a>）</p>
+<p class="bridge"><strong>CS を学んだ人へ：</strong>これは検索システムの「リコールしてから精密ランキング」という 2 段階です。リコールは安いですが、全件を走査します。精密ランキングは高価で、候補だけを見ます。ここでのリコールは、インデクサーが全圧縮行を走査することです。精密ランキングは、640 行に対して行う本物のアテンションです。候補ブロックの事前絞り込みは、リコールの前にもう 1 段、粗い索引を足すようなもので、まずブロック単位で大半を落とします。</p>
+<div class="callout vs"><strong>DeepInfer と比べると：</strong>クラスタでは、主となる圧縮 KV とインデクサーのキーを、同じ種類のページ化されたブロック KV に入れます。128 トークンで 1 ブロックとし、ブロックテーブルで探します（<a href="#deepinfer/pd-kv/sec-4">DeepInfer の第 3 ページ</a>）。Strata にブロックテーブルはありません。ソース層ごとの圧縮行と索引キーは、それぞれ位置順に連続した配列で、i 行目は i × 行バイト数の場所にあります。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10230" target="_blank" rel="noopener noreferrer">ds4_model.cu の 10230 行目</a>）<span class="ev ev-est">教育用の試算</span>1 台のコンピュータが 1 つの会話だけを受け持つので、複数リクエストでの共有、退避、プレフィックスのヒットのためにブロックに分ける必要がありません。</div>
+
+<h2 id="sec-5">3.5 トークンが残すもの：3 種類の状態と、2 つのロールバック方法</h2>
+<p>1 つのトークンがすべての層を通り抜けると、エンジンには 4 つのものが残ります。層ごとのウィンドウリング。圧縮器の、埋まっていないグループ。ソース層の圧縮行と索引キー（追記のみ）。そして Engram の n-gram 履歴で、これは <a href="#deepseek/engram">Engram のページ</a> で扱います。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.hpp#L8-L11" target="_blank" rel="noopener noreferrer">ds4_model.hpp の 8–11 行目</a>）最初の 3 つが、会話を巻き戻せるか、一時停止できるかを決めます。</p>
+<figure class="fig"><svg viewBox="0 0 440 358" role="img" aria-label="図 DS3-5：1 つのトークンが残す 3 種類の状態。上書き式のウィンドウリング、上書き式のグループバッファ、追記のみの圧縮行。ロールバックの方法はコピーか切り詰め">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="14" width="132" height="176" rx="7"/>
+<text fill="currentColor" x="78" y="38" font-size="12" text-anchor="middle">ウィンドウリング</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="62" font-size="12" text-anchor="middle">128 行 × 528 B</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="82" font-size="12" text-anchor="middle">40 層で約 2.58 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="102" font-size="12" text-anchor="middle">上書き式：</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="118" font-size="12" text-anchor="middle">古い行を捨てる</text>
+<text fill="currentColor" x="78" y="142" font-size="12" text-anchor="middle">戻し方：</text>
+<text fill="currentColor" x="78" y="158" font-size="12" text-anchor="middle">事前コピー</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="178" font-size="12" text-anchor="middle">ホワイトボードと同じ</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="14" width="132" height="176" rx="7"/>
+<text fill="currentColor" x="220" y="38" font-size="12" text-anchor="middle">グループバッファ</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="62" font-size="12" text-anchor="middle">未完の R 個の位置</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="82" font-size="12" text-anchor="middle">FP32：kv と score</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="102" font-size="12" text-anchor="middle">上書き式：</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="118" font-size="12" text-anchor="middle">満杯でクリア</text>
+<text fill="currentColor" x="220" y="142" font-size="12" text-anchor="middle">戻し方：</text>
+<text fill="currentColor" x="220" y="158" font-size="12" text-anchor="middle">事前コピー</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="178" font-size="12" text-anchor="middle">ホワイトボードと同じ</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="296" y="14" width="132" height="176" rx="7"/>
+<text fill="currentColor" x="362" y="38" font-size="12" text-anchor="middle">圧縮行 + 索引キー</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="62" font-size="12" text-anchor="middle">追記のみ、位置順</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="82" font-size="12" text-anchor="middle">368 B/位置（R = 1）</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="102" font-size="12" text-anchor="middle">文脈とともに</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="118" font-size="12" text-anchor="middle">増える</text>
+<text fill="currentColor" x="362" y="142" font-size="12" text-anchor="middle">戻し方：</text>
+<text fill="currentColor" x="362" y="158" font-size="12" text-anchor="middle">位置の切り詰め</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="178" font-size="12" text-anchor="middle">ノートと同じ</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M78 190V216M220 190V216M78 216H220M149 216V230"/>
+<path class="f-muted" fill="#5c6d66" d="M145 226L149 234L153 226Z"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="236" width="274" height="54" rx="7"/>
+<text fill="currentColor" x="149" y="257" font-size="12" text-anchor="middle">チェックポイント ≤ 4 つ：</text>
+<text fill="currentColor" x="149" y="275" font-size="12" text-anchor="middle">リングとバッファをコピー</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M149 290V304M362 190V304M149 304H362M220 304V312"/>
+<path class="f-muted" fill="#5c6d66" d="M216 308L220 316L224 308Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="318" width="416" height="28" rx="5"/>
+<text fill="currentColor" x="220" y="337" font-size="12" text-anchor="middle">会話の駐車：状態を丸ごと書き出す（圧縮行を含む）</text>
+</svg><figcaption>図 DS3-5　3 種類の状態と、2 つのロールバック方法。上書き式の 2 つは、あらかじめコピーしておく（チェックポイント）しかありません。追記のみの圧縮行は、位置を切り詰めて戻します。会話の駐車では、3 つともチェックポイントと一緒に書き出します。数字は教育用の試算で、式は本文にあります。</figcaption></figure>
+<p>第 20 章は、2 種類の記憶を「ノートとホワイトボード」にたとえました。圧縮行はノートです。後ろにしか書かず、位置順に並んでいて、戻すには「どのページまで書いたか」を小さくするだけです。はみ出した分は、あとで書き直します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5691-L5692" target="_blank" rel="noopener noreferrer">ds4_model.cu の 5691–5692 行目</a>）リングと、埋まっていないグループバッファはホワイトボードです。第 9 章の GDN の状態も、このホワイトボードの仲間です（<a href="#chapter/09/c09-rnn-state">第 9 章「回帰型ニューラルネットワークと『状態』」</a>）。新しい内容が古い内容を消すので、戻したければ、あらかじめ写真を撮っておくしかありません。チェックポイントがその写真で、コピーするのはこの 2 つだけです。同時に残せるのは最大 4 つで、前のターンのプロンプトの末尾、その 1 つ前の位置、アンカー 1 つ、共有プレフィックス 1 つです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1104-L1110" target="_blank" rel="noopener noreferrer">1104–1110 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5751-L5755" target="_blank" rel="noopener noreferrer">5751–5755 行目</a>）1 つにつき、少なくとも 2.58 MiB かかります。<span class="ev ev-est">教育用の試算</span>ホワイトボードをなぜ撮影するのかは、<a href="#chapter/20/c20-copy-on-write">第 20 章「スナップショットとコピーオンライト」</a> を見てください。</p>
+<p>別のリクエストが会話をモデルから押し出すとき、エンジンは<dfn>会話の駐車</dfn>を 1 回行います。状態を全部書き出すのです。内容は、トークン、層ごとのリングとグループバッファ、ソース層ごとの圧縮行と索引キー（0 から pos ÷ R 行）、それにチェックポイントです。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5788-L5806" target="_blank" rel="noopener noreferrer">ds4_model.cu の 5788–5806 行目</a>）サイズには既成の式があります。ヘッダと 4 × pos バイトのトークン、層ごとの 16 + 67,584 バイトにグループバッファ（2 × R × 512 × 4 バイト、R &gt; 1 のソース層だけ）、ソース層ごとの ⌊pos ÷ R⌋ × (288 + 80) バイト、そしてチェックポイントを足します。ドキュメントが挙げている数字は、6.5K トークンあたり約 17 MB です。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L116" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 116 行目</a>）式で概算すると、リングが 2.70 MB、最大 4 つのチェックポイントで少なくとも 10.8 MB、R = 1 のソース層 1 つで 6,500 × 368 ≈ 2.4 MB、合計約 15.9 MB です。これにグループバッファと他のソース層が加わるので、ドキュメントと同じオーダーです。<span class="ev ev-est">教育用の試算</span>最初の 20 層の R が分からないので、この計算は桁を見積もるところまでです。会話の駐車の流れは <a href="#deepseek/draft">DSpark と会話の駐車</a> のページで扱います。</p>
+<p>続いて、長い文脈の勘定です。下の表は、同じ行バイト数を使って 3 つを比べます。仮に「40 層すべてが位置ごとに 1 行の FP8 を保存する」素朴な方法（位置ごとに 40 × 528 = 21,120 バイト）、R = 1 のソース層 1 つ（位置ごとに 288 + 80 = 368 バイト、行数 = 文脈 + 1）、そして 40 層のウィンドウリングです。<span class="ev ev-est">教育用の試算</span></p>
+<div class="table-wrap"><table><thead><tr><th>文脈</th><th>素朴な方法：40 層が全位置を保存</th><th>R = 1 のソース層 1 つ</th><th>40 層のウィンドウリング</th></tr></thead><tbody>
+<tr><td>8,192</td><td>165 MiB</td><td>2.88 MiB</td><td>2.58 MiB</td></tr>
+<tr><td>32,768</td><td>660 MiB</td><td>11.5 MiB</td><td>2.58 MiB</td></tr>
+<tr><td>262,144</td><td>5.16 GiB</td><td>92.0 MiB</td><td>2.58 MiB</td></tr>
+<tr><td>1,048,576</td><td>20.6 GiB</td><td>368 MiB</td><td>2.58 MiB</td></tr>
+</tbody></table></div>
+<p>文脈が 4 倍になると、ソース層の分も 4 倍になります。それでも線形の増え方ですが、係数は小さく、位置あたり 368 バイトで、素朴な方法は 21,120 バイトです。リングは文脈で変わりません。他のソース層は、位置あたり 368 ÷ R バイトで別に計算します。R の値はこのページにはないので、モデル全体の合計は出せません。</p>
+<p>これらのキャッシュはVRAMに置かれ、エキスパートと場所を取り合います。読み込み時に、エンジンはまず max_context に合わせてリングと各ソース層の圧縮キャッシュを確保し、残ったVRAMにエキスパートを置きます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2696-L2698" target="_blank" rel="noopener noreferrer">ds4_model.cu の 2696–2698 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L3042" target="_blank" rel="noopener noreferrer">3042 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4600-L4620" target="_blank" rel="noopener noreferrer">4600–4620 行目</a>）ドキュメントははっきり書いています。位置が 1 つ増えるごとに、置けるエキスパートが少し減ります。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L99-L100" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 99–100 行目</a>）文脈の既定値は 8,192 で、--context は 8K から 1M まで指定できます。256K を超える長さは、上流では試されていません。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L93" target="_blank" rel="noopener noreferrer">93 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L96-L98" target="_blank" rel="noopener noreferrer">96–98 行目</a>）文脈がいっぱいになると、エンジンは “the context is full” と報告します。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9295" target="_blank" rel="noopener noreferrer">ds4_model.cu の 9295 行目</a>）setup.py の 795 行目のコメントには “(4096 and 8192; 64K is not tried yet)” とありますが、古くなっています。同じファイルの 8533–8536 行目のチェックは、8,192 から 1,048,576 までを受け付けます。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/setup.py#L795" target="_blank" rel="noopener noreferrer">setup.py の 795 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/setup.py#L8533-L8536" target="_blank" rel="noopener noreferrer">8533–8536 行目</a>）</p>
+<div class="callout vs"><strong>Qwen の経路と比べると：</strong>第 17 章は、KV キャッシュを 4 トークン 1 ページでページ化しました。文脈が 64K を超えると、ページの大半はメインメモリに置かれ、VRAMには、よく使うものだけが残ります（<a href="#chapter/17/c17-paging">第 17 章「KV キャッシュとページング管理」</a>）。dsv41 にはこの層がありません。圧縮キャッシュは位置順に並んだ連続配列で、文脈の上限に合わせてVRAMに一度で確保されます。もっと長い文脈を置きたければ、エキスパートの場所を譲るしかありません。第 8 章で、Qwen の 12 個の QSA 層は、32K の文脈で合計 768 MiB でした（FP16、<a href="#chapter/08/c08-attention">第 8 章</a>）。ここでは、R = 1 のソース層 1 つが、同じ長さで 11.5 MiB です（FP4）。これは 12 層と 1 層の比較で、FP16 と FP4 の比較でもあり、基準がそろっていません。2 つのモデルの合計は直接比べられません。DeepSeek 側に最初の 20 層の R が欠けているからです。</div>
+<div class="callout vs"><strong>DeepInfer と比べると：</strong>クラスタのリングは 134 トークンです。128 に 6 を足したもので、増えた 6 は投機的デコーディングのロールバック用です。シーケンスごとに保存するのは最初の 20 層のリングだけで、約 1.4 MB です（<a href="#deepinfer/pd-kv/sec-4">DeepInfer の第 3 ページ</a>）。Strata のリングは 128 行で、ロールバックは別に用意した 16 行のバックアップ領域で行います。駐車のときに保存するのは状態全体で、圧縮行を含みます。どちらにも同じ道理があります。リングは一度上書きしたら戻せないので、約束した位置で写真を撮っておく必要があるのです。</div>
+
+<h2 id="sec-6">3.6 アテンションはボトルネックではない：デコードの勘定と、長いプロンプトの近道</h2>
+<p>まず、デコード 1 ステップでキャッシュから何バイト読むかを計算します。各層は、最大で 128 行のリング（1 行 528 バイト）と 512 行の圧縮行（1 行 288 バイト）を読みます。128 × 528 + 512 × 288 = 215,040 バイトです。40 層すべてに圧縮行があるなら、上限は 8,601,600 バイト、約 8.2 MiB です。<span class="ev ev-est">教育用の試算</span>次にエキスパートです。ドキュメントの配置表には、UD-Q8_K_XL で 1 エキスパートが 18.8 MB と書かれています。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L15" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 15 行目</a>）1 トークン・1 層で 6 個使うので、40 層では 240 個、約 4.5 GB です。<span class="ev ev-est">教育用の試算</span>アテンションが読むキャッシュは、エキスパートの読み取りの約 0.2% しかありません。インデクサーの走査は別勘定です。全行を採点するインデクサー層は、1 ステップごとに n × 80 バイトを読み、n = 1,048,576 なら 80 MiB で、この 8.2 MiB をすでに超えます。<span class="ev ev-est">教育用の試算</span>つまり 0.2% が成り立つのは、アテンションの部分と、短い文脈だけです。また 0.2% は触れたバイト数の比で、時間の比ではありません。エキスパートはVRAMにあるものも、メインメモリにあるものも、SSD にあるものもあり、遅いのは後ろの 2 つです。</p>
+<p>コードのコメントにある実測値も、これを裏づけています。エンジンには split-KV アテンションカーネルがあり、単一クエリでは A4000 上で 2.9 倍速くなります。しかし 4 × R9700 のマシンではデコードが 21.8 対 21.9 tok/s で、測れるほどの効果はなかったため、既定では無効で、DS4_ATTN_SPLIT=1 で有効にします。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L2027-L2031" target="_blank" rel="noopener noreferrer">ds4_kernels.cu の 2027–2031 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L2442-L2445" target="_blank" rel="noopener noreferrer">2442–2445 行目</a>）デコードが遅いのは別の場所で、エキスパートと SSD です。<a href="#deepseek/experts">エキスパートのページ</a> を見てください。</p>
+<p>長いプロンプトの勘定は違います。プロンプトを読むとき、すべての位置がすべての層を通ります。ただし 20〜39 層には近道があります。これらの層が早い位置を読むのは 20 層目の圧縮行と索引キーを通してだけで、ウィンドウが戻って見るのは 127 トークンだけです。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9304-L9306" target="_blank" rel="noopener noreferrer">ds4_model.cu の 9304–9306 行目</a>）そのため、長いプロンプトの前のほうは、20〜39 層のアテンションとエキスパートを通す必要がなく、20 層目の圧縮行と索引キーを計算するだけで済みます（コードでは kv_only と呼び、コメントには「エキスパートなし」とあります）。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8538-L8542" target="_blank" rel="noopener noreferrer">8538–8542 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L3937-L3938" target="_blank" rel="noopener noreferrer">3937–3938 行目</a>）全層が必要なのは最後の部分だけです。1 層通るごとに、依存の範囲が 127 トークン前へ広がるので、20 層で残る行は (40 − 20) × 127 + 128 = 2,668 行です。<span class="ev ev-est">教育用の試算</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/test_prompt_skip.py#L26-L30" target="_blank" rel="noopener noreferrer">test_prompt_skip.py の 26–30 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9315-L9317" target="_blank" rel="noopener noreferrer">ds4_model.cu の 9315–9317 行目</a>）飛ばせる行が 1,024 行以上あって初めて、やる価値があります。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L963" target="_blank" rel="noopener noreferrer">963 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9318" target="_blank" rel="noopener noreferrer">9318 行目</a>）2,668 + 1,024 なので、1 回に投入するプロンプトが約 3,692 トークン以上のときに使われます。<span class="ev ev-est">教育用の試算</span>この近道が有効になるのは、1 枚のカードで、プロンプトをチャンクごとに読む経路だけで、DS4_YOCO=0 で無効になります。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9275-L9283" target="_blank" rel="noopener noreferrer">9275–9283 行目</a>）</p>
+<p>32,768 トークンのプロンプトで概算します。2,668 ÷ 32,768 は約 8% で、20〜39 層が処理する行は約 8% だけです。<span class="ev ev-est">教育用の試算</span>なぜ答えが変わらないのでしょうか。コメントの説明はこうです。これらの層が早い位置に対して行う仕事のうち、あとで読まれるのは圧縮行と索引キーだけで、残りは各層自身のリングにしか影響せず、リングは最後の 128 行しか残さないからです。上流には、近道と完全な計算を比べるテストスクリプトがあり、KL が「エキスパートの合計順序のノイズ」の範囲に収まることを要求しています。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/test_prompt_skip.py#L1-L11" target="_blank" rel="noopener noreferrer">test_prompt_skip.py の 1–11 行目</a>）</p>
+<div class="callout vs"><strong>DeepInfer と比べると：</strong>DeepSeek 自身のサービスは、キャッシュにヒットしたあと、最後の 128 トークンだけをリプレイし、ウィンドウをリプレイ区間の内側で切ります。これが有界リプレイです（<a href="#deepinfer/pd-kv/sec-5">DeepInfer の第 3 ページ</a>）。Strata のコードには、このルールのためのスイッチがあります。DS4_YOCO=2 は「最後の 128 行だけ残す」で、より速く、答えは少し変わります。既定値の 1 は 2,668 行を残し、エキスパートの合計順序を除けば完全な計算と一致します。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9263-L9266" target="_blank" rel="noopener noreferrer">ds4_model.cu の 9263–9266 行目</a>）</div>
+
+<div class="recap"><h3>この 3 点を覚えよう</h3><ol>
+<li>各層で、各トークンが読む行には上限があります。ウィンドウリングの直近 128 行（FP8、1 行 528 バイト、上書き式）、インデクサーが圧縮行から選んだ最大 512 行（FP4、1 行 288 バイト）、ヘッドごとに 1 つの sink の値です。64 ヘッドは、同じ 1 行の K = V と同じ選択リストを共有します。</li>
+<li>128 トークンより前の位置は、圧縮行だけが残ります。R 個の位置につき 1 行で、学習された重み付き平均であり、追記のみです。R = 1 のソース層は位置あたり 368 バイト（圧縮行 + 索引キー）を使い、40 層のリングは約 2.58 MiB で固定です。</li>
+<li>上限があることは、無料という意味ではありません。インデクサーは 1 ステップごとに全圧縮行（または事前絞り込み後の候補）を走査し、プロンプトを読み終えるまでは二乗オーダーの採点です。キャッシュはVRAMに置かれ、エキスパートを押しのけます。ロールバックには 2 つの方法があり、圧縮行は位置を切り詰め、リングとグループバッファは事前にコピーします。</li>
+</ol></div>
+<div class="myth"><p><strong>よくある誤解：「各トークンが読むのは 640 行だけだから、長い文脈はたいしてお金がかからない。」</strong></p>
+<p>読む行には上限がありますが、コストはそこだけにかかるわけではありません。インデクサーは全圧縮行を採点します。デコード時は 1 ステップごとに n 行で、プロンプトを読み終えるには L²/(2R) 組です。圧縮行と索引キーはすべて保持しておく必要があり、VRAMを占めて、エキスパートを押しのけます。上流の助言は率直です。256K かそれより短い長さから始めること。512K や 1M では、最初の返答まで何分も待ちます。<span class="ev ev-report">上流レポート</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L98-L100" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md の 98–100 行目</a>）</p></div>
+
+<details class="deep"><summary>もう一歩深く：1 つのデコードステップの呼び出しの流れと、確認できなかったこと</summary>
+<h3>1 つのデコードトークンが layer() の中で順に行うこと</h3>
+<p>入口は <code>layer()</code> です。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9961" target="_blank" rel="noopener noreferrer">ds4_model.cu の 9961 行目</a>）以下はアテンション部分の順序で、行番号はすべて同じファイルのものです。</p>
+<ol>
+<li>q：低ランク潜在ベクトルに <code>wq_b</code> をかけ、そのあと回転します（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10080-L10087" target="_blank" rel="noopener noreferrer">10080–10087 行目</a>）。</li>
+<li>ウィンドウ：<code>ring_to_ext</code> がリングを BF16 の作業行にデコードします。新しい K = V の行は、正規化、回転、FP8 への丸めを経て、その後ろにつながります。<code>ext_to_ring</code> がそれをスロット p mod 128 に書きます（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10094-L10104" target="_blank" rel="noopener noreferrer">10094–10104 行目</a>）。</li>
+<li>トークンごとのウィンドウ範囲を <code>AttnRows</code> に書きます。<code>max(win − p0, t + 1)</code> から数えて 128 行です（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10107-L10119" target="_blank" rel="noopener noreferrer">10107–10119 行目</a>）。</li>
+<li>圧縮器：R = 1 なら直接正規化し、R &gt; 1 なら <code>compress_win</code> を呼びます。埋まったグループの行は、回転、FP4 への丸めを経て、<code>g_first × 行バイト数</code> の場所に書かれます（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10129-L10148" target="_blank" rel="noopener noreferrer">10129–10148 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10223-L10232" target="_blank" rel="noopener noreferrer">10223–10232 行目</a>）。</li>
+<li>インデクサー：ソース層はまず新しい索引キーを計算し、次に q とヘッドの重みを計算して、<code>index_score</code> と <code>topk</code> を呼びます（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10156-L10215" target="_blank" rel="noopener noreferrer">10156–10215 行目</a>）。</li>
+<li><code>sparse_attn</code>：スケーリング係数は 1 ÷ √512 で、sink を渡します（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10261-L10263" target="_blank" rel="noopener noreferrer">10261–10263 行目</a>）。出力は逆回転し、FP8 に丸め、<code>wo_a</code> と <code>wo_b</code> を通ります（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10265-L10279" target="_blank" rel="noopener noreferrer">10265–10279 行目</a>）。</li>
+</ol>
+<h3>固定したチェックアウトで自分で確かめる</h3>
+<pre><code>git grep -n -F "one shared K = V row per token" -- src/dsv41/ds4_model.cu
+git grep -n -F "const float den = den_s + expf(sink" -- src/dsv41/ds4_kernels.cu
+git grep -n -F "size_t win_rb()" -- src/dsv41/ds4_model.cu
+git grep -n -F "constexpr size_t kv_row_bytes" -- src/dsv41/ds4_kernels.cuh
+git grep -n -F "without a KV source of that ratio" -- src/dsv41/ds4_model.cu
+git grep -n -F "static constexpr int kYocoMin" -- src/dsv41/ds4_model.cu</code></pre>
+<h3>コードの中にしかないスイッチ</h3>
+<p><code>DS4_ATTN_SPLIT=1</code> は split-KV デコードカーネルを有効にします（既定は無効）。<code>DS4_YOCO</code> または <code>STRATA_DS4_PROMPT_SKIP</code> は、長いプロンプトの近道を選びます。1 が既定、2 は DeepSeek 自身のサービスのルール、0 は無効です。<span class="ev ev-code">コード上の事実</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L2027-L2031" target="_blank" rel="noopener noreferrer">ds4_kernels.cu の 2027–2031 行目</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9266-L9272" target="_blank" rel="noopener noreferrer">ds4_model.cu の 9266–9272 行目</a>）</p>
+<h3>ドキュメントとコードが食い違うところ</h3>
+<p>setup.py の 795 行目のコメントには “(4096 and 8192; 64K is not tried yet)” とあります。ドキュメントと、同じファイルの 8533–8536 行目のチェックは、一致して 8K から 1M を許可しています。このページでは、コードとドキュメント本文に従って扱いました。</p>
+<h3>確認していないこと</h3>
+<p>最初の 20 層の各ソース層の圧縮比 R と、どの層の R が 0 なのかは、固定したリポジトリにはなく、pack の ds4.txt にあります。そのため、モデル全体の KV の合計と、「6.5K トークンあたり約 17 MB」の細かい内訳は、このページでは計算できていません。インデクサーのヘッド数 32 はラボのコメントにしかなく、候補ブロックの 8 と 2048 は 1 つのテスト用フィクスチャにしかありません。インタラクティブ図の動作は別のファイルが実装しているので、このページに書いたのは静的な図だけです。</p>
+</details>

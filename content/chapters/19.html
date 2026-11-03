@@ -1,5 +1,5 @@
 <div class="hook"><span class="eyebrow">你可能注意到过</span>
-<p>看 Strata 写字，有时会觉得它是“一蹦一串”地往外冒，而不是一个字一个字地挤。README 的说法是：一个小帮手先猜后面几个词，大模型一次把这些猜测全部检查一遍，所以同样的答案能快 1.6–1.8 倍。<span class="ev ev-report">上游报告</span>[S01]</p>
+<p>看 Strata 写字，有时会觉得它是“一蹦一串”地往外冒，而不是一个字一个字地挤。上游文档的说法是：一个小帮手先猜后面几个词，大模型一次把这些猜测全部检查一遍，所以同样的答案能快 1.6–1.8 倍。<span class="ev ev-report">上游报告</span>[S02]</p>
 <p>上游文档还说，模型自带的猜测层一次最多猜 3 个 token。<span class="ev ev-report">上游报告</span>[S02] 问题来了：猜对的 token 等于白赚，为什么不一次猜 10 个？这一章回答两件事：猜几个最划算，以及接受率一直在变时，引擎怎样边跑边改主意。</p></div>
 <p class="tldr"><strong>一句话：</strong>多猜一个 token，期望多拿到的部分按几何级数越来越少，验证一轮的时间却一直在涨。Strata 比较的是“每毫秒期望提交几个 token”，并用指数移动平均边跑边更新接受率。</p>
 
@@ -227,7 +227,7 @@
 
 <h2 id="sec-5">19.5 Strata 真正在跑的是哪一个</h2>
 <p>到这里讲的控制器在 <code>src/spec/controller.cpp</code> 里。它编译进 <code>strata_spec</code> 库，有自己的单元测试 <code>controller_test</code>。<span class="ev ev-code">代码事实</span> 但打开生成主程序 <code>generate.cpp</code>（它是可执行文件 <code>strata</code> 的主源码；v0.1.44 起，Qwen3.6 的模型文件在 <code>main</code> 开头就交给另一条引擎路径，那里每轮的草稿数由 <code>--mtp N</code> 固定），它引入的是另一个头文件 <code>draft_policy.hpp</code>，生成循环调用的是 <code>DraftPolicy</code>。本书检查过的引擎源码里，没有找到对 <code>Controller</code> 的调用。<span class="ev ev-code">代码事实</span> 图 19-7 把两者并排放。</p>
-<figure class="fig"><svg viewBox="0 0 400 268" role="img" aria-label="图 19-7：Controller 用公式模型估成本并决定 MTP 窗口，只在单元测试里被调用；DraftPolicy 用实测耗时，只决定要不要换成查找草稿，被生成主循环调用">
+<figure class="fig"><svg viewBox="0 0 400 268" role="img" aria-label="图 19-7：Controller 用公式模型估成本并决定 MTP 窗口，只在单元测试里被调用；DraftPolicy 用实测耗时，默认只决定要不要换成查找草稿，被生成主循环调用">
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="185" height="200" rx="8"/>
 <text class="f-text" fill="#182f2b" x="22" y="32" font-size="13" font-weight="600">Controller</text>
 <text class="f-muted" fill="#5c6d66" x="22" y="50" font-size="12">src/spec/controller.cpp</text>
@@ -240,8 +240,8 @@
 <rect class="f-soft" fill="#e5f1df" x="205" y="10" width="185" height="200" rx="8"/>
 <text class="f-text" fill="#182f2b" x="217" y="32" font-size="13" font-weight="600">DraftPolicy</text>
 <text class="f-muted" fill="#5c6d66" x="217" y="50" font-size="12">src/spec/draft_policy.cpp</text>
-<text class="f-text" fill="#182f2b" x="217" y="76" font-size="12">MTP 窗口由 --spec 定</text>
-<text class="f-text" fill="#182f2b" x="217" y="100" font-size="12">只决定：换不换查找草稿</text>
+<text class="f-text" fill="#182f2b" x="217" y="76" font-size="12">MTP 窗口默认由 --spec 定</text>
+<text class="f-text" fill="#182f2b" x="217" y="100" font-size="12">默认只决定换不换查找草稿</text>
 <text class="f-text" fill="#182f2b" x="217" y="124" font-size="12">成本：实测每轮耗时</text>
 <text class="f-text" fill="#182f2b" x="217" y="148" font-size="12">MTP 产出：实测的平均</text>
 <text class="f-text" fill="#182f2b" x="217" y="172" font-size="12">门槛：快 3% 才换</text>
@@ -249,9 +249,11 @@
 <text class="f-text" fill="#182f2b" x="200" y="236" font-size="12" text-anchor="middle">两者的目标相同：每毫秒期望提交的 token 数</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="256" font-size="12" text-anchor="middle">区别在于分母：一个靠公式估，一个靠秒表测</text>
 </svg><figcaption>图 19-7　同一个目标函数，两种实现。真正在生成循环里做决定的是右边：它不再用公式猜成本，而是记下每种窗口实际跑了多久。</figcaption></figure>
-<p>先说 MTP 这一侧。生成循环里，MTP 的窗口长度来自启动参数 <code>--spec</code>，除第一轮外每轮固定；只有设置了 <code>--spec-min-p</code> 时才会缩短：草稿层对某个草稿的把握低于这个门槛，就不再往窗口里加。<span class="ev ev-code">代码事实</span> 上游文档的说法是 MTP 一次最多猜 3 个。<span class="ev ev-report">上游报告</span>[S02]</p>
-<p><code>DraftPolicy</code> 管的是另一件事：<dfn>提示词查找</dfn>（prompt lookup）。如果正在写的内容重复了上下文里的某一段，比如改代码时照抄原来的几行，那么上次那段后面跟着什么，这次多半也一样，可以直接拿来当草稿。查找草稿最多 5 个，而且只在实测的接受率和成本都说划算时才用。上游报告的效果是：改代码快 6–11%，普通文本不变。<span class="ev ev-report">上游报告</span>[S02] 生成循环里还有一个前提：启用 MTP 时，查找草稿的第一个 token 必须和 MTP 自己的第一个草稿一致，才交给 <code>DraftPolicy</code> 判断。<span class="ev ev-code">代码事实</span></p>
-<p><code>DraftPolicy</code> 的算法仍是这一章的公式：查找一侧 E(k) = 1 + q + q² + … + qᵏ，q 是按“匹配了多长”分桶统计的接受率；MTP 一侧直接用实测的每轮平均产出。分母不再是公式，而是每种窗口长度实测的每轮耗时，用 α = 0.1 的 EMA 平滑；没测过的长度，按一条预设的形状曲线从测过的长度换算。查找窗口要比 MTP 窗口快 3% 以上才会被选中。<span class="ev ev-code">代码事实</span></p>
+<p>先说 MTP 这一侧。默认设置下，生成循环里 MTP 的窗口长度来自启动参数 <code>--spec</code>，除第一轮外每轮固定；只有设置了 <code>--spec-min-p</code> 时才会缩短：草稿层对某个草稿的把握低于这个门槛，就不再往窗口里加。<span class="ev ev-code">代码事实</span> 上游文档的说法是 MTP 一次最多猜 3 个。<span class="ev ev-report">上游报告</span>[S02]</p>
+<p>v0.2.3 起多了一个开关 <code>STRATA_SPEC_COST=1</code>，把这一侧也交给实测。MTP 一个一个地起草，每起草一个，<code>DraftPolicy</code> 就用“概率相近的草稿实际被接受的比例”估一遍 E，再除以实测的窗口耗时；只要再多一两个草稿还有机会超过目前最好的窗口，就继续起草，否则停在最好的窗口。耗时表按上下文长度分三档：6K 以内、24K 以内、更长。<span class="ev ev-code">代码事实</span> 它只改变验证哪几行，每个 token 仍由大模型拍板。这个开关默认关闭；只有 DGX Spark（GB10）从 v0.2.7.1 起默认打开它。<span class="ev ev-code">代码事实</span> 上游报告在这张卡上解码快 4.7%，而 <code>"parallel": 8</code> 时它约慢 3.5%，上游建议关掉。<span class="ev ev-report">上游报告</span></p>
+<p>上游还有一个默认关闭的 DFlash2 草稿器：Terminal 里用 <code>strata launch --drafting dflash2</code> 打开，只用于 Qwen3.8-Flash-Next。默认的 auto 等于 MTP，因为还没有哪张卡显示它处处更快。<span class="ev ev-report">上游报告</span></p>
+<p><code>DraftPolicy</code> 管的是另一件事：<dfn>提示词查找</dfn>（prompt lookup）。如果正在写的内容重复了上下文里的某一段，比如改代码时照抄原来的几行，那么上次那段后面跟着什么，这次多半也一样，可以直接拿来当草稿。查找草稿最多 5 个，而且只在实测的接受率和成本都说划算时才用。上游报告的效果是：改代码快 6–11%，普通文本不变。<span class="ev ev-report">上游报告</span>[S02] 生成循环里还有一个前提：启用 MTP 时，查找草稿的第一个 token 必须和 MTP 自己的第一个草稿一致，才交给 <code>DraftPolicy</code> 判断；打开概率式草稿 <code>STRATA_SPEC_PROB=1</code> 时是例外。<span class="ev ev-code">代码事实</span></p>
+<p><code>DraftPolicy</code> 的算法仍是这一章的公式：查找一侧 E(k) = 1 + q + q² + … + qᵏ，q 是按“匹配了多长”分桶统计的接受率；MTP 一侧直接用实测的每轮平均产出。分母不再是公式，而是每种窗口长度实测的每轮耗时，用 α = 0.1 的 EMA 平滑（打开 <code>STRATA_SPEC_COST</code> 时，每种窗口的头几次测量改取平均）；没测过的长度，按一条预设的形状曲线从测过的长度换算。查找窗口要比 MTP 窗口快 3% 以上才会被选中。<span class="ev ev-code">代码事实</span></p>
 <p>这是一个很好的工程教训：成本模型写得再细，也比不上直接测。机器不同、上下文长度不同，每轮的时间都会变；实测值天然跟着机器走。</p>
 
 <h2 id="sec-6">19.6 动手：自己找最佳窗口</h2>
@@ -285,7 +287,7 @@
 <p>单看 <code>Controller</code> 的两个函数，还有一个值得注意的边界：选了“不猜”之后，<code>observe</code> 会直接返回，估计不再更新。<span class="ev ev-code">代码事实</span>[S09] 如果噪声把估计一度压到门槛以下，单靠这两个函数就再也学不回来，需要调用方另行探索。（本章模块里有一个测试专门演示了这一点。）<code>DraftPolicy</code> 有显式的探索：一个没测过耗时的查找窗口，只要接受率估计不低于 0.85，前 3 次会被直接试用；注释说验证保证了输出不变，赌上的只是这一轮的速度（这条注释写于尾部跳过之前，见下一小节）。<span class="ev ev-code">代码事实</span> v0.1.40.2 又补了一条：一个测过、但已经超过 300 轮没再测的查找窗口，在接受率估计不低于 0.85 时也会被重新试用。注释给的理由是：它的耗时可能是在某一段特别慢的时候测的，按这个价格它永远选不上，也就永远不会再测。<span class="ev ev-code">代码事实</span></p>
 <h3>输出会不会因为草稿而变</h3>
 <p>不开尾部跳过时，原理上不会：每个提交的 token 都是大模型自己的选择。但上游文档指出一个浮点层面的例外：使用 IQ 量化的模型时，CPU 算一个 token 的专家和算多个 token 的专家用不同的内核，舍入略有不同；而一个专家被几个 token 共享，取决于验证窗口里的草稿。所以温度为 0 时，同一个提示词也可能得到另一个同样合理的回答。设置 <code>STRATA_IQ_MT_MIN=1</code> 后，所有分组都用多 token 内核，答案就不再因为这处舍入依赖草稿。<span class="ev ev-report">上游报告</span>[S03]</p>
-<p>第二个例外来自 v0.1.42 起服务端默认打开的路由尾部跳过（第 18 章 18.2 节）。它按整个验证窗口决定少算哪些不在显存里的专家，所以从代码看，草稿不同，大模型算出的数值也可能不同。<span class="ev ev-code">代码事实</span>（<code>src/core/expert_source.cpp</code>）要让答案和草稿无关，还要设 <code>STRATA_ROUTE_TAIL_SKIP=0</code>。上游文档里“答案不再依赖草稿”那句没跟着更新，本书以代码为准。</p>
+<p>第二个例外来自路由尾部跳过（第 18 章 18.2 节）。它从 v0.1.42 起在 CUDA 服务端默认打开，v0.1.43 起 HIP 的 gfx1200 和 gfx1201 也一样；NVFP4 专家、显存已缓存 90% 以上的专家、<code>--batch</code> 槽位等情形默认不开。<span class="ev ev-code">代码事实</span> 它按整个验证窗口决定少算哪些不在显存里的专家，所以从代码看，草稿不同，大模型算出的数值也可能不同。<span class="ev ev-code">代码事实</span>（<code>src/core/expert_source.cpp</code>）要让答案和草稿无关，还要设 <code>STRATA_ROUTE_TAIL_SKIP=0</code>。上游文档里“答案不再依赖草稿”那句没跟着更新，本书以代码为准。</p>
 <h3>验收标准</h3>
 <p>检验一个窗口控制器，边界比一条漂亮的曲线更有说服力：</p>
 <ul>

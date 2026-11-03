@@ -31,3 +31,8 @@ test('the loop count equals the number of generated tokens', () => {
   assert.equal(m.engineInput(7, 3), 10);
   assert.throws(() => m.loopRounds(-1));
 });
+
+test('widget text does not cite the README 30,000 tokens/minute rule (gone at v0.2.9)', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/viz/01-journey.js'), 'utf8');
+  assert.ok(!/30[,.]000/.test(src), 'stale README rule of thumb still in the widget');
+});

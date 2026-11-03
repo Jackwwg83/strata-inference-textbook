@@ -207,6 +207,7 @@
 <text class="f-muted" fill="#5c6d66" x="200" y="228" font-size="12" text-anchor="middle">交互版：逐片送入 6 个片段，看思考、正文、工具调用怎样分开</text>
 </svg><figcaption>图 23-7　解析器只扣住“可能是标签开头”的几个字符，其余文字照常立刻发出。这样既不漏出半截标签，也不拖慢显示。</figcaption></figure></div>
 <p>真实的 <code>OutputParser</code> 比这个组件多做了两件事。第一，它会边写边报告工具调用的进度：工具名一出现就发一个开始事件，参数也一段段报告，免得客户端在模型写一个大文件时干等几分钟。<span class="ev ev-code">代码事实</span> 第二，标签前后的换行也要小心处理，保证流式输出和一次性输出的结果完全一致。</p>
+<p>模型写工具调用时偶尔不照模板的写法来：比如不带 <code>&lt;tool_call&gt;</code> 外壳，或在外壳里直接写 JSON。v0.2.8 起，服务器默认把这类调用救回来，当成工具调用交给客户端；在模型的运行配置里写 <code>"tool_call_recovery": false</code> 可以关掉。<span class="ev ev-code">代码事实</span> 上游报告：在 1,462 个智能体回合里，按本意读对的比例从 92.9% 升到 98.3%；它只管请求里声明过的工具。<span class="ev ev-report">上游报告</span> v0.2.9 又补两条。一，对话里已经调用过的工具，算作已声明，之后再调用它，仍按工具调用返回，不再当成普通文字。二，写在代码围栏或缩进代码块里的调用，只显示成代码，不执行；围栏要用至少一样长的同类标记才收尾，所以长围栏里夹着的短围栏不会提前结束它。<span class="ev ev-code">代码事实</span> 第二条贴近“模型的输出是不可信输入”：引用工具调用的文字，不该变成真的调用。</p>
 <p>工具调用还牵涉安全。模型写出一个函数名，不等于系统允许执行它：模型的输出是<strong>不可信输入</strong>，执行前要检查参数、检查权限。Strata 只给明确要求的请求（带 <code>"strata_mcp": true</code>）提供 MCP 工具，其他客户端看到的接口和原来一模一样。[S15] 第 24 章会继续讲“谁有权让模型做什么”。</p>
 
 <h2 id="sec-6">23.6 动手：把同一段流切成任意大小</h2>
@@ -235,7 +236,7 @@
 <h3>“OpenAI 兼容”指的是一个接口子集</h3>
 <p>“兼容”要按实现了哪些端点、哪些字段、什么语义来理解，不能只凭路径长得像 <code>/v1/...</code> 就判断全部兼容。本书只描述 <code>serve/server.py</code> 开头列出的端点和边界 [S15]，没有逐个审计所有协议字段。v0.1.39 新加的 <code>/v1/responses</code> 不在那份清单里。它的流式事件每条都带一行 <code>event:</code> 名字，从 <code>response.created</code> 开始，以 <code>response.completed</code>（或 incomplete、failed）结束。本书也没有审计它。<span class="ev ev-report">上游报告</span>几个读源码能确认的细节：第一个事件的 delta 是 <code>{"role":"assistant","content":""}</code>；思考内容放在 <code>reasoning_content</code> 字段；取消导致的结束，对客户端报告为 <code>stop</code>。</p>
 <h3>流已经开始了，才发现出错怎么办</h3>
-<p>HTTP 状态码在响应头里，响应头一旦发出就不能改。所以 Strata 把能提前发现的错误放在流开始之前：提问长度加上最大输出长度超过上下文时，直接回 400 拒绝，从不偷偷截断。[S15] 流开始后引擎才报错（例如引擎进程意外退出），状态码已经是 200 了，Strata 就在流里写一个带 <code>error</code> 字段的事件，再写 <code>data: [DONE]</code> 正常收尾；Anthropic 风格的接口则写一个 <code>event: error</code> 事件。<span class="ev ev-code">代码事实</span> 客户端必须检查事件内容，不能只看状态码。</p>
+<p>HTTP 状态码在响应头里，响应头一旦发出就不能改。所以 Strata 把能提前发现的错误放在流开始之前：提问本身就装不进上下文时，直接回 400 拒绝，从不偷偷截断提问。提问装得下、但提问加最大输出长度超过上下文时，v0.2.0-beta 起默认把最大输出长度缩短到剩下的空间；在运行配置里写 <code>"fit_max_tokens": false</code>（或启动参数 <code>--no-fit-max-tokens</code>），就回到严格的 400。<span class="ev ev-code">代码事实</span>[S15] 流开始后引擎才报错（例如引擎进程意外退出），状态码已经是 200 了，Strata 就在流里写一个带 <code>error</code> 字段的事件，再写 <code>data: [DONE]</code> 正常收尾；Anthropic 风格的接口则写一个 <code>event: error</code> 事件。<span class="ev ev-code">代码事实</span> 客户端必须检查事件内容，不能只看状态码。</p>
 <h3>模板沙箱只管模板这一层</h3>
 <p><code>frontend.py</code> 用 Jinja 的 <code>ImmutableSandboxedEnvironment</code> 渲染聊天模板。[S16] 这是模板层的具体防护，限制模板代码能做的事；它不能自动证明工具执行、图片 URL 获取、本地文件读取也都安全。每一种资源访问都需要单独的威胁模型。Strata 对 MCP 工具另有一道检查：只有 Strata 自己的网页（或配置里明确信任的来源），并且以 JSON 格式发送，才能让模型用这些工具，因为工具以你在这台电脑上的权限运行。<span class="ev ev-code">代码事实</span></p>
 <h3>验收方法与证据边界</h3>

@@ -81,6 +81,9 @@ test('event validation accepts known shapes and rejects the rest', () => {
   // Column pages (content/columns.json) count as page views, never as chapters.
   assert.deepEqual(a.sanitizeEvent({ type: 'pageview', route: 'deepinfer/wide-ep' }), { type: 'pageview', route: 'deepinfer/wide-ep', chapter: null, lab: null, detail: null, ref: null, lang: null, site: 'zh' });
   assert.equal(a.sanitizeEvent({ type: 'pageview', route: 'deepinfer' }).route, 'deepinfer');
+  assert.equal(a.sanitizeEvent({ type: 'pageview', route: 'deepseek/engram' }).route, 'deepseek/engram');
+  assert.equal(a.sanitizeEvent({ type: 'pageview', route: 'deepseek' }).route, 'deepseek');
+  assert.equal(a.sanitizeEvent({ type: 'pageview', route: 'deepseek/engram/x' }), null);
   for (const bad of [{ type: 'pageview', route: 'deepinfer/<b>' }, { type: 'pageview', route: 'deepinfer/wide-ep/x' }, { type: 'read', route: 'deepinfer/wide-ep', detail: '10:2' }, { type: 'chapter_done', route: 'deepinfer/overview' }]) assert.equal(a.sanitizeEvent(bad), null, JSON.stringify(bad));
   for (const bad of [null, 'x', {}, { type: 'hack', route: 'home' }, { type: 'pageview', route: '<script>' }, { type: 'pageview', route: 'chapter/1' },
     { type: 'pageview', route: 'x'.repeat(200) }, { type: 'quiz_answer', route: 'chapter/02', detail: 'drop table' }, { type: 'quiz_answer', route: 'home', detail: '1:correct' },

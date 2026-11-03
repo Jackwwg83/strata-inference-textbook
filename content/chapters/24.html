@@ -27,13 +27,13 @@
 </svg><figcaption>图 24-1　“停止”在每一层的含义不同。浏览器那一层最先停，显卡那一层最后停，中间每一层都要有人把信号往下传。</figcaption></figure>
 <p>为了把这件事讲清楚，先给请求画一张<dfn>状态机</dfn>：请求在任何时刻都处于某一个状态，只有特定的事件能让它换到另一个状态。下面是本书的教学版本：</p>
 <ul>
-<li><strong>排队</strong>：请求到了，但引擎正在服务别人。Strata 默认一次只服务一个序列，后来的都在 FIFO（先进先出）队列里等。[S15] v0.1.39 加了一个要手动打开的 <code>"parallel": N</code>：最多 N 个对话在引擎里一起解码，多出来的请求等空闲的槽位。<span class="ev ev-report">上游报告</span>[S01] 本章只讲默认的单序列路径。</li>
+<li><strong>排队</strong>：请求到了，但引擎正在服务别人。Strata 默认一次只服务一个序列，后来的都在 FIFO（先进先出）队列里等。[S15] v0.1.39 加了一个要手动打开的 <code>"parallel": N</code>：最多 N 个对话在引擎里一起解码，多出来的请求等空闲的槽位。<span class="ev ev-report">上游报告</span>[S01] 本章只讲默认的单序列路径。排队的时间也可以设上限：<code>--max-queue</code> 限制排队的个数，<code>--queue-timeout</code> 限制最多等几秒；这两项都是可选的，而且超时设置要配合 <code>--max-queue</code> 才能用。等超时的请求以 timeout 结束，这是本章那串状态里的一种结尾。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L9099-L9101" target="_blank" rel="noopener noreferrer">server.py</a>）v0.2.7 起，网页聊天页的“最近请求”表会给这种请求标一个 Timeout 徽章。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/web/app.js#L532-L534" target="_blank" rel="noopener noreferrer">app.js</a>）</li>
 <li><strong>读题</strong>：引擎一块一块地读你的提问（第 1 章讲过的 prefill）。</li>
 <li><strong>生成</strong>：一个 token 一个 token 地写答案。</li>
 <li><strong>完成 / 已取消 / 失败</strong>：三个终点。每个请求最后都必须落到其中一个，不能悬着。</li>
 <li><strong>取消中</strong>：已经喊了“停”，但引擎还没确认停下。这个中间状态最容易被忽略。</li>
 </ul>
-<p>这些状态名是本书的抽象，不是上游代码里的枚举。Strata 实际记录的是一个请求是“排队中”还是“生成中”，再加一句阶段说明，比如“正在读提问”“正在回答”。<span class="ev ev-code">代码事实</span> 下面的模拟器把整个过程放慢了：</p>
+<p>这些状态名是本书的抽象，不是上游代码里的枚举。Strata 实际记录的是一个请求是“排队中”还是“生成中”，再加一句阶段说明，比如“正在读提问”“正在回答”。<span class="ev ev-code">代码事实</span> v0.2.0-beta 起，服务器还会给 <code>/v1/telemetry</code> 留一串去掉内容的事件：queued、admitted、reading、first_token，结尾是 finished、cancelled、disconnected、timeout、error。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L4318-L4321" target="_blank" rel="noopener noreferrer">server.py</a>）上面的三个终点，是本书把这几种结尾合并成的教学版本。下面的模拟器把整个过程放慢了：</p>
 <div class="viz" data-viz="request-lifecycle"><figure class="fig"><svg viewBox="0 0 400 262" role="img" aria-label="图 24-2：请求的教学状态机。排队、读题、生成、完成是正常路径；取消中是读题和生成被取消后的中间状态，确认后才进入已取消；引擎失联则进入失败">
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="16" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="64" y="39" font-size="14" text-anchor="middle">排队</text>
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="152" y="16" width="96" height="36" rx="8"/><text class="f-text" fill="#182f2b" x="200" y="39" font-size="14" text-anchor="middle">读题</text>
@@ -84,7 +84,7 @@
 <p>服务器用 Python 的 <code>subprocess.Popen</code> 启动 <code>strata --serve</code>，把它的标准输入和标准输出都接成管道。<span class="ev ev-code">代码事实</span> 引擎加载好权重后，会先写几行 <code>INFO</code>，再写一行 <code>READY</code> 加上下文长度；如果这一行还带着 <code>stop</code>，说明这个引擎版本支持中途停止。服务器读到 <code>READY</code>，才把引擎当作“活着”。之后，服务器写一行 <code>GEN</code> 命令提交一个请求，引擎回 <code>T</code>（一个 token）、<code>PP</code>（读题进度）、<code>DONE</code>（结束）或 <code>ERR</code>（出错）。</p>
 <p>还有一个专门的读取线程，把引擎的每一行输出放进队列。这样，处理请求的线程就能“带超时地”等待下一行：等不到，可以先发个心跳、检查一下取消标志，而不是一直傻等。<span class="ev ev-code">代码事实</span></p>
 <p>引擎进程也会意外结束。代码里专门有一个 <code>EngineDied</code> 异常，注释写着最常见的原因：在 Linux 上，被内存不足时的 OOM killer 结束了。[S15] 这时当前请求以错误收尾，下一个请求到来时，服务器用同样的命令重新启动引擎。v0.1.39 起，如果新进程还没说 <code>READY</code> 就退出了，服务器隔 15 秒再试，最多试 3 次：刚死掉的引擎占着的显存，可能要过一会儿才还回来。<span class="ev ev-code">代码事实</span> v0.1.44 起，启动本身也会重试：引擎启动后 30 秒内就退出，日志里只有显卡运行时自己的报错（或者什么也没写），服务器就隔 2、4、8 秒再试。这多见于 ROCm 上的快速重启：上一个引擎的显卡队列还没拆完。v0.1.44.1 又收窄了这条规则：日志里什么也没写、进程却是被系统结束的（比如非法指令、坏内存访问），就不再重试，因为再试一次还会一样；报错里直接写出进程是怎么结束的。<span class="ev ev-code">代码事实</span></p>
-<p>正常关闭引擎也有讲究。服务器分三步走，每一步最多等 20 秒，见图 24-4。</p>
+<p>正常关闭引擎也有讲究。服务器分三步走：QUIT 等 20 秒，terminate 等 5 秒，kill 再等 20 秒，见图 24-4。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L110" target="_blank" rel="noopener noreferrer">server.py</a>）v0.1.45 的三步都是 20 秒；v0.2.0-beta 起，terminate 这一步缩成了 5 秒。</p>
 <figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 24-4：关闭引擎进程分三步：先写 QUIT 让它自己退出，不行再 terminate，再不行就 kill；三步之后仍未退出就报告错误">
 <text class="f-text" fill="#182f2b" x="200" y="18" font-size="13" font-weight="600" text-anchor="middle">关闭引擎进程：先礼后兵</text>
 <rect class="f-soft" fill="#e5f1df" x="8" y="32" width="86" height="76" rx="8"/>
@@ -105,13 +105,13 @@
 <text class="f-on" fill="#ffffff" x="347" y="94" font-size="12" text-anchor="middle">不假装已释放</text>
 <path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.5" d="M94 70H104M192 70H202M290 70H300"/>
 <text class="f-muted" fill="#5c6d66" x="51" y="128" font-size="12" text-anchor="middle">等 20 秒</text>
-<text class="f-muted" fill="#5c6d66" x="149" y="128" font-size="12" text-anchor="middle">等 20 秒</text>
+<text class="f-muted" fill="#5c6d66" x="149" y="128" font-size="12" text-anchor="middle">等 5 秒</text>
 <text class="f-muted" fill="#5c6d66" x="247" y="128" font-size="12" text-anchor="middle">等 20 秒</text>
 <text class="f-text" fill="#182f2b" x="10" y="164" font-size="12">为什么先礼后兵：引擎锁住了几十 GB 内存，</text>
 <text class="f-text" fill="#182f2b" x="10" y="184" font-size="12">让它自己有序释放，比被操作系统强行收回更稳妥。</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">Windows 上，引擎被放进一个“作业对象”：服务器无论</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">怎样退出，操作系统都会连带结束引擎。</text>
-</svg><figcaption>图 24-4　关闭引擎的三级台阶。每一级给 20 秒，三级都失败时如实报告“引擎还没退出”，而不是假装显存和内存已经还回来了。</figcaption></figure>
+</svg><figcaption>图 24-4　关闭引擎的三级台阶。三级依次给 20、5、20 秒，三级都失败时如实报告“引擎还没退出”，而不是假装显存和内存已经还回来了。</figcaption></figure>
 <p>注释解释了为什么第一步是 <code>QUIT</code>：引擎会自己释放内存，而解除几十 GB 锁页内存的锁定需要一些时间。<span class="ev ev-code">代码事实</span> 如果三步都失败，服务器抛出 <code>EngineStuck</code>，并且<strong>继续保留</strong>这个进程的记录，不会宣称它的显存和内存已经还回来了。另外，在 Windows 上，服务器把引擎放进一个设置了“关闭即结束”的作业对象。这样，即使你直接关掉控制台窗口，引擎也会随之结束，不会变成没人管的孤儿进程。<span class="ev ev-code">代码事实</span></p>
 
 <h2 id="sec-3">24.3 取消：把“停”一层层传下去</h2>
@@ -147,6 +147,8 @@
 </svg><figcaption>图 24-5　取消的六步。前三步只花不到一秒；第 ⑤ 步要等引擎走到检查点，在哪个阶段取消，决定了要等多久。</figcaption></figure>
 <p>第 ⑤ 步的检查点在哪里？生成时，每产出一个 token，循环就看一眼标志。读题时，引擎是一块一块读的：<code>prefill.hpp</code> 里的 <code>should_stop</code> 在<strong>每一块开始之前</strong>检查一次，返回真就提前结束，错误信息是 “cancelled”。<span class="ev ev-code">代码事实</span>[S12] 服务器的注释也写明：读题过程中发出的 STOP，要等当前这一块读完才会被看到。一块最多可以有 32768 个 token。[S15] 交互图里的“最坏要等多久”就是按这个算的。</p>
 <p>第 ⑥ 步同样重要。STOP 发出后，服务器要继续读引擎的输出，一直读到<strong>这个请求自己的</strong> <code>DONE</code>，而且全程拿着 FIFO 锁。注释解释了原因：如果提前放手，引擎队列里还残留着上一个请求的 <code>DONE</code>，下一个请求就会把它当成自己的结束信号。<span class="ev ev-code">代码事实</span> 这一步也有时限：等 STOP 的回音时绝不无限期地等，因为等待期间 FIFO 一直被占着，后面所有人都在排队。</p>
+<p>挂断不一定是取消。有的客户端（比如 OpenAI 的 SDK）收到 <code>data: [DONE]</code> 就挂断，那时答案已经全部写完了。v0.2.9 之前，Strata 应用自带的网关会把这种请求记成“Request cancelled”。现在，网关一看到 <code>[DONE]</code> 就记下来，之后的挂断不再算取消（#4690）。<span class="ev ev-report">上游报告</span> 这段逻辑在 <code>apps/host</code> 的网关里，不在 <code>serve/server.py</code> 里。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/apps/host/server/native-gateway.mjs#L5" target="_blank" rel="noopener noreferrer">native-gateway.mjs</a>）</p>
+<p>v0.2.7 起，网页聊天页还有一项设置：回答还没写完时，你又发了一条新消息，怎么办。选项是“等待”“回答后发送”和“打断”。“打断”就是网页自己先停掉当前这条回答，已写出的字保留，标成“已打断”，新消息马上发出。默认是“等待”：页面什么都不做。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/web/app.js#L1115-L1118" target="_blank" rel="noopener noreferrer">app.js</a>）</p>
 <p>测试时用的 <code>MockEngine</code> 也遵守这个约定：每吐一个 token 前，先看一眼取消标志。[S15] 所以取消逻辑可以在没有显卡的机器上测。</p>
 
 <h2 id="sec-4">24.4 卡住了怎么办：看门狗</h2>
@@ -174,7 +176,7 @@
 <text class="f-text" fill="#182f2b" x="310" y="206" font-size="12">≈ 983</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="236" font-size="12">一块按 32768 个 token 算；快的每秒读 2171 个，慢的 100 个</text>
 </svg><figcaption>图 24-6　看门狗的时限跟着工作阶段变。慢电脑读一大块提问时，时限会自动放宽到十几分钟，免得误杀正在干活的引擎。<span class="ev ev-est">教学推演</span></figcaption></figure>
-<p>图里的数字是代入代码常量算出来的。<span class="ev ev-est">教学推演</span> 第一块：300 + 32768 ÷ 50 ≈ 955 秒。快的电脑按上游实测的每秒 2171 个 token 读一块 32768 个 token，约 15.1 秒，3 倍是 45.3 秒，不到 300 秒，所以时限仍是 300 秒；慢的电脑每秒 100 个，一块要 327.7 秒，3 倍约 983 秒。</p>
+<p>图里的数字是代入代码常量算出来的。<span class="ev ev-est">教学推演</span> 第一块：300 + 32768 ÷ 50 ≈ 955 秒。快的电脑按上游 DETAILS.md 里的实测，每秒 2171 个 token（RTX 5070，Q2_0，引擎 0.1.26，32K 提示词）读一块 32768 个 token，约 15.1 秒，3 倍是 45.3 秒，不到 300 秒，所以时限仍是 300 秒；慢的电脑每秒 100 个，一块要 327.7 秒，3 倍约 983 秒。</p>
 <p>超时以后怎么办？注释里管这叫“两边失步”：引擎的主线程在等下一条命令，服务器却在等这个请求的结束。服务器结束引擎进程，这个请求以错误收尾，下一个请求到来时重新启动引擎。[S15] 结束进程虽然粗暴，好处是显存和内存一定会随进程一起还回来。</p>
 <p>v0.1.40.2 起，看门狗也管启动阶段（#1317）。以前，服务器等引擎说 <code>READY</code>、等图片编码器回话时都不设时限：一个启动时卡住的进程会一直占着请求的轮次，引擎闲在命令循环里，没有哪只看门狗会响，后面的请求全在排队。现在，等引擎的 <code>READY</code> 最多 900 秒；等图片编码器启动、等它读完一张图，各最多 300 秒。超时就结束那个进程，下一个请求再重新启动它。环境变量 <code>STRATA_ENGINE_READY_S</code>、<code>STRATA_VISION_READY_S</code>、<code>STRATA_VISION_ENCODE_S</code> 可以改这三个时限，设成 0 表示不限。时限故意放得很宽：冷启动加载模型、慢硬盘、慢 CPU 编码图片，都不算卡死。<span class="ev ev-code">代码事实</span>[S15]</p>
 <p>更底层也有同样的思路。负责验证草稿 token 的 <code>Verifier</code> 有一个 <code>release_gpu_waits</code>：显卡上的一批计算卡住、无法正常结束时，它把显卡上所有等待的标志强行放行，让这批计算排空。但从此以后，这个 Verifier <strong>拒绝</strong>再执行任何新的计算窗口，因为那批计算是在不可信的条件下跑完的。<span class="ev ev-code">代码事实</span>[S08] 强行排空不等于正常完成，不能装作什么都没发生，继续服务下一个请求。</p>
@@ -188,7 +190,7 @@
 <p>比对本身也有讲究。普通的字符串比较一旦遇到不同的字符就立刻返回，猜对的前缀越长，比较花的时间就越久。攻击者测量时间，就能一位一位地猜出密钥。这类利用耗时、功耗等“副产品”泄露信息的攻击叫<dfn>旁路攻击</dfn>，这一种叫<dfn>计时攻击</dfn>。防法是用<dfn>恒定时间比较</dfn>：不管从哪一位开始不同，都把整串比完再返回。</p>
 <p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/API密鑰" target="_blank" rel="noopener noreferrer">维基百科：API 密钥</a> · <a href="https://zh.wikipedia.org/zh-cn/旁路攻击" target="_blank" rel="noopener noreferrer">维基百科：旁路攻击</a> · <a href="https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Reference/Headers/Authorization" target="_blank" rel="noopener noreferrer">MDN：Authorization 头</a> · <a href="https://docs.python.org/zh-cn/3/library/hmac.html" target="_blank" rel="noopener noreferrer">Python 文档：hmac.compare_digest</a> · <a href="https://www.rfc-editor.org/rfc/rfc6750" target="_blank" rel="noopener noreferrer">RFC 6750：Bearer 令牌</a></p>
 </aside>
-<p>Strata 的第一道防线是<strong>默认只听本机</strong>：服务器默认监听 <code>127.0.0.1</code>，别的设备根本连不上。<span class="ev ev-code">代码事实</span> 这时 README 告诉你，应用里随便填一个 API Key 都行。[S01] 想从手机或另一台电脑访问，就要改成监听 <code>0.0.0.0</code>，README 的原话是“一定要设一个密钥”。[S01] 如果你改了监听地址却没设密钥，服务器启动时会打出一行警告：没有 API Key，网络里的任何人都能用这个模型。<span class="ev ev-code">代码事实</span></p>
+<p>Strata 的第一道防线是<strong>默认只听本机</strong>：服务器默认监听 <code>127.0.0.1</code>，别的设备根本连不上。<span class="ev ev-code">代码事实</span> 这时上游文档说，应用里随便填一个 API Key 都行。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DETAILS.md#L36" target="_blank" rel="noopener noreferrer">DETAILS.md</a>）想从手机或另一台电脑访问，就要改成监听 <code>0.0.0.0</code>。上游文档对密钥的说法是“建议，不是必须”。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DETAILS.md#L613-L615" target="_blank" rel="noopener noreferrer">DETAILS.md</a>）如果你改了监听地址却没设密钥，服务器启动时会打出一行警告：没有 API Key，网络里的任何人都能用这个模型。<span class="ev ev-code">代码事实</span> v0.2.2 起，服务器和应用不设密钥也不会被拒绝（Terminal 这一部分 0.2.1.3 已有）。只是要你明说：用 <code>--no-api-key</code>，或在配置里写 <code>"api_key": "none"</code>。警告还是那一行。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L8369-L8382" target="_blank" rel="noopener noreferrer">server.py</a>）经 Cloudflare 隧道公开的地址，警告更重；Terminal 和应用仍然默认帮你生成一把密钥。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/TERMINAL_LAUNCH.md#L62-L65" target="_blank" rel="noopener noreferrer">TERMINAL_LAUNCH.md</a>）</p>
 <p>设了密钥以后，访问 <code>/v1/*</code> 的请求必须带上它：写成 <code>Authorization: Bearer …</code>，或者写在 <code>x-api-key</code> 头里（Anthropic 风格的客户端用这个）。比对用的是 <code>hmac.compare_digest</code>，代码注释写着“恒定时间”；比对失败回 401，类型是 <code>authentication_error</code>。<span class="ev ev-code">代码事实</span> v0.1.41 起可以设好几把密钥：命令行或环境变量里用逗号隔开，或者在配置里写成列表。服务器把客户端带来的密钥和每一把都比一遍，不管哪一把先对上，都比完再返回，所以仍是恒定时间。一把本身含逗号的密钥，从命令行或环境变量给会被切开，要写成配置里的列表。<span class="ev ev-code">代码事实</span> 整个判断过程见图 24-7。</p>
 <figure class="fig"><svg viewBox="0 0 400 310" role="img" aria-label="图 24-7：Strata 检查 API Key 的流程：没设密钥直接放行；设了密钥就取出客户端带的密钥，和每一把密钥做恒定时间比较，对上任一把才处理，都不对回 401">
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="8" width="200" height="34" rx="8"/>
@@ -243,7 +245,7 @@
 <div class="recap"><h3>记住这三点</h3><ol>
 <li>一个请求要穿过浏览器、HTTP 连接、服务进程、引擎进程和显卡。每层“停了”的含义不同，取消信号要一层层传下去，并且要确认。</li>
 <li>Strata 的取消是协作式的：监视线程每 0.5 秒查一次连接，设下取消标志；引擎在检查点停下，服务器读到这个请求自己的 DONE 才释放 FIFO。读题时检查点隔得远，取消就慢。</li>
-<li>Strata 默认只听本机。对外开放时必须设 API Key，比对用恒定时间的 <code>hmac.compare_digest</code>，防止计时攻击。</li>
+<li>Strata 默认只听本机。对外开放时应当设 API Key（不设，服务器也能启动，只是警告），比对用恒定时间的 <code>hmac.compare_digest</code>，防止计时攻击。</li>
 </ol></div>
 <div class="myth"><p><strong>常见误解：“关掉网页，显卡就停了。”</strong></p>
 <p>关掉网页只停了最上面一层。服务器要先发现连接断了，再通知引擎，引擎还要走到下一个检查点才会停。Strata 在修复 #430、#431 之前，就出现过客户端早已离开、引擎还在一直算的情况。“停了”要在每一层分别确认。</p></div>
@@ -251,7 +253,7 @@
 <details class="deep"><summary>深入一层：取消的线性化点、迟到的旧回包与信任边界</summary>
 <h3>取消从哪一刻起算“生效”</h3>
 <p>可以把取消定义为：从某个已经确认的边界开始，不再向用户提交新的 token，并且相关资源最终停止使用。这个边界就是取消的<dfn>线性化点</dfn>。只设了一个标志、还没被读题的分块循环或生成循环看到时，取消并没有完成。</p>
-<p>按本书对 <code>serve/server.py</code> 的阅读，请求拿到 FIFO 锁、把 <code>GEN</code> 命令发给引擎之后，在等待引擎输出的循环里检查取消标志：每收到一行 token 或读题进度时查一次，引擎没有输出时每 0.5 秒查一次。<span class="ev ev-code">代码事实</span> v0.1.40 时，没有输出的情况下要等满 10 秒才查一次；v0.1.40.2 把这段间隔缩到了 0.5 秒（#1182）。排队这一段，v0.1.42 起也查了（#1619）：排队的请求每 10 秒醒一次，客户端已经走了，就让出位置，以“已取消”结束，不发 <code>GEN</code>；客户端还在，就发一条保活。<span class="ev ev-code">代码事实</span> v0.1.43.1 起，准备图片这一段也查（#1999）：下载每张图之前、等图片编码器的轮次时（每 0.25 秒看一次）、编码两张图之间，客户端走了，请求就此结束，不再往下做。<span class="ev ev-code">代码事实</span> 可拿到锁的那一刻，仍然不查。在最后一次检查之后、轮到它之前才挂断的请求，仍会让引擎开始读它的提问，之后才收到 STOP。一个值得做的扩展练习：拿到锁之后、发命令之前，再检查一次标志。</p>
+<p>按本书对 <code>serve/server.py</code> 的阅读，请求拿到 FIFO 锁、把 <code>GEN</code> 命令发给引擎之后，在等待引擎输出的循环里检查取消标志：每收到一行 token 或读题进度时查一次，引擎没有输出时每 0.5 秒查一次。<span class="ev ev-code">代码事实</span> v0.1.40 时，没有输出的情况下要等满 10 秒才查一次；v0.1.40.2 把这段间隔缩到了 0.5 秒（#1182）。排队这一段，v0.1.42 起也查了（#1619）：排队的请求每 10 秒醒一次，客户端已经走了，就让出位置，以“已取消”结束，不发 <code>GEN</code>；客户端还在，就发一条保活。<span class="ev ev-code">代码事实</span> v0.1.43.1 起，准备图片这一段也查（#1999）：下载每张图之前、等图片编码器的轮次时（每 0.25 秒看一次）、编码两张图之间，客户端走了，请求就此结束，不再往下做。<span class="ev ev-code">代码事实</span> v0.2.0-beta 起，拿到锁的那一刻也查一次：客户端已经走了，就把锁还回去，以“已取消”结束。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L5604-L5607" target="_blank" rel="noopener noreferrer">server.py</a>）但是拿到锁以后、发 <code>GEN</code> 命令之前，中间还隔着别的步骤（比如必要时重新启动引擎），这一段不再查。在这一段里才挂断的请求，仍会让引擎开始读它的提问，之后才收到 STOP。一个值得做的扩展练习：发命令之前，再检查一次标志。</p>
 <h3>例题：超时后的旧回包</h3>
 <p>请求 A 超时，服务开始处理请求 B。如果 A 迟到的结果仍然写进共享的输出队列，B 就可能收到 A 的 token，或者把 A 的 <code>DONE</code> 当成自己的结束。解决方向是给输出加上归属校验，并且在旧执行确认结束之前，不复用同一份可变状态。</p>
 <p>Strata 的做法正是后者：发 STOP 之后，一直读到这个请求自己的 <code>DONE</code>，全程拿着 FIFO 锁；统计用量时，也只认这个请求期间到达的 <code>DONE</code>，否则一个出错或断开的请求，会把上一个请求的解码数字记成自己的。<span class="ev ev-code">代码事实</span> 本书没有审计上游所有的输出归属路径；课堂上可以用一个故意延迟的 mock 引擎构造这种风险，再验证修复。</p>
@@ -259,7 +261,7 @@
 <p>把“暂时没有文字输出”一律当成死锁，会误杀正在读长提问的健康请求；永远等待，又会堵死整个 FIFO。合理的诊断要能区分：排队、合法的长计算、慢速 I/O、子进程失联、协议失步，并且报告状态和最后的进度，而不是只给一个含糊的“超时”。Strata 按读题分块调整时限，并把失联原因写进错误信息，就是这个思路。[S15]</p>
 <p>同理，“显式的模型控制”（加载、卸载）不能打断正在运行或排队的请求：代码里为此专门定义了 <code>ModelBusy</code>。[S15] 上游文档说明，这时控制接口返回 409。<span class="ev ev-report">上游报告</span></p>
 <h3>工具、图片 URL 和本地文件都是信任边界</h3>
-<p>模型输出是不可信输入。工具参数要经过结构校验和权限检查；获取远程 URL 牵涉对外访问和资源限制；读取本地路径牵涉文件权限和路径范围。Strata 的图片输入支持 base64 数据、http(s) URL 和本地文件路径三种来源。[S15] v0.1.40 给这些入口补了三道检查：指向别的电脑的网络路径一律不读；从 URL 读图片最多读 32 MiB；别的网站的网页不能让服务器把本机文件当图片读。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/477ac13cbe8e582c20484871ce459d20d82df09d/serve/server.py#L2390-L2427" target="_blank" rel="noopener noreferrer">server.py</a>）上游自己也是一个入口一个入口补的：社区提交的修复漏了 <code>/v1/responses</code> 这个入口，维护者合并时才补上。<span class="ev ev-report">上游报告</span> 服务器去取 http(s) URL 这一环是否防住了 SSRF，本书没有审计。安全要逐个入口审计，不能因为某处用了一个安全的库，就断言整体安全。</p>
+<p>模型输出是不可信输入。工具参数要经过结构校验和权限检查；获取远程 URL 牵涉对外访问和资源限制；读取本地路径牵涉文件权限和路径范围。Strata 的图片输入支持 base64 数据、http(s) URL 和本地文件路径三种来源。[S15] v0.1.40 给这些入口补了三道检查：指向别的电脑的网络路径一律不读；从 URL 读图片最多读 32 MiB；别的网站的网页不能让服务器把本机文件当图片读。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L2914-L2951" target="_blank" rel="noopener noreferrer">server.py</a>）上游自己也是一个入口一个入口补的：社区提交的修复漏了 <code>/v1/responses</code> 这个入口，维护者合并时才补上。<span class="ev ev-report">上游报告</span> 服务器去取 http(s) URL 这一环是否防住了 SSRF，本书没有审计。安全要逐个入口审计，不能因为某处用了一个安全的库，就断言整体安全。</p>
 <p><code>frontend.py</code> 用沙箱化的 Jinja 环境渲染模板。[S16] 这是模板层的具体选择，不能自动证明工具执行、URL 获取和文件访问都安全。每一种资源都需要单独的威胁模型。</p>
 <h3>“取消完成”的验收清单</h3>
 <p>在 mock 引擎里注入这些情况：读题时取消、输出中断、重复取消、引擎无响应、旧结果迟到、恢复后再次请求。验收条件：不再提交新的用户可见 token；所有读写相关缓冲的任务都已停止或完成；队列和状态不会被下一个请求误用；迟到的旧输出能被识别并丢弃；资源只释放一次；客户端得到明确的“已取消”或“失败”，而不是“成功”。</p>

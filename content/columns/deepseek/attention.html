@@ -1,0 +1,312 @@
+<div class="hook"><span class="eyebrow">换个引擎看</span>
+<p>第 8 章讲过，注意力是“带着问题回头翻书”：每个新字都要给前文打分，上下文越长，要翻的页越多。Strata 的 Qwen 路径用两招省力：24 个查询头共用 2 套键值，再从全部位置里最多挑 2051 个来看。</p>
+<p>DeepSeek-V4.1-Flash 在 strata-dsv41 里走了另一条路。最近 128 个字一行不少地留着；更早的字按 R 个一组揉成一行（V4.1 的 20 到 39 层 R = 1，不揉，只靠 FP4 和共享来源层省空间）；再由一个小打分器从这些行里挑最多 512 行。上下文从 8K 涨到 1M，每个字、每一层参与注意力的行数仍是同一个上限。这一页回答三个问题：一个字到底读哪些行；这些行为什么这么小；以及为了让对话退得回、停得下，引擎要把哪些状态存下来。</p></div>
+
+<p class="tldr"><strong>一句话：</strong>每个字在每一层读三处：最近 128 行（窗口环，覆盖式）、索引器从压缩行里挑出的最多 512 行（只追加）、再往 softmax 的分母里加一个每头学来的 sink 数；64 个头共用同一行 K = V（512 维）和同一张挑选清单。参与注意力的行数因此有上限，缓存里只留压缩行（每 R 个位置一行）。代价转到了索引器：来源层和没用预筛的索引层每步要扫过全部压缩行，读完一段提示要做平方量级的打分。</p>
+
+<h2 id="sec-1">3.1 一个字回头看什么：128 行、挑出的 512 行和一个 sink</h2>
+<p>一层注意力怎么算，ds4_model.cu 的文件头写成了一份配方。对第 p 个字，这一层依次做五件事。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8-L10" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 8–10 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.hpp#L6-L10" target="_blank" rel="noopener noreferrer">ds4_model.hpp 第 6–10 行</a>）</p>
+<ol>
+<li>隐藏状态经 wq_a、wq_b 两步低秩投影，变成 64 个头、每头 512 维的 q。</li>
+<li>另投影出这个字自己的一行 K = V，512 维，舍入到 FP8，写进这一层的窗口环。</li>
+<li>读三处：窗口环里最近的 128 行；索引器从压缩行里挑出的最多 512 行（压缩比大于 0 的层才有）；每个头一个学来的 sink。</li>
+<li>每个头用 q 给这些行打分，过 softmax，加权求和。64 个头读同一批行。</li>
+<li>输出的旋转部分转回去，舍入到 FP8，经分组的 wo_a 和 wo_b 投影。</li>
+</ol>
+<figure class="fig"><svg viewBox="0 0 440 350" role="img" aria-label="图 DS3-1：一层注意力对一个字做的事：投影出 q 和一行 K = V，读窗口环、挑出的压缩行和 sink，打分求和，再投影输出">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="8" width="220" height="34" rx="7"/>
+<text fill="currentColor" x="220" y="29" font-size="12" text-anchor="middle">这一层收到：第 p 个字的隐藏状态</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 42V54M115 54V66M325 54V66M115 54H325"/>
+<path class="f-muted" fill="#5c6d66" d="M111 62L115 70L119 62ZM321 62L325 70L329 62Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="72" width="205" height="48" rx="7"/>
+<text fill="currentColor" x="115" y="93" font-size="12" text-anchor="middle">q：wq_a、wq_b 低秩投影</text>
+<text class="f-muted" fill="#5c6d66" x="115" y="111" font-size="12" text-anchor="middle">64 个头 × 512 维</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="223" y="72" width="205" height="48" rx="7"/>
+<text fill="currentColor" x="325" y="93" font-size="12" text-anchor="middle">这个字的一行 K = V（512 维）</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="111" font-size="12" text-anchor="middle">舍入 FP8，写进环槽 p mod 128</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M115 120V132M325 120V132M115 132H325M220 132V146"/>
+<path class="f-muted" fill="#5c6d66" d="M216 142L220 150L224 142Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="152" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="78" y="172" font-size="12" text-anchor="middle">最近 128 行</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="190" font-size="12" text-anchor="middle">窗口环，覆盖式</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="208" font-size="12" text-anchor="middle">FP8，每层一块</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="152" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="220" y="172" font-size="12" text-anchor="middle">索引器挑 ≤ 512 行</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="190" font-size="12" text-anchor="middle">压缩行：只追加</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="208" font-size="12" text-anchor="middle">FP4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="296" y="152" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="362" y="172" font-size="12" text-anchor="middle">sink：每头一个数</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="190" font-size="12" text-anchor="middle">只进分母，</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="208" font-size="12" text-anchor="middle">不占缓存行</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M78 216V228M220 216V228M362 216V228"/>
+<path class="f-muted" fill="#5c6d66" d="M74 224L78 232L82 224ZM216 224L220 232L224 224ZM358 224L362 232L366 224Z"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="234" width="416" height="52" rx="7"/>
+<text fill="currentColor" x="220" y="256" font-size="12" text-anchor="middle">每个头：用 q 给每一行打分，softmax（分母里加 sink），加权求和</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="275" font-size="12" text-anchor="middle">K = V：同一行既被打分，也被加权求和；64 个头读同一批行</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 286V296"/>
+<path class="f-muted" fill="#5c6d66" d="M216 296L220 304L224 296Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="60" y="306" width="320" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="328" font-size="12" text-anchor="middle">输出：逆向旋转，舍入 FP8，经 wo_a、wo_b 投影</text>
+</svg><figcaption>图 DS3-1　一层注意力对一个字做的事。q 来自低秩投影，K 和 V 是同一行；每个头读三处：窗口环里最近 128 行、索引器挑出的至多 512 行压缩行、一个学来的 sink。画的是配方的结构，每个方框的出处在正文里。</figcaption></figure>
+<p>数字的出处要分清。128、512 和 64 个头，是文件头与实验室程序注释里的数字 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41_lab/ds4_lab.cu#L1-L4" target="_blank" rel="noopener noreferrer">ds4_lab.cu 第 1–4 行</a>）。引擎自己从 pack 的 ds4.txt 读 sliding_window、index_topk 和 num_attention_heads <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L519-L522" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 519–522 行</a>）。写死的有四条几何检查：head_dim 必须是 512，index_head_dim 必须是 128，每字专家数不超过 8，hc 不超过 8；任何一条不满足，pack 加载失败 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2166-L2169" target="_blank" rel="noopener noreferrer">第 2166–2169 行</a>）。</p>
+<p><dfn>K = V</dfn> 的意思是两份并成一份。第 8 章里，每个位置存键 k 和值 v：k 决定“看哪里”，v 决定“看到什么”。这里同一行先拿去算点积，再拿去加权求和，GPU 内核用的是同一组行指针 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L892-L903" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 892–903 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L934-L941" target="_blank" rel="noopener noreferrer">第 934–941 行</a>）。64 个头再共用这一行，这叫多查询注意力（MQA）。它比第 8 章的 GQA 更进一步：GQA 是 24 个头分成 2 组，MQA 是所有头一组。背景见 <a href="https://arxiv.org/abs/1911.02150" target="_blank" rel="noopener noreferrer">Shazeer 的原论文</a>。</p>
+<p><dfn>sink</dfn> 是每个头一个学来的数。它只进 softmax 的分母，没有对应的值行：输出 = 各行加权和 ÷（各行权重之和 + e^(sink − 最大分数)）<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L946-L949" target="_blank" rel="noopener noreferrer">第 946–949 行</a>；sink 的加载在 <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4308" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 4308 行</a>）。一个头觉得所有行都不相关，就把权重交给 sink，输出缩向 0。sink 只是一个数，不占缓存行。softmax 为什么需要这样一个出口，<a href="https://arxiv.org/abs/2309.17453" target="_blank" rel="noopener noreferrer">StreamingLLM 论文</a>有一段分析。</p>
+<div class="callout vs"><strong>对照 Qwen 路径：</strong>第 8 章的 Qwen 层有 24 个查询头和 2 套键值，K 和 V 是两份，每次从全部位置里最多挑 2051 个（<a href="#chapter/08/c08-attention">第 8 章「注意力」</a>）。DeepSeek 层的 64 个头共用 1 行，K 和 V 是同一行。Qwen 的结果还要乘一个 sigmoid 输出门；这里让一个头“少说话”的办法，是分母里的 sink。</div>
+
+<h2 id="sec-2">3.2 128 行的环：最近的字一个都不丢</h2>
+<p><dfn>窗口环</dfn>是每层一块固定大小的缓存，128 行。位置 p 的那一行写进槽 p mod 128，新行覆盖 128 个字之前的旧行 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L1297-L1331" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 1297–1331 行</a>）。每行 512 维，存成 FP8 码，每 32 个值配一个 2 的幂次刻度 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L22-L33" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 第 22–33 行</a>）。FP8 是什么，见<a href="#chapter/04/c04-float">第 4 章「二进制与浮点数」</a>。</p>
+<p>一行占多少字节，可以直接算：512 个码加 512 ÷ 32 = 16 个刻度，共 528 字节，正好是 16 的倍数，不用补齐 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L3209-L3213" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 3209–3213 行</a>）。一层的环是 128 × 528 = 67,584 字节。DeepSeek-V4.1-Flash 有 40 层 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L3" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 3 行</a>），40 层共 2,703,360 字节，约 2.58 MiB <span class="ev ev-est">教学推演</span>。这一份和上下文长度无关。集群那一页独立算出了同一个 528（<a href="#deepinfer/pd-kv/sec-4">DeepInfer 第 3 页</a>）。</p>
+<figure class="fig"><svg viewBox="0 0 440 226" role="img" aria-label="图 DS3-2：窗口环的写入：位置 128 写进槽 0，覆盖位置 0，环里剩下位置 1 到 128">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">第 127 个位置写完之后：槽 s 里放着位置 s</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="44" y="45" font-size="12" text-anchor="middle">槽 0</text>
+<text class="f-muted" fill="#5c6d66" x="44" y="62" font-size="12" text-anchor="middle">位置 0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="86" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="118" y="45" font-size="12" text-anchor="middle">槽 1</text>
+<text class="f-muted" fill="#5c6d66" x="118" y="62" font-size="12" text-anchor="middle">位置 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="160" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="192" y="45" font-size="12" text-anchor="middle">槽 2</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="62" font-size="12" text-anchor="middle">位置 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="322" y="45" font-size="12" text-anchor="middle">槽 126</text>
+<text class="f-muted" fill="#5c6d66" x="322" y="62" font-size="12" text-anchor="middle">位置 126</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="364" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="396" y="45" font-size="12" text-anchor="middle">槽 127</text>
+<text class="f-muted" fill="#5c6d66" x="396" y="62" font-size="12" text-anchor="middle">位置 127</text>
+<text class="f-muted" fill="#5c6d66" x="244" y="53" font-size="12" text-anchor="middle">…</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="104" font-size="12" text-anchor="start">第 128 个位置进来：槽 = 128 mod 128 = 0，覆盖位置 0 的旧行</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="12" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="44" y="131" font-size="12" text-anchor="middle">槽 0</text>
+<text fill="currentColor" x="44" y="148" font-size="12" text-anchor="middle">位置 128</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="86" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="118" y="131" font-size="12" text-anchor="middle">槽 1</text>
+<text class="f-muted" fill="#5c6d66" x="118" y="148" font-size="12" text-anchor="middle">位置 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="160" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="192" y="131" font-size="12" text-anchor="middle">槽 2</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="148" font-size="12" text-anchor="middle">位置 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="322" y="131" font-size="12" text-anchor="middle">槽 126</text>
+<text class="f-muted" fill="#5c6d66" x="322" y="148" font-size="12" text-anchor="middle">位置 126</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="364" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="396" y="131" font-size="12" text-anchor="middle">槽 127</text>
+<text class="f-muted" fill="#5c6d66" x="396" y="148" font-size="12" text-anchor="middle">位置 127</text>
+<text class="f-muted" fill="#5c6d66" x="244" y="139" font-size="12" text-anchor="middle">…</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M12 168H428M12 162V168M428 162V168"/>
+<text fill="currentColor" x="220" y="188" font-size="12" text-anchor="middle">环里现在放的是位置 1 … 128：恰好 128 行（含刚写的这一行）</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="212" font-size="12" text-anchor="middle">每步只写一个槽，其余行不挪动；按位置 mod 128 找槽</text>
+</svg><figcaption>图 DS3-2　窗口环是一圈 128 个槽。位置 p 写进槽 p mod 128，最旧的行被覆盖，其余行原地不动。第 128 个位置写进槽 0 之后，环里恰好是位置 1 到 128。</figcaption></figure>
+<p>从位置 127 起，一个字看到的窗口恰好是 128 行，包括它自己；更早的字只有 p + 1 行。引擎先把环里的行解码成 BF16 的工作行，接上新行，再取最近 128 个位置；环里最旧的那一行被排除，随后被新行覆盖 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10090-L10118" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 10090–10118 行</a>）。为什么只精确留 128 个字？上游没有写动机，这是推演：<span class="ev ev-est">教学推演</span>近处的字影响最大，半句话、刚定义的变量名都在这几行里，精确地留着它们，成本固定；更早的字交给 3.3 节的压缩行。</p>
+<p>环是覆盖式的，覆盖了就回不去。推测解码验证一批草稿字时，每层先把将被覆盖的行备份下来，最多 16 行，草稿被拒绝再写回去 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4357-L4360" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 4357–4360 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L175-L176" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 第 175–176 行</a>）。每层的环备份区是 16 × 528 = 8,448 字节 <span class="ev ev-est">教学推演</span>。R &gt; 1 的来源层还要另备分组缓冲和新压缩行的快照 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4357-L4361" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 4357–4361 行</a>）。备份区只有带草稿模型的 pack 才分配。草稿怎么验，留给 <a href="#deepseek/draft">DSpark 与会话停车</a>那一页。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>窗口环就是环形缓冲区（循环队列）：容量固定，写指针绕圈，新数据覆盖最旧的数据，不再分配内存。网卡的收包队列和 Linux 内核的 kfifo 是同一种结构。槽号等于位置 mod 128，所以读第 p 个位置的行，不用移动任何数据。参见 <a href="https://zh.wikipedia.org/zh-cn/環形緩衝區" target="_blank" rel="noopener noreferrer">维基百科：環形緩衝區</a> · <a href="https://en.wikipedia.org/wiki/Circular_buffer" target="_blank" rel="noopener noreferrer">Wikipedia: Circular buffer</a>。</p>
+
+<h2 id="sec-3">3.3 压缩行：把 R 个位置揉成一行</h2>
+<p>比 128 个字更早的位置，原始行已经被环覆盖。它们以压缩行的形式留下：每 R 个位置一行。R 叫<dfn>压缩比</dfn>，每层一个数，来自 pack 的 compress_ratios 列表 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L531" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 531 行</a>）。R = 0 的层没有压缩行，只做窗口注意力；DSpark 草稿模型的块必须是这种层 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2383-L2384" target="_blank" rel="noopener noreferrer">第 2383–2384 行</a>）。</p>
+<p>怎么把 R 个位置揉成一行？每个位置先投影出一对 512 维向量，kv 和 score，写进槽 p mod R。位置 p 满足 (p + 1) mod R = 0 时，这一组满了。引擎对每个维度各做一次 softmax，作用在 R 个 score 上，再用得到的权重对 kv 加权求和，最后做 RMSNorm <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L570-L604" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 570–604 行</a>）。结果加上旋转位置编码，舍入到 FP4：E2M1 码，每 16 个值配一个 E4M3 刻度。一行 256 + 32 = 288 字节 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10223-L10232" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 10223–10232 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L22-L33" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 第 22–33 行</a>）。没满的一组停在 FP32 缓冲里，kv 和 score 各 R × 512 个 float <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4329-L4331" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 4329–4331 行</a>）。</p>
+<figure class="fig"><svg viewBox="0 0 440 296" role="img" aria-label="图 DS3-3：压缩器：R 个位置各给一对 kv 和 score，对每个维度做 softmax 加权求和，再归一化、旋转、舍入 FP4，得到一行压缩行">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">每 R 个位置一组（图中画 R = 4，只为示意）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="59" y="46" font-size="12" text-anchor="middle">位置 4k</text>
+<text class="f-muted" fill="#5c6d66" x="59" y="63" font-size="12" text-anchor="middle">kv、score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="119" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="166" y="46" font-size="12" text-anchor="middle">位置 4k + 1</text>
+<text class="f-muted" fill="#5c6d66" x="166" y="63" font-size="12" text-anchor="middle">kv、score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="226" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="273" y="46" font-size="12" text-anchor="middle">位置 4k + 2</text>
+<text class="f-muted" fill="#5c6d66" x="273" y="63" font-size="12" text-anchor="middle">kv、score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="333" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="380" y="46" font-size="12" text-anchor="middle">位置 4k + 3</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="63" font-size="12" text-anchor="middle">kv、score</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M59 72V84M166 72V84M273 72V84M380 72V84M59 84H380M220 84V98"/>
+<path class="f-muted" fill="#5c6d66" d="M216 94L220 102L224 94Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="104" width="416" height="48" rx="7"/>
+<text fill="currentColor" x="220" y="125" font-size="12" text-anchor="middle">对每个维度各做一次：R 个 score 过 softmax</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="143" font-size="12" text-anchor="middle">用这组权重对 R 个 kv 加权求和</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 152V160"/>
+<path class="f-muted" fill="#5c6d66" d="M216 160L220 168L224 160Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="170" width="320" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="193" font-size="12" text-anchor="middle">RMSNorm → 旋转位置编码 → 舍入 FP4</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 206V214"/>
+<path class="f-muted" fill="#5c6d66" d="M216 214L220 222L224 214Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="90" y="224" width="260" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="247" font-size="12" text-anchor="middle">1 行压缩行：256 + 32 = 288 字节</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="282" font-size="12" text-anchor="middle">位置 p 写入槽 p mod R；(p + 1) mod R = 0 时这一组满了</text>
+</svg><figcaption>图 DS3-3　压缩器把一组 R 个位置揉成一行。每个维度的权重由 softmax 给出，是学出来的加权平均，不是简单的平均。图里 R = 4 只为画图；真实的 R 由每层的 compress_ratios 决定。</figcaption></figure>
+<p>R = 1 时不揉：每个位置一行压缩行，但仍是单独的一次投影（compressor.wkv 加归一化），不是窗口那一行的拷贝 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10129-L10135" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 10129–10135 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/ref.py#L250-L251" target="_blank" rel="noopener noreferrer">ref.py 第 250–251 行</a>）。</p>
+<p>不是每一层都存自己的压缩行。只有 kv_source_layer_ids 列出的来源层带压缩器、拥有压缩缓存；后面压缩比相同的层直接读它 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2393-L2412" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 2393–2412 行</a>）。加载时有一条检查：一个 ratio 大于 0 的层之前，必须已有同压缩比的来源层，否则报错。代码注释说，V4.1 里第 20 层是第一个压缩比为 1 的层，20 到 39 层都读它的压缩行和索引键 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9261-L9262" target="_blank" rel="noopener noreferrer">第 9261–9262 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9304-L9306" target="_blank" rel="noopener noreferrer">第 9304–9306 行</a>）。前 20 层各来源层的压缩比由 pack 的 ds4.txt 决定，钉住的仓库里没有它们的取值，本页统一写成 R。集群那一页把“读前面层的缓存”的层叫 YoCo 消费层（<a href="#deepinfer/pd-kv/sec-4">DeepInfer 第 3 页</a>）；Strata 的代码里也用 yoco 这个名字。</p>
+<p>压缩缓存的容量按加载时的上下文上限定：每个来源层 ⌈max_context ÷ R⌉ + 1 行 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2401" target="_blank" rel="noopener noreferrer">第 2401 行</a>）。每行 288 字节的压缩 KV，再加 80 字节的索引键：128 维 FP4 是 64 字节码加 4 字节刻度，补齐到 16 的倍数得 80 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L29-L33" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 第 29–33 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L3211-L3213" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 3211–3213 行</a>）。</p>
+<p>旋转位置编码的频率表也分两套：压缩比大于 0 的层用带长上下文缩放的表，窗口层用不缩放的表 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2171-L2172" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 2171–2172 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L544-L565" target="_blank" rel="noopener noreferrer">第 544–565 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9969" target="_blank" rel="noopener noreferrer">第 9969 行</a>）。会往远处看的层，才用缩放过的表。</p>
+<div class="callout vs"><strong>对照 Qwen 路径：</strong>第 8 章 Qwen 的索引键，是 4 个原始键的平均，再归一化、旋转，只用来打分；真正做注意力的，仍是全部原始键值（<a href="#chapter/08/c08-attention">第 8 章</a>）。DeepSeek 的压缩行是学出来的加权平均，而且它自己就是注意力读的那一行。窗口之外的旧位置，原始行已经不在，以后只能通过压缩行读到。</div>
+
+<h2 id="sec-4">3.4 索引器：从全部压缩行里挑出 512 行</h2>
+<p><dfn>索引器</dfn>是一个很小的打分器。对第 p 个字，压缩行 i 的分数是 <code>Σ_h relu(q_h · k_i) × w_h</code> <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L131-L134" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 第 131–134 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L626-L689" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 626–689 行</a>）。q_h 是索引器自己的查询：从注意力 q 的低秩潜向量再投影出一组头，每头 128 维。内核最多支持 32 个头 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L2356-L2362" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 2356–2362 行</a>），实验室注释写的头数正好是 32 <span class="ev ev-report">上游报告</span>。k_i 是第 i 行的索引键，128 维，FP4。w_h 是每个头的权重，由这个字的隐藏状态投影出来 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10156-L10187" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 10156–10187 行</a>）。第 8 章 Qwen 的索引器也是 relu 加和、没有 softmax；DeepSeek 多了这组随内容变化的头权重。</p>
+<p>分数最高的 min(512, n) 个位置入选，n = ⌊(p + 1) ÷ R⌋ 是此刻已有的压缩行数；n 不超过 512 时全选 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10151-L10155" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 10151–10155 行</a>）。挑选的结果是一张位置清单，一个字一张，64 个头共用 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L840" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 840 行</a>：内核按字取清单，不按头取）。</p>
+<p>并不是每层都有索引器。index_source_layer_ids 列出的层才给压缩行打分、更新清单，其他层沿用最近一次的清单 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9582-L9594" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 9582–9594 行</a>）。索引键只在拥有压缩缓存的来源层生成：它是压缩行（旋转之前）再经一次投影、归一化、旋转、舍入到 FP4 的结果 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10156-L10170" target="_blank" rel="noopener noreferrer">第 10156–10170 行</a>）。</p>
+<p>来源层的清单还可以先做一次预筛，叫候选块。candidate_source_layer_id 指定的那一层（测试夹具里是第 20 层）先把压缩行按 candidate_block_size 个一块分组，每块取块内最高分，再挑分数最高的 candidate_topk_blocks 块，最新位置所在的块一定入选 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L798-L812" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 798–812 行</a>）。之后的索引层用它的结果，只给这些块里的位置打分；块数不超过 candidate_topk_blocks 时预筛不起作用 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10188-L10215" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 10188–10215 行</a>）。转换器的一份测试夹具里，块大小是 8，块数是 2048（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tests/terminal/test_pack_gguf_engram.py#L173-L177" target="_blank" rel="noopener noreferrer">test_pack_gguf_engram.py 第 173–177 行</a>）。如果真实 pack 也是这两个值，预筛要等压缩行超过 8 × 2048 = 16,384 行才起作用 <span class="ev ev-est">教学推演</span>。</p>
+<p>下面的交互图让你选一个上下文长度，看一个解码字这一步读了哪些行：窗口环里的 128 行，加上索引器挑出的最多 512 行压缩行。静态图画的是默认上下文 8,192、R = 1 的层。</p>
+<div class="viz" data-viz="ds-attention-state"><figure class="fig"><svg viewBox="0 0 440 336" role="img" aria-label="图 DS3-4：R = 1 的层，上下文 8,192 时，一个解码字读 128 行窗口加 512 行挑出的压缩行，共 640 行；上下文变长，这个数不变">
+<text class="f-muted" fill="#5c6d66" x="12" y="16" font-size="12" text-anchor="start">例：R = 1 的层，上下文 8,192（默认），第 8,192 个字在回头看</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="26" width="416" height="30" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="27" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="31" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="35" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="36" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="37" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="40" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="42" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="47" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="49" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="50" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="62" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="74" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="99" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="103" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="110" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="144" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="162" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="174" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="174" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="183" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="186" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="190" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="219" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="231" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="238" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="243" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="248" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="250" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="251" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="269" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="270" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="278" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="348" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="350" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="384" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="400" y="26" width="2" height="30"/>
+<rect class="f-accent" fill="#136d5a" x="419" y="22" width="9" height="38" rx="1"/>
+<rect class="f-warn" fill="#9e5d24" x="12" y="76" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="88" font-size="12" text-anchor="start">竖线：索引器挑的 512 行（位置只是示意，实际由分数决定）</text>
+<rect class="f-accent" fill="#136d5a" x="12" y="98" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="110" font-size="12" text-anchor="start">窗口：最近 128 行，来自环，不经过挑选</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="12" y="120" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="132" font-size="12" text-anchor="start">其余压缩行：这一步不读，但要一直留着</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M12 148H428"/>
+<text class="f-muted" fill="#5c6d66" x="12" y="168" font-size="12" text-anchor="start">上下文</text>
+<text class="f-muted" fill="#5c6d66" x="92" y="168" font-size="12" text-anchor="start">窗口行</text>
+<text class="f-muted" fill="#5c6d66" x="168" y="168" font-size="12" text-anchor="start">压缩行 n</text>
+<text class="f-muted" fill="#5c6d66" x="250" y="168" font-size="12" text-anchor="start">挑选行</text>
+<text class="f-muted" fill="#5c6d66" x="350" y="168" font-size="12" text-anchor="start">共读</text>
+<text fill="currentColor" x="12" y="192" font-size="12" text-anchor="start">300</text>
+<text fill="currentColor" x="92" y="192" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="192" font-size="12" text-anchor="start">300</text>
+<text fill="currentColor" x="250" y="192" font-size="12" text-anchor="start">300（全选）</text>
+<text fill="currentColor" x="350" y="192" font-size="12" text-anchor="start">428</text>
+<text fill="currentColor" x="12" y="214" font-size="12" text-anchor="start">8,192</text>
+<text fill="currentColor" x="92" y="214" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="214" font-size="12" text-anchor="start">8,192</text>
+<text fill="currentColor" x="250" y="214" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="214" font-size="12" text-anchor="start">640</text>
+<text fill="currentColor" x="12" y="236" font-size="12" text-anchor="start">262,144</text>
+<text fill="currentColor" x="92" y="236" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="236" font-size="12" text-anchor="start">262,144</text>
+<text fill="currentColor" x="250" y="236" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="236" font-size="12" text-anchor="start">640</text>
+<text fill="currentColor" x="12" y="258" font-size="12" text-anchor="start">1,048,576</text>
+<text fill="currentColor" x="92" y="258" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="258" font-size="12" text-anchor="start">1,048,576</text>
+<text fill="currentColor" x="250" y="258" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="258" font-size="12" text-anchor="start">640</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="288" font-size="12" text-anchor="start">一般地 n = ⌊上下文 ÷ R⌋，挑选行 = min(512, n)，</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="304" font-size="12" text-anchor="start">每层每字共读 ≤ 128 + 512 = 640 行</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="324" font-size="12" text-anchor="start">注意读的行数不变，索引器要打分的行数是 n，随上下文增长</text>
+</svg><figcaption>图 DS3-4　一个解码字在 R = 1 的层读多少行：窗口 128 行，加上挑出的 min(512, n) 行。上下文从 300 涨到 1,048,576，共读行数最多 640，不再增长；但压缩行 n 在涨，索引器要给它们全部打分。教学推演，行数按本节的公式算。</figcaption></figure></div>
+<p>注意力读的行有上限，索引器的扫描没有统一的上限。解码时，来源层和没用预筛的索引层，每步要给全部 n 行打分；用预筛的层只给候选块里的位置打分（见上文）。全打分的层读 n × 80 字节的索引键，做 n × 32 × 128 次乘加（头数按注释）<span class="ev ev-est">教学推演</span>。n 随上下文线性增长。读完一段提示，要给每个位置各打一次分：L 个字的提示在一个 R = 1 的索引层上共 L(L + 1) ÷ 2 对，一般是 L²/(2R)。L = 8,192 时约 3.4 × 10⁷ 对，L = 262,144 时约 3.4 × 10¹⁰，L = 1,048,576 时约 5.5 × 10¹¹ <span class="ev ev-est">教学推演</span>。262,144 这一档，正好是第 8 章算过的全注意力配对数（约 344 亿，<a href="#chapter/08/c08-complexity">第 8 章「O(n²)」</a>）。省下来的是每一对的成本：若用 64 个头 × 512 维做全注意力，每对要 2 × 32,768 次乘加（点积加加权求和）；索引器每对只做 32 × 128 = 4,096 次，没有 softmax，粗算便宜约 16 倍 <span class="ev ev-est">教学推演</span>。文档也这样说：提示很长时读得很慢，“因为索引器的工作量随长度的平方增长”，512K 或 1M 的第一次回复要等很多分钟 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L98-L100" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 98–100 行</a>）。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这是搜索系统里“召回再精排”的两段式：召回便宜，但要扫全库；精排贵，只看候选。这里的召回是索引器扫全部压缩行，精排是对 640 行做真正的注意力。候选块预筛则像在召回前再加一层粗索引，先按块筛掉大半。</p>
+<div class="callout vs"><strong>对照 DeepInfer：</strong>集群把主压缩 KV 和索引器的键放进同一种分页的块 KV：128 个 token 一块，用块表去找（<a href="#deepinfer/pd-kv/sec-4">DeepInfer 第 3 页</a>）。Strata 没有块表：每个来源层的压缩行和索引键各排成一个按位置连续的数组，第 i 行就在 i × 行字节数的地方 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10230" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 10230 行</a>）。<span class="ev ev-est">教学推演</span>一台电脑只服务一段对话，不必为多个请求共享、换出、命中前缀而分块。</div>
+
+<h2 id="sec-5">3.5 一个字留下什么：三种状态，两种回退办法</h2>
+<p>一个字走完所有层，在引擎里留下四样东西：每层的窗口环；压缩器没满的一组；来源层的压缩行和索引键，只追加；Engram 的 n-gram 历史，归 <a href="#deepseek/engram">Engram 那一页</a>。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.hpp#L8-L11" target="_blank" rel="noopener noreferrer">ds4_model.hpp 第 8–11 行</a>）前三样决定了对话能不能退回、能不能停车。</p>
+<figure class="fig"><svg viewBox="0 0 440 314" role="img" aria-label="图 DS3-5：一个字留下的三种状态：覆盖式的窗口环、覆盖式的分组缓冲、只追加的压缩行；回退办法是拷贝或截断">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="14" width="132" height="150" rx="7"/>
+<text fill="currentColor" x="78" y="38" font-size="12" text-anchor="middle">窗口环（每层一块）</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="62" font-size="12" text-anchor="middle">128 行 × 528 B</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="82" font-size="12" text-anchor="middle">40 层约 2.58 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="102" font-size="12" text-anchor="middle">覆盖式：丢旧行</text>
+<text fill="currentColor" x="78" y="132" font-size="12" text-anchor="middle">回退：先拷贝</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="152" font-size="12" text-anchor="middle">像白板</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="14" width="132" height="150" rx="7"/>
+<text fill="currentColor" x="220" y="38" font-size="12" text-anchor="middle">分组缓冲</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="62" font-size="12" text-anchor="middle">未满一组的 R 个位置</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="82" font-size="12" text-anchor="middle">FP32：kv 与 score</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="102" font-size="12" text-anchor="middle">覆盖式：满一组就清</text>
+<text fill="currentColor" x="220" y="132" font-size="12" text-anchor="middle">回退：先拷贝</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="152" font-size="12" text-anchor="middle">像白板</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="296" y="14" width="132" height="150" rx="7"/>
+<text fill="currentColor" x="362" y="38" font-size="12" text-anchor="middle">压缩行 + 索引键</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="62" font-size="12" text-anchor="middle">只追加，按位置排</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="82" font-size="12" text-anchor="middle">368 B/位置（R = 1）</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="102" font-size="12" text-anchor="middle">随上下文增长</text>
+<text fill="currentColor" x="362" y="132" font-size="12" text-anchor="middle">回退：截断位置</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="152" font-size="12" text-anchor="middle">像笔记本</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M78 164V190M220 164V190M78 190H220M149 190V204"/>
+<path class="f-muted" fill="#5c6d66" d="M145 200L149 208L153 200Z"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="210" width="274" height="36" rx="7"/>
+<text fill="currentColor" x="149" y="233" font-size="12" text-anchor="middle">检查点：最多 4 份，只拷环和分组缓冲</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M149 246V260M362 164V260M149 260H362M220 260V268"/>
+<path class="f-muted" fill="#5c6d66" d="M216 264L220 272L224 264Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="274" width="416" height="28" rx="5"/>
+<text fill="currentColor" x="220" y="293" font-size="12" text-anchor="middle">会话停车：整份状态写出去，含压缩行</text>
+</svg><figcaption>图 DS3-5　三种状态，两种回退办法。覆盖式的两样只能事先拷贝（检查点）；只追加的压缩行靠截断位置回退。会话停车把三样连同检查点一起写出去。数字是教学推演，公式在正文。</figcaption></figure>
+<p>第 20 章用“笔记本和白板”比喻两类记忆。压缩行是笔记本：只往后写，按位置排好，退回去只要把“写到哪一页”改小，超出的部分以后重写 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5691-L5692" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 5691–5692 行</a>）。环和未满的分组缓冲是白板，第 9 章的 GDN 状态也是这种白板（<a href="#chapter/09/c09-rnn-state">第 9 章「两种记忆」</a>）：新内容盖掉旧内容，想退回只能事先拍照。检查点就是这张照片，它只拷这两样；最多同时留 4 份：上一轮提示的末尾、它前面的一个位置、一个锚点、一个共享前缀 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1104-L1110" target="_blank" rel="noopener noreferrer">第 1104–1110 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5751-L5755" target="_blank" rel="noopener noreferrer">第 5751–5755 行</a>）。每份至少 2.58 MiB <span class="ev ev-est">教学推演</span>。为什么白板要拍照，见<a href="#chapter/20/c20-copy-on-write">第 20 章「快照与写时复制」</a>。</p>
+<p>对话被另一个请求挤出模型时，引擎做一次<dfn>会话停车</dfn>：把全部状态写出去。内容是 token、每层的环和分组缓冲、每个来源层的压缩行和索引键（0 到 pos ÷ R 行），再加检查点 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5788-L5806" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 5788–5806 行</a>）。大小有现成的公式：头部和 4 × pos 字节的 token，加上每层 16 + 67,584 字节再加分组缓冲（2 × R × 512 × 4 字节，只有 R &gt; 1 的来源层有），加上每个来源层 ⌊pos ÷ R⌋ × (288 + 80) 字节，再加检查点。文档给的数是约 17 MB 每 6.5K 个字 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L116" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 116 行</a>）。用公式粗估：环 2.70 MB，最多 4 份检查点至少 10.8 MB，一个 R = 1 的来源层 6,500 × 368 ≈ 2.4 MB，合计约 15.9 MB，再加分组缓冲和其他来源层，与文档同一量级 <span class="ev ev-est">教学推演</span>。前 20 层的 R 缺失，这笔账只能估到量级。会话停车的流程归 <a href="#deepseek/draft">DSpark 与会话停车</a>那一页。</p>
+<p>再看长上下文的账。下表用同一套行字节数比较三样东西：假想的“40 层都为每个位置存一行 FP8”（朴素做法，每个位置 40 × 528 = 21,120 字节）；一个 R = 1 的来源层（每个位置 288 + 80 = 368 字节，行数 = 上下文 + 1）；40 层的窗口环。<span class="ev ev-est">教学推演</span></p>
+<div class="table-wrap"><table><thead><tr><th>上下文</th><th>朴素做法：40 层存每个位置</th><th>一个 R = 1 的来源层</th><th>40 层窗口环</th></tr></thead><tbody>
+<tr><td>8,192</td><td>165 MiB</td><td>2.88 MiB</td><td>2.58 MiB</td></tr>
+<tr><td>32,768</td><td>660 MiB</td><td>11.5 MiB</td><td>2.58 MiB</td></tr>
+<tr><td>262,144</td><td>5.16 GiB</td><td>92.0 MiB</td><td>2.58 MiB</td></tr>
+<tr><td>1,048,576</td><td>20.6 GiB</td><td>368 MiB</td><td>2.58 MiB</td></tr>
+</tbody></table></div>
+<p>上下文翻 4 倍，来源层的账也翻 4 倍，仍是线性增长，但系数小：每个位置 368 字节，朴素做法是 21,120 字节。环不随上下文变。其他来源层各按每个位置 368 ÷ R 字节另算；R 的取值本页没有，所以整个模型的总数给不出。</p>
+<p>这些缓存放在显存里，和专家抢地方。加载时，引擎先按 max_context 分配环和每个来源层的压缩缓存，再用剩下的显存放专家 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2696-L2698" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 2696–2698 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L3042" target="_blank" rel="noopener noreferrer">第 3042 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4600-L4620" target="_blank" rel="noopener noreferrer">第 4600–4620 行</a>）。文档说得直接：每多一个位置，就少放一点专家 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L99-L100" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 99–100 行</a>）。上下文默认 8,192；--context 取 8K 到 1M；256K 以上上游没有测过 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L93" target="_blank" rel="noopener noreferrer">第 93 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L96-L98" target="_blank" rel="noopener noreferrer">第 96–98 行</a>）。上下文写满，引擎报 “the context is full” <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9295" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 9295 行</a>）。setup.py 第 795 行的注释还写着 “(4096 and 8192; 64K is not tried yet)”，已经过时：同一文件第 8533–8536 行的校验接受 8,192 到 1,048,576 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/setup.py#L795" target="_blank" rel="noopener noreferrer">setup.py 第 795 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/setup.py#L8533-L8536" target="_blank" rel="noopener noreferrer">第 8533–8536 行</a>）。</p>
+<div class="callout vs"><strong>对照 Qwen 路径：</strong>第 17 章把 KV 缓存按 4 个 token 一页分页；上下文超过 64K 时，大部分页放进内存，显存只留常用的（<a href="#chapter/17/c17-paging">第 17 章「分页」</a>）。dsv41 没有这一层：压缩缓存是按位置连续排列的数组，按上下文上限一次分配在显存里，要放更长的上下文，就得让出专家的位置。第 8 章里，Qwen 的 12 个 QSA 层合计在 32K 上下文要 768 MiB（FP16，<a href="#chapter/08/c08-attention">第 8 章</a>）；这里一个 R = 1 的来源层在同样长度是 11.5 MiB（FP4）。这是 12 层对 1 层，也是 FP16 对 FP4，口径不同。两个模型的总账不能直接比，因为 DeepSeek 一侧缺前 20 层的 R。</div>
+<div class="callout vs"><strong>对照 DeepInfer：</strong>集群上的环是 134 个 token：128 加 6，多出的 6 个留给投机解码回退；每个序列只存档前 20 层的环，约 1.4 MB（<a href="#deepinfer/pd-kv/sec-4">DeepInfer 第 3 页</a>）。Strata 的环是 128 行，回退靠另备的 16 行备份区；停车时存的是整份状态，含压缩行。两边有同一个道理：环一旦被覆盖就退不回去，所以都要在约定的位置拍照。</div>
+
+<h2 id="sec-6">3.6 注意力不是瓶颈：解码的账和长提示的捷径</h2>
+<p>先算解码一步从缓存里读多少。每层最多读 128 行环（每行 528 字节）和 512 行压缩行（每行 288 字节），共 128 × 528 + 512 × 288 = 215,040 字节。40 层都有压缩行的话，上限是 8,601,600 字节，约 8.2 MiB <span class="ev ev-est">教学推演</span>。再看专家：文档的放置表按 UD-Q8_K_XL 写着一个专家 18.8 MB <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L15" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 15 行</a>），每字每层用 6 个，40 层是 240 个，约 4.5 GB <span class="ev ev-est">教学推演</span>。注意力读的缓存只有专家读取的约 0.2%。索引器的扫描另算：每个全打分的索引层每步读 n × 80 字节，n = 1,048,576 时是 80 MiB，已经超过这 8.2 MiB <span class="ev ev-est">教学推演</span>。所以 0.2% 只对注意力这一部分、短上下文成立。0.2% 比的是摸到的字节数，不是时间：专家有的在显存，有的在内存，有的在 SSD，慢的是后者。</p>
+<p>代码注释的实测印证了这一点。引擎里有一个 split-KV 注意力内核，单查询时在 A4000 上快 2.9 倍；但在 4 × R9700 的机器上，解码是 21.8 对 21.9 tok/s，没有可测的收益，所以它默认关闭，要用 DS4_ATTN_SPLIT=1 打开 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L2027-L2031" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 2027–2031 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L2442-L2445" target="_blank" rel="noopener noreferrer">第 2442–2445 行</a>）。解码慢在别处：专家和 SSD，见<a href="#deepseek/experts">专家那一页</a>。</p>
+<p>长提示的账不同。读提示时，每个位置都要过所有层。但 20 到 39 层有一条捷径：它们读更早的位置，只通过第 20 层的压缩行和索引键，窗口只往回看 127 个字 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9304-L9306" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 9304–9306 行</a>）。所以长提示的前面部分，不必过 20 到 39 层的注意力和专家，只要把第 20 层的压缩行和索引键算出来（代码叫 kv_only，注释写着“没有专家”）<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8538-L8542" target="_blank" rel="noopener noreferrer">第 8538–8542 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L3937-L3938" target="_blank" rel="noopener noreferrer">第 3937–3938 行</a>）。只有最后一段需要全部层：每多过一层，依赖的范围往前多 127 个字，20 层共留 (40 − 20) × 127 + 128 = 2,668 行 <span class="ev ev-est">教学推演</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/test_prompt_skip.py#L26-L30" target="_blank" rel="noopener noreferrer">test_prompt_skip.py 第 26–30 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9315-L9317" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 9315–9317 行</a>）。至少有 1,024 行可跳才值得做 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L963" target="_blank" rel="noopener noreferrer">第 963 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9318" target="_blank" rel="noopener noreferrer">第 9318 行</a>）。2,668 + 1,024，所以一次喂入的提示约 3,692 个字以上才会用上 <span class="ev ev-est">教学推演</span>。这条捷径只在一张卡、分块读提示的路径上启用，DS4_YOCO=0 关闭 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9275-L9283" target="_blank" rel="noopener noreferrer">第 9275–9283 行</a>）。</p>
+<p>用 32,768 个字的提示粗估：2,668 ÷ 32,768 约 8%，也就是 20 到 39 层只处理约 8% 的行 <span class="ev ev-est">教学推演</span>。为什么不改答案？注释的说法是：这些层对早期位置的工作，只有压缩行和索引键被后面读到，其余只影响各层自己的环，而环只留最后 128 行；上游有一个测试脚本，把捷径和完整计算对比，要求 KL 留在“专家求和顺序的噪声”之内 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/test_prompt_skip.py#L1-L11" target="_blank" rel="noopener noreferrer">test_prompt_skip.py 第 1–11 行</a>）。</p>
+<div class="callout vs"><strong>对照 DeepInfer：</strong>DeepSeek 自家服务命中缓存之后，只重放最后 128 个字，并把窗口截在重放段之内，这叫有界重放（<a href="#deepinfer/pd-kv/sec-5">DeepInfer 第 3 页</a>）。Strata 的代码给这条规则留了一个开关：DS4_YOCO=2 是“只留最后 128 行”，更快，答案会略有变化；默认值 1 留 2,668 行，除专家求和顺序外与完整计算一致 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9263-L9266" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 9263–9266 行</a>）。</div>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>每层、每个字读的行有上限：窗口环里最近 128 行（FP8，528 字节一行，覆盖式），加索引器从压缩行里挑的至多 512 行（FP4，288 字节一行），加每头一个 sink 数。64 个头共用同一行 K = V 和同一张挑选清单。</li>
+<li>128 个字之前的位置，只剩压缩行：每 R 个位置一行，是学出来的加权平均，只追加。R = 1 的来源层每位置占 368 字节（压缩行加索引键）；40 层的环固定约 2.58 MiB。</li>
+<li>上限不等于免费。索引器每步扫全部（或预筛后的候选）压缩行，读完一段提示是平方量级的打分；缓存放在显存里，挤掉专家；回退有两种办法：压缩行截断位置，环和分组缓冲先拷贝。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解：“每个字只读 640 行，所以长上下文不花什么钱。”</strong></p>
+<p>读的行有上限，花费却不止在这里。索引器要给全部压缩行打分，解码时每步 n 行，读完提示是 L²/(2R) 对；全部压缩行和索引键都要留着，占显存，挤掉专家。上游的建议很直接：从 256K 或更短开始，512K 和 1M 的第一次回复要等很多分钟 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L98-L100" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 98–100 行</a>）。</p></div>
+
+<details class="deep"><summary>深入一层：一个解码步的调用链，和没能核对的东西</summary>
+<h3>一个解码字在 layer() 里按顺序做什么</h3>
+<p>入口是 <code>layer()</code> <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9961" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 9961 行</a>）。下面是注意力部分的顺序，行号都在同一个文件里。</p>
+<ol>
+<li>q：<code>wq_b</code> 作用在低秩潜向量上，再做旋转（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10080-L10087" target="_blank" rel="noopener noreferrer">第 10080–10087 行</a>）。</li>
+<li>窗口：<code>ring_to_ext</code> 把环解码成 BF16 工作行；新的 K = V 行经归一化、旋转、FP8 舍入，接在后面；<code>ext_to_ring</code> 把它写进槽 p mod 128（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10094-L10104" target="_blank" rel="noopener noreferrer">第 10094–10104 行</a>）。</li>
+<li>每个字的窗口范围写进 <code>AttnRows</code>：从 <code>max(win − p0, t + 1)</code> 起，共 128 行（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10107-L10119" target="_blank" rel="noopener noreferrer">第 10107–10119 行</a>）。</li>
+<li>压缩器：R = 1 直接归一化，R &gt; 1 调 <code>compress_win</code>；满组的行经旋转、舍入 FP4，写到 <code>g_first × 行字节数</code> 处（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10129-L10148" target="_blank" rel="noopener noreferrer">第 10129–10148 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10223-L10232" target="_blank" rel="noopener noreferrer">第 10223–10232 行</a>）。</li>
+<li>索引器：来源层先算新的索引键，再算 q、头权重，调 <code>index_score</code> 和 <code>topk</code>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10156-L10215" target="_blank" rel="noopener noreferrer">第 10156–10215 行</a>）。</li>
+<li><code>sparse_attn</code>：缩放系数 1 ÷ √512，传入 sink（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10261-L10263" target="_blank" rel="noopener noreferrer">第 10261–10263 行</a>）。输出再逆向旋转、舍入 FP8，过 <code>wo_a</code>、<code>wo_b</code>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10265-L10279" target="_blank" rel="noopener noreferrer">第 10265–10279 行</a>）。</li>
+</ol>
+<h3>在钉住的签出里自己核对</h3>
+<pre><code>git grep -n -F "one shared K = V row per token" -- src/dsv41/ds4_model.cu
+git grep -n -F "const float den = den_s + expf(sink" -- src/dsv41/ds4_kernels.cu
+git grep -n -F "size_t win_rb()" -- src/dsv41/ds4_model.cu
+git grep -n -F "constexpr size_t kv_row_bytes" -- src/dsv41/ds4_kernels.cuh
+git grep -n -F "without a KV source of that ratio" -- src/dsv41/ds4_model.cu
+git grep -n -F "static constexpr int kYocoMin" -- src/dsv41/ds4_model.cu</code></pre>
+<h3>只在代码里的开关</h3>
+<p><code>DS4_ATTN_SPLIT=1</code> 打开 split-KV 解码内核（默认关）；<code>DS4_YOCO</code> 或 <code>STRATA_DS4_PROMPT_SKIP</code> 选长提示的捷径：1 默认，2 是 DeepSeek 自家服务的规则，0 关 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L2027-L2031" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 2027–2031 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9266-L9272" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 9266–9272 行</a>）。</p>
+<h3>文档与代码不一致的地方</h3>
+<p>setup.py 第 795 行的注释写着 “(4096 and 8192; 64K is not tried yet)”；文档与同文件第 8533–8536 行的校验一致地允许 8K 到 1M。本页按代码和文档正文处理。</p>
+<h3>没有核对的东西</h3>
+<p>前 20 层各来源层的压缩比 R，以及哪些层的 R 是 0，不在钉住的仓库里，在 pack 的 ds4.txt 里；所以整个模型的 KV 总账和“约 17 MB 每 6.5K 个字”的细账本页没有算出来。索引头数 32 只见于实验室注释；候选块的 8 和 2048 只见于一份测试夹具。交互图的行为由另一个文件实现，本页只写了它的静态图。</p>
+</details>

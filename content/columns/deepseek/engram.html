@@ -1,0 +1,246 @@
+<div class="hook"><span class="eyebrow">换个引擎看</span>
+<p>前几页讲的都是“算”：专家怎么放，注意力怎么换。这一页讲“查”。DeepSeek-V4.1-Flash 的文件里躺着一张很大的表：三套低比特文件（1.75、2.00、2.25 bpw）共用的那张是 111 GB，UD-Q8_K_XL 自带的那张是 203 GB。它不做一次乘法。模型每写一个字，只翻其中 48 行：111 GB 那张约 7 KB，203 GB 那张约 12.7 KB。可引擎为这 7 KB 专门养了一组读盘线程和一块行缓存，还要赶在第 1 层和第 14 层之前把行备好。读完这一页，你能回答三个问题：一个字怎么变成 48 个行号；翻到的行怎样改变模型的状态；SSD 的速度到底卡在这张表上，还是卡在别处。</p></div>
+<p class="tldr"><strong>一句话：</strong>Engram 是一张只查不算的哈希表。每个字用哈希算出 48 个行号（第 1 层和第 14 层各 24 个），从 SSD 读来，还原成数，过一个门，加回模型的状态。有效字节只有 7 到 12.7 KB，所以难点是延迟：字一确定就发读请求，用到之前才去收，靠读盘线程和行缓存把等待藏起来。Mac 文档里每字 48 到 111 MB 的读盘量，几乎全是专家，不是这张表。</p>
+
+<h2 id="sec-1">4.1 一张只查不算的表：它在哪一步用，有多大</h2>
+<p><strong>先看它在哪一步。</strong>引擎源码开头画了一层的流程。在有 Engram 的那两层里，它排在最前面，先于注意力和专家。这一步只有一行：h += gate(h, key) × value，value 来自 24 行 n-gram 表。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5-L7" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 5–7 行</a>）注释写的是第 1 层和第 14 层，真实的层号由模型配置里的 engram_layer_ids 给出。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L532" target="_blank" rel="noopener noreferrer">第 532 行</a>）模型一共 40 层，其余 38 层不碰这张表。<span class="ev ev-est">教学推演</span>（40 − 2；40 层见 <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L3-L4" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 3–4 行</a>）</p>
+<p>n-gram 是什么，为什么用哈希行号去查，第 11 章已经讲过（<a href="#chapter/11/c11-ngram">第 11 章「词组记忆」</a>）。主线的 Qwen3.8-Flash-Next 也有这样一张表，源码里叫 PLE。这一页只讲 DeepSeek 这边的做法。</p>
+<p><strong>它是模型的一部分。</strong>每个 Engram 层有一个张量，名字是 layers.&lt;层号&gt;.engram.embed.weight。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2894" target="_blank" rel="noopener noreferrer">第 2894 行</a>）三套低比特文件（1.75、2.00、2.25 bpw）共用同一个 Engram 文件，格式是 IQ4_NL，111 GB，下载一次，三套都用。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L39" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 39 行</a>）UD-Q8_K_XL 自带的那张是 202.8 GB，格式是 MXFP8。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L17" target="_blank" rel="noopener noreferrer">第 17 行</a>；<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/strata_control/dsv41_fit.py#L8" target="_blank" rel="noopener noreferrer">dsv41_fit.py 第 8 行</a>）文档还特意补了一句：这张表不算在内存里，但盘慢了，每个字都会慢，所以模型文件要放在 NVMe 盘上。<span class="ev ev-report">上游报告</span>（同上第 17 行）</p>
+<p><strong>一行有多宽。</strong>读盘代码认三种 GGUF 行格式，外加一种旧打包格式（码和比例分在两个张量里）：MXFP8 每 32 个数占 33 字节，Q6_K 每 256 个数占 210 字节，IQ4_NL 每 32 个数占 18 字节。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_engram_io.hpp#L93-L95" target="_blank" rel="noopener noreferrer">ds4_engram_io.hpp 第 93–95 行</a>；<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2902-L2913" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 2902–2913 行</a>）每行有多少个数，由模型包的头给出，源码里没有写死。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L413-L416" target="_blank" rel="noopener noreferrer">第 413–416 行</a>）lab 工具在“真实形状”的注释下写了每层 24 行、每行 256 个数。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41_lab/ds4_lab.cu#L1-L5" target="_blank" rel="noopener noreferrer">ds4_lab.cu 第 1–5 行</a>；<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41_lab/ds4_lab.cu#L315" target="_blank" rel="noopener noreferrer">第 315 行</a>）这个形状可以拿文件大小验一遍。</p>
+<p><strong>用文件大小验一遍。</strong>按 256 个数一行算：IQ4_NL 每行 8 块 × 18 = 144 字节，MXFP8 每行 8 块 × 33 = 264 字节。<span class="ev ev-est">教学推演</span>setup.py 的注释记着，合并后的 Engram 张量是 110,595,290,400 字节。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/setup.py#L743" target="_blank" rel="noopener noreferrer">setup.py 第 743 行</a>）除以 144，正好是 768,022,850 行。<span class="ev ev-est">教学推演</span>再按 engram_hash.py 的规则取 48 个质数（两层各 24 列，从 16,000,000 往上依次取互不相同的质数），它们的和也是 768,022,850。<span class="ev ev-est">教学推演</span>（规则见 <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/engram_hash.py#L34-L39" target="_blank" rel="noopener noreferrer">engram_hash.py 第 34–39 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/engram_hash.py#L59-L65" target="_blank" rel="noopener noreferrer">第 59–65 行</a>；16,000,000 是我试出来的起点，文件里没有这个数；算式在本页末尾）个位数都对上了：每行 144 字节，每层 24 列，共 48 列。MXFP8 那张也对得上，只差 192 字节。这 192 字节多半是 GGUF 元数据和对齐填充，我没有核对。<span class="ev ev-est">教学推演</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/strata_control/dsv41_fit.py#L32" target="_blank" rel="noopener noreferrer">dsv41_fit.py 第 32 行</a>记着 202,758,032,592）</p>
+<p><strong>一个字取多少字节。</strong>引擎给每个字取 48 行，两个层各 24 行。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/engram_iq4nl_bench.py#L4-L5" target="_blank" rel="noopener noreferrer">engram_iq4nl_bench.py 第 4–5 行</a>：“for one token, gathers 48 rows”）48 × 144 = 6,912 字节，约 7 KB。MXFP8 那张是 48 × 264 = 12,672 字节。<span class="ev ev-est">教学推演</span>整张表 111 GB，一个字只翻其中 7 KB；203 GB 那张，一个字翻 12.7 KB。这就是“查”和“算”的差别：UD-Q8_K_XL 里一个专家有 18.8 MB，要把这些权重过一遍。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L15" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 15 行</a>）2-bit 套装的专家更小。Engram 只取几十个小行。</p>
+<figure class="fig"><svg viewBox="0 0 400 256" role="img" aria-label="图 DS4-1：Engram 表的账：两层各 24 列，共 768,022,850 行；一行 256 个数，IQ4_NL 占 144 字节，MXFP8 占 264 字节">
+<text class="f-muted" fill="#5c6d66" x="12" y="16" font-size="12" text-anchor="start">一张表 = 两个 Engram 层，各有自己的一份</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="12" y="24" width="182" height="56" rx="6"/>
+<text fill="#182f2b" x="103.0" y="49.0" font-size="12" text-anchor="middle">第 1 层的表</text>
+<text fill="#182f2b" x="103.0" y="65.0" font-size="12" text-anchor="middle">24 列 × 约 1,600 万行</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="206" y="24" width="182" height="56" rx="6"/>
+<text fill="#182f2b" x="297.0" y="49.0" font-size="12" text-anchor="middle">第 14 层的表</text>
+<text fill="#182f2b" x="297.0" y="65.0" font-size="12" text-anchor="middle">24 列 × 约 1,600 万行</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="100" font-size="12" text-anchor="middle">合计 768,022,850 行（推算，见 4.1 节）</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="126" font-size="12" text-anchor="start">IQ4_NL（三套低比特文件共用）：8 块 × 18 B = 144 B 一行</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="12" y="132" width="44" height="22" rx="0"/>
+<text fill="#182f2b" x="34" y="148" font-size="12" text-anchor="middle">18 B</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="59" y="132" width="44" height="22" rx="0"/>
+<text fill="#182f2b" x="81" y="148" font-size="12" text-anchor="middle">18 B</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="106" y="132" width="44" height="22" rx="0"/>
+<text fill="#182f2b" x="128" y="148" font-size="12" text-anchor="middle">18 B</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="153" y="132" width="44" height="22" rx="0"/>
+<text fill="#182f2b" x="175" y="148" font-size="12" text-anchor="middle">18 B</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="200" y="132" width="44" height="22" rx="0"/>
+<text fill="#182f2b" x="222" y="148" font-size="12" text-anchor="middle">18 B</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="247" y="132" width="44" height="22" rx="0"/>
+<text fill="#182f2b" x="269" y="148" font-size="12" text-anchor="middle">18 B</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="294" y="132" width="44" height="22" rx="0"/>
+<text fill="#182f2b" x="316" y="148" font-size="12" text-anchor="middle">18 B</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="341" y="132" width="44" height="22" rx="0"/>
+<text fill="#182f2b" x="363" y="148" font-size="12" text-anchor="middle">18 B</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="178" font-size="12" text-anchor="start">MXFP8（UD-Q8_K_XL 自带）：8 块 × 33 B = 264 B 一行</text>
+<rect fill="#136d5a" x="12" y="184" width="44" height="22" rx="0"/>
+<text fill="#ffffff" x="34" y="200" font-size="12" text-anchor="middle">33 B</text>
+<rect fill="#136d5a" x="59" y="184" width="44" height="22" rx="0"/>
+<text fill="#ffffff" x="81" y="200" font-size="12" text-anchor="middle">33 B</text>
+<rect fill="#136d5a" x="106" y="184" width="44" height="22" rx="0"/>
+<text fill="#ffffff" x="128" y="200" font-size="12" text-anchor="middle">33 B</text>
+<rect fill="#136d5a" x="153" y="184" width="44" height="22" rx="0"/>
+<text fill="#ffffff" x="175" y="200" font-size="12" text-anchor="middle">33 B</text>
+<rect fill="#136d5a" x="200" y="184" width="44" height="22" rx="0"/>
+<text fill="#ffffff" x="222" y="200" font-size="12" text-anchor="middle">33 B</text>
+<rect fill="#136d5a" x="247" y="184" width="44" height="22" rx="0"/>
+<text fill="#ffffff" x="269" y="200" font-size="12" text-anchor="middle">33 B</text>
+<rect fill="#136d5a" x="294" y="184" width="44" height="22" rx="0"/>
+<text fill="#ffffff" x="316" y="200" font-size="12" text-anchor="middle">33 B</text>
+<rect fill="#136d5a" x="341" y="184" width="44" height="22" rx="0"/>
+<text fill="#ffffff" x="363" y="200" font-size="12" text-anchor="middle">33 B</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="226" font-size="12" text-anchor="start">每块 32 个数；一行 8 块 = 256 个数（已用文件大小验过）</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="244" font-size="12" text-anchor="start">768,022,850 × 144 B = 110.6 GB；× 264 B = 202.8 GB</text>
+</svg><figcaption>图 DS4-1　Engram 的账：两个层各一张表，每层 24 列，共 768,022,850 行；一行 256 个数，IQ4_NL 占 144 字节，MXFP8 占 264 字节。每个字只取 48 行，约 7 KB，整张表却有 111 GB。行宽和行数是推算的，文件里没有直接写出。</figcaption></figure>
+<div class="callout vs"><strong>对照 Qwen 路径：</strong>第 11 章的 PLE 表有 320,001,536 行，每行 90 字节，共 28.8 GB；每个字取 16 行，只在一层用。DeepSeek 这张有 7.68 亿行，每行 144 字节；每个字取 48 行，在两层用。表大了约 3.8 倍（110.6 ÷ 28.8），每字取的行是 Qwen 的 3 倍，行宽多了 60%（144 ÷ 90）。<span class="ev ev-est">教学推演</span>（Qwen 一侧的数字出自 <a href="#chapter/11/c11-ngram">第 11 章</a>，已在那里核对）两边的路线一脉相承：先哈希，再按行读盘，再放进模型。区别在规模，也在下面几节要讲的读法。</div>
+
+<h2 id="sec-2">4.2 一个字怎么变成 48 个行号</h2>
+<p>行号全靠哈希算出来。没有神经网络，也没有查字典。算法在 eg_issue 里，一共四步。</p>
+<p><strong>第一步，把词号换成压缩词号。</strong>参考实现的注释写了换法：词先经过 NFKC、NFD、去重音、转小写、合并空白，处理完相同的词共用一个新号。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/engram_hash.py#L5-L7" target="_blank" rel="noopener noreferrer">engram_hash.py 第 5–7 行</a>）引擎自己不做这件事，它从模型包的 engram.bin 里读现成的映射表。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L405-L430" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 405–430 行</a>）图片位置的词没有压缩词号，记为 −1，任何 n-gram 都不跨过图片，图片位置也不取行。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L6256-L6260" target="_blank" rel="noopener noreferrer">第 6256–6260 行</a>；<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L6298" target="_blank" rel="noopener noreferrer">第 6298 行</a>）</p>
+<p><strong>第二步，往回看，各乘一个固定的奇数。</strong>对当前字和它前面的几个字，各乘一个数：往回第 s 个字的压缩词号，乘第 s 个乘数。看到文本开头或图片就停，后面的位置用一个固定的填充词号。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L6304-L6307" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 6304–6307 行</a>）乘数每层一套，由模型包带来。参考实现用固定的种子生成它们：种子是 10007 乘层号，结果取奇数。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/engram_hash.py#L82-L89" target="_blank" rel="noopener noreferrer">engram_hash.py 第 82–89 行</a>）所以这里没有任何学出来的索引，同样的 n-gram 永远落在同一行。</p>
+<p><strong>第三步，逐级异或，再按列取余。</strong>把乘积从近到远一个个异或进同一个数：异或前两项，得到 2 字组的哈希；再异或第三项，得到 3 字组的哈希，依此类推。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L6309-L6311" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 6309–6311 行</a>）每个长度对应若干列（头）。每一列有自己的质数和起点：行号 = 哈希 mod 质数 + 起点。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L6314" target="_blank" rel="noopener noreferrer">第 6314 行</a>）质数相当于桶的个数，起点是同一层前面各列质数之和，所以每一列占这层表里自己的一段，互不重叠。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/engram_hash.py#L73-L79" target="_blank" rel="noopener noreferrer">engram_hash.py 第 73–79 行</a>）</p>
+<p><strong>第四步，按行号读文件。</strong>行号乘上每行的字节数，加上张量的起点，就是文件里的位置。表里只有行，没有键：读盘代码没有任何比对键的步骤。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L6337-L6340" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 6337–6340 行</a>）行缓存用“行号 × 8 + Engram 层的序号（0 或 1）”当键。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L6317" target="_blank" rel="noopener noreferrer">第 6317 行</a>）每层的列数 = (n-gram 上限 − 1) × 头数。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L6279" target="_blank" rel="noopener noreferrer">第 6279 行</a>）上限和头数各是几，本页用到的文件没有写，所以不报；能确定的只有乘积，每层 24 列。</p>
+<p>撞车怎么办？一个行号可能被很多个 n-gram 共用，这是不存键的代价。第 11 章讲过同样的取舍（<a href="#chapter/11/c11-hash">第 11 章「哈希」</a>）。这里再加一条推测：取回的行有时不对口，所以后面要有一个门，让当前状态决定信几分。<span class="ev ev-est">教学推演</span></p>
+<p><strong>用小数字走一遍。</strong>最近三个字的压缩词号是 4、9、6（6 是当前字），乘数 3、5、7，两列的质数是 11（起点 0）和 13（起点 11）。乘积 18、45、28；18 ⊕ 45 = 63，63 mod 11 = 8，第一列读第 8 行；63 ⊕ 28 = 35，35 mod 13 = 9，加起点 11，第二列读第 20 行。<span class="ev ev-est">教学推演</span>（玩具数字，规则同上，图 DS4-2 画了同一个例子）</p>
+<figure class="fig"><svg viewBox="0 0 400 334" role="img" aria-label="图 DS4-2：一个字的行号怎么算：压缩词号、乘固定奇数、逐级异或、按列取余加起点、按行号读文件；图中是一个只有两列的玩具例子">
+<rect fill="#e5f1df" stroke="#9fb5a6" x="12" y="8" width="376" height="46" rx="6"/>
+<text fill="#182f2b" x="200.0" y="28.0" font-size="12" text-anchor="middle">① 词号 → 压缩词号</text>
+<text fill="#182f2b" x="200.0" y="44.0" font-size="12" text-anchor="middle">玩具：最近三个字是 4、9、6，6 是当前字</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="12" y="66" width="376" height="46" rx="6"/>
+<text fill="#182f2b" x="200.0" y="86.0" font-size="12" text-anchor="middle">② 往回看，各乘一个固定的奇数</text>
+<text fill="#182f2b" x="200.0" y="102.0" font-size="12" text-anchor="middle">乘数 3、5、7：6×3 = 18，9×5 = 45，4×7 = 28</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="12" y="124" width="376" height="46" rx="6"/>
+<text fill="#182f2b" x="200.0" y="144.0" font-size="12" text-anchor="middle">③ 逐级异或：先 2 字组，再 3 字组</text>
+<text fill="#182f2b" x="200.0" y="160.0" font-size="12" text-anchor="middle">18 ⊕ 45 = 63；63 ⊕ 28 = 35</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="12" y="182" width="376" height="46" rx="6"/>
+<text fill="#182f2b" x="200.0" y="202.0" font-size="12" text-anchor="middle">④ 每列取余，再加这一列的起点</text>
+<text fill="#182f2b" x="200.0" y="218.0" font-size="12" text-anchor="middle">63 mod 11 = 8 → 第 8 行；35 mod 13 = 9，+ 11 → 第 20 行</text>
+<rect fill="#136d5a" x="12" y="240" width="376" height="46" rx="6"/>
+<text fill="#ffffff" x="200.0" y="260.0" font-size="12" text-anchor="middle">⑤ 行号 × 144 B + 张量起点 = 文件位置</text>
+<text fill="#ffffff" x="200.0" y="276.0" font-size="12" text-anchor="middle">读 144 B；缓存的键 = 行号 × 8 + Engram 层序号</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M200 54V60"/>
+<path class="f-muted" fill="#5c6d66" d="M196 59L200 66L204 59Z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M200 112V118"/>
+<path class="f-muted" fill="#5c6d66" d="M196 117L200 124L204 117Z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M200 170V176"/>
+<path class="f-muted" fill="#5c6d66" d="M196 175L200 182L204 175Z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M200 228V234"/>
+<path class="f-muted" fill="#5c6d66" d="M196 233L200 240L204 233Z"/>
+<text class="f-muted" fill="#5c6d66" x="12" y="304" font-size="12" text-anchor="start">玩具里每个 n-gram 长度只有一列；真实的每层有 24 列</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="322" font-size="12" text-anchor="start">表里只有行，没有键：不同的 n-gram 可能撞到同一行</text>
+</svg><figcaption>图 DS4-2　一个字的行号怎么算：压缩词号、乘固定奇数、逐级异或、按列取余加起点、按行号读文件。图里是只有两列的玩具；真实的每层有 24 列，两层共读 48 行。全程只用整数运算，没有可学习的参数。</figcaption></figure>
+<p class="bridge"><strong>学过计算机的同学：</strong>这是机器学习里的“特征哈希”（hashing trick）：键不存，行号直接当数组下标，和哈希表的区别是不处理冲突。第一步的压缩词号像输入规范化：大小写、重音、空白不同的写法并成同一个键，共用一行。哈希函数本身见<a href="#chapter/11/c11-hash">第 11 章</a>。</p>
+<div class="callout vs"><strong>对照 Qwen 路径：</strong>第 11 章的 Qwen 哈希直接拿词号相乘，取最近 2 个和最近 3 个字，各 8 个头，共 16 行；每个头的模数在 2000 万左右。DeepSeek 先压缩词号，一层 24 列，每列的质数在 1,600 万左右（上一节推算），两个层各算各的。两边都是“相乘、异或、取余”，都不存键。（Qwen 一侧见 <a href="#chapter/11/c11-ngram">第 11 章</a>，已在那里核对）</div>
+
+<h2 id="sec-3">4.3 取回的 48 行怎样改变模型的状态</h2>
+<p><strong>先把行还原成数。</strong>IQ4_NL 的一块是 32 个数、18 字节：一个 fp16 的缩放因子，加 16 字节的 4 位码。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1089-L1091" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 1089–1091 行</a>）引擎把每行反量化成 F32。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10021" target="_blank" rel="noopener noreferrer">第 10021 行</a>）量化怎么存、怎么还原，见<a href="#chapter/04/c04-quant">第 4 章「量化」</a>。</p>
+<p><strong>24 行拼成一个长向量，过一次矩阵乘。</strong>24 × 256 = 6,144 个数，每个字、每个 Engram 层各一份。<span class="ev ev-est">教学推演</span>乘上这一层的 engram.wkv 矩阵，得到 (H + 1) × D 个数。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10038" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 10038 行</a>）H 是模型状态的流数（代码里叫 hc），D 是每条流的宽度。lab 注释给出的真实形状是 H = 4，D = 5,120。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41_lab/ds4_lab.cu#L1-L3" target="_blank" rel="noopener noreferrer">ds4_lab.cu 第 1–3 行</a>）所以输出是 5 × 5,120 = 25,600 个数。<span class="ev ev-est">教学推演</span></p>
+<p><strong>输出拆成 4 把钥匙和 1 个值。</strong>前 4 段各属于一条流，叫 key；最后 1 段是大家共用的 value。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L1546-L1550" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 1546–1550 行</a>）</p>
+<p><strong>门决定每条流拿多少。</strong>对第 k 条流：把状态 h 和 key 各自按均方根归一化，逐维乘上这条流自己的权重 w，求点积，再按维数缩放；取带符号的平方根，过 sigmoid，得到 0 到 1 之间的门值 g。最后 h ← h + g × value。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L1543-L1565" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 1543–1565 行</a>）w 是两个学出来的向量 q 和 k 的逐项积。有的打包已经乘好，没有的由引擎加载时相乘。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4343-L4352" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 4343–4352 行</a>；<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L46" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 46 行</a>）</p>
+<p><strong>怎么读这个公式。</strong>value 像一页“这几个字之后常见什么”的笔记，key 像“这页笔记适合什么样的上下文”。门拿当前状态和 key 比一比：对得上，就多加一点。<span class="ev ev-est">教学推演</span>（这是对公式的读法，源码没有这样解释）加回的位置在注意力之前，这一步不占 KV 缓存。<span class="ev ev-est">教学推演</span></p>
+<figure class="fig"><svg viewBox="0 0 400 308" role="img" aria-label="图 DS4-3：取回的 24 行怎样改变状态：反量化、一次矩阵乘、拆成 key 和 value、门、加回状态">
+<rect fill="#e5f1df" stroke="#9fb5a6" x="12" y="8" width="376" height="46" rx="6"/>
+<text fill="#182f2b" x="200.0" y="28.0" font-size="12" text-anchor="middle">① 24 行 × 256 个数，反量化成 F32</text>
+<text fill="#182f2b" x="200.0" y="44.0" font-size="12" text-anchor="middle">得到 6,144 个数（每个字、每个 Engram 层各一份）</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="12" y="64" width="376" height="46" rx="6"/>
+<text fill="#182f2b" x="200.0" y="84.0" font-size="12" text-anchor="middle">② 一次矩阵乘：engram.wkv</text>
+<text fill="#182f2b" x="200.0" y="100.0" font-size="12" text-anchor="middle">6,144 个数 → 5 × 5,120 = 25,600 个数</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="12" y="120" width="376" height="46" rx="6"/>
+<text fill="#182f2b" x="200.0" y="140.0" font-size="12" text-anchor="middle">③ 拆成 4 把钥匙 key ＋ 1 个共用的值 value</text>
+<text fill="#182f2b" x="200.0" y="156.0" font-size="12" text-anchor="middle">状态有 4 条流，每条宽 5,120（lab 注释里的真实形状）</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="12" y="176" width="376" height="46" rx="6"/>
+<text fill="#182f2b" x="200.0" y="196.0" font-size="12" text-anchor="middle">④ 门：每条流各自比一比 h 和 key</text>
+<text fill="#182f2b" x="200.0" y="212.0" font-size="12" text-anchor="middle">归一化，逐维乘 w，点积，带符号开方，sigmoid → g</text>
+<rect fill="#136d5a" x="12" y="232" width="376" height="46" rx="6"/>
+<text fill="#ffffff" x="200.0" y="252.0" font-size="12" text-anchor="middle">⑤ h ← h + g × value</text>
+<text fill="#ffffff" x="200.0" y="268.0" font-size="12" text-anchor="middle">只在第 1、14 层做，其余 38 层不碰这张表</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M200 54V58"/>
+<path class="f-muted" fill="#5c6d66" d="M196 57L200 64L204 57Z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M200 110V114"/>
+<path class="f-muted" fill="#5c6d66" d="M196 113L200 120L204 113Z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M200 166V170"/>
+<path class="f-muted" fill="#5c6d66" d="M196 169L200 176L204 169Z"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M200 222V226"/>
+<path class="f-muted" fill="#5c6d66" d="M196 225L200 232L204 225Z"/>
+<text class="f-muted" fill="#5c6d66" x="12" y="296" font-size="12" text-anchor="start">这一步发生在注意力之前；没有注意力，也不需要 KV 缓存</text>
+</svg><figcaption>图 DS4-3　取回的 24 行怎样改变状态：反量化，一次矩阵乘，拆成 4 把 key 和 1 个 value，门算出 0 到 1 的权重，加回状态。H = 4、D = 5,120 取自 lab 注释。</figcaption></figure>
+
+<h2 id="sec-4">4.4 读盘：字一确定就发请求，用到之前才去收</h2>
+<p><strong>行号只取决于字，所以能提前读。</strong>一个字的 48 个行号只由当前字和它前面几个字的词号决定，不依赖前面任何一层的计算。字一确定，就能发读请求；到用它的那一层之前，才去收。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_engram_io.hpp#L5-L10" target="_blank" rel="noopener noreferrer">ds4_engram_io.hpp 第 5–10 行</a>）第 1 层的行躲在“嵌入加第 0 层”后面，第 14 层的行躲在第 0 到 13 层后面。<span class="ev ev-code">代码事实</span>（同上第 6–7 行）一个窗口的字到齐，两个 Engram 层的请求就一起发出，第 1 层的排在队首。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9720-L9728" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 9720–9728 行</a>；<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_engram_io.hpp#L7-L8" target="_blank" rel="noopener noreferrer">hpp 第 7–8 行</a>）发请求的时间，加上收的时候还没读完的那一截，都计入 engram_ms。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9741-L9743" target="_blank" rel="noopener noreferrer">第 9741–9743 行</a>）</p>
+<p><strong>窗口有多长。</strong>在逐字解码和草稿验证里，一个窗口最多 16 个字。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L18" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 第 18 行</a>）逐字解码时窗口只有 1 个字：step 只喂一个字。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8071" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 8071 行</a>）草稿模型的验证窗口更长，一次带 n + 1 个字，行一起发。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7950-L7960" target="_blank" rel="noopener noreferrer">第 7950–7960 行</a>；草稿在 <a href="#deepseek/draft">第 5 页</a>）默认的分块提示走另一条路：每块几百到几万字，由辅助线程提前一块读行。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L6420-L6424" target="_blank" rel="noopener noreferrer">第 6420–6424 行</a>）所以逐字解码时，第 1 层的行只有“嵌入加第 0 层”那一小段时间可藏，是最紧的一环。<span class="ev ev-est">教学推演</span>（读注释后的推理）</p>
+<p><strong>读盘线程。</strong>引擎养了一组专门读 Engram 的线程，每个线程有自己的文件句柄，从一个先进先出的队列里领活。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_engram_io.hpp#L129-L146" target="_blank" rel="noopener noreferrer">ds4_engram_io.hpp 第 129–146 行</a>）线程数的默认值是 min(16, max(4, 逻辑处理器数 ÷ 2))，Mac 版固定为 2，注释的理由是“线程多到能让 SSD 的队列保持忙”，从页缓存读的话需要的线程少。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2844-L2853" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 2844–2853 行</a>）同时在路上的读越多，SSD 的小块随机读吞吐越高（<a href="#chapter/05/c05-bandwidth-latency">第 5 章「延迟与带宽」</a>）。Windows 上每次 ReadFile 是同步的，线程数就等于队列深度。注释记着两组测量：Project Maya 在 20 核电脑上读 28K 字的提示，10 个线程 17.1 秒，64 个线程 13.4 秒；Strata 在一台 6 核机器上，64 个线程让 4K 提示快了 4.5%，解码没变快。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2847-L2851" target="_blank" rel="noopener noreferrer">第 2847–2851 行</a>）</p>
+<p><strong>Mac 只开 2 个线程。</strong>注释写：线程多于 2 个时，同一个提示的解码在 16 次里有 3 到 9 次和串行结果不同，开 1 到 2 个线程的 24 次都没有，原因还没找到。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2855-L2856" target="_blank" rel="noopener noreferrer">第 2855–2856 行</a>）文档说这让提示速度慢 3% 到 12%，答案速度不变。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L79-L81" target="_blank" rel="noopener noreferrer">DEEPSEEK_MAC.md 第 79–81 行</a>）文档没解释为什么只影响提示。一个合理的猜测：逐字解码每字只有 48 个读，2 个线程应付得来；读一个 3,000 字的提示，最多要发 3,000 × 48 = 144,000 个读，线程少就容易成为瓶颈。<span class="ev ev-est">教学推演</span>（行缓存命中的不用读，所以是上限）</p>
+<p><strong>行缓存。</strong>同一个 n-gram 反复出现，它的行就不必重读。引擎在进程里放了一块行缓存，用时钟算法替换，每行有一个“最近用过”的标记，给第二次机会。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_engram_io.hpp#L38-L91" target="_blank" rel="noopener noreferrer">ds4_engram_io.hpp 第 38–91 行</a>）容量是空闲内存的 1/64，下限 16 MiB，上限 256 MiB；可用 DS4_ENGRAM_CACHE_MB 改，0 为关。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2861-L2864" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 2861–2864 行</a>）每个槽存 hd + hd ÷ 32 = 264 字节，256 MiB 大约能放 100 万行。<span class="ev ev-est">教学推演</span>（268,435,456 ÷ 264 ≈ 1,016,800；槽宽见 <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2846" target="_blank" rel="noopener noreferrer">第 2846 行</a>）这只占整张表的 0.13%，它靠的是重复，不是覆盖。<span class="ev ev-est">教学推演</span>命中的行是拷贝，不是读，输出和读盘完全相同。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_engram_io.hpp#L9-L10" target="_blank" rel="noopener noreferrer">hpp 第 9–10 行</a>）同一个窗口里同一行出现两次，只读一次。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L6275-L6276" target="_blank" rel="noopener noreferrer">第 6275–6276 行</a>）文档没有给命中率。引擎跑完会打印一行“Engram per token: …% without a read”，你可以自己看。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L1574-L1581" target="_blank" rel="noopener noreferrer">ds4_main.cpp 第 1574–1581 行</a>）</p>
+<figure class="fig"><svg viewBox="0 0 400 252" role="img" aria-label="图 DS4-4：读盘与计算并行：字一确定就发出 48 个读请求，第 1 层的行排在队首，在用到之前才去收；只有读得比窗口慢的那一截变成等待">
+<text class="f-muted" fill="#5c6d66" x="12" y="16" font-size="12" text-anchor="start">一个字的时间线（示意，不按比例）</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="36" font-size="12" text-anchor="start">计算</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="12" y="42" width="40" height="24" rx="0"/>
+<text fill="#182f2b" x="32.0" y="58" font-size="12" text-anchor="middle">嵌入</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="54" y="42" width="50" height="24" rx="0"/>
+<text fill="#182f2b" x="79.0" y="58" font-size="12" text-anchor="middle">第 0 层</text>
+<rect fill="#136d5a" x="106" y="42" width="56" height="24" rx="0"/>
+<text fill="#ffffff" x="134.0" y="58" font-size="12" text-anchor="middle">第 1 层</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="164" y="42" width="118" height="24" rx="0"/>
+<text fill="#182f2b" x="223.0" y="58" font-size="12" text-anchor="middle">第 2–13 层</text>
+<rect fill="#136d5a" x="284" y="42" width="58" height="24" rx="0"/>
+<text fill="#ffffff" x="313.0" y="58" font-size="12" text-anchor="middle">第 14 层</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="344" y="42" width="44" height="24" rx="0"/>
+<text fill="#182f2b" x="366.0" y="58" font-size="12" text-anchor="middle">…</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M106 42V180"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M284 42V180"/>
+<text class="f-muted" fill="#5c6d66" x="12" y="92" font-size="12" text-anchor="start">A 读得快：用到之前就读完，等待为 0</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="12" y="98" width="90" height="22" rx="0"/>
+<text fill="#182f2b" x="57" y="114" font-size="12" text-anchor="middle">第 1 层 24 行</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="102" y="98" width="134" height="22" rx="0"/>
+<text fill="#182f2b" x="169" y="114" font-size="12" text-anchor="middle">第 14 层 24 行</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="148" font-size="12" text-anchor="start">B 读得慢：第 1 层的行晚到，只等越过虚线的那一截</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="12" y="154" width="94" height="22" rx="0"/>
+<text fill="#182f2b" x="59" y="170" font-size="12" text-anchor="middle">第 1 层的行</text>
+<rect fill="#9e5d24" x="106" y="154" width="34" height="22" rx="0"/>
+<text fill="#ffffff" x="123" y="170" font-size="12" text-anchor="middle">等</text>
+<rect fill="#e5f1df" stroke="#9fb5a6" x="140" y="154" width="120" height="22" rx="0"/>
+<text fill="#182f2b" x="200" y="170" font-size="12" text-anchor="middle">第 14 层的行</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="204" font-size="12" text-anchor="start">左虚线：收第 1 层的行（嵌入 + 第 0 层之后）</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="222" font-size="12" text-anchor="start">右虚线：收第 14 层的行（第 0–13 层之后）</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="240" font-size="12" text-anchor="start">第 1 层的行排在读盘队首；逐字解码时窗口只有 1 个字</text>
+</svg><figcaption>图 DS4-4　读盘和计算并行：字一确定就发出 48 个读请求，第 1 层的行排在队首；到第 1 层、第 14 层之前才去收。读得快，等待为 0；读得慢，只有越过虚线的那一截变成等待。</figcaption></figure>
+<p><strong>读走哪条路。</strong>默认走缓冲读：pread 读文件，经过操作系统的页缓存。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_engram_io.hpp#L235-L254" target="_blank" rel="noopener noreferrer">ds4_engram_io.hpp 第 235–254 行</a>）绕过页缓存的直接读只有 Windows 有，要设 DS4_EG_DIRECT=1，默认关，注释记着它让 4K 提示慢了 8%。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2867-L2873" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 2867–2873 行</a>）</p>
+<p>另一件事：Engram 的页和原地读的专家共用页缓存。源码注释说，把专家拷进自己的内存，就“不会把页缓存输给 Engram 表和文件的搅动”。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5340-L5341" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 5340–5341 行</a>；专家怎么分层见<a href="#deepseek/experts">第 2 页</a>）</p>
+<p>最后一点：一行读不出来，引擎不崩，把这一行按零处理。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L6388" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 6388 行</a>）所以读盘出问题时，症状可能是答案悄悄变差，不是报错。Mac 版会往 stderr 打一行警告，其他版本不会。<span class="ev ev-est">教学推演</span></p>
+<p class="bridge"><strong>学过计算机的同学：</strong>“发请求”和“收结果”拆成两个调用，就是异步 I/O 里的 future：先拿凭据，要用时再等。队列深度可以用利特尔法则估：同时在路上的读数 = 吞吐 × 单次延迟。所以小块随机读靠多个线程撑起并发，不靠单次读更快（<a href="#chapter/14/c14-async">第 14 章「异步」</a>、<a href="#chapter/06/c06-mmap-page-cache">第 6 章「页缓存」</a>）。</p>
+<div class="callout vs"><strong>对照 Qwen 路径：</strong>主线 PLE 的读法几乎相反。它默认直接读，绕过页缓存；行缓存是 8 路组相联，1,048,576 行，每行 90 字节，约 94 MB。DeepSeek 默认走缓冲读，和专家共用页缓存；行缓存是时钟加第二次机会，上限 256 MB。主线的表只在一层用，只有“嵌入加第 0 层”一个窗口可藏；这里第二个窗口（第 0 到 13 层）宽松得多。<span class="ev ev-est">教学推演</span>（Qwen 一侧见 <a href="#chapter/11/c11-set-assoc">第 11 章「组相联缓存」</a>，已在那里核对）</div>
+
+<h2 id="sec-5">4.5 SSD 的速度到底卡在哪</h2>
+<p><strong>文档给的是总数，不是 Engram 的账。</strong>Mac 文档的表里有一行“Read from the SSD per word”：2.00 套装 48 MB，2.25 套装 111 MB。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L50" target="_blank" rel="noopener noreferrer">DEEPSEEK_MAC.md 第 50 行</a>；条件：M5 Max 128 GB，0.2.7.1 打包引擎，两个 Engram 读取线程；测量时旁边还有一个空闲的 60 GB Qwen 服务共用文件缓存，见<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L35-L39" target="_blank" rel="noopener noreferrer">第 35–39 行</a>）文档没写这一行用哪个计数器量的。引擎里最接近的是 disk_mb：这个进程让存储设备读了多少字节，包括原地读的专家；在 Mac 上，命中页缓存的读取不计。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L62-L85" target="_blank" rel="noopener noreferrer">ds4_main.cpp 第 62–85 行</a>；<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L954-L957" target="_blank" rel="noopener noreferrer">第 954–957 行</a>）把文档里那一行当成这一类计数器，是我的推断。<span class="ev ev-est">教学推演</span></p>
+<p><strong>Engram 占其中多少。</strong>每字 48 行，每行至少读一页。按 4 KiB 一页算，一般 48 × 4 KiB = 192 KiB，约 0.2 MB，偶尔跨页会多读一页；Apple 芯片的页是 16 KiB，约 48 × 16 KiB = 768 KiB，约 0.8 MB。<span class="ev ev-est">教学推演</span>（页越大，一次小读放大越多；每行 144 字节很少跨页）对比 48 MB 和 111 MB，Engram 约占 1.6% 和 0.7%。还有一个更干净的论据：两套用的是同一张表。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L39" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 39 行</a>）111 − 48 = 63 MB 的差，基本来自专家（Engram 的差额只有 0.8 MB 上下）。<span class="ev ev-est">教学推演</span></p>
+<p>所以 Mac 上“SSD 慢拖累每个字”，拖累的主要是专家。文档自己的说法也是：一个解码字受限于这些 SSD 读取，和一条算 GPU 没装下的专家的 CPU 通道，而不是 GPU。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L57-L62" target="_blank" rel="noopener noreferrer">DEEPSEEK_MAC.md 第 57–62 行</a>）专家怎么在显存、内存和 SSD 之间分层，见<a href="#deepseek/experts">第 2 页</a>。</p>
+<p><strong>那 Engram 为什么还要线程和缓存？</strong>因为它要的是延迟，不是带宽。48 个随机小读，必须在第 1 层、第 14 层之前回来。仓库里的读盘基准脚本也这样写（译文）：每字 48 行的收集在 110 GB 上是随机的，IOPS 和 MB/s 一样重要。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/engram_iq4nl_bench.py#L45" target="_blank" rel="noopener noreferrer">engram_iq4nl_bench.py 第 45 行</a>）读完所需的时间，粗略是 ⌈行数 ÷ 线程数⌉ × 单次随机读延迟。<span class="ev ev-est">教学推演</span>（教学模型）假设单次 100 微秒、4 个线程：⌈48 ÷ 4⌉ × 100 µs = 1.2 ms。按 15 字/秒算，一个字约 67 ms，分到 40 层，平均每层约 1.7 ms。<span class="ev ev-est">教学推演</span>（1000 ÷ 15 ≈ 67；67 ÷ 40 ≈ 1.7）两个数相当，这就是第 1 层的行排队首的原因。这个模型有破绽：Mac 只开 2 个线程，它会预测答案速度受影响，文档却说没有，可见真实延迟更短，或缓存命中很多。它只说明量级。</p>
+<p><strong>把读速换成字速的上限。</strong>每字要读多少 MB，由模型包和内存决定；一秒能读多少 MB，由盘决定。上限 = 读速 ÷ 每字 MB。下面的图把两条线画在一起：横轴是 SSD 读速，竖轴是字速上限。交互版可以拖动读速和每字 MB。文档没说那一行对应哪组速度，图里按代码提示的短答案取。</p>
+<div class="viz" data-viz="ds-engram-read"><figure class="fig"><svg viewBox="0 0 400 254" role="img" aria-label="图 DS4-5：字速上限 = SSD 读速 ÷ 每字读盘量；两条线是每字 48 MB 和 111 MB，圆点是 Mac 实测的字速，横坐标是它至少要求的读速">
+<text class="f-muted" fill="#5c6d66" x="12" y="14" font-size="12" text-anchor="start">每字读 48 MB（2.00 套装）：实测约 15.6 字/秒（实心点）</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="32" font-size="12" text-anchor="start">每字读 111 MB（2.25 套装）：实测约 15.0 字/秒（空心点）</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="50" font-size="12" text-anchor="start">虚线：3.6 GB/s 时的上限，分别是 75 和 32 字/秒</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.2" d="M48 64.1V212H380"/>
+<text class="f-muted" fill="#5c6d66" x="48.0" y="228" font-size="12" text-anchor="middle">0</text>
+<text class="f-muted" fill="#5c6d66" x="131.0" y="228" font-size="12" text-anchor="middle">1</text>
+<text class="f-muted" fill="#5c6d66" x="214.0" y="228" font-size="12" text-anchor="middle">2</text>
+<text class="f-muted" fill="#5c6d66" x="297.0" y="228" font-size="12" text-anchor="middle">3</text>
+<text class="f-muted" fill="#5c6d66" x="380.0" y="228" font-size="12" text-anchor="middle">4</text>
+<text class="f-muted" fill="#5c6d66" x="214" y="246" font-size="12" text-anchor="middle">SSD 读速（GB/s）</text>
+<text class="f-muted" fill="#5c6d66" x="42" y="216.0" font-size="12" text-anchor="end">0</text>
+<text class="f-muted" fill="#5c6d66" x="42" y="172.5" font-size="12" text-anchor="end">25</text>
+<text class="f-muted" fill="#5c6d66" x="42" y="129.0" font-size="12" text-anchor="end">50</text>
+<text class="f-muted" fill="#5c6d66" x="42" y="85.5" font-size="12" text-anchor="end">75</text>
+<text class="f-muted" fill="#5c6d66" x="56" y="72.1" font-size="12" text-anchor="start">上限（字/秒）</text>
+<path fill="none" stroke="#136d5a" stroke-width="2" d="M48.0 212.0L380.0 67.0"/>
+<path fill="none" stroke="#9e5d24" stroke-width="2" d="M48.0 212.0L380.0 149.3"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M346.8 212.0V64.1"/>
+<circle fill="#136d5a" cx="346.8" cy="81.5" r="3"/>
+<text class="f-muted" fill="#5c6d66" x="339.8" y="73.5" font-size="12" text-anchor="end">75</text>
+<circle fill="#9e5d24" cx="346.8" cy="155.6" r="3"/>
+<text class="f-muted" fill="#5c6d66" x="339.8" y="147.6" font-size="12" text-anchor="end">32</text>
+<circle fill="#136d5a" cx="110.2" cy="184.9" r="5"/>
+<circle fill="#ffffff" stroke="#9e5d24" stroke-width="2" cx="186.2" cy="185.9" r="5"/>
+<text class="f-muted" fill="#5c6d66" x="102.2" y="175.9" font-size="12" text-anchor="end">0.75</text>
+<text class="f-muted" fill="#5c6d66" x="186.2" y="173.9" font-size="12" text-anchor="middle">1.67</text>
+</svg><figcaption>图 DS4-5　字速上限 = SSD 读速 ÷ 每字读盘量。两条线是每字 48 MB 和 111 MB；圆点是 Mac 文档的实测字速（代码提示：2.00 套装 15.2–16.0，取 15.6；2.25 套装 14.7–15.3，取 15.0），横坐标是它至少要求的读速：0.75 与 1.67 GB/s（15.6 × 48，15.0 × 111）。虚线是 3.6 GB/s：上限 75 和 32 字/秒，远高于实测。</figcaption></figure></div>
+<p><strong>看这张图的三点提醒。</strong>其一，这是上限，真实速度更低：专家还要在 CPU 上算。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L57-L62" target="_blank" rel="noopener noreferrer">DEEPSEEK_MAC.md 第 57–62 行</a>）这台 Mac 的盘速文档没写；若它也有 3.6 GB/s，两个点就远低于上限，说明字速不由读速单独决定。其二，读速要按“你的读法”取值：专家是大块读，接近顺序读；Engram 是小块随机读，吞吐低得多。<span class="ev ev-est">教学推演</span>其三，每字 MB 不是常数：内存多，留住的专家多，读盘量就低。<span class="ev ev-report">上游报告</span>（同上第 57–59 行）3.6 GB/s 来自文档里的一台 5070 机器（12 GB 显存，64 GB 内存），那一行没有给每字 MB，所以图里没有画它的字速。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L63-L64" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 63–64 行</a>）</p>
+<p><strong>在自己的机器上量。</strong>引擎每 8 个字给监视器发一行 STAT，里面有 disk_mb（每字读盘 MB）和 engram_ms（每字发 Engram 请求加等读完的毫秒数）。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L937-L957" target="_blank" rel="noopener noreferrer">ds4_main.cpp 第 937–957 行</a>；<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L976" target="_blank" rel="noopener noreferrer">第 976 行</a>）命令行跑完会打印“Engram per token”和“decode reads from the disk: N MB a token”。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L1574-L1584" target="_blank" rel="noopener noreferrer">第 1574–1584 行</a>）上游没有公布这些数的实测值，本页也没有。拿 disk_mb 和你的盘速回到上面的图，就能判断你的机器卡在读盘，还是卡在别处。</p>
+<div class="callout vs"><strong>对照 DeepInfer：</strong>DeepInfer 列已核对的各页没有讲这张表，所以本页不替集群回答“它放在哪”。可以对照的是另一件事：集群也用 SSD 层，装的却是 KV 缓存，不是模型的参数（见 <a href="#deepinfer/pd-kv">DeepInfer 第 3 页</a>，已在 774ce244 核对）。一台电脑把表放在 SSD 上，是因为 111 GB 超过一般机器的内存；GPU 只收到读出来的几行。它读的是模型自己的权重。</div>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>Engram 是一张约 7.68 亿行的哈希表，两个层各有一份。每个字用相乘、异或、取余算出 48 个行号，每行 144 字节，共约 7 KB；表里没有键，撞车被允许；取回的行过一个门，加回状态。</li>
+<li>难点是延迟，不是带宽。行号只取决于字，所以字一确定就发读请求，用到之前才去收；读盘线程、行缓存和页缓存一起把等待藏起来。Mac 为了结果稳定只开 2 个线程，代价是提示慢 3% 到 12%。</li>
+<li>Mac 文档里每字 48 MB 和 111 MB 的读盘量，几乎全是专家，Engram 约占 1.6%。字速上限 = SSD 读速 ÷ 每字 MB；按短答案代码提示的中值估，Mac 的字速只要求 0.75 到 1.67 GB/s 的读速（15.6 × 48，15.0 × 111；教学推演）。</li>
+</ol></div>
+
+<div class="myth"><p><strong>常见误解：“Engram 有 111 GB，所以它吃掉了 SSD 的带宽。”</strong></p>
+<p>表大和读得多是两回事。一个字只翻 48 行，约 7 KB；就算每行都读一整页，也不到 1 MB。Mac 文档里每字 48 MB 和 111 MB 的读盘量，两套用同一张表，差的 63 MB 基本来自专家（Engram 的差额不会超过 0.8 MB）。<span class="ev ev-est">教学推演</span>（算式见 4.5 节）Engram 要的是低延迟和足够的并发读，不是带宽。模型文件放在慢盘上，两种读都会变慢，但慢的主要是专家。</p></div>
+
+<details class="deep"><summary>深入一层：怎么自己核对这一页的数，以及没核对到的地方</summary>
+<p><strong>第一步，取一份锁定提交的源码</strong>：<code>git clone https://github.com/Niko1221/Strata</code>，进入目录后 <code>git checkout c62d5e3a</code>。下面的命令里，<code>git -C up</code> 指在这份签出里跑 git，在它的根目录下直接写 <code>git</code> 即可：</p>
+<pre><code>git -C up grep -n -F "[Engram, layers 1 and 14]" -- src/dsv41/ds4_model.cu
+git -C up grep -n -F "collected only right before the layer" -- src/dsv41/ds4_engram_io.hpp
+git -C up grep -n -F "rolling ^= prod[n]" -- src/dsv41/ds4_model.cu
+git -C up grep -n -F "Engram rows 256" -- tools/dsv41_lab/ds4_lab.cu
+git -C up grep -n -F "gathers 48 rows" -- tools/dsv41/engram_iq4nl_bench.py
+git -C up grep -n -F "110,595,290,400" -- setup.py
+git -C up grep -n -F "Read from the SSD per word" -- docs/DEEPSEEK_MAC.md</code></pre>
+<p><strong>第二步，验 4.1 节的质数和。</strong>下面这段只用标准库。它从 16,000,000 往上取 48 个相邻的质数，求和，再乘每行字节数。输出应该是 768022850、110595290400、202758032400：</p>
+<pre><code>python3 -c "
+def p(n): return n &gt; 1 and all(n % i for i in range(2, int(n ** .5) + 1))
+c, s = 16_000_000, 0
+for _ in range(48):
+    c += 1
+    while not p(c): c += 1
+    s += c
+print(s, s * 144, s * 264)"</code></pre>
+<p>110,595,290,816 − 110,595,290,400 = 416，202,758,032,592 − 202,758,032,400 = 192：都是文件头那几百字节。起点 16,000,000 是试出来的假设；换成 8,000,000 或 4,000,000，再配 512 或 1,024 个数一行，算出来的行数对不上文件大小。</p>
+<p><strong>页缓存路径的行速。</strong>ds4_model.cu 第 2867–2870 行的注释说，从多个线程读同一个文件的页缓存，在那台 Windows 机器上约每秒 25.5 万行。<span class="ev ev-report">上游报告</span>逐字解码每字 48 行，15 字/秒只要 720 行/秒，占 0.3%。读提示时，Mac 文档里 2.00 套装读 32,000 字的提示是 609 字/秒（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L49" target="_blank" rel="noopener noreferrer">DEEPSEEK_MAC.md 第 49 行</a>），最多要 609 × 48 ≈ 29,000 行/秒。两个数来自两台机器，只用来比量级；行缓存命中的行不用读，所以 29,000 是上限。<span class="ev ev-est">教学推演</span></p>
+<p><strong>两套文件布局。</strong>文档说，ISTA-DASLab 在 10 月 27 日重新切分了文件：新的六分片布局里，两张 Engram 表合成一个张量，字节不变；门权重存的是 q 乘 k 的乘积；Engram“名字和大小都一样，但哈希不同”，哪个布局都能用哪张。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L46-L48" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 46–48 行</a>）代码这边，门权重两种写法都认：有 engram.gate.weight 就直接用，没有就读 q_weight 和 k_weight 逐项相乘。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4343-L4352" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 4343–4352 行</a>）打包脚本也认两套元数据拼写：engram.* 和 llama.cpp 风格的 ple.*。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/pack_gguf.py#L236-L259" target="_blank" rel="noopener noreferrer">pack_gguf.py 第 236–259 行</a>）“哈希不同”具体指哪些数不同，文档没说，本页没有核对。</p>
+<p><strong>文档、注释和代码不一致的地方，按代码处理。</strong>① engram_iq4nl_bench.py 的开头写着“随机 2.3 KB 的行读”（第 7 行），与上面的 144 字节对不上。该文件自称是“Phase 1.3 skeleton”，行宽以 GGUF 头为准（“nothing is hardcoded here”）。本页以 lab 的 hd = 256 和质数和验算为准。同一个文件还写着 O_DIRECT：表放不进内存，所以不用页缓存。这是当时的设想；现在的引擎默认走缓冲读，直接读只在 Windows 上作为选项。② DEEPSEEK41.md 第 17 行说“表读自 SSD”，第 39 行说“读自内存或 SSD”。两句不冲突：页缓存里有的页，就是从内存读的。</p>
+<p><strong>没有核对的东西。</strong>① 24 列怎么分成 n-gram 长度乘头数：打包后的文件里才有，本页用到的文件没写。② Engram 层确实是两个：来自 ds4_model.cu 第 6 行的注释、DEEPSEEK41.md 第 46 行“两张 Engram 表”，以及质数和里的“两层各 24 列”这一假设，三者互相吻合，但没有读到模型包的头。③ Mac 文档里“每字读 SSD”那一行用的计数器：本页按 disk_mb 的类型推断。④ Engram 的命中率、engram_ms 的实测值：上游没有公布，本页没有。⑤ Mac 上多线程结果不同的原因：代码注释和文档都说“还没找到”，本页不猜。⑥ 100 µs 的单次读延迟是假设值，不是测量。</p>
+</details>
