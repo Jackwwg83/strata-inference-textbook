@@ -43,7 +43,7 @@
 <path class="f-muted" fill="#5c6d66" d="M376 26V36L370 31Z"/>
 <text class="f-muted" fill="#5c6d66" x="200" y="370" font-size="12" text-anchor="middle">不开变长验证时，5 个草稿每步全部验证</text>
 </svg><figcaption>图 D4-1　一步解码：主模型一次验完一排 token；草稿模块一次前向，给下一步备好 5 个草稿和它们各自的把握。把握决定下一步验几个。</figcaption></figure>
-<div class="callout vs"><strong>对照 Strata：</strong>Strata 的草稿来自模型自带的一层 MTP 层，最多猜 3 个；默认的验证规则是“草稿和目标的抽样结果完全相等才接受”，经典的 min(1, p ÷ q) 规则要另开开关（<a href="#chapter/18">第 18 章</a> 18.5 节）。DeepInfer 默认就用经典规则，一次猜 5 个，还多输出一列置信度。多出来的这列数，不是为了验证本身，是为了调度：一步里有几十个请求，得有个依据决定先验谁。</div>
+<div class="callout vs"><strong>对照 Strata：</strong>Strata 的草稿来自模型自带的一层 MTP 层，最多猜 3 个；默认的验证规则是“草稿和目标的抽样结果完全相等才接受”，经典的 min(1, p ÷ q) 规则要另开开关（<a href="#chapter/18">第 18 章</a> 18.5 节）。DeepInfer 默认就用经典规则，一次猜 5 个，还多输出一列置信度。多出来的这列数，不是为了验证本身，是为了调度：一步里有几十个请求，得有个依据决定先验谁。同一个 DeepSeek-V4.1-Flash 上，Strata 的 DSpark 草稿模型和 DeepInfer 一样，一次块前向猜 5 个、带一列置信度；一台电脑只有一个请求，置信度只用来裁一个窗口（<a href="#deepseek/draft/sec-1">DeepSeek 专栏第 5 页 5.1 节</a>）。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/dspark_ref.py#L10-L14" target="_blank" rel="noopener noreferrer">dspark_ref.py 第 10–14 行</a>）</div>
 
 <h2 id="sec-2">4.2 验几个最划算：把名额先给把握最大的草稿</h2>
 <p>最省事的做法是每个请求都把 5 个草稿全验。问答说，这样会把验证算力浪费在希望渺茫的草稿上，因为不同请求、不同位置的接受概率差得很多。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md#L243" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>）</p>
