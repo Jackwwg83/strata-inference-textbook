@@ -1,5 +1,5 @@
 <div class="hook"><span class="eyebrow">이런 걸 느끼셨을 거예요</span>
-<p>Strata가 글을 쓰는 모습을 보면, 한 글자씩 쥐어짜듯 나오는 게 아니라 "한 번에 한 줄씩 툭툭" 튀어나오는 것처럼 느껴질 때가 있어요. README의 설명은 이래요. 작은 도우미가 뒤에 올 단어 몇 개를 먼저 추측하고, 큰 모델이 그 추측을 한 번에 전부 검사해요. 그래서 같은 답을 1.6~1.8배 빠르게 낼 수 있어요.<span class="ev ev-report">업스트림 보고</span>[S01]</p>
+<p>Strata가 글을 쓰는 모습을 보면, 한 글자씩 쥐어짜듯 나오는 게 아니라 "한 번에 한 줄씩 툭툭" 튀어나오는 것처럼 느껴질 때가 있어요. 업스트림 문서의 설명은 이래요. 작은 도우미가 뒤에 올 단어 몇 개를 먼저 추측하고, 큰 모델이 그 추측을 한 번에 전부 검사해요. 그래서 같은 답을 1.6~1.8배 빠르게 낼 수 있어요.<span class="ev ev-report">업스트림 보고</span>[S02]</p>
 <p>업스트림 문서는 모델에 내장된 추측 층이 한 번에 토큰을 최대 3개까지 추측한다고도 해요.<span class="ev ev-report">업스트림 보고</span>[S02] 그런데 이상하지 않나요? 맞게 추측한 토큰은 공짜로 버는 셈인데, 왜 한 번에 10개를 추측하지 않을까요? 이 장은 두 가지에 답해요. 몇 개를 추측하는 게 가장 이득인지, 그리고 수락률이 계속 변할 때 엔진이 달리면서 어떻게 마음을 바꾸는지예요.</p></div>
 <p class="tldr"><strong>한마디로:</strong> 토큰을 하나 더 추측할 때 기댓값으로 더 얻는 몫은 등비급수로 점점 줄어드는데, 검증 한 라운드의 시간은 계속 늘어요. Strata가 비교하는 건 "1밀리초당 기댓값으로 커밋하는 토큰 수"이고, 수락률은 지수 이동 평균으로 달리면서 갱신해요.</p>
 
@@ -235,7 +235,7 @@
 
 <h2 id="sec-5">19.5 Strata가 실제로 돌리는 건 어느 쪽일까</h2>
 <p>여기까지 설명한 컨트롤러는 <code>src/spec/controller.cpp</code>에 있어요. <code>strata_spec</code> 라이브러리로 컴파일되고, 자체 단위 테스트 <code>controller_test</code>도 있어요.<span class="ev ev-code">코드 사실</span> 그런데 생성 메인 프로그램 <code>generate.cpp</code>(실행 파일 <code>strata</code>의 메인 소스예요. v0.1.44부터 Qwen3.6 모델 파일은 <code>main</code> 맨 앞에서 다른 엔진 경로로 넘어가고, 그 경로에서는 라운드마다 드래프트 수를 <code>--mtp N</code>으로 고정해요)를 열어 보면, 불러오는 건 다른 헤더 파일 <code>draft_policy.hpp</code>이고, 생성 루프가 호출하는 것도 <code>DraftPolicy</code>예요. 이 책이 검사한 엔진 소스에서는 <code>Controller</code>를 호출하는 곳을 찾지 못했어요.<span class="ev ev-code">코드 사실</span> 그림 19-7은 둘을 나란히 놓아요.</p>
-<figure class="fig"><svg viewBox="0 0 400 268" role="img" aria-label="그림 19-7: Controller는 공식 모델로 비용을 추정해 MTP 윈도우를 정하지만 단위 테스트에서만 호출돼요. DraftPolicy는 실측 시간을 쓰고, 룩업 드래프트로 바꿀지만 정하며, 생성 메인 루프가 호출해요">
+<figure class="fig"><svg viewBox="0 0 400 268" role="img" aria-label="그림 19-7: Controller는 공식 모델로 비용을 추정해 MTP 윈도우를 정하지만 단위 테스트에서만 호출돼요. DraftPolicy는 실측 시간을 쓰고, 기본적으로 룩업 드래프트로 바꿀지만 정하며, 생성 메인 루프가 호출해요">
 <rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="10" width="185" height="200" rx="8"/>
 <text class="f-text" fill="#182f2b" x="22" y="32" font-size="13" font-weight="600">Controller</text>
 <text class="f-muted" fill="#5c6d66" x="22" y="50" font-size="12">src/spec/controller.cpp</text>
@@ -248,8 +248,8 @@
 <rect class="f-soft" fill="#e5f1df" x="205" y="10" width="185" height="200" rx="8"/>
 <text class="f-text" fill="#182f2b" x="217" y="32" font-size="13" font-weight="600">DraftPolicy</text>
 <text class="f-muted" fill="#5c6d66" x="217" y="50" font-size="12">src/spec/draft_policy.cpp</text>
-<text class="f-text" fill="#182f2b" x="217" y="76" font-size="12">MTP 윈도우: --spec</text>
-<text class="f-text" fill="#182f2b" x="217" y="100" font-size="12">룩업 교체 여부만 결정</text>
+<text class="f-text" fill="#182f2b" x="217" y="76" font-size="12">MTP 윈도우: 기본 --spec</text>
+<text class="f-text" fill="#182f2b" x="217" y="100" font-size="12">기본은 룩업 교체만 결정</text>
 <text class="f-text" fill="#182f2b" x="217" y="124" font-size="12">비용: 실측 라운드 시간</text>
 <text class="f-text" fill="#182f2b" x="217" y="148" font-size="12">MTP 산출: 실측 평균</text>
 <text class="f-text" fill="#182f2b" x="217" y="172" font-size="12">문턱: 3% 빨라야 교체</text>
@@ -257,9 +257,11 @@
 <text class="f-text" fill="#182f2b" x="200" y="236" font-size="12" text-anchor="middle">둘의 목표는 같아요: 1밀리초당 기대 커밋 토큰 수</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="256" font-size="12" text-anchor="middle">차이는 분모예요: 하나는 공식으로, 하나는 초시계로 재요</text>
 </svg><figcaption>그림 19-7　같은 목표 함수, 두 가지 구현이에요. 실제로 생성 루프에서 결정을 내리는 건 오른쪽이에요. 비용을 공식으로 짐작하지 않고, 윈도우 종류마다 실제로 얼마나 걸렸는지 기록해요.</figcaption></figure>
-<p>먼저 MTP 쪽이에요. 생성 루프에서 MTP의 윈도우 길이는 시작 인자 <code>--spec</code>에서 오고, 첫 라운드를 빼면 라운드마다 고정돼요. <code>--spec-min-p</code>를 설정했을 때만 짧아져요. 드래프트 층이 어떤 드래프트에 갖는 확신이 이 문턱보다 낮으면 그 드래프트를 윈도우에 더 넣지 않아요.<span class="ev ev-code">코드 사실</span> 업스트림 문서는 MTP가 한 번에 최대 3개를 추측한다고 해요.<span class="ev ev-report">업스트림 보고</span>[S02]</p>
-<p><code>DraftPolicy</code>가 맡는 건 다른 일, <dfn>프롬프트 룩업(prompt lookup)</dfn>이에요. 지금 쓰는 내용이 컨텍스트의 어느 부분을 반복한다면(예를 들어 코드를 고치면서 원래 있던 몇 줄을 그대로 베낄 때) 지난번에 그 부분 뒤에 뭐가 왔는지 이번에도 대체로 같을 테니, 그걸 바로 드래프트로 써요. 룩업 드래프트는 최대 5개이고, 실측한 수락률과 비용이 모두 이득이라고 할 때만 써요. 업스트림 보고의 효과는 코드 수정에서 6~11% 빨라지고 일반 텍스트에서는 변화 없음이에요.<span class="ev ev-report">업스트림 보고</span>[S02] 생성 루프에는 전제도 하나 있어요. MTP를 켰을 때는 룩업 드래프트의 첫 토큰이 MTP 자신의 첫 드래프트와 같아야 <code>DraftPolicy</code>의 판단을 받아요.<span class="ev ev-code">코드 사실</span></p>
-<p><code>DraftPolicy</code>의 알고리즘도 이 장의 공식이에요. 룩업 쪽은 E(k) = 1 + q + q² + … + qᵏ이고, q는 "얼마나 길게 일치했는가"별로 나눈 구간마다 통계낸 수락률이에요. MTP 쪽은 실측한 라운드당 평균 산출을 바로 써요. 분모는 더 이상 공식이 아니라 윈도우 길이마다 실측한 라운드당 시간이고, α = 0.1인 EMA로 매끄럽게 만들어요. 측정해 보지 않은 길이는 미리 정해 둔 모양 곡선으로 측정해 본 길이에서 환산해요. 룩업 윈도우는 MTP 윈도우보다 3% 넘게 빨라야 선택돼요.<span class="ev ev-code">코드 사실</span></p>
+<p>먼저 MTP 쪽이에요. 기본 설정에서 생성 루프의 MTP 윈도우 길이는 시작 인자 <code>--spec</code>에서 오고, 첫 라운드를 빼면 라운드마다 고정돼요. <code>--spec-min-p</code>를 설정했을 때만 짧아져요. 드래프트 층이 어떤 드래프트에 갖는 확신이 이 문턱보다 낮으면 그 드래프트를 윈도우에 더 넣지 않아요.<span class="ev ev-code">코드 사실</span> 업스트림 문서는 MTP가 한 번에 최대 3개를 추측한다고 해요.<span class="ev ev-report">업스트림 보고</span>[S02]</p>
+<p>v0.2.3부터 스위치 <code>STRATA_SPEC_COST=1</code>이 생겼어요. MTP는 드래프트를 하나씩 만들어요. 하나를 만들 때마다 <code>DraftPolicy</code>가 "확률이 비슷한 드래프트가 실제로 수락된 비율"로 E를 추정하고, 이를 윈도우의 실측 시간으로 나눠요. 한두 개를 더 늘리면 지금까지의 최고 윈도우를 넘을 가능성이 있는 동안은 계속 만들고, 아니면 최고 윈도우에서 멈춰요. 시간 표는 컨텍스트 길이에 따라 세 구간으로 나뉘어요. 6K 이내, 24K 이내, 그보다 긴 경우예요.<span class="ev ev-code">코드 사실</span> 이 스위치가 바꾸는 건 어떤 행을 검증하느냐뿐이에요. 토큰은 여전히 하나하나 큰 모델이 정해요. 이 스위치는 기본으로 꺼져 있어요. DGX Spark(GB10)만 v0.2.7.1부터 기본으로 켜요.<span class="ev ev-code">코드 사실</span> 업스트림 보고에 따르면 이 카드에서 디코딩이 4.7% 빨라지고, <code>"parallel": 8</code>일 때는 약 3.5% 느려져서 업스트림은 끄라고 권해요.<span class="ev ev-report">업스트림 보고</span></p>
+<p>업스트림에는 기본으로 꺼져 있는 DFlash2 드래프터도 있어요. Terminal에서 <code>strata launch --drafting dflash2</code>로 켜고, Qwen3.8-Flash-Next에만 써요. 기본값 auto는 MTP와 같아요. 어느 카드에서나 더 빠르다고 나온 적이 아직 없기 때문이에요.<span class="ev ev-report">업스트림 보고</span></p>
+<p><code>DraftPolicy</code>가 맡는 건 다른 일, <dfn>프롬프트 룩업(prompt lookup)</dfn>이에요. 지금 쓰는 내용이 컨텍스트의 어느 부분을 반복한다면(예를 들어 코드를 고치면서 원래 있던 몇 줄을 그대로 베낄 때) 지난번에 그 부분 뒤에 뭐가 왔는지 이번에도 대체로 같을 테니, 그걸 바로 드래프트로 써요. 룩업 드래프트는 최대 5개이고, 실측한 수락률과 비용이 모두 이득이라고 할 때만 써요. 업스트림 보고의 효과는 코드 수정에서 6~11% 빨라지고 일반 텍스트에서는 변화 없음이에요.<span class="ev ev-report">업스트림 보고</span>[S02] 생성 루프에는 전제도 하나 있어요. MTP를 켰을 때는 룩업 드래프트의 첫 토큰이 MTP 자신의 첫 드래프트와 같아야 <code>DraftPolicy</code>의 판단을 받아요. 확률적 드래프트 <code>STRATA_SPEC_PROB=1</code>을 켰을 때는 예외예요.<span class="ev ev-code">코드 사실</span></p>
+<p><code>DraftPolicy</code>의 알고리즘도 이 장의 공식이에요. 룩업 쪽은 E(k) = 1 + q + q² + … + qᵏ이고, q는 "얼마나 길게 일치했는가"별로 나눈 구간마다 통계낸 수락률이에요. MTP 쪽은 실측한 라운드당 평균 산출을 바로 써요. 분모는 더 이상 공식이 아니라 윈도우 길이마다 실측한 라운드당 시간이고, α = 0.1인 EMA로 매끄럽게 만들어요(<code>STRATA_SPEC_COST</code>를 켜면 윈도우마다 처음 몇 번의 측정은 평균을 내요). 측정해 보지 않은 길이는 미리 정해 둔 모양 곡선으로 측정해 본 길이에서 환산해요. 룩업 윈도우는 MTP 윈도우보다 3% 넘게 빨라야 선택돼요.<span class="ev ev-code">코드 사실</span></p>
 <p>좋은 엔지니어링 교훈이에요. 비용 모델을 아무리 정교하게 써도 직접 재는 것만 못해요. 기계가 다르고 컨텍스트 길이가 다르면 라운드마다의 시간이 달라져요. 실측값은 자연히 기계를 따라가요.</p>
 
 <h2 id="sec-6">19.6 직접 해 보기: 최적 윈도우 직접 찾기</h2>
@@ -293,7 +295,7 @@
 <p><code>Controller</code>의 두 함수만 보면 주의할 경계가 하나 더 있어요. "추측 안 함"을 고르고 나면 <code>observe</code>가 바로 반환해서 추정이 더는 갱신되지 않아요.<span class="ev ev-code">코드 사실</span>[S09] 잡음이 추정을 한 번 문턱 아래로 눌러 버리면, 이 두 함수만으로는 다시는 배울 수 없어서 호출하는 쪽이 따로 탐색해야 해요. (이 장의 모듈에는 이를 보여 주는 테스트가 따로 있어요.) <code>DraftPolicy</code>에는 명시적인 탐색이 있어요. 소요 시간을 재 본 적 없는 룩업 윈도우는 수락률 추정이 0.85 이상이기만 하면 처음 3번을 바로 시험해 봐요. 주석에 따르면 검증이 출력이 변하지 않음을 보장하니, 거는 건 이번 라운드의 속도뿐이에요(이 주석은 꼬리 건너뛰기보다 먼저 쓰였어요. 다음 소절을 보세요).<span class="ev ev-code">코드 사실</span> v0.1.40.2에서 규칙이 하나 더 생겼어요. 시간을 재 본 적은 있지만 300라운드가 넘도록 다시 재지 않은 룩업 윈도우도, 수락률 추정이 0.85 이상이면 다시 시험해 봐요. 주석이 드는 이유는 이래요. 그 소요 시간이 유난히 느린 구간에서 잰 값일 수 있어요. 그 가격이면 영영 뽑히지 않고, 그러면 다시는 재지 않게 돼요.<span class="ev ev-code">코드 사실</span></p>
 <h3>드래프트 때문에 출력이 변할까요</h3>
 <p>꼬리 건너뛰기를 쓰지 않을 때, 원리상 변하지 않아요. 커밋되는 모든 토큰은 큰 모델 자신의 선택이니까요. 하지만 업스트림 문서는 부동소수점 수준의 예외를 하나 짚어요. IQ 양자화 모델을 쓸 때 CPU가 토큰 하나의 전문가를 계산할 때와 토큰 여러 개의 전문가를 계산할 때 다른 커널을 쓰고, 반올림이 약간 달라요. 한 전문가를 몇 개 토큰이 공유하는지는 검증 윈도우의 드래프트에 따라 달라지고요. 그래서 온도가 0이어도 같은 프롬프트가 똑같이 그럴듯한 다른 답을 낼 수 있어요. <code>STRATA_IQ_MT_MIN=1</code>로 설정하면 모든 그룹이 다중 토큰 커널을 써서, 답이 더는 이 반올림 때문에 드래프트에 달려 있지는 않아요.<span class="ev ev-report">업스트림 보고</span>[S03]</p>
-<p>두 번째 예외는 v0.1.42부터 서비스 모드가 기본으로 켜는 라우팅 꼬리 건너뛰기에서 나와요(18장 18.2절). 이것은 VRAM에 없는 전문가 중 어떤 것을 덜 계산할지를 검증 윈도우 전체를 보고 정해요. 그래서 코드로 보면 드래프트가 다르면 큰 모델이 계산해 내는 수치도 달라질 수 있어요.<span class="ev ev-code">코드 사실</span>(<code>src/core/expert_source.cpp</code>) 답이 드래프트와 무관하게 하려면 <code>STRATA_ROUTE_TAIL_SKIP=0</code>도 설정해야 해요. 업스트림 문서의 「답이 더는 드래프트에 달려 있지 않다」는 문장은 따라서 고쳐지지 않았고, 이 책은 코드를 기준으로 해요.</p>
+<p>두 번째 예외는 라우팅 꼬리 건너뛰기에서 나와요(18장 18.2절). 이 기능은 CUDA 서비스 모드에서 v0.1.42부터, HIP의 gfx1200과 gfx1201에서도 v0.1.43부터 기본으로 켜져요. NVFP4 전문가, VRAM에 90% 이상 캐시된 전문가, <code>--batch</code> 슬롯 같은 경우에는 기본으로 켜지지 않아요.<span class="ev ev-code">코드 사실</span> 이 기능은 VRAM에 없는 전문가 중 어떤 것을 덜 계산할지를 검증 윈도우 전체를 보고 정해요. 그래서 코드로 보면 드래프트가 다르면 큰 모델이 계산해 내는 수치도 달라질 수 있어요.<span class="ev ev-code">코드 사실</span>(<code>src/core/expert_source.cpp</code>) 답이 드래프트와 무관하게 하려면 <code>STRATA_ROUTE_TAIL_SKIP=0</code>도 설정해야 해요. 업스트림 문서의 「답이 더는 드래프트에 달려 있지 않다」는 문장은 따라서 고쳐지지 않았고, 이 책은 코드를 기준으로 해요.</p>
 <h3>검수 기준</h3>
 <p>윈도우 컨트롤러를 검증할 때는 예쁜 곡선보다 경계가 더 설득력 있어요.</p>
 <ul>
