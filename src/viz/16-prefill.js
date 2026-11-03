@@ -44,7 +44,7 @@
       bTry: [
         '把 <b>n</b> 从 1 拉到 2：耗时只多 5%，第二个 token 几乎是“白送”的。',
         '拉到 4、再到 8，盯住“平均每个 token”：它先快速下降，到 4 个左右就基本走平了。n 再大，计算量本身开始占上风，复用的好处不再增长。',
-        '对照第 18 章：验证窗口最多 8 行，这张表正是投机控制器决定“猜几个”时用到的成本表之一。',
+        '对照第 18 章：验证窗口在 NVIDIA 上最多 8 行（AMD 的 HIP 版 v0.2.8 起可到 16 行），这张表正是投机控制器决定“猜几个”时用到的成本表之一。',
       ],
       try: [
         '把 <b>C</b> 从 1 拉到 8192，看下面的柱子：一开始几乎线性上涨，到 2048 附近就平了。上涨段是“权重读一次、服务更多 token”，平台段是算力上限。',
@@ -88,7 +88,7 @@
       bTry: [
         'Drag <b>n</b> from 1 to 2: the time grows by only 5%, so the second token is almost "free".',
         'Go to 4, then 8, and watch "Average per token": it drops fast at first and is nearly flat by about 4. Past that, the compute itself starts to dominate and the benefit of reuse stops growing.',
-        'Compare with Chapter 18: the verification window holds at most 8 rows, and this table is one of the cost tables the speculative controller uses to decide "how many to guess".',
+        'Compare with Chapter 18: the verification window holds at most 8 rows on NVIDIA (up to 16 on HIP builds for AMD since v0.2.8), and this table is one of the cost tables the speculative controller uses to decide "how many to guess".',
       ],
       try: [
         'Drag <b>C</b> from 1 to 8192 and watch the bars below: they rise almost linearly at first and flatten out around 2048. The rising part is "one read of the weights serves more tokens"; the plateau is the compute ceiling.',
@@ -132,7 +132,7 @@
       bTry: [
         'اسحب <b>n</b> من 1 إلى 2: يزيد الزمن 5% فقط، فيكاد token الثاني يكون «هدية».',
         'انتقل إلى 4 ثم 8 وراقب «متوسط كل token»: ينخفض سريعًا أولًا، ثم يكاد يستقر عند نحو 4. وبعد ذلك يبدأ الحساب نفسه يغلب، ولا يزيد نفع إعادة الاستخدام.',
-        'قارن بالفصل 18: نافذة التحقق تضم 8 صفوف على الأكثر، وهذا الجدول أحد جداول الكلفة التي يستخدمها المتحكم التخميني ليقرر «كم يخمّن».',
+        'قارن بالفصل 18: نافذة التحقق تضم 8 صفوف على الأكثر على NVIDIA (وحتى 16 صفًا في إصدارات HIP لـ AMD منذ v0.2.8)، وهذا الجدول أحد جداول الكلفة التي يستخدمها المتحكم التخميني ليقرر «كم يخمّن».',
       ],
       try: [
         'اسحب <b>C</b> من 1 إلى 8192 وراقب الأعمدة في الأسفل: ترتفع أولًا بشكل شبه خطي، ثم تستقر عند نحو 2048. الجزء الصاعد هو «قراءة واحدة للأوزان تخدم token أكثر»، والهضبة هي حد قدرة الحساب.',
@@ -176,7 +176,7 @@
       bTry: [
         '<b>n</b>을 1에서 2로 끌어 보세요. 시간이 5%만 늘어서, 두 번째 토큰은 거의 "공짜"예요.',
         '4, 그다음 8까지 끌면서 "토큰당 평균"을 지켜보세요. 처음에는 빠르게 내려가다가 4개쯤에서 거의 평평해져요. n이 더 커지면 계산량 자체가 우세해져서, 재사용의 이점이 더는 늘지 않아요.',
-        '18장과 비교해 보세요. 검증 윈도우는 최대 8줄이고, 이 표가 바로 추측 컨트롤러가 "몇 개를 추측할지" 정할 때 쓰는 비용표 중 하나예요.',
+        '18장과 비교해 보세요. 검증 윈도우는 NVIDIA에서 최대 8줄이고(AMD의 HIP 빌드는 v0.2.8부터 16줄까지), 이 표가 바로 추측 컨트롤러가 "몇 개를 추측할지" 정할 때 쓰는 비용표 중 하나예요.',
       ],
       try: [
         '<b>C</b>를 1에서 8192까지 끌면서 아래 막대를 보세요. 처음에는 거의 선형으로 오르다가 2048 근처에서 평평해져요. 오르는 구간은 "가중치를 한 번 읽어서 더 많은 토큰을 돕는" 구간이고, 평평한 구간은 연산 능력의 상한이에요.',
@@ -220,7 +220,7 @@
       bTry: [
         '<b>n</b> を 1 から 2 に動かします。時間は 5% しか増えず、2 つ目の token はほとんど「おまけ」です。',
         '4、そして 8 まで動かして、「1 token あたりの平均」に注目します。最初は急に下がり、4 個あたりでほぼ横ばいになります。n がそれより大きくなると、計算そのものが主役になり、再利用の効果はもう伸びません。',
-        '第 18 章と見比べましょう。検証ウィンドウは最大 8 行です。この表は、投機コントローラが「何個推測するか」を決めるときに使うコスト表の 1 つです。',
+        '第 18 章と見比べましょう。検証ウィンドウは NVIDIA では最大 8 行です（AMD の HIP 版は v0.2.8 から 16 行まで）。この表は、投機コントローラが「何個推測するか」を決めるときに使うコスト表の 1 つです。',
       ],
       try: [
         '<b>C</b> を 1 から 8192 まで動かして、下の棒を見ます。最初はほぼ直線的に上がり、2048 付近で頭打ちになります。上がる部分は「重みを 1 回読んで、より多くの token の役に立つ」部分です。平らな部分が演算性能の上限です。',
@@ -264,7 +264,7 @@
       bTry: [
         'Arrastra <b>n</b> de 1 a 2: el tiempo crece solo un 5%, así que el segundo token es casi «gratis».',
         'Ve a 4 y luego a 8, y mira «Promedio por token»: baja rápido al principio y está casi plano hacia 4. Pasado eso, el cálculo en sí empieza a dominar y el beneficio de la reutilización deja de crecer.',
-        'Compáralo con el capítulo 18: la ventana de verificación tiene como máximo 8 filas, y esta tabla es una de las tablas de costo que usa el controlador especulativo para decidir «cuántos tokens adivinar».',
+        'Compáralo con el capítulo 18: la ventana de verificación tiene como máximo 8 filas en NVIDIA (hasta 16 en las compilaciones HIP de AMD desde v0.2.8), y esta tabla es una de las tablas de costo que usa el controlador especulativo para decidir «cuántos tokens adivinar».',
       ],
       try: [
         'Arrastra <b>C</b> de 1 a 8192 y mira las barras de abajo: suben casi linealmente al principio y se aplanan hacia 2048. La parte que sube es «una lectura de los pesos sirve a más tokens»; la meseta es el techo de cálculo.',

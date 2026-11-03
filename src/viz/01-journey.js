@@ -59,7 +59,7 @@
       wAnsK: '写完回答', wAnsF: (m, tg) => `<b>= ${m} ÷ ${tg} token/s</b><br>一轮一个 token`,
       wShareK: '读题占总时间', wShareF: '<b>= 等第一个字 ÷ 总时间</b>',
       sec: (s) => `${s} 秒`,
-      wNote: '按 1K = 1,024 个 token 估算。README 给的经验值更保守：第一条消息大约每 30,000 个 token 要读 1 分钟。',
+      wNote: '按 1K = 1,024 个 token 估算。上游文档说，长文读起来每秒能超过 1,000 个 token，和这里的数字同一量级。',
       wTry: [
         '把提问长度从 4K 拉到 128K：等第一个字从约 3 秒变成约 1 分钟，写答案的时间几乎不变。',
         '把回答长度拉到 1000：写答案按比例变长，读题时间纹丝不动。两段时间由不同的因素决定。',
@@ -120,7 +120,7 @@
       wAnsK: 'Finish the answer', wAnsF: (m, tg) => `<b>= ${m} ÷ ${tg} token/s</b><br>one token per round`,
       wShareK: 'Prefill share of total time', wShareF: '<b>= first-word wait ÷ total time</b>',
       sec: (s) => `${s} s`,
-      wNote: 'Estimated with 1K = 1,024 tokens. The README gives a more cautious rule of thumb: the first message takes about 1 minute to read per 30,000 tokens.',
+      wNote: 'Estimated with 1K = 1,024 tokens. The upstream docs say a long text is read at over 1,000 tokens per second, the same order as these numbers.',
       wTry: [
         'Drag the prompt length from 4K to 128K: the wait for the first word goes from about 3 seconds to about 1 minute, while the time to write the answer barely changes.',
         'Drag the answer length to 1000: decode time grows in proportion, and prefill time does not move at all. The two phases depend on different things.',
@@ -181,7 +181,7 @@
       wAnsK: 'إنهاء الإجابة', wAnsF: (m, tg) => `<b>= ${m} ÷ ${tg} token/s</b><br>رمز واحد في كل دورة`,
       wShareK: 'حصة prefill من الزمن الكلي', wShareF: '<b>= انتظار الكلمة الأولى ÷ الزمن الكلي</b>',
       sec: (s) => `${s} ث`,
-      wNote: 'التقدير يعتمد 1K = 1,024 رمزًا. أما القاعدة التقريبية في README فأكثر حذرًا: الرسالة الأولى تحتاج نحو دقيقة واحدة لكل 30,000 رمز.',
+      wNote: 'التقدير يعتمد 1K = 1,024 رمزًا. وتذكر وثائق المشروع أن النصوص الطويلة تُقرأ بسرعة تزيد على 1,000 رمز في الثانية، أي بنفس رتبة الأرقام هنا.',
       wTry: [
         'حرّك طول المُطالبة من 4K إلى 128K: ينتقل انتظار الكلمة الأولى من نحو 3 ثوانٍ إلى نحو دقيقة، بينما يكاد زمن كتابة الإجابة لا يتغير.',
         'حرّك طول الإجابة إلى 1000: يطول decode بالتناسب، ولا يتحرك زمن prefill إطلاقًا. المرحلتان تعتمدان على عوامل مختلفة.',
@@ -242,7 +242,7 @@
       wAnsK: 'Terminar la respuesta', wAnsF: (m, tg) => `<b>= ${m} ÷ ${tg} token/s</b><br>un token por vuelta`,
       wShareK: 'Parte del prefill en el tiempo total', wShareF: '<b>= espera de la primera palabra ÷ tiempo total</b>',
       sec: (s) => `${s} s`,
-      wNote: 'Estimado con 1K = 1.024 tokens. El README da una regla más prudente: el primer mensaje tarda 1 minuto en leerse por cada 30.000 tokens.',
+      wNote: 'Estimado con 1K = 1.024 tokens. La documentación del proyecto dice que un texto largo se lee a más de 1.000 tokens por segundo, el mismo orden de magnitud que estas cifras.',
       wTry: [
         'Arrastra la longitud del prompt de 4K a 128K: la espera de la primera palabra pasa de unos 3 segundos a más o menos 1 minuto, y el tiempo de escribir la respuesta casi no cambia.',
         'Arrastra la longitud de la respuesta a 1000: el tiempo de decode crece en proporción y el del prefill no se mueve nada. Las dos fases dependen de cosas distintas.',
@@ -303,7 +303,7 @@
       wAnsK: '답변을 다 쓰는 시간', wAnsF: (m, tg) => `<b>= ${m} ÷ ${tg} token/s</b><br>한 바퀴에 토큰 하나`,
       wShareK: '전체 시간 중 프리필 비중', wShareF: '<b>= 첫 글자까지 기다린 시간 ÷ 전체 시간</b>',
       sec: (s) => `${s}초`,
-      wNote: '1K = 1,024 토큰으로 계산했어요. README의 경험값은 더 보수적이에요. 첫 메시지는 토큰 30,000개당 약 1분이 걸린다고 해요.',
+      wNote: '1K = 1,024 토큰으로 계산했어요. 업스트림 문서에 따르면 긴 글은 초당 1,000토큰 넘게 읽는다고 해요. 여기 숫자와 같은 규모예요.',
       wTry: [
         '질문 길이를 4K에서 128K로 늘려 보세요. 첫 글자까지 약 3초에서 약 1분으로 늘고, 답을 쓰는 시간은 거의 그대로예요.',
         '답변 길이를 1000으로 늘려 보세요. 디코드 시간은 비례해서 늘고, 프리필 시간은 꿈쩍도 안 해요. 두 구간은 서로 다른 요인으로 정해져요.',
@@ -364,7 +364,7 @@
       wAnsK: '回答を書き終えるまで', wAnsF: (m, tg) => `<b>= ${m} ÷ ${tg} token/s</b><br>1 周に 1 トークン`,
       wShareK: 'プリフィルが全体に占める割合', wShareF: '<b>= 最初の 1 文字まで ÷ 全体の時間</b>',
       sec: (s) => `${s} 秒`,
-      wNote: '1K = 1,024 トークンとして見積もっています。README の目安はもっと控えめで、最初のメッセージは約 30,000 トークンごとに 1 分かけて読みます。',
+      wNote: '1K = 1,024 トークンとして見積もっています。上流のドキュメントによると、長い文章は毎秒 1,000 トークン以上で読まれます。ここの数字と同じ桁です。',
       wTry: [
         '質問の長さを 4K から 128K へ動かします。最初の 1 文字までの待ち時間は約 3 秒から約 1 分になり、答えを書く時間はほとんど変わりません。',
         '回答の長さを 1000 にします。デコードの時間は比例して伸び、プリフィルの時間はまったく動きません。2 つの段階は、別の要因で決まります。',
