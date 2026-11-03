@@ -13,37 +13,40 @@
 <li>每个头用 q 给这些行打分，过 softmax，加权求和。64 个头读同一批行。</li>
 <li>输出的旋转部分转回去，舍入到 FP8，经分组的 wo_a 和 wo_b 投影。</li>
 </ol>
-<figure class="fig"><svg viewBox="0 0 560 360" role="img" aria-label="图 DS3-1：一层注意力对一个字做的事：投影出 q 和一行 K = V，读窗口环、挑出的压缩行和 sink，打分求和，再投影输出">
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="8" width="260" height="38" rx="7"/>
-<text fill="currentColor" x="280" y="32" font-size="13" text-anchor="middle">这一层收到：第 p 个字的隐藏状态</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M280 46V60M145 60V76M415 60V76M145 60H415"/>
-<path class="f-muted" fill="#5c6d66" d="M141 72L145 80L149 72ZM411 72L415 80L419 72Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="82" width="250" height="48" rx="7"/>
-<text fill="currentColor" x="145" y="103" font-size="13" text-anchor="middle">q：wq_a、wq_b 低秩投影</text>
-<text class="f-muted" fill="#5c6d66" x="145" y="121" font-size="13" text-anchor="middle">64 个头 × 512 维</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="290" y="82" width="250" height="48" rx="7"/>
-<text fill="currentColor" x="415" y="103" font-size="13" text-anchor="middle">这个字的一行 K = V（512 维）</text>
-<text class="f-muted" fill="#5c6d66" x="415" y="121" font-size="13" text-anchor="middle">舍入到 FP8，写进环槽 p mod 128</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M145 130V142M415 130V142M145 142H415M280 142V160"/>
-<path class="f-muted" fill="#5c6d66" d="M276 156L280 164L284 156Z"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="166" width="166" height="56" rx="7"/>
-<text fill="currentColor" x="103" y="189" font-size="13" text-anchor="middle">最近 128 行（窗口环）</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="208" font-size="13" text-anchor="middle">每层一块，覆盖式，FP8</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="197" y="166" width="166" height="56" rx="7"/>
-<text fill="currentColor" x="280" y="189" font-size="13" text-anchor="middle">索引器挑的 ≤ 512 行</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="208" font-size="13" text-anchor="middle">压缩行：只追加，FP4</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="374" y="166" width="166" height="56" rx="7"/>
-<text fill="currentColor" x="457" y="189" font-size="13" text-anchor="middle">sink：每头一个数</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="208" font-size="13" text-anchor="middle">只进分母，不占缓存行</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M103 222V238M280 222V238M457 222V238"/>
-<path class="f-muted" fill="#5c6d66" d="M99 234L103 242L107 234ZM276 234L280 242L284 234ZM453 234L457 242L461 234Z"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="244" width="520" height="52" rx="7"/>
-<text fill="currentColor" x="280" y="266" font-size="13" text-anchor="middle">每个头：用 q 给每一行打分，softmax（分母里加 sink），加权求和</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="285" font-size="13" text-anchor="middle">K = V：同一行既被打分，也被加权求和；64 个头读同一批行</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M280 296V312"/>
-<path class="f-muted" fill="#5c6d66" d="M276 308L280 316L284 308Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="110" y="318" width="340" height="36" rx="7"/>
-<text fill="currentColor" x="280" y="341" font-size="13" text-anchor="middle">输出：逆向旋转，舍入 FP8，经 wo_a、wo_b 投影</text>
+<figure class="fig"><svg viewBox="0 0 440 350" role="img" aria-label="图 DS3-1：一层注意力对一个字做的事：投影出 q 和一行 K = V，读窗口环、挑出的压缩行和 sink，打分求和，再投影输出">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="8" width="220" height="34" rx="7"/>
+<text fill="currentColor" x="220" y="29" font-size="12" text-anchor="middle">这一层收到：第 p 个字的隐藏状态</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 42V54M115 54V66M325 54V66M115 54H325"/>
+<path class="f-muted" fill="#5c6d66" d="M111 62L115 70L119 62ZM321 62L325 70L329 62Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="72" width="205" height="48" rx="7"/>
+<text fill="currentColor" x="115" y="93" font-size="12" text-anchor="middle">q：wq_a、wq_b 低秩投影</text>
+<text class="f-muted" fill="#5c6d66" x="115" y="111" font-size="12" text-anchor="middle">64 个头 × 512 维</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="223" y="72" width="205" height="48" rx="7"/>
+<text fill="currentColor" x="325" y="93" font-size="12" text-anchor="middle">这个字的一行 K = V（512 维）</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="111" font-size="12" text-anchor="middle">舍入 FP8，写进环槽 p mod 128</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M115 120V132M325 120V132M115 132H325M220 132V146"/>
+<path class="f-muted" fill="#5c6d66" d="M216 142L220 150L224 142Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="152" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="78" y="172" font-size="12" text-anchor="middle">最近 128 行</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="190" font-size="12" text-anchor="middle">窗口环，覆盖式</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="208" font-size="12" text-anchor="middle">FP8，每层一块</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="152" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="220" y="172" font-size="12" text-anchor="middle">索引器挑 ≤ 512 行</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="190" font-size="12" text-anchor="middle">压缩行：只追加</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="208" font-size="12" text-anchor="middle">FP4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="296" y="152" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="362" y="172" font-size="12" text-anchor="middle">sink：每头一个数</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="190" font-size="12" text-anchor="middle">只进分母，</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="208" font-size="12" text-anchor="middle">不占缓存行</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M78 216V228M220 216V228M362 216V228"/>
+<path class="f-muted" fill="#5c6d66" d="M74 224L78 232L82 224ZM216 224L220 232L224 224ZM358 224L362 232L366 224Z"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="234" width="416" height="52" rx="7"/>
+<text fill="currentColor" x="220" y="256" font-size="12" text-anchor="middle">每个头：用 q 给每一行打分，softmax（分母里加 sink），加权求和</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="275" font-size="12" text-anchor="middle">K = V：同一行既被打分，也被加权求和；64 个头读同一批行</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 286V296"/>
+<path class="f-muted" fill="#5c6d66" d="M216 296L220 304L224 296Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="60" y="306" width="320" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="328" font-size="12" text-anchor="middle">输出：逆向旋转，舍入 FP8，经 wo_a、wo_b 投影</text>
 </svg><figcaption>图 DS3-1　一层注意力对一个字做的事。q 来自低秩投影，K 和 V 是同一行；每个头读三处：窗口环里最近 128 行、索引器挑出的至多 512 行压缩行、一个学来的 sink。画的是配方的结构，每个方框的出处在正文里。</figcaption></figure>
 <p>数字的出处要分清。128、512 和 64 个头，是文件头与实验室程序注释里的数字 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41_lab/ds4_lab.cu#L1-L4" target="_blank" rel="noopener noreferrer">ds4_lab.cu 第 1–4 行</a>）。引擎自己从 pack 的 ds4.txt 读 sliding_window、index_topk 和 num_attention_heads <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L519-L522" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 519–522 行</a>）。写死的有四条几何检查：head_dim 必须是 512，index_head_dim 必须是 128，每字专家数不超过 8，hc 不超过 8；任何一条不满足，pack 加载失败 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2166-L2169" target="_blank" rel="noopener noreferrer">第 2166–2169 行</a>）。</p>
 <p><dfn>K = V</dfn> 的意思是两份并成一份。第 8 章里，每个位置存键 k 和值 v：k 决定“看哪里”，v 决定“看到什么”。这里同一行先拿去算点积，再拿去加权求和，GPU 内核用的是同一组行指针 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L892-L903" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 892–903 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L934-L941" target="_blank" rel="noopener noreferrer">第 934–941 行</a>）。64 个头再共用这一行，这叫多查询注意力（MQA）。它比第 8 章的 GQA 更进一步：GQA 是 24 个头分成 2 组，MQA 是所有头一组。背景见 <a href="https://arxiv.org/abs/1911.02150" target="_blank" rel="noopener noreferrer">Shazeer 的原论文</a>。</p>
@@ -53,44 +56,44 @@
 <h2 id="sec-2">3.2 128 行的环：最近的字一个都不丢</h2>
 <p><dfn>窗口环</dfn>是每层一块固定大小的缓存，128 行。位置 p 的那一行写进槽 p mod 128，新行覆盖 128 个字之前的旧行 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L1297-L1331" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 1297–1331 行</a>）。每行 512 维，存成 FP8 码，每 32 个值配一个 2 的幂次刻度 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L22-L33" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 第 22–33 行</a>）。FP8 是什么，见<a href="#chapter/04/c04-float">第 4 章「二进制与浮点数」</a>。</p>
 <p>一行占多少字节，可以直接算：512 个码加 512 ÷ 32 = 16 个刻度，共 528 字节，正好是 16 的倍数，不用补齐 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L3209-L3213" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 3209–3213 行</a>）。一层的环是 128 × 528 = 67,584 字节。DeepSeek-V4.1-Flash 有 40 层 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L3" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 3 行</a>），40 层共 2,703,360 字节，约 2.58 MiB <span class="ev ev-est">教学推演</span>。这一份和上下文长度无关。集群那一页独立算出了同一个 528（<a href="#deepinfer/pd-kv/sec-4">DeepInfer 第 3 页</a>）。</p>
-<figure class="fig"><svg viewBox="0 0 560 226" role="img" aria-label="图 DS3-2：窗口环的写入：位置 128 写进槽 0，覆盖位置 0，环里剩下位置 1 到 128">
-<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="13" text-anchor="start">第 127 个位置写完之后：槽 s 里放着位置 s</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="55" y="45" font-size="13" text-anchor="middle">槽 0</text>
-<text class="f-muted" fill="#5c6d66" x="55" y="62" font-size="13" text-anchor="middle">位置 0</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="135" y="45" font-size="13" text-anchor="middle">槽 1</text>
-<text class="f-muted" fill="#5c6d66" x="135" y="62" font-size="13" text-anchor="middle">位置 1</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="215" y="45" font-size="13" text-anchor="middle">槽 2</text>
-<text class="f-muted" fill="#5c6d66" x="215" y="62" font-size="13" text-anchor="middle">位置 2</text>
-<text class="f-muted" fill="#5c6d66" x="285" y="53" font-size="13" text-anchor="middle">…</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="355" y="45" font-size="13" text-anchor="middle">槽 126</text>
-<text class="f-muted" fill="#5c6d66" x="355" y="62" font-size="13" text-anchor="middle">位置 126</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="400" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="435" y="45" font-size="13" text-anchor="middle">槽 127</text>
-<text class="f-muted" fill="#5c6d66" x="435" y="62" font-size="13" text-anchor="middle">位置 127</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="104" font-size="13" text-anchor="start">第 128 个位置进来：槽 = 128 mod 128 = 0，覆盖位置 0 的旧行</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="20" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="55" y="131" font-size="13" text-anchor="middle">槽 0</text>
-<text fill="currentColor" x="55" y="148" font-size="13" text-anchor="middle">位置 128</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="135" y="131" font-size="13" text-anchor="middle">槽 1</text>
-<text class="f-muted" fill="#5c6d66" x="135" y="148" font-size="13" text-anchor="middle">位置 1</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="215" y="131" font-size="13" text-anchor="middle">槽 2</text>
-<text class="f-muted" fill="#5c6d66" x="215" y="148" font-size="13" text-anchor="middle">位置 2</text>
-<text class="f-muted" fill="#5c6d66" x="285" y="139" font-size="13" text-anchor="middle">…</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="355" y="131" font-size="13" text-anchor="middle">槽 126</text>
-<text class="f-muted" fill="#5c6d66" x="355" y="148" font-size="13" text-anchor="middle">位置 126</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="400" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="435" y="131" font-size="13" text-anchor="middle">槽 127</text>
-<text class="f-muted" fill="#5c6d66" x="435" y="148" font-size="13" text-anchor="middle">位置 127</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M20 168H470M20 162V168M470 162V168"/>
-<text fill="currentColor" x="245" y="188" font-size="13" text-anchor="middle">环里现在放的是位置 1 … 128：恰好 128 行（含刚写的这一行）</text>
-<text class="f-muted" fill="#5c6d66" x="245" y="212" font-size="13" text-anchor="middle">每步只写一个槽，其余行不挪动；按位置 mod 128 找槽</text>
+<figure class="fig"><svg viewBox="0 0 440 226" role="img" aria-label="图 DS3-2：窗口环的写入：位置 128 写进槽 0，覆盖位置 0，环里剩下位置 1 到 128">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">第 127 个位置写完之后：槽 s 里放着位置 s</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="44" y="45" font-size="12" text-anchor="middle">槽 0</text>
+<text class="f-muted" fill="#5c6d66" x="44" y="62" font-size="12" text-anchor="middle">位置 0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="86" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="118" y="45" font-size="12" text-anchor="middle">槽 1</text>
+<text class="f-muted" fill="#5c6d66" x="118" y="62" font-size="12" text-anchor="middle">位置 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="160" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="192" y="45" font-size="12" text-anchor="middle">槽 2</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="62" font-size="12" text-anchor="middle">位置 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="322" y="45" font-size="12" text-anchor="middle">槽 126</text>
+<text class="f-muted" fill="#5c6d66" x="322" y="62" font-size="12" text-anchor="middle">位置 126</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="364" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="396" y="45" font-size="12" text-anchor="middle">槽 127</text>
+<text class="f-muted" fill="#5c6d66" x="396" y="62" font-size="12" text-anchor="middle">位置 127</text>
+<text class="f-muted" fill="#5c6d66" x="244" y="53" font-size="12" text-anchor="middle">…</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="104" font-size="12" text-anchor="start">第 128 个位置进来：槽 = 128 mod 128 = 0，覆盖位置 0 的旧行</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="12" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="44" y="131" font-size="12" text-anchor="middle">槽 0</text>
+<text fill="currentColor" x="44" y="148" font-size="12" text-anchor="middle">位置 128</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="86" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="118" y="131" font-size="12" text-anchor="middle">槽 1</text>
+<text class="f-muted" fill="#5c6d66" x="118" y="148" font-size="12" text-anchor="middle">位置 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="160" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="192" y="131" font-size="12" text-anchor="middle">槽 2</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="148" font-size="12" text-anchor="middle">位置 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="322" y="131" font-size="12" text-anchor="middle">槽 126</text>
+<text class="f-muted" fill="#5c6d66" x="322" y="148" font-size="12" text-anchor="middle">位置 126</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="364" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="396" y="131" font-size="12" text-anchor="middle">槽 127</text>
+<text class="f-muted" fill="#5c6d66" x="396" y="148" font-size="12" text-anchor="middle">位置 127</text>
+<text class="f-muted" fill="#5c6d66" x="244" y="139" font-size="12" text-anchor="middle">…</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M12 168H428M12 162V168M428 162V168"/>
+<text fill="currentColor" x="220" y="188" font-size="12" text-anchor="middle">环里现在放的是位置 1 … 128：恰好 128 行（含刚写的这一行）</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="212" font-size="12" text-anchor="middle">每步只写一个槽，其余行不挪动；按位置 mod 128 找槽</text>
 </svg><figcaption>图 DS3-2　窗口环是一圈 128 个槽。位置 p 写进槽 p mod 128，最旧的行被覆盖，其余行原地不动。第 128 个位置写进槽 0 之后，环里恰好是位置 1 到 128。</figcaption></figure>
 <p>从位置 127 起，一个字看到的窗口恰好是 128 行，包括它自己；更早的字只有 p + 1 行。引擎先把环里的行解码成 BF16 的工作行，接上新行，再取最近 128 个位置；环里最旧的那一行被排除，随后被新行覆盖 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10090-L10118" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 10090–10118 行</a>）。为什么只精确留 128 个字？上游没有写动机，这是推演：<span class="ev ev-est">教学推演</span>近处的字影响最大，半句话、刚定义的变量名都在这几行里，精确地留着它们，成本固定；更早的字交给 3.3 节的压缩行。</p>
 <p>环是覆盖式的，覆盖了就回不去。推测解码验证一批草稿字时，每层先把将被覆盖的行备份下来，最多 16 行，草稿被拒绝再写回去 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4357-L4360" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 4357–4360 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L175-L176" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 第 175–176 行</a>）。每层的环备份区是 16 × 528 = 8,448 字节 <span class="ev ev-est">教学推演</span>。R &gt; 1 的来源层还要另备分组缓冲和新压缩行的快照 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4357-L4361" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 4357–4361 行</a>）。备份区只有带草稿模型的 pack 才分配。草稿怎么验，留给 <a href="#deepseek/draft">DSpark 与会话停车</a>那一页。</p>
@@ -99,34 +102,34 @@
 <h2 id="sec-3">3.3 压缩行：把 R 个位置揉成一行</h2>
 <p>比 128 个字更早的位置，原始行已经被环覆盖。它们以压缩行的形式留下：每 R 个位置一行。R 叫<dfn>压缩比</dfn>，每层一个数，来自 pack 的 compress_ratios 列表 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L531" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 531 行</a>）。R = 0 的层没有压缩行，只做窗口注意力；DSpark 草稿模型的块必须是这种层 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2383-L2384" target="_blank" rel="noopener noreferrer">第 2383–2384 行</a>）。</p>
 <p>怎么把 R 个位置揉成一行？每个位置先投影出一对 512 维向量，kv 和 score，写进槽 p mod R。位置 p 满足 (p + 1) mod R = 0 时，这一组满了。引擎对每个维度各做一次 softmax，作用在 R 个 score 上，再用得到的权重对 kv 加权求和，最后做 RMSNorm <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L570-L604" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 570–604 行</a>）。结果加上旋转位置编码，舍入到 FP4：E2M1 码，每 16 个值配一个 E4M3 刻度。一行 256 + 32 = 288 字节 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10223-L10232" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 10223–10232 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L22-L33" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 第 22–33 行</a>）。没满的一组停在 FP32 缓冲里，kv 和 score 各 R × 512 个 float <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4329-L4331" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 4329–4331 行</a>）。</p>
-<figure class="fig"><svg viewBox="0 0 560 296" role="img" aria-label="图 DS3-3：压缩器：R 个位置各给一对 kv 和 score，对每个维度做 softmax 加权求和，再归一化、旋转、舍入 FP4，得到一行压缩行">
-<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="13" text-anchor="start">每 R 个位置一组（图中画 R = 4，只为示意）</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="26" width="110" height="46" rx="6"/>
-<text fill="currentColor" x="75" y="46" font-size="13" text-anchor="middle">位置 4k</text>
-<text class="f-muted" fill="#5c6d66" x="75" y="63" font-size="13" text-anchor="middle">kv、score</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="155" y="26" width="110" height="46" rx="6"/>
-<text fill="currentColor" x="210" y="46" font-size="13" text-anchor="middle">位置 4k + 1</text>
-<text class="f-muted" fill="#5c6d66" x="210" y="63" font-size="13" text-anchor="middle">kv、score</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="26" width="110" height="46" rx="6"/>
-<text fill="currentColor" x="345" y="46" font-size="13" text-anchor="middle">位置 4k + 2</text>
-<text class="f-muted" fill="#5c6d66" x="345" y="63" font-size="13" text-anchor="middle">kv、score</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="425" y="26" width="110" height="46" rx="6"/>
-<text fill="currentColor" x="480" y="46" font-size="13" text-anchor="middle">位置 4k + 3</text>
-<text class="f-muted" fill="#5c6d66" x="480" y="63" font-size="13" text-anchor="middle">kv、score</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M75 72V84M210 72V84M345 72V84M480 72V84M75 84H480M277 84V98"/>
-<path class="f-muted" fill="#5c6d66" d="M273 94L277 102L281 94Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="104" width="520" height="48" rx="7"/>
-<text fill="currentColor" x="280" y="125" font-size="13" text-anchor="middle">对每个维度各做一次：R 个 score 过 softmax</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="143" font-size="13" text-anchor="middle">用这组权重对 R 个 kv 加权求和</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M280 152V164"/>
-<path class="f-muted" fill="#5c6d66" d="M276 160L280 168L284 160Z"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="170" width="360" height="36" rx="7"/>
-<text fill="currentColor" x="280" y="193" font-size="13" text-anchor="middle">RMSNorm → 旋转位置编码 → 舍入 FP4</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M280 206V218"/>
-<path class="f-muted" fill="#5c6d66" d="M276 214L280 222L284 214Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="150" y="224" width="260" height="36" rx="7"/>
-<text fill="currentColor" x="280" y="247" font-size="13" text-anchor="middle">1 行压缩行：256 + 32 = 288 字节</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="282" font-size="13" text-anchor="middle">位置 p 写入槽 p mod R；(p + 1) mod R = 0 时这一组满了</text>
+<figure class="fig"><svg viewBox="0 0 440 296" role="img" aria-label="图 DS3-3：压缩器：R 个位置各给一对 kv 和 score，对每个维度做 softmax 加权求和，再归一化、旋转、舍入 FP4，得到一行压缩行">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">每 R 个位置一组（图中画 R = 4，只为示意）</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="59" y="46" font-size="12" text-anchor="middle">位置 4k</text>
+<text class="f-muted" fill="#5c6d66" x="59" y="63" font-size="12" text-anchor="middle">kv、score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="119" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="166" y="46" font-size="12" text-anchor="middle">位置 4k + 1</text>
+<text class="f-muted" fill="#5c6d66" x="166" y="63" font-size="12" text-anchor="middle">kv、score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="226" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="273" y="46" font-size="12" text-anchor="middle">位置 4k + 2</text>
+<text class="f-muted" fill="#5c6d66" x="273" y="63" font-size="12" text-anchor="middle">kv、score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="333" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="380" y="46" font-size="12" text-anchor="middle">位置 4k + 3</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="63" font-size="12" text-anchor="middle">kv、score</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M59 72V84M166 72V84M273 72V84M380 72V84M59 84H380M220 84V98"/>
+<path class="f-muted" fill="#5c6d66" d="M216 94L220 102L224 94Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="104" width="416" height="48" rx="7"/>
+<text fill="currentColor" x="220" y="125" font-size="12" text-anchor="middle">对每个维度各做一次：R 个 score 过 softmax</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="143" font-size="12" text-anchor="middle">用这组权重对 R 个 kv 加权求和</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 152V160"/>
+<path class="f-muted" fill="#5c6d66" d="M216 160L220 168L224 160Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="170" width="320" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="193" font-size="12" text-anchor="middle">RMSNorm → 旋转位置编码 → 舍入 FP4</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 206V214"/>
+<path class="f-muted" fill="#5c6d66" d="M216 214L220 222L224 214Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="90" y="224" width="260" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="247" font-size="12" text-anchor="middle">1 行压缩行：256 + 32 = 288 字节</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="282" font-size="12" text-anchor="middle">位置 p 写入槽 p mod R；(p + 1) mod R = 0 时这一组满了</text>
 </svg><figcaption>图 DS3-3　压缩器把一组 R 个位置揉成一行。每个维度的权重由 softmax 给出，是学出来的加权平均，不是简单的平均。图里 R = 4 只为画图；真实的 R 由每层的 compress_ratios 决定。</figcaption></figure>
 <p>R = 1 时不揉：每个位置一行压缩行，但仍是单独的一次投影（compressor.wkv 加归一化），不是窗口那一行的拷贝 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10129-L10135" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 10129–10135 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/ref.py#L250-L251" target="_blank" rel="noopener noreferrer">ref.py 第 250–251 行</a>）。</p>
 <p>不是每一层都存自己的压缩行。只有 kv_source_layer_ids 列出的来源层带压缩器、拥有压缩缓存；后面压缩比相同的层直接读它 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2393-L2412" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 2393–2412 行</a>）。加载时有一条检查：一个 ratio 大于 0 的层之前，必须已有同压缩比的来源层，否则报错。代码注释说，V4.1 里第 20 层是第一个压缩比为 1 的层，20 到 39 层都读它的压缩行和索引键 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9261-L9262" target="_blank" rel="noopener noreferrer">第 9261–9262 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9304-L9306" target="_blank" rel="noopener noreferrer">第 9304–9306 行</a>）。前 20 层各来源层的压缩比由 pack 的 ds4.txt 决定，钉住的仓库里没有它们的取值，本页统一写成 R。集群那一页把“读前面层的缓存”的层叫 YoCo 消费层（<a href="#deepinfer/pd-kv/sec-4">DeepInfer 第 3 页</a>）；Strata 的代码里也用 yoco 这个名字。</p>
@@ -140,80 +143,81 @@
 <p>并不是每层都有索引器。index_source_layer_ids 列出的层才给压缩行打分、更新清单，其他层沿用最近一次的清单 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9582-L9594" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 9582–9594 行</a>）。索引键只在拥有压缩缓存的来源层生成：它是压缩行（旋转之前）再经一次投影、归一化、旋转、舍入到 FP4 的结果 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10156-L10170" target="_blank" rel="noopener noreferrer">第 10156–10170 行</a>）。</p>
 <p>来源层的清单还可以先做一次预筛，叫候选块。candidate_source_layer_id 指定的那一层（测试夹具里是第 20 层）先把压缩行按 candidate_block_size 个一块分组，每块取块内最高分，再挑分数最高的 candidate_topk_blocks 块，最新位置所在的块一定入选 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L798-L812" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 第 798–812 行</a>）。之后的索引层用它的结果，只给这些块里的位置打分；块数不超过 candidate_topk_blocks 时预筛不起作用 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10188-L10215" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 10188–10215 行</a>）。转换器的一份测试夹具里，块大小是 8，块数是 2048（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tests/terminal/test_pack_gguf_engram.py#L173-L177" target="_blank" rel="noopener noreferrer">test_pack_gguf_engram.py 第 173–177 行</a>）。如果真实 pack 也是这两个值，预筛要等压缩行超过 8 × 2048 = 16,384 行才起作用 <span class="ev ev-est">教学推演</span>。</p>
 <p>下面的交互图让你选一个上下文长度，看一个解码字这一步读了哪些行：窗口环里的 128 行，加上索引器挑出的最多 512 行压缩行。静态图画的是默认上下文 8,192、R = 1 的层。</p>
-<div class="viz" data-viz="ds-attention-state"><figure class="fig"><svg viewBox="0 0 560 318" role="img" aria-label="图 DS3-4：R = 1 的层，上下文 8,192 时，一个解码字读 128 行窗口加 512 行挑出的压缩行，共 640 行；上下文变长，这个数不变">
-<text class="f-muted" fill="#5c6d66" x="20" y="16" font-size="13" text-anchor="start">例：R = 1 的层，上下文 8,192（默认），第 8,192 个字在回头看</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="26" width="520" height="30" rx="3"/>
-<rect class="f-warn" fill="#9e5d24" x="39" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="44" y="26" width="2" height="30"/>
+<div class="viz" data-viz="ds-attention-state"><figure class="fig"><svg viewBox="0 0 440 336" role="img" aria-label="图 DS3-4：R = 1 的层，上下文 8,192 时，一个解码字读 128 行窗口加 512 行挑出的压缩行，共 640 行；上下文变长，这个数不变">
+<text class="f-muted" fill="#5c6d66" x="12" y="16" font-size="12" text-anchor="start">例：R = 1 的层，上下文 8,192（默认），第 8,192 个字在回头看</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="26" width="416" height="30" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="27" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="31" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="35" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="36" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="37" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="40" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="42" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="47" y="26" width="2" height="30"/>
 <rect class="f-warn" fill="#9e5d24" x="49" y="26" width="2" height="30"/>
 <rect class="f-warn" fill="#9e5d24" x="50" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="51" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="55" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="57" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="64" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="66" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="68" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="83" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="97" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="129" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="134" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="143" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="185" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="207" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="222" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="223" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="234" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="237" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="242" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="279" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="294" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="302" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="309" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="315" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="318" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="319" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="341" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="342" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="353" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="440" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="443" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="485" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="505" y="26" width="2" height="30"/>
-<rect class="f-accent" fill="#136d5a" x="531" y="22" width="9" height="38" rx="1"/>
-<rect class="f-warn" fill="#9e5d24" x="20" y="76" width="10" height="14" rx="2"/>
-<text fill="currentColor" x="38" y="88" font-size="13" text-anchor="start">竖线：索引器挑的 512 行（位置只是示意，实际由分数决定）</text>
-<rect class="f-accent" fill="#136d5a" x="20" y="98" width="10" height="14" rx="2"/>
-<text fill="currentColor" x="38" y="110" font-size="13" text-anchor="start">窗口：最近 128 行，来自环，不经过挑选</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="20" y="120" width="10" height="14" rx="2"/>
-<text fill="currentColor" x="38" y="132" font-size="13" text-anchor="start">其余压缩行：这一步不读，但要一直留着</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 148H540"/>
-<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="13" text-anchor="start">上下文</text>
-<text class="f-muted" fill="#5c6d66" x="150" y="168" font-size="13" text-anchor="start">窗口行</text>
-<text class="f-muted" fill="#5c6d66" x="240" y="168" font-size="13" text-anchor="start">压缩行 n</text>
-<text class="f-muted" fill="#5c6d66" x="360" y="168" font-size="13" text-anchor="start">挑选行</text>
-<text class="f-muted" fill="#5c6d66" x="450" y="168" font-size="13" text-anchor="start">共读</text>
-<text fill="currentColor" x="20" y="192" font-size="13" text-anchor="start">300</text>
-<text fill="currentColor" x="150" y="192" font-size="13" text-anchor="start">128</text>
-<text fill="currentColor" x="240" y="192" font-size="13" text-anchor="start">300</text>
-<text fill="currentColor" x="360" y="192" font-size="13" text-anchor="start">300（全选）</text>
-<text fill="currentColor" x="450" y="192" font-size="13" text-anchor="start">428</text>
-<text fill="currentColor" x="20" y="214" font-size="13" text-anchor="start">8,192</text>
-<text fill="currentColor" x="150" y="214" font-size="13" text-anchor="start">128</text>
-<text fill="currentColor" x="240" y="214" font-size="13" text-anchor="start">8,192</text>
-<text fill="currentColor" x="360" y="214" font-size="13" text-anchor="start">512</text>
-<text fill="currentColor" x="450" y="214" font-size="13" text-anchor="start">640</text>
-<text fill="currentColor" x="20" y="236" font-size="13" text-anchor="start">262,144</text>
-<text fill="currentColor" x="150" y="236" font-size="13" text-anchor="start">128</text>
-<text fill="currentColor" x="240" y="236" font-size="13" text-anchor="start">262,144</text>
-<text fill="currentColor" x="360" y="236" font-size="13" text-anchor="start">512</text>
-<text fill="currentColor" x="450" y="236" font-size="13" text-anchor="start">640</text>
-<text fill="currentColor" x="20" y="258" font-size="13" text-anchor="start">1,048,576</text>
-<text fill="currentColor" x="150" y="258" font-size="13" text-anchor="start">128</text>
-<text fill="currentColor" x="240" y="258" font-size="13" text-anchor="start">1,048,576</text>
-<text fill="currentColor" x="360" y="258" font-size="13" text-anchor="start">512</text>
-<text fill="currentColor" x="450" y="258" font-size="13" text-anchor="start">640</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="288" font-size="13" text-anchor="start">一般地 n = ⌊上下文 ÷ R⌋，挑选行 = min(512, n)，每层每字共读 ≤ 128 + 512 = 640 行</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="308" font-size="13" text-anchor="start">注意读的行数不变，索引器要打分的行数是 n，随上下文增长</text>
+<rect class="f-warn" fill="#9e5d24" x="62" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="74" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="99" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="103" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="110" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="144" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="162" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="174" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="174" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="183" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="186" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="190" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="219" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="231" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="238" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="243" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="248" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="250" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="251" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="269" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="270" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="278" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="348" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="350" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="384" y="26" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="400" y="26" width="2" height="30"/>
+<rect class="f-accent" fill="#136d5a" x="419" y="22" width="9" height="38" rx="1"/>
+<rect class="f-warn" fill="#9e5d24" x="12" y="76" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="88" font-size="12" text-anchor="start">竖线：索引器挑的 512 行（位置只是示意，实际由分数决定）</text>
+<rect class="f-accent" fill="#136d5a" x="12" y="98" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="110" font-size="12" text-anchor="start">窗口：最近 128 行，来自环，不经过挑选</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="12" y="120" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="132" font-size="12" text-anchor="start">其余压缩行：这一步不读，但要一直留着</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M12 148H428"/>
+<text class="f-muted" fill="#5c6d66" x="12" y="168" font-size="12" text-anchor="start">上下文</text>
+<text class="f-muted" fill="#5c6d66" x="92" y="168" font-size="12" text-anchor="start">窗口行</text>
+<text class="f-muted" fill="#5c6d66" x="168" y="168" font-size="12" text-anchor="start">压缩行 n</text>
+<text class="f-muted" fill="#5c6d66" x="250" y="168" font-size="12" text-anchor="start">挑选行</text>
+<text class="f-muted" fill="#5c6d66" x="350" y="168" font-size="12" text-anchor="start">共读</text>
+<text fill="currentColor" x="12" y="192" font-size="12" text-anchor="start">300</text>
+<text fill="currentColor" x="92" y="192" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="192" font-size="12" text-anchor="start">300</text>
+<text fill="currentColor" x="250" y="192" font-size="12" text-anchor="start">300（全选）</text>
+<text fill="currentColor" x="350" y="192" font-size="12" text-anchor="start">428</text>
+<text fill="currentColor" x="12" y="214" font-size="12" text-anchor="start">8,192</text>
+<text fill="currentColor" x="92" y="214" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="214" font-size="12" text-anchor="start">8,192</text>
+<text fill="currentColor" x="250" y="214" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="214" font-size="12" text-anchor="start">640</text>
+<text fill="currentColor" x="12" y="236" font-size="12" text-anchor="start">262,144</text>
+<text fill="currentColor" x="92" y="236" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="236" font-size="12" text-anchor="start">262,144</text>
+<text fill="currentColor" x="250" y="236" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="236" font-size="12" text-anchor="start">640</text>
+<text fill="currentColor" x="12" y="258" font-size="12" text-anchor="start">1,048,576</text>
+<text fill="currentColor" x="92" y="258" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="258" font-size="12" text-anchor="start">1,048,576</text>
+<text fill="currentColor" x="250" y="258" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="258" font-size="12" text-anchor="start">640</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="288" font-size="12" text-anchor="start">一般地 n = ⌊上下文 ÷ R⌋，挑选行 = min(512, n)，</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="304" font-size="12" text-anchor="start">每层每字共读 ≤ 128 + 512 = 640 行</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="324" font-size="12" text-anchor="start">注意读的行数不变，索引器要打分的行数是 n，随上下文增长</text>
 </svg><figcaption>图 DS3-4　一个解码字在 R = 1 的层读多少行：窗口 128 行，加上挑出的 min(512, n) 行。上下文从 300 涨到 1,048,576，共读行数最多 640，不再增长；但压缩行 n 在涨，索引器要给它们全部打分。教学推演，行数按本节的公式算。</figcaption></figure></div>
 <p>注意力读的行有上限，索引器的扫描没有统一的上限。解码时，来源层和没用预筛的索引层，每步要给全部 n 行打分；用预筛的层只给候选块里的位置打分（见上文）。全打分的层读 n × 80 字节的索引键，做 n × 32 × 128 次乘加（头数按注释）<span class="ev ev-est">教学推演</span>。n 随上下文线性增长。读完一段提示，要给每个位置各打一次分：L 个字的提示在一个 R = 1 的索引层上共 L(L + 1) ÷ 2 对，一般是 L²/(2R)。L = 8,192 时约 3.4 × 10⁷ 对，L = 262,144 时约 3.4 × 10¹⁰，L = 1,048,576 时约 5.5 × 10¹¹ <span class="ev ev-est">教学推演</span>。262,144 这一档，正好是第 8 章算过的全注意力配对数（约 344 亿，<a href="#chapter/08/c08-complexity">第 8 章「O(n²)」</a>）。省下来的是每一对的成本：若用 64 个头 × 512 维做全注意力，每对要 2 × 32,768 次乘加（点积加加权求和）；索引器每对只做 32 × 128 = 4,096 次，没有 softmax，粗算便宜约 16 倍 <span class="ev ev-est">教学推演</span>。文档也这样说：提示很长时读得很慢，“因为索引器的工作量随长度的平方增长”，512K 或 1M 的第一次回复要等很多分钟 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L98-L100" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 98–100 行</a>）。</p>
 <p class="bridge"><strong>学过计算机的同学：</strong>这是搜索系统里“召回再精排”的两段式：召回便宜，但要扫全库；精排贵，只看候选。这里的召回是索引器扫全部压缩行，精排是对 640 行做真正的注意力。候选块预筛则像在召回前再加一层粗索引，先按块筛掉大半。</p>
@@ -221,36 +225,36 @@
 
 <h2 id="sec-5">3.5 一个字留下什么：三种状态，两种回退办法</h2>
 <p>一个字走完所有层，在引擎里留下四样东西：每层的窗口环；压缩器没满的一组；来源层的压缩行和索引键，只追加；Engram 的 n-gram 历史，归 <a href="#deepseek/engram">Engram 那一页</a>。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.hpp#L8-L11" target="_blank" rel="noopener noreferrer">ds4_model.hpp 第 8–11 行</a>）前三样决定了对话能不能退回、能不能停车。</p>
-<figure class="fig"><svg viewBox="0 0 560 300" role="img" aria-label="图 DS3-5：一个字留下的三种状态：覆盖式的窗口环、覆盖式的分组缓冲、只追加的压缩行；回退办法是拷贝或截断">
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="14" width="166" height="150" rx="7"/>
-<text fill="currentColor" x="103" y="38" font-size="13" text-anchor="middle">窗口环（每层一块）</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="62" font-size="13" text-anchor="middle">128 行 × 528 B</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="82" font-size="13" text-anchor="middle">40 层约 2.58 MiB</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="102" font-size="13" text-anchor="middle">覆盖式：丢旧行</text>
-<text fill="currentColor" x="103" y="132" font-size="13" text-anchor="middle">回退：先拷贝</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="152" font-size="13" text-anchor="middle">像白板</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="197" y="14" width="166" height="150" rx="7"/>
-<text fill="currentColor" x="280" y="38" font-size="13" text-anchor="middle">分组缓冲</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="62" font-size="13" text-anchor="middle">未满一组的 R 个位置</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="82" font-size="13" text-anchor="middle">FP32：kv 与 score</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="102" font-size="13" text-anchor="middle">覆盖式：满一组就清</text>
-<text fill="currentColor" x="280" y="132" font-size="13" text-anchor="middle">回退：先拷贝</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="152" font-size="13" text-anchor="middle">像白板</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="374" y="14" width="166" height="150" rx="7"/>
-<text fill="currentColor" x="457" y="38" font-size="13" text-anchor="middle">压缩行 + 索引键</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="62" font-size="13" text-anchor="middle">只追加，按位置排</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="82" font-size="13" text-anchor="middle">368 B/位置（R = 1）</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="102" font-size="13" text-anchor="middle">随上下文增长</text>
-<text fill="currentColor" x="457" y="132" font-size="13" text-anchor="middle">回退：截断位置</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="152" font-size="13" text-anchor="middle">像笔记本</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M103 164V190M280 164V190M103 190H280M191 190V206"/>
-<path class="f-muted" fill="#5c6d66" d="M187 202L191 210L195 202Z"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="212" width="342" height="36" rx="7"/>
-<text fill="currentColor" x="191" y="235" font-size="13" text-anchor="middle">检查点：最多 4 份，只拷环和分组缓冲</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M191 248V262M457 164V262M191 262H457M324 262V270"/>
-<path class="f-muted" fill="#5c6d66" d="M320 268L324 276L328 268Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="130" y="278" width="388" height="18" rx="5"/>
-<text fill="currentColor" x="324" y="292" font-size="13" text-anchor="middle">会话停车：整份状态写出去，含压缩行</text>
+<figure class="fig"><svg viewBox="0 0 440 314" role="img" aria-label="图 DS3-5：一个字留下的三种状态：覆盖式的窗口环、覆盖式的分组缓冲、只追加的压缩行；回退办法是拷贝或截断">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="14" width="132" height="150" rx="7"/>
+<text fill="currentColor" x="78" y="38" font-size="12" text-anchor="middle">窗口环（每层一块）</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="62" font-size="12" text-anchor="middle">128 行 × 528 B</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="82" font-size="12" text-anchor="middle">40 层约 2.58 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="102" font-size="12" text-anchor="middle">覆盖式：丢旧行</text>
+<text fill="currentColor" x="78" y="132" font-size="12" text-anchor="middle">回退：先拷贝</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="152" font-size="12" text-anchor="middle">像白板</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="14" width="132" height="150" rx="7"/>
+<text fill="currentColor" x="220" y="38" font-size="12" text-anchor="middle">分组缓冲</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="62" font-size="12" text-anchor="middle">未满一组的 R 个位置</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="82" font-size="12" text-anchor="middle">FP32：kv 与 score</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="102" font-size="12" text-anchor="middle">覆盖式：满一组就清</text>
+<text fill="currentColor" x="220" y="132" font-size="12" text-anchor="middle">回退：先拷贝</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="152" font-size="12" text-anchor="middle">像白板</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="296" y="14" width="132" height="150" rx="7"/>
+<text fill="currentColor" x="362" y="38" font-size="12" text-anchor="middle">压缩行 + 索引键</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="62" font-size="12" text-anchor="middle">只追加，按位置排</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="82" font-size="12" text-anchor="middle">368 B/位置（R = 1）</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="102" font-size="12" text-anchor="middle">随上下文增长</text>
+<text fill="currentColor" x="362" y="132" font-size="12" text-anchor="middle">回退：截断位置</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="152" font-size="12" text-anchor="middle">像笔记本</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M78 164V190M220 164V190M78 190H220M149 190V204"/>
+<path class="f-muted" fill="#5c6d66" d="M145 200L149 208L153 200Z"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="210" width="274" height="36" rx="7"/>
+<text fill="currentColor" x="149" y="233" font-size="12" text-anchor="middle">检查点：最多 4 份，只拷环和分组缓冲</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M149 246V260M362 164V260M149 260H362M220 260V268"/>
+<path class="f-muted" fill="#5c6d66" d="M216 264L220 272L224 264Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="274" width="416" height="28" rx="5"/>
+<text fill="currentColor" x="220" y="293" font-size="12" text-anchor="middle">会话停车：整份状态写出去，含压缩行</text>
 </svg><figcaption>图 DS3-5　三种状态，两种回退办法。覆盖式的两样只能事先拷贝（检查点）；只追加的压缩行靠截断位置回退。会话停车把三样连同检查点一起写出去。数字是教学推演，公式在正文。</figcaption></figure>
 <p>第 20 章用“笔记本和白板”比喻两类记忆。压缩行是笔记本：只往后写，按位置排好，退回去只要把“写到哪一页”改小，超出的部分以后重写 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5691-L5692" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 5691–5692 行</a>）。环和未满的分组缓冲是白板，第 9 章的 GDN 状态也是这种白板（<a href="#chapter/09/c09-rnn-state">第 9 章「两种记忆」</a>）：新内容盖掉旧内容，想退回只能事先拍照。检查点就是这张照片，它只拷这两样；最多同时留 4 份：上一轮提示的末尾、它前面的一个位置、一个锚点、一个共享前缀 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1104-L1110" target="_blank" rel="noopener noreferrer">第 1104–1110 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5751-L5755" target="_blank" rel="noopener noreferrer">第 5751–5755 行</a>）。每份至少 2.58 MiB <span class="ev ev-est">教学推演</span>。为什么白板要拍照，见<a href="#chapter/20/c20-copy-on-write">第 20 章「快照与写时复制」</a>。</p>
 <p>对话被另一个请求挤出模型时，引擎做一次<dfn>会话停车</dfn>：把全部状态写出去。内容是 token、每层的环和分组缓冲、每个来源层的压缩行和索引键（0 到 pos ÷ R 行），再加检查点 <span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5788-L5806" target="_blank" rel="noopener noreferrer">ds4_model.cu 第 5788–5806 行</a>）。大小有现成的公式：头部和 4 × pos 字节的 token，加上每层 16 + 67,584 字节再加分组缓冲（2 × R × 512 × 4 字节，只有 R &gt; 1 的来源层有），加上每个来源层 ⌊pos ÷ R⌋ × (288 + 80) 字节，再加检查点。文档给的数是约 17 MB 每 6.5K 个字 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L116" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 116 行</a>）。用公式粗估：环 2.70 MB，最多 4 份检查点至少 10.8 MB，一个 R = 1 的来源层 6,500 × 368 ≈ 2.4 MB，合计约 15.9 MB，再加分组缓冲和其他来源层，与文档同一量级 <span class="ev ev-est">教学推演</span>。前 20 层的 R 缺失，这笔账只能估到量级。会话停车的流程归 <a href="#deepseek/draft">DSpark 与会话停车</a>那一页。</p>
