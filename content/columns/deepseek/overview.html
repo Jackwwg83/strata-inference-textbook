@@ -1,0 +1,149 @@
+<div class="hook"><span class="eyebrow">换个引擎看</span>
+<p>前 28 章，Strata 在一台电脑上跑通了主线模型 Qwen3.8-Flash-Next。从 v0.2.4 起，它还能在同一类电脑上跑 DeepSeek-V4.1-Flash——靠的是一条新移植来的引擎路径 <code>strata-dsv41</code>（CMake 注释称它为第三个引擎路径，与主线内核互不共享符号），从开源项目 Project Maya 的 maya-ds4 移植而来。这一页打地基：引擎从哪来、500 GB 的文件放在哪、实测速度是什么条件下测的。每一页的对照线索都是同一句话：这个数在什么机器上测的？</p></div>
+<p class="tldr"><strong>一句话：</strong>strata-dsv41 是第三个引擎路径——独立可执行文件，不和 Qwen 内核共享符号，一条管道一次处理一个请求；一台电脑把专家分层存放、UD 集的 Engram 表放 SSD，2-bit 集的 111 GB 表从内存或 SSD 读。本页所有数字都带着测量条件（机器、文件集、版本、默认参数），搬动数字时请把条件一起搬走。</p>
+
+<h2 id="sec-1">1.1 另一个引擎：从 Maya 移植来的一段代码</h2>
+<p><strong>这是一个移植，不是一次重写，也不共享内核。</strong>Strata 的 CMake 注释把 src/dsv41 称为"the third engine path (…from Project Maya's maya-ds4, MIT, third_party/project-maya)"：它有自己的内核库 strata_dsv41_kernels 和独立可执行文件 strata-dsv41，不和主线的 strata_kernels 共享任何符号。CMake 注释原话是"no symbol is shared with strata_kernels"。构建选项 STRATA_BUILD_DSV41 默认 OFF。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/CMakeLists.txt#L906-L920" target="_blank" rel="noopener noreferrer">CMakeLists.txt 第 906–920 行</a>）</p>
+<p>桌面应用和命令行都装这个引擎：Terminal 从 0.2.4 起、桌面应用从 0.2.5 起。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/AI_REFERENCE.md#L32" target="_blank" rel="noopener noreferrer">AI_REFERENCE.md 第 32 行</a>）<strong>一条协议适配层，两边各跑各的引擎。</strong>服务端的 <code>StrataEngine</code> 包装类负责拉起常驻引擎（一次 <code>strata --serve</code> 进程），默认一次处理一个请求（batch=0）；dsv41 没有批量槽。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L985" target="_blank" rel="noopener noreferrer">server.py 第 985 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L997" target="_blank" rel="noopener noreferrer">第 997 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/strata_cli/launch/runner.py#L1496" target="_blank" rel="noopener noreferrer">runner.py 第 1496 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/strata_cli/launch/runner.py#L1503" target="_blank" rel="noopener noreferrer">第 1503 行</a>）引擎侧走的是同一套管道协议：INFO 行报状态，READY 报上下文长度，GEN/GENI 进、STOP 和 QUIT 控制，请求靠命令行切分。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L9-L13" target="_blank" rel="noopener noreferrer">ds4_main.cpp 第 9–13 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L391" target="_blank" rel="noopener noreferrer">第 391 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L741-L750" target="_blank" rel="noopener noreferrer">第 741–750 行</a>）协议形状相同，形状里面的内容不一样：这个模型有自己的 tokenizer、模板和 DSML 工具调用格式，细节归第 5 页（<a href="#deepseek/draft">会话状态放磁盘</a>）。</p>
+<p>一条统一的内核启动写法横跨 CUDA 与 Metal：CUDA 的三尖括号调用被映射到 Metal dispatch（<a href="#chapter/22">第 22 章「可移植性」</a>）。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_launch.h#L1-L3" target="_blank" rel="noopener noreferrer">ds4_launch.h 第 1–3 行</a>）打包好的引擎从 0.2.7 起携带 sm_86、sm_89、sm_120 三种 NVIDIA 机器码（之前 RTX 40 系走 sm_86 代码，靠 CUDA 同代规则运行）；<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L67-L68" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 67–68 行</a>）Strix Halo 集成显卡在 Windows（gfx1151）上测试。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/AI_REFERENCE.md#L32" target="_blank" rel="noopener noreferrer">AI_REFERENCE.md 第 32 行</a>）AI_REFERENCE 第 32 行还写着“Not on Mac, Intel Arc or Strix Halo on Linux yet”和“8K context”。其中两处已过时：Mac 有专门的文档和实测（文字模式），上下文 8,192 只是默认值，--context 可以调到 1M。Strix Halo 的实测都在 Windows 上，“Linux 上还不行”这一句没有被推翻。本页按代码与文档正文处理。</p>
+<figure class="fig"><svg viewBox="0 0 400 214" role="img" aria-label="图 DS1-1：Strata 用一条管道、两种引擎；strata-dsv41 自带三个后端，和主线内核互不共享符号">
+<text class="f-text" fill="#182f2b" x="200" y="16" font-size="12" text-anchor="middle">一条管道：一次只处理一个请求</text>
+<rect class="f-box" fill="#ffffff" stroke="#5c6d66" x="100" y="24" width="200" height="36" rx="7"/>
+<text class="f-text" fill="#182f2b" x="200" y="38" font-size="12" text-anchor="middle">包装类：StrataEngine 包装器</text>
+<text class="f-muted" fill="#5c6d66" x="200" y="53" font-size="12" text-anchor="middle">一次 strata --serve 进程，默认排队（batch=0）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M200 60V74M96 90V74H304V90"/>
+<path class="f-muted" fill="#5c6d66" d="M92 86L96 94L100 86ZM300 86L304 94L308 86Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="14" y="98" width="166" height="48" rx="7"/>
+<text class="f-text" fill="#182f2b" x="97" y="116" font-size="12" text-anchor="middle">主线 Qwen 引擎</text>
+<text class="f-muted" fill="#5c6d66" x="97" y="132" font-size="12" text-anchor="middle">strata_kernels 内核库</text>
+<rect class="f-accent" fill="#136d5a" x="220" y="98" width="166" height="48" rx="7"/>
+<text class="f-on" fill="#ffffff" x="303" y="116" font-size="12" text-anchor="middle">strata-dsv41：移植引擎</text>
+<text class="f-on" fill="#ffffff" x="303" y="132" font-size="12" text-anchor="middle">独立可执行，不共享符号</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="220" y="158" width="166" height="44" rx="7"/>
+<text class="f-text" fill="#182f2b" x="303" y="176" font-size="12" text-anchor="middle">dsv41 自带三个后端</text>
+<text class="f-muted" fill="#5c6d66" x="303" y="192" font-size="12" text-anchor="middle">CUDA / HIP / Metal</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M303 146V158"/>
+<text class="f-muted" fill="#5c6d66" x="97" y="176" font-size="12" text-anchor="middle">与右边互不共享内核符号</text>
+</svg><figcaption>图 DS1-1　Strata 把 DeepSeek 引擎作为"第三个引擎路径"接进来：一条管道、两种引擎，默认排队、一次一个请求。深色框是本次的主角；左侧主线内核与它互不共享符号。</figcaption></figure>
+<p class="bridge"><strong>学过计算机的同学：</strong>可以把它理解为一个 JDBC 型接口层，把两种数据库引擎包在同一个客户端后面。StrataEngine 负责拉起常驻进程、排队请求、解析输出行。排队默认一次一个请求（batch=0），dsv41 没有批量槽可填——统一的是协议形状，不是两种引擎的内部（<a href="#chapter/25">第 25 章</a>）。</p>
+
+<h2 id="sec-2">1.2 模型形状与打包布局：500 GB 和 257 GB 不是一套账</h2>
+<p><strong>模型形状。</strong>DeepSeek-V4.1-Flash 是一个混合专家模型：40 层，每层 384 个专家，写每个字用 6 个，旁边还配一张 203 GB 的 n-gram 查找表。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L3-L4" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 3–4 行</a>）40 × 384 = 15,360 个专家，与文档放置表写的"routed experts (15,360 of 18.8 MB)"吻合。<span class="ev ev-est">教学推演</span> 集群端的核对表写着"384 个路由专家加 1 个共享专家，每个 token 选 6 个"（<a href="#deepinfer/overview">DeepInfer 列总览</a>）。</p>
+<p>书主线走的是另一条路线：Qwen3.8-Flash-Next 是 48 层、512 个路由专家加 1 个共享专家、每个 token 选 10 个（<a href="#chapter/10">第 10 章</a>；对照 <a href="#deepinfer/overview">DeepInfer 列总览</a> 的模型行）。</p>
+<p>默认上下文是 8,192 个 token——引擎被检验时用的就是这个长度；模型原生读 1,048,576 个位置，--context 取 8K 到 1M，256K 以上没有测过。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L93" target="_blank" rel="noopener noreferrer">第 93 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L96" target="_blank" rel="noopener noreferrer">第 96 行</a>）AI_REFERENCE 写"8K context"，把它理解成上限会错：默认长度和上限是两回事。</p>
+<p><strong>打包布局。</strong>setup.py 的模型清单列了六套文件：三个 IST-DAS 2-bit 集（IQ1_M 1.75 bpw、IQ2_XXS 2.00 bpw、IQ2_XS 2.25 bpw）、Unsloth 的 UD-Q8_K_XL，以及两个 Unsloth 低位打包 UD-IQ1_S 和 UD-IQ1_M。后两个没有和原版比过质量。setup.py 的说明建议能装 2.00 或 2.25 就选它们。短答案、代码与工具调用看起来没问题，长而细的活会更弱。<span class="ev ev-code">代码事实</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/setup.py#L798" target="_blank" rel="noopener noreferrer">setup.py 第 798 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/setup.py#L836-L854" target="_blank" rel="noopener noreferrer">第 836–854 行</a>）</p>
+<p>两种打包布局的账不一样。UD-Q8_K_XL 是一整套自包含的文件集：专家 288.8 GB 用 MXFP4，其余 16.8 GB 用 BF16，再加一张 202.8 GB 的 Engram 查找表——288.8 + 16.8 + 202.8 = 508.4，正是 9 个分片的总和，也就是文档里说的 508 GB 那一档（本页简称 500 GB）。<span class="ev ev-est">教学推演</span> 三个 2-bit 集各带模型 4 分片（121/138/155 GB），共同共用一张 111 GB 的 IQ4_NL Engram 表和 8 GB 的 DSpark 草稿模型：2.00 集总盘 138 + 111 + 8 = 257 GB，2.25 集 274 GB，1.75 集 239 GB，三套全装 533 GB。文档的 239 是四舍五入后的总盘；按取整值 121 + 111 + 8 相加是 240。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L29-L31" target="_blank" rel="noopener noreferrer">第 29–31 行</a>）Engram 在 GGUF 布局里只有一个文件：setup.py 记 110,595,290,816 B（110.6 GB，文档约写成 111 GB）。UD 集的 202.8 GB 表与 IST-DAS 共用的 4-bit IQ4_NL 表（111 GB）是两个不同的文件。两者为何差这么多，文档没写。</p>
+<p><strong>质量：离原版有多远。</strong>测量条件相同——4,995 个位置、最终 GGUF 文件、对照原版模型：<span class="ev ev-report">上游报告</span></p>
+<table class="tbl"><tr><th>文件集</th><th>每字位数</th><th>KL</th><th>困惑度相对原版</th><th>分项（代码 / 智能体）</th></tr>
+<tr><td>IST-DAS 2.00（IQ2_XXS）</td><td>2.00 bpw</td><td>0.170</td><td>+15.5%</td><td>+8.6% / +5.3%</td></tr>
+<tr><td>IST-DAS 2.25（IQ2_XS）</td><td>2.25 bpw</td><td>0.107</td><td>+7.3%</td><td>+3.2% / +2.2%</td></tr>
+<tr><td>IST-DAS 1.75（IQ1_M）</td><td>1.75 bpw</td><td>0.217</td><td>+21%（top-1 82.5%）</td><td>文档 +24%、日常英语 +53%，长句最弱</td></tr>
+<tr><td>Mac 端同测（对照用）</td><td>2.00 / 2.25</td><td>0.170 / 0.111</td><td>正文：2.00 约 +17%，2.25 约 +8%（Mac 打分）</td><td>—</td></tr></table>
+<p>出处：<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L29-L32" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 29–32 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L45-L51" target="_blank" rel="noopener noreferrer">DEEPSEEK_MAC.md 第 45–51 行</a>。2.25 集的 KL 在两处文档里分别是 0.107 和 0.111——Mac 文档的打分用固定专家放置，0.111 与 0.107 为何不同，来源文档没写，本页照抄并分开标注。每字位数与 bpw 是什么，见<a href="#chapter/04">第 4 章「量化」</a>。</p>
+<p><strong>6 个专家里默认用几个。</strong>默认写 6 个专家；"Faster"档用 5 个（<code>--experts 5</code>），默认在显存合计 16 GiB 及以下的电脑和集成显卡上开启，由引擎自己判断（<code>--experts auto</code>）；"Full quality"档用全 6 个。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L130" target="_blank" rel="noopener noreferrer">第 130 行</a>）怎么选，留到<a href="#deepseek/experts">第 2 页</a>。</p>
+
+<h2 id="sec-3">1.3 三层放置：显存、内存、SSD 各放什么</h2>
+<p><strong>先记住三个词：显存、内存、SSD。</strong>一台电脑把专家放进三层，顺序是从快到慢：显存放得下就放显存；其余在 CPU 上就地计算，直接从模型文件读；UD 集的 Engram 查找表整个放 SSD；2-bit 集的 111 GB 表从内存或 SSD 读。表不计入内存，但每写一个字都要读它几行。</p>
+<p><strong>500 GB 那套（UD-Q8_K_XL，508.4 GB）放哪。</strong>实测机器：4× R9700（每卡 32 GB，共 128 GB 显存）＋ 251 GB 内存。放置结果：6,197 个专家（116.5 GB）在显存，9,163 个（172.3 GB）在 CPU 侧；116.5 + 172.3 = 288.8，正好等于专家总大小——全部专家要么在显存、要么在 CPU 侧被就地读取。注意力等其他稠密权重 16.8 GB，四张卡每卡约 3.9 GB（单卡机器则 16 GB 全塞一张卡）。Engram 表 202.8 GB 放 SSD。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L15-L21" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 第 15–21 行</a>）16.8 + 202.8 + 288.8 = 508.4，加和恰好吻合，500 GB 的账到此对上。<span class="ev ev-est">教学推演</span> 4×R9700 是 2 卡起算的多卡路径（<a href="#chapter/21">第 21 章</a>），251 GB 内存按放置表数字记，不是"需求"。但 CPU 侧 172.3 GB 要有大约同样多的空闲内存才能留在缓存里；内存更少，这部分专家改读 SSD，速度变慢。</p>
+<p><strong>257 GB 那套（2.00 集）放哪。</strong>Ryzen AI Max"Strix Halo"128 GB 统一内存：默认 Faster 档下，显存与 CPU 共用同一条内存池，内存里保住了 2.00 集专家中的约 109 GB。128 GB 统一内存池由 64 GB BIOS 保留区加 Windows 看到的 64 GB 组成，引擎把它只算一次。池里只扣稠密权重和给 Windows 与桌面留的 12 GB，剩约 109 GB 放专家；其余 23 GB 专家直接从 SSD 读。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L51-L55" target="_blank" rel="noopener noreferrer">第 51–55 行</a>）</p>
+<p><strong>Mac 一侧。</strong>M5 Max 128 GB：128 GB 的 Mac 在内存里保住约 68 GB 专家。这个比例不是由"当时还剩多少内存"决定的，它由内存总量决定：扣掉 40%，再扣引擎自身占的内存。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L57" target="_blank" rel="noopener noreferrer">DEEPSEEK_MAC.md 第 57 行</a>）验算：128 × 60% = 76.8 GB，扣掉引擎足迹，68 GB 这个量级对得上。<span class="ev ev-est">教学推演</span> 整台 Mac 至少需要 64 GB 内存、260–280 GB 空闲磁盘，且要放快速盘（2.00 集 257 GB；2.25 集 274 GB，两者共用那张 111 GB 的表）。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L7" target="_blank" rel="noopener noreferrer">第 7 行</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L41-L49" target="_blank" rel="noopener noreferrer">第 41–49 行</a>）</p>
+<div class="viz" data-viz="ds-overview-tiers"><figure class="fig"><svg viewBox="0 0 400 232" role="img" aria-label="图 DS1-2：508.4 GB 的 UD 集和 257 GB 的 2.00 集各放在哪些层；两条横条各自按自己的总大小画，不按同一比例">
+<text class="f-text" fill="#182f2b" x="12" y="14" font-size="12" text-anchor="middle">两条横条按自己的 GB 比例画，两条之间互不可比</text>
+<text class="f-text" fill="#182f2b" x="12" y="34" font-size="12" text-anchor="start">4× R9700（共 128 GB 显存）＋ 251 GB 内存：UD 集 508.4 GB 实测放置</text>
+<rect class="f-soft" fill="#e5f1df" x="12" y="40" width="66" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="45" y="56" font-size="12" text-anchor="middle">显存</text>
+<rect class="f-accent" fill="#136d5a" x="78" y="40" width="86" height="24"/>
+<text class="f-on" fill="#ffffff" x="121" y="56" font-size="12" text-anchor="middle">内存</text>
+<rect class="f-side" fill="#8fb3a5" x="164" y="40" width="101" height="24"/>
+<text class="f-on" fill="#ffffff" x="214" y="56" font-size="12" text-anchor="middle">SSD：Engram 202.8 GB</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="86" font-size="12" text-anchor="start">图例：浅绿＝显存（或统一内存池）；深绿＝CPU 侧内存；灰绿＝SSD 直读</text>
+<text class="f-text" fill="#182f2b" x="12" y="110" font-size="12" text-anchor="start">Ryzen AI Max 128 GB 统一内存：2.00 集 257 GB 的默认放置</text>
+<rect class="f-soft" fill="#e5f1df" x="12" y="116" width="211" height="24"/>
+<text class="f-muted" fill="#5c6d66" x="117" y="132" font-size="12" text-anchor="middle">统一内存池：约 109 GB 专家常驻</text>
+<rect class="f-side" fill="#8fb3a5" x="223" y="116" width="45" height="24"/>
+<text class="f-on" fill="#ffffff" x="245" y="132" font-size="12" text-anchor="middle">SSD 23 GB</text>
+<text class="f-muted" fill="#5c6d66" x="276" y="132" font-size="12" text-anchor="start">右侧另有 111 GB Engram ＋ 8 GB 草稿模型</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="164" font-size="12" text-anchor="start">显存条：116.5 GB 专家 ＋ 16.8 GB 稠密权重；内存条：172.3 GB 专家（CPU 就地计算）</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="182" font-size="12" text-anchor="start">Engram 表不计入内存；SSD 慢，每个字都变慢（Mac 每字共读 48–111 MB）</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" stroke-dasharray="3 3" d="M12 96H388"/>
+</svg><figcaption>图 DS1-2　两条横条、两个维度：500 GB 那一档放的是"显存＋251 GB 内存＋SSD"三层，257 GB 那一档放的是"128 GB 统一内存＋SSD"两层。SSD 上的 202.8 GB（上条）和 119 GB（下条右侧）都不计入内存，但要占用读取带宽。</figcaption></figure></div>
+<p class="bridge"><strong>学过计算机的同学：</strong>这套三层放置是内存层级的一次重演：显存 ≈ 高速缓存，内存 ≈ 主存，SSD ≈ 交换区。按需取专家像请求调页，热专家像工作集；把"常驻多少、从盘上读多少"算准，就是在平衡两条带宽。对照读<a href="#chapter/12">第 12 章「专家缓存」</a>和<a href="#chapter/13">第 13 章「CPU + GPU」</a>；搬运本身走锁页内存与 DMA，见<a href="#chapter/14">第 14 章</a>。Strata 在 Qwen 主线上早就在做同样的分层——差别是 DeepSeek 把这套账放大到了 288.8 GB 专家和 100 GB 量级的查找表。</p>
+<div class="callout vs"><strong>对照 Qwen 路径：</strong>主线 Qwen3.8-Flash-Next 也是"专家分层＋查表"，且专家更小、表更薄。把本页的三层放置直接类比到主线，会忽略 DeepSeek 专家数量级带来的放置与带宽差别——第 2 页细讲。</div>
+
+<h2 id="sec-4">1.4 实测速度：每个数带着条件</h2>
+<p>下表每一行的测量条件都来自文档原文（打包引擎、默认参数；另有标注）。把表里的数搬到别的机器或别的版本上，比较就失效了（<a href="#chapter/27">第 27 章</a>）。</p>
+<table class="tbl"><tr><th>机器</th><th>测量条件</th><th>结果</th><th>出处</th></tr>
+<tr><td>RTX 5070（12 GB）＋ 64 GB 内存 ＋ 3.6 GB/s NVMe</td><td>2.00 集（文件集与版本取自 MODELS.md 第 96 行，DEEPSEEK41.md 未写）</td><td>答案约 4.7 token/s；读提示 4K 121 / 8K 231 token/s</td><td><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L63-L64" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md L63–64</a> <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>RTX 3060（12 GB）＋ 46 GB 内存</td><td>2.00 集（文件集与版本取自 MODELS.md 第 96 行，DEEPSEEK41.md 未写）</td><td>约 8–10 token/s（代码 9.9、智能体 7.8）；8K 提示 149 token/s；DSpark 默认关，开启 ＋2–13%</td><td>同上 <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>4× R9700（每卡 32 GB）</td><td>代码任务，带出厂热专家档</td><td>2.00 集约 48 token/s；2.25 集约 80 token/s。MODELS.md 同时说 2.25 一般略慢，这里的 80 来源不明，不要当成 2.25 更快</td><td>同上，第 64–65 行 <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>RTX 4090（48 GB）＋ 128 GB 内存（用户 #3935 自报）</td><td>2.00 集，用户自编译 sm_89；5 段 64-token 答案取中位数，<code>--ssd-cache 108 --dspark on --dspark-conf 0.65</code></td><td>解码中位 40.2 token/s；提示 141（1.2K）/ 615（4.6K）；<code>--dspark auto</code> 在该机判"关"，得 16–22 token/s</td><td><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L67-L70" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md L67–70</a> <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>Ryzen AI Max"Strix Halo"（128 GB 统一内存）</td><td>2.00 集，默认 Faster，DSpark auto</td><td>代码答案 19–21 token/s（智能体约 18，聊天 11）；提示 4K 87 / 8K 125 / 32K 177；验证窗口默认走异步 mailbox 路径，在这台机器上让代码答案慢 31%，所以 setup 写 <code>DS4_ASYNC_T=4</code> 改成同步；<code>--prefill-chunk 8192</code> 比 1,024 默认快 11–15%（解码不受影响）</td><td><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L51-L58" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md L51–58</a> <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>Mac M5 Max（128 GB，0.2.7.1 打包引擎）</td><td>出厂默认、两个 Engram 读取线程、每次运行起一个新进程、各测两遍；测量时同一台机器上还跑着另一台闲置（加载但不运行）的 60 GB Qwen 模型，与之共享文件缓存</td><td>短答案（代码）：2.00 集 15.2–16.0、2.25 集 14.7–15.3；短答案（智能体）：15.3–16.2 / 13.1–13.6；3K 提示后 14.5–15.1 / 11.7–11.8；14K 提示后 13.8–15.1 / 10.5–11.1</td><td><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L35-L49" target="_blank" rel="noopener noreferrer">DEEPSEEK_MAC.md L35–49</a> <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>4× R9700</td><td>0.2.4 时期、"Speed 选择"出现之前的旧档</td><td>约 31 token/s；带 DSpark 55–69；提示约 360（32K 时 557）</td><td><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/MODELS.md#L98-L104" target="_blank" rel="noopener noreferrer">MODELS.md L98–104</a> <span class="ev ev-report">上游报告</span></td></tr></table>
+<p>两个对不上的地方，本页不猜来源，照抄并分开标注：其一，DEEPSEEK_MAC.md 第 9 行的短答句写 15–18 token/s，比同一文档表格的上界 16.2 更宽——本页取表格范围。其二，同一类 4× R9700 机器，旧档 31（2.00 集、0.2.4，带 DSpark 55–69）与现行 48（2.00 集、带出厂热专家档）条件不同，原因文档没写。</p>
+<div class="callout vs"><strong>对照 Qwen 路径：</strong>DeepInfer 列的对照记录里，Strata 在一张 RTX 5070 上（跑主线 Qwen3.8-Flash-Next）写答案约 93 token/s，只算输出（见 <a href="#deepinfer/overview">DeepInfer 列总览</a>，引自第 1 章）；本页同型号 5070 上 DeepSeek 2.00 集的约 4.7 token/s 与它不可比。引用任何数字之前，先核对机器、模型、量化档（<a href="#chapter/27">第 27 章</a>）。</div>
+<div class="callout vs"><strong>对照 DeepInfer：</strong>同一个模型走集群路线时，专家铺满几十张卡：一个通信域内 64 卡，EP64DP64，上下文 131,072，每 rank 同时 8–256 个请求；解码吞吐约 2,600–26,000 token/s/GPU，摊到每个用户约 325–103 token/s。差距主要在并发上限。单流速度集群也更高，但条件不同，不能直接比。这组吞吐是从图上读数、按假设的 75% 草稿接受率折算的，不是实测（见 <a href="#deepinfer/overview">DeepInfer 列总览</a>，已核对；数值表的测量条件随数字标注）。</div>
+
+<h2 id="sec-5">1.5 一台电脑与一个集群：同一模型的两条路</h2>
+<p>同一个 DeepSeek-V4.1-Flash，DeepInfer 集群路线铺 128 张卡（P:D ≈ 1:1，最小"高效"部署 64＋64），一台电脑装不满也得装。<span class="ev ev-report">上游报告</span>（已在 <a href="#deepinfer/overview">DeepInfer 列总览</a> 核对，条件随数字标注）</p>
+<table class="tbl"><tr><th>维度</th><th>一台电脑（Strata dsv41）</th><th>集群（DeepInfer 路线）</th></tr>
+<tr><td>专家在哪</td><td>显存 / 内存 / SSD 三层；508.4 GB 实测：116.5 在显存、172.3 在 CPU 侧、202.8 在 SSD（见 1.3）</td><td>按专家铺满几十张卡；EP64DP64，另加冗余专家（<a href="#deepinfer/wide-ep">DeepInfer 第 2 页</a>） <span class="ev ev-report">上游报告</span></td></tr>
+<tr><td>并发</td><td>一条管道一次一个请求，没有 --batch 可传（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/strata_cli/launch/runner.py#L1496" target="_blank" rel="noopener noreferrer">runner.py L1496</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/strata_cli/launch/runner.py#L1503" target="_blank" rel="noopener noreferrer">L1503</a>）；<code>--parallel</code> 被忽略并警告（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L126" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md L126</a>） <span class="ev ev-report">上游报告</span></td><td>连续批处理，每 rank 8–256 个请求；零开销调度器（<a href="#deepinfer/spec-sched">DeepInfer 第 4 页</a>）</td></tr>
+<tr><td>上下文</td><td>默认 8,192；--context 8K–1M；256K 以上未测 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L93" target="_blank" rel="noopener noreferrer">L93</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L96" target="_blank" rel="noopener noreferrer">L96</a>）</td><td>基准取 131,072（<a href="#deepinfer/overview">DeepInfer 列总览</a> 已核对，含条件）</td></tr>
+<tr><td>会话状态</td><td>会话槽位放磁盘（ds4-slots 目录，上限 2 GB，一周后清除，细节见第 5 页）；验证窗默认走异步 mailbox 管道，Strix Halo 上 setup 改成了同步（见 1.4 表）</td><td>约 100 PiB 的 SSD 存储层专门存 KV（3FS），会话留 3–7 天 <span class="ev ev-report">上游报告</span>（见 <a href="#deepinfer/overview">DeepInfer 列总览</a>，已核对，条件随数字标注）</td></tr></table>
+<p><strong>这台电脑还不会什么。</strong>一次处理一个请求（任何机器上 <code>--parallel</code> 都被忽略并警告）；Mac 上图像输入关闭——DeepSeek 的图像读取器没有在 Metal 引擎上运行过，Mac 只读文字，桌面引擎自带的 319 MiB 视觉塔不参与 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L18" target="_blank" rel="noopener noreferrer">DEEPSEEK_MAC.md L18</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L121" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md L121</a>）；Mac 上 DSpark 关着，同样的答案、没有提速 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L74" target="_blank" rel="noopener noreferrer">L74</a>）；Mac 上 32K 以上上下文没有测过 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L75" target="_blank" rel="noopener noreferrer">L75</a>）。PC 一侧 40 GB 内存以下的机器没有测过，setup 会警告但仍然安装 <span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L65" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md L65</a>）。</p>
+<p class="bridge"><strong>学过计算机的同学：</strong>这套对照接近嵌入式数据库与数据库集群。一台电脑像跑在应用进程里的单连接 SQLite，一次一条查询；集群像带负载均衡与共享存储层的完整数据库栈，把带宽与延迟"摊"到几十张卡上。一个省的是搬运成本，一个买的是并发上限。</p>
+
+<h2 id="sec-6">1.6 本专栏怎么读</h2>
+<p>后面四页各回答一组问题。每页都从本页的某个事实出发，先补前置章节。</p>
+<figure class="fig"><svg viewBox="0 0 400 320" role="img" aria-label="图 DS1-3：本专栏后四页各回答一组问题，并标出应先读的前置章节">
+<rect class="f-soft" fill="#e5f1df" x="14" y="14" width="150" height="42" rx="7"/>
+<text class="f-text" fill="#182f2b" x="89" y="32" font-size="12" text-anchor="middle">本页：一台电脑装得下吗</text>
+<text class="f-muted" fill="#5c6d66" x="89" y="48" font-size="12" text-anchor="middle">放置、速度、条件</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M164 35H178V264H190M178 42H190M178 112H190M178 188H190"/>
+<rect class="f-accent" fill="#136d5a" x="190" y="14" width="196" height="56" rx="7"/>
+<text class="f-on" fill="#ffffff" x="288" y="32" font-size="13" text-anchor="middle">第 2 页：288.8 GB 的专家放哪</text>
+<text class="f-on" fill="#ffffff" x="288" y="48" font-size="12" text-anchor="middle">三层放置 · 热专家档 · Faster 5/6</text>
+<text class="f-on" fill="#ffffff" x="288" y="64" font-size="12" text-anchor="middle">先读：第 10、12、13 章</text>
+<rect class="f-accent" fill="#136d5a" x="190" y="84" width="196" height="56" rx="7"/>
+<text class="f-on" fill="#ffffff" x="288" y="102" font-size="13" text-anchor="middle">第 3 页：换掉的注意力</text>
+<text class="f-on" fill="#ffffff" x="288" y="118" font-size="12" text-anchor="middle">128 行窗口 · 压缩行 · 索引器</text>
+<text class="f-on" fill="#ffffff" x="288" y="134" font-size="12" text-anchor="middle">先读：第 8、9、17 章</text>
+<rect class="f-accent" fill="#136d5a" x="190" y="160" width="196" height="56" rx="7"/>
+<text class="f-on" fill="#ffffff" x="288" y="178" font-size="13" text-anchor="middle">第 4 页：SSD 上的大表</text>
+<text class="f-on" fill="#ffffff" x="288" y="194" font-size="12" text-anchor="middle">111 GB 查找表 · 每写 1 字读几行</text>
+<text class="f-on" fill="#ffffff" x="288" y="210" font-size="12" text-anchor="middle">先读：第 11、6 章</text>
+<rect class="f-accent" fill="#136d5a" x="190" y="236" width="196" height="56" rx="7"/>
+<text class="f-on" fill="#ffffff" x="288" y="254" font-size="13" text-anchor="middle">第 5 页：DSpark 草稿与验证</text>
+<text class="f-on" fill="#ffffff" x="288" y="270" font-size="12" text-anchor="middle">草稿怎么定 · 验证窗 · 会话停车</text>
+<text class="f-on" fill="#ffffff" x="288" y="286" font-size="12" text-anchor="middle">先读：第 18、23 章</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="310" font-size="12" text-anchor="start">深色框＝本专栏页；先读的章节在正文首次出现处已给出。</text>
+</svg><figcaption>图 DS1-3　专栏后四页各回答一组问题，并对照本书的相关章节。集群一侧的同一模型见 <a href="#deepinfer/wide-ep">DeepInfer 第 2 页</a>、<a href="#deepinfer/pd-kv">第 3 页</a> 和 <a href="#deepinfer/spec-sched">第 4 页</a>。</figcaption></figure>
+<ul>
+<li><a href="#deepseek/experts">第 2 页 专家放在哪</a>：288.8 GB 专家怎么分到三层、热专家档、Faster 用 5 个专家、显存不够时的退路。先读<a href="#chapter/10">第 10 章「MoE」</a>、<a href="#chapter/12">第 12 章「专家缓存」</a>、<a href="#chapter/13">第 13 章「CPU + GPU」</a>。</li>
+<li><a href="#deepseek/attention">第 3 页 换掉的注意力</a>：每个字回头看 128 行窗口、压缩行和索引器挑出的行；一个字留下哪几种状态。先读<a href="#chapter/08">第 8 章「注意力」</a>、<a href="#chapter/09">第 9 章「GDN」</a>、<a href="#chapter/17">第 17 章「KV 容量」</a>。</li>
+<li><a href="#deepseek/engram">第 4 页 Engram 大表</a>：111 GB 的 IQ4_NL 表怎么被逐 token 直读、读取线程、慢盘。先读<a href="#chapter/11">第 11 章「PLE 与 n-gram」</a>、<a href="#chapter/06">第 6 章「模型加载」</a>。</li>
+<li><a href="#deepseek/draft">第 5 页 DSpark 与验证</a>：草稿模型、验证窗与 <code>DS4_ASYNC_T</code>、会话停车、DSML 工具调用。先读<a href="#chapter/18">第 18 章「投机解码」</a>、<a href="#chapter/23">第 23 章「从 token 到 API」</a>。</li>
+</ul>
+
+<div class="recap"><h3>记住这三点</h3><ol>
+<li>strata-dsv41 是从 Project Maya 移植的第三个引擎路径：独立可执行、不和主线内核共享符号、一条管道一次一个请求（<code>--parallel</code> 忽略，也没有批量槽）。</li>
+<li>一台电脑把专家放进三层：显存 → 内存（含热专家档，见第 2 页）→ SSD 直读；Engram 表不计入内存，Mac 实测每写 1 字共从 SSD 读 48 MB（2.00）/ 111 MB（2.25），其中含放在 SSD 上的专家，不只是 Engram。</li>
+<li>别把速度与质量数字搬离条件：机器、文件集、上下文、版本、默认参数缺一不可；跨机器、跨版本比较前先回 1.4 表对条件。</li>
+</ol></div>
+<div class="myth"><p><strong>常见误解："500 GB 的文件就得配 500 GB 的电脑。"</strong></p>
+<p>文件大小不是内存需求。4× R9700 机器用 251 GB 内存跑 508.4 GB 的 UD 集：116.5 GB 在显存、172.3 GB 在 CPU 侧、202.8 GB 的 Engram 表在 SSD 直读。128 GB 的 Mac 在内存里只保住约 68 GB 专家，其余按字从盘上读。</p>
+<p><span class="ev ev-report">上游报告</span>（<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L15-L21" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md L15–21</a>、<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK_MAC.md#L57" target="_blank" rel="noopener noreferrer">DEEPSEEK_MAC.md L57</a>）</p></div>
+
+<details class="deep"><summary>深入一层：这一页的引用怎样自己核对</summary>
+<h3>在钉住的签出里跑这些命令</h3>
+<pre><code>git grep -n -F "257 GB of disk" -- docs/DEEPSEEK41.md
+git grep -n -F "Not in this version" -- docs/DEEPSEEK41.md
+git grep -n -F "4090 48 GB with 128 GB" -- docs/DEEPSEEK41.md
+git grep -n -F "Text only, no pictures" -- docs/DEEPSEEK_MAC.md
+git grep -n -F "UD-Q8_K_XL" -- setup.py
+git grep -n -F "Engram-IQ4_NL" -- setup.py</code></pre>
+<p>第 1、2 条对 1.2 与 1.5 的总盘和并发说法；第 3、4 条对 1.4–1.5 的 4090 与 Mac 说法；第 5、6 条对 1.2 的打包布局。本页代码引用都在<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/README.md" target="_blank" rel="noopener noreferrer">这个提交</a>里核对过。</p>
+<h3>没有核对的东西</h3>
+<p>AI_REFERENCE.md 第 32 行的平台与上下文列和文档正文矛盾（8K 对 8K–1M；“Not on Mac”对 Mac 实测）。本页按代码与正文处理这两处；“Strix Halo on Linux”一句没有反证，保留。DEEPSEEK_MAC.md 短答句（15–18）与表格（≤16.2）不同源，本页取表格。--dspark auto 的判"关"规则（累积置信度截断）没有核对，归第 5 页。DeepInfer 一侧的数字在 774ce244 上核对过（复用它们时按规则带 <a href="#deepinfer/overview">DeepInfer 列</a> 链接）。</p>
+</details>
