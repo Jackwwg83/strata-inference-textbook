@@ -301,7 +301,7 @@
       const vramRange = $('[data-row=vram] input'), ramRange = $('[data-row=ram] input');
       const st = { ...M.DEFAULT };
 
-      const txt = (x, y, s, color) => { const t = Viz.svg('text', { x, y, 'font-size': 12, 'text-anchor': Viz.lang === 'ar' ? 'end' : 'start', style: `fill:${color || 'var(--muted)'}` }, svg); t.textContent = s; return t; };
+      const txt = (x, y, s, color) => { const t = Viz.svg('text', { x, y, 'font-size': 12, 'text-anchor': 'start', style: `fill:${color || 'var(--muted)'}` }, svg); t.textContent = s; return t; };
 
       function draw() {
         const p = M.place(st), set = M.SETS[st.setId];
