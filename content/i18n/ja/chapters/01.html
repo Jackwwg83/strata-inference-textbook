@@ -1,5 +1,5 @@
 <div class="hook"><span class="eyebrow">まずは、ちょっと不思議な話から</span>
-<p>Strata の README の冒頭には、こう書かれています。自分のゲーミング PC で、1250 億パラメータの AI モデルを動かせる。GPU（グラフィックスカード）に求められるのは、VRAM 12 GB から。<span class="ev ev-report">上流レポート</span>[S01]</p>
+<p>Strata v0.1.45 の README の冒頭には、こう書かれています。自分のゲーミング PC で、1250 億パラメータの AI モデルを動かせる。GPU（グラフィックスカード）に求められるのは、VRAM 12 GB から。<span class="ev ev-report">上流レポート</span><a href="https://github.com/Niko1221/Strata/blob/477ac13cbe8e582c20484871ce459d20d82df09d/README.md#L5-L6" target="_blank" rel="noopener noreferrer">README 第 5–6 行</a>現在のドキュメントは言い方が変わっています。この種のモデルは、数百 GB の VRAM を持つサーバで動かすのがふつうで、あなたのグラフィックスカードの VRAM は 12–24 GB しかありません。<span class="ev ev-report">上流レポート</span>[S02]</p>
 <p>常識で計算してみましょう。1250 億個のパラメータは、1 つが 1 バイトだとしても 125 GB になります。12 GB のグラフィックスカードに、どうやって入るのでしょうか。この本が答えたいのは、こういう疑問です。AI モデルは、あなたのコンピュータの中で、実際にどう動いているのか。この疑問をたどりながら、コンピュータの構成、OS、アルゴリズム、ネットワークといった基礎知識をひとつにつなげていきます。</p></div>
 <p class="tldr"><strong>ひとことで：</strong>チャット AI が一度に生成するのは、1 つのトークンだけです。その 1 つを作るために、GPU、メモリ、CPU、SSD が総動員されます。Strata の腕前は、この 4 つを「ちょうど足りる」ように配置することにあります。</p>
 
@@ -69,7 +69,7 @@
 <text class="f-muted" fill="#5c6d66" x="10" y="224" font-size="12">まとめて計算できるからです（第 16 章）。</text>
 </svg><figcaption>図 1-3　先に問題を読み、あとで答えを書きます。プリフィルでは質問全体をまとめて計算するので、単位時間に処理できるトークンがずっと多くなります。デコードは 1 つずつしか進められません。</figcaption></figure></div>
 <p>第 1 段階は<dfn>プリフィル</dfn>（prefill、問題を読む段階）です。モデルは質問全体を一度に読み込みます。質問のトークンはすべて分かっているので、まとめて計算できます。第 2 段階は<dfn>デコード</dfn>（decode、答えを書く段階）です。新しいトークンは、どれも 1 つ前のトークンに依存します。だから 1 つずつ進めるしかありません。</p>
-<p>Strata の上流の測定によると、同じマシンで、プリフィルは毎秒約 1,299 トークン、デコードは毎秒約 93 トークンを処理します。<span class="ev ev-report">上流レポート</span>[S03] つまり、質問が長いほど、最初の 1 文字までの待ち時間も長くなります。README も注意を促しています。会話の最初のメッセージは丸ごと 1 回読む必要があり、約 30,000 トークンごとに 1 分かかります。そのあとの追加の質問は、増えた部分だけを読むので、数秒で答えが始まります。[S01]</p>
+<p>Strata の上流の測定によると、同じマシンで、プリフィルは毎秒約 1,299 トークン、デコードは毎秒約 93 トークンを処理します。<span class="ev ev-report">上流レポート</span>[S03] つまり、質問が長いほど、最初の 1 文字までの待ち時間も長くなります。（この速度は、上流がエンジン 0.1.26 で測ったもので、再測定はしていません。）上流のドキュメントも注意を促しています。長い文章は大きなかたまりごとに読まれ、速さは毎秒 1,000 トークン以上です。会話の最初のメッセージは丸ごと 1 回読む必要があり、そのあとの追加の質問は、増えた部分だけを読むので、数秒で答えが始まります。<span class="ev ev-report">上流レポート</span>[S02]</p>
 
 <h2 id="sec-3">1.3 モデル、エンジン、アプリ：よく混同される 3 つの役割</h2>
 <p>レストランにたとえてみましょう。図 1-4 です。Strata 自身のドキュメントも、厨房のたとえを使っています。[S02]</p>
@@ -98,9 +98,9 @@
 <text class="f-muted" fill="#5c6d66" x="134" y="270" font-size="12">Qwen3.8-Flash-Next</text>
 </svg><figcaption>図 1-4　3 つの役割は、それぞれ受け持ちが違います。アプリがエンジンに渡すのはトークン番号の列で、エンジンはモデルのレシピに従って計算します。</figcaption></figure>
 <ul>
-<li><strong>モデルはレシピです。</strong>学習で得られた膨大な数字（「パラメータ」または「重み」）と、固定の計算規則でできています。Qwen3.8-Flash-Next は 1 つのモデルです。</li>
-<li><strong>推論エンジンは厨房とシェフです。</strong>あなたのハードウェアの上で、レシピどおりに計算を実行します。Strata は推論エンジンの 1 つで、llama.cpp や vLLM もそうです。Strata が主に動くのは NVIDIA と AMD のグラフィックスカード（CUDA / HIP）です。ほかに、コミュニティのメンバーが書いてテストした実験版があり、Intel Arc（SYCL）と Apple Silicon の Mac（Metal）に対応します。[S01]</li>
-<li><strong>アプリは受付です。</strong>あなたを迎え、話を整えて厨房に渡し、できた料理をあなたに運びます。Strata 付属のウェブチャット画面や、API でつなぐプログラミングツールは、この層にあります。[S01]</li>
+<li><strong>モデルはレシピです。</strong>学習で得られた膨大な数字（「パラメータ」または「重み」）と、固定の計算規則でできています。Qwen3.8-Flash-Next は 1 つのモデルです。Strata は現在、Qwen3.6-35B-A3B と DeepSeek-V4.1-Flash も動かせます。後者は専用のエンジンを使います（<a href="#deepseek">DeepSeek コラム</a>を参照）。この本が追うのは Qwen3.8-Flash-Next の系統です。<span class="ev ev-report">上流レポート</span>[S01]</li>
+<li><strong>推論エンジンは厨房とシェフです。</strong>あなたのハードウェアの上で、レシピどおりに計算を実行します。Strata は推論エンジンの 1 つで、llama.cpp や vLLM もそうです。Strata のエンジンにはいくつかのバックエンドがあります。NVIDIA のグラフィックスカード（CUDA。Linux ARM64 の DGX Spark を含む）、AMD のグラフィックスカード（HIP）、Intel Arc（SYCL、Linux のみ）、Apple Silicon の Mac（Metal）です。README の対応リストで、まだ experimental と書かれているのは AMD RX 6000 だけです。<span class="ev ev-report">上流レポート</span>[S01] エンジンは別のインストールパッケージです。Windows と Linux のパッケージにはエンジンが入っておらず、アプリは初回起動時に、あなたの GPU に合わせてダウンロードします（Mac のパッケージには小さな Metal エンジンが入っています）。<span class="ev ev-report">上流レポート</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/INSTALL.md#L37-L48" target="_blank" rel="noopener noreferrer">INSTALL.md 第 37–48 行</a></li>
+<li><strong>アプリは受付です。</strong>あなたを迎え、話を整えて厨房に渡し、できた料理をあなたに運びます。Strata 付属のデスクトップアプリ（チャット、ファイル、リアルタイムプレビュー）、ターミナルの <code>strata launch</code>、そして API でつなぐプログラミングツール（Claude Code、Codex CLI など）は、この層にあります。[S01]</li>
 </ul>
 <p>この 3 層を区別しておくと、問題を調べるときに探す場所を間違えません。エンジンをどれだけ速くしても、モデルは賢くなりません。レシピが同じなら、厨房を替えても料理の味は同じはずです。逆に、回答の質が落ちたときは、原因がレシピ（モデルを替えた、圧縮しすぎた）にあるかもしれません。厨房（エンジンのバグで計算が間違っている）かもしれません。受付（テンプレートやプロトコルがあなたの言葉を誤って伝えた）かもしれません。</p>
 
@@ -122,7 +122,7 @@
 <text class="f-muted" fill="#5c6d66" x="200" y="270" font-size="12" text-anchor="middle">地下倉庫：いちばん大きく、いちばん遅い</text>
 <text class="f-text" fill="#182f2b" x="200" y="290" font-size="12" text-anchor="middle">28.8 GB の参照テーブル。1 トークンが読むのは数行だけ</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="334" font-size="12" text-anchor="middle">上へ行くほど：速く、小さく、高価</text>
-</svg><figcaption>図 1-5　Strata が 3 層の記憶装置をどう使うか。容量は README が示すハードウェア要件で、役割分担は上流のドキュメントによります。[S01][S02]</figcaption></figure>
+</svg><figcaption>図 1-5　Strata が 3 層の記憶装置をどう使うか。VRAM の 12–24 GB と役割分担は上流のドキュメントによります。RAM の 32–64 GB は<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/MODELS.md#L116-L139" target="_blank" rel="noopener noreferrer">MODELS.md の構成の説明</a>から取りました（64 GB ならすべてのサイズが動きます。32 GB では低メモリモードが必要で、エキスパートの一部は SSD に残ります）。[S02]</figcaption></figure>
 <p>GPU は計算がいちばん速いのですが、VRAM がいちばん小さく、市販のゲーミングカードでは 12–24 GB ほどです。RAM（メインメモリ）はずっと大きいものの、GPU から遠く、データは PCIe というバスを通して送る必要があります。SSD はいちばん大きく、いちばん遅い装置です。</p>
 <p>Strata の役割分担は次のとおりです <span class="ev ev-report">上流レポート</span>[S02]：</p>
 <ol>
@@ -159,7 +159,7 @@
 <p class="bridge"><strong>CS を学んだ人へ：</strong>これは「コンピュータ構成」で習うメモリ階層そのままです。違いは、VRAM という層が増えている点だけです。CPU から見ると、VRAM は別のデバイス上のメモリです。自分のメモリのように直接読み書きはできず、データは PCIe を通して運びます（DMA は第 14 章で扱います）。</p>
 
 <h2 id="sec-5">1.5 計算してみよう：24,576 と 480</h2>
-<p>README によると、このモデルは 24,576 個の「エキスパート」でできていて、1 語を書くのにそのうち 10 個だけを使います。[S01] わかりやすくするために、この説明は簡略化されています。ソースコードで確かめてみましょう。</p>
+<p>上流の HOW_IT_WORKS ドキュメントによると、このモデルは 24,576 個の「エキスパート」でできていて、1 語を書くのにそのうち 10 個だけを使います。[S02] わかりやすくするために、この説明は簡略化されています。ソースコードで確かめてみましょう。</p>
 <p>ソースコードが定義するモデルの構造は、48 層で、1 層に 512 個のエキスパートです <span class="ev ev-code">コード上の事実</span>[S04]。各トークンは<strong>各層で</strong> 10 個のエキスパートを選びます <span class="ev ev-code">コード上の事実</span>[S13]。図 1-7 に、この構造を描きました。</p>
 <figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="図 1-7：48 層、1 層あたり 512 個のエキスパート、各層で 10 個を選ぶ。1 トークンで合計 480 回のエキスパート選択を行う">
 <text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">1 行 ＝ 1 層の 512 エキスパート（濃い 10 個が選ばれたもの）</text>
@@ -250,12 +250,12 @@
 <p>この本の結論には、どの種類の証拠にあたるかを必ず示します。</p>
 <ul>
 <li><span class="ev ev-code">コード上の事実</span>固定バージョンのソースコードから直接読み取ったもの。例：「48 層」。</li>
-<li><span class="ev ev-report">上流レポート</span>Strata の作者がドキュメントに書いた説明や、測ったデータ。この本では再測定していません。例：「RTX 5070 で毎秒 94 トークンを生成」。[S01]</li>
+<li><span class="ev ev-report">上流レポート</span>Strata の作者がドキュメントに書いた説明や、測ったデータ。この本では再測定していません。例：「RTX 5070 で毎秒 93 トークンを生成」（Q2_0、4K の質問）。[S03]</li>
 <li><span class="ev ev-est">教育用の試算</span>この本が簡略化したモデルで計算した結果。直感をつかむためのもので、実測ではありません。ブラウザ上のインタラクティブな実験は、すべてこの種類です。</li>
 <li>基礎原理：数学やコンピュータの一般的な法則。Strata に依存しないので、ラベルは付けません。</li>
 </ul>
 <p>なぜここまで気にするのでしょうか。AI の世界では、数字が別の場所へ持ち出されやすいからです。他人のグラフィックスカードでの速度、ある設定でのメモリ使用量、宣伝図の簡略化された説明。条件から切り離されると、人を誤解させかねません。「この数字は、どんな条件で得られたのか」と問う習慣は、どの数字を覚えるよりも役に立ちます。</p>
-<p>この本のソースコード読解は、Strata v0.1.45 に固定しています。これは 2026-10-16 のコミット 477ac13… で、ページ下部に完全なコミット番号があります。本の中の事実は 2026-10-19 に確認しました。Strata はまだ速いペースで変わっているので、新しいバージョンでは数字が変わっているかもしれません。</p>
+<p>この本のソースコード読解は、Strata v0.2.9 に固定しています。これは 2026-10-31 のコミット c62d5e3a… で、ページ下部に完全なコミット番号があります。本の中の事実は 2026-11-02 に確認しました。この本の前の版は v0.1.45（2026-10-16、コミット 477ac13…）に固定していました。一部の文はまだそのバージョンを引用していて、文の中でそう断っています。Strata はまだ速いペースで変わっているので、新しいバージョンでは数字が変わっているかもしれません。</p>
 <p><strong>手を動かす：</strong>この章のインタラクティブ実験「1 つのトークンの旅」を開きましょう。図 1-1 の経路を、1 段階ずつ確かめられる部品に分けてあります。各段階の入力と出力が見えます。どれか 1 本の矢印について、「ここが壊れたらどうなるか」を考えてみてください。たとえば、テンプレートが違っていたら。トークナイザとモデルが合っていなかったら。実験の数字はどれも教育用の試算で、あなたのコンピュータでの実測ではありません。</p>
 
 <div class="recap"><h3>この 3 点を覚えよう</h3><ol>
@@ -264,12 +264,12 @@
 <li>数字を見たら必ず問います。これはコード上の事実か、上流レポートか、試算か。単位と範囲は何か。</li>
 </ol></div>
 <div class="myth"><p><strong>よくある誤解：「モデルのファイルが何 GB なら、VRAM も何 GB 必要」</strong></p>
-<p>そうとは限りません。ファイルサイズが示すのは、重みが SSD の上で何バイトを占めるか、ということだけです。実行時は、重みの一部を RAM に置いたまま CPU で計算したり、必要なときだけ GPU に送ったりできます。VRAM には、会話履歴や一時データも置かなければなりません。Strata は約 70 GB のモデルをダウンロードしますが、12 GB のグラフィックスカードで動きます。[S01]</p></div>
+<p>そうとは限りません。ファイルサイズが示すのは、重みが SSD の上で何バイトを占めるか、ということだけです。実行時は、重みの一部を RAM に置いたまま CPU で計算したり、必要なときだけ GPU に送ったりできます。VRAM には、会話履歴や一時データも置かなければなりません。Strata の Q2_0、IQ2_XS、IQ3_XXS の 3 つのパッケージは 66〜76 GB をダウンロードしますが、12 GB のグラフィックスカードで動きます。<span class="ev ev-report">上流レポート</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/MODELS.md#L143" target="_blank" rel="noopener noreferrer">MODELS.md 第 143 行</a></p></div>
 
 <details class="deep"><summary>もう一歩深く：ソースコードを読みたい人へ</summary>
 <h3>サーバ層とエンジンの本当の境界</h3>
 <p>Strata のサーバコードでは、アプリ層がエンジンに渡すのは HTTP リクエストでも生の JSON でもなく、トークン番号の列です。インターフェースは <code>Engine.generate(ids, max_new, sampling, cancel)</code> で、トークン番号を 1 つずつ返すイテレータを返します。<span class="ev ev-code">コード上の事実</span>[S15] テンプレートの適用、トークン化、プロトコルの解析は、すべてこの境界の外にあります。だから問題を調べるときは、まず、エラーが境界のどちら側で起きたのかを見分けます。</p>
-<p>同じファイルの冒頭には、こうも書かれています。サーバが一度に処理するシーケンスは 1 つだけで、リクエストは先着順（FIFO）で並びます。[S15] これは既定の動作です。v0.1.39 からは、モデルの設定ファイルに <code>"parallel": N</code> と書くと、エンジンが最大 N 本の会話を同時にデコードできます。書かない場合や 1 の場合は、これまでどおり一度に 1 つです。エンジンの 1 つのバッチウィンドウには最大 8 行しか入らないので、N の既定の上限は 8 です。v0.1.40 では、任意のオプション <code>--batch-mtp</code> が加わりました。これを有効にすると、VRAM に余裕があれば、8 本を超える会話も、この 8 行のウィンドウを順番に使えます。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/477ac13cbe8e582c20484871ce459d20d82df09d/serve/server.py#L2676-L2697" target="_blank" rel="noopener noreferrer">server.py</a> これが当てはまるのは 1 枚のカードの場合です。複数のカードでレイヤー分割をするときは、v0.1.43.1 以降、<code>--batch-groups</code> を書かなければ、エンジンが会話をグループに分けてパイプラインで実行し、<code>--batch-mtp</code> を切ります。ログにその旨が出ます（第 25 章）。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/477ac13cbe8e582c20484871ce459d20d82df09d/src/program/generate.cpp#L5044-L5067" target="_blank" rel="noopener noreferrer">generate.cpp</a> v0.1.45 からは、レイヤー分割のとき、各グループが 8 行のウィンドウを 1 つずつ使います。そのため、1 グループが 8 本を超えなければ、合計は 8 本を超えられます。たとえば 4 枚のカードで 16 本の会話なら、4 グループに分かれ、1 グループ 4 本です。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/program/generate.cpp#L6097-L6128" target="_blank" rel="noopener noreferrer">generate.cpp</a> README は、12 GB のグラフィックスカードで複数の会話を同時にデコードすると、どの回答も遅くなる、と注意しています。[S01]「OpenAI 互換 API に対応」は、やはり「複数人の同時利用に対応」と同じではありません。複数ユーザー向けに拡張するには何が要るかは、第 25 章で議論します。</p>
+<p>同じファイルの冒頭には、こうも書かれています。サーバが一度に処理するシーケンスは 1 つだけで、リクエストは先着順（FIFO）で並びます。[S15] これは既定の動作です。v0.1.39 からは、モデルの設定ファイルに <code>"parallel": N</code> と書くと、エンジンが最大 N 本の会話を同時にデコードできます。書かない場合や 1 の場合は、これまでどおり一度に 1 つです。エンジンの 1 つのバッチウィンドウには、CUDA の既定のビルド、SYCL、Metal では最大 8 行しか入らないので、N の既定の上限は 8 です。v0.1.40 では、任意のオプション <code>--batch-mtp</code> が加わりました。これを有効にすると、VRAM に余裕があれば、8 本を超える会話も、この 8 行のウィンドウを順番に使えます。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L3300-L3324" target="_blank" rel="noopener noreferrer">server.py</a> v0.2.8 からは、AMD（HIP）ビルドのウィンドウに 16 行入ります。ビルドオプション <code>STRATA_WINDOW_MAX_T</code> には auto、8、16 を指定でき、auto は HIP では 16、CUDA では 8 になります。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/include/strata/kernels/window_limits.hpp#L1-L25" target="_blank" rel="noopener noreferrer">window_limits.hpp</a><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/CMakeLists.txt#L101-L102" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a> これらは 1 枚のカードの話です。複数のカードでレイヤー分割をするときは、v0.1.43.1 以降、<code>--batch-groups</code> を書かなければ、エンジンが会話をグループに分けてパイプラインで実行し、<code>--batch-mtp</code> を切ります。ログにその旨が出ます（第 25 章）。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/program/generate.cpp#L6047-L6072" target="_blank" rel="noopener noreferrer">generate.cpp</a> v0.1.45 からは、レイヤー分割のとき、各グループが 1 つずつウィンドウを使います。そのため、1 グループの会話数がウィンドウの行数を超えなければ、合計は 8 本を超えられます。行数は 8 行で、HIP ビルドでは 16 行です。たとえば 4 枚のカードで 16 本の会話なら、4 グループに分かれ、1 グループ 4 本です。4 枚の AMD カードで 64 本なら、4 グループに分かれ、1 グループ 16 本にできます。<span class="ev ev-code">コード上の事実</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/program/generate.cpp#L6097-L6128" target="_blank" rel="noopener noreferrer">generate.cpp</a><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/BATCHING.md#L541-L543" target="_blank" rel="noopener noreferrer">BATCHING.md</a> 上流の並列処理のドキュメントは、RTX 5070 12 GB で測っています。2 個または 4 個のリクエストを同時に送ると、合計の速さは 1 つずつ処理するより 11〜24 % 低くなります。ただし、4 個のリクエストが同時に届き、<code>"parallel": 4</code> に設定すると、最後のリクエストの最初のトークンまでの待ち時間は 11.2 秒から 1.8 秒に下がります。スロットが買うのは待ち時間であって速さではないので、セットアップウィザードは 12 GB のカードを一度に 1 つのままにします。<span class="ev ev-report">上流レポート</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/BATCHING.md#L644-L664" target="_blank" rel="noopener noreferrer">BATCHING.md 第 644–664 行</a>「OpenAI 互換 API に対応」は、やはり「複数人の同時利用に対応」と同じではありません。複数ユーザー向けに拡張するには何が要るかは、第 25 章で議論します。</p>
 <h3>層ごとの「キャッシュ」を混同しない</h3>
 <p>CPU のハードウェアキャッシュは、最近アクセスしたメモリの行を保存します。Strata のエキスパートキャッシュは、一部の重みを VRAM に置きます。KV キャッシュは、会話履歴の途中結果を保存します。セッションキャッシュは、復元できるシーケンス全体の状態を保存します。参照テーブルの行キャッシュは、SSD から読んだテーブルの行を保存します。これらは、保存する対象も、寿命も、無効になる条件もまったく違います。「キャッシュを足そう」という提案が意味を持つのは、<strong>何をキャッシュするのか、同じ対象だとどう確認するのか、いつ無効になるのか</strong>を説明できるときだけです。</p>
 <h3>コメントは事実ではない</h3>
