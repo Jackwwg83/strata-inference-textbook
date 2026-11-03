@@ -8,33 +8,42 @@
 <p><strong>내부 구조.</strong> 엔진에 들어 있는 검증 스크립트는 DeepSeek 체크포인트와 한 줄씩 대조해요. 거기에 이렇게 적혀 있어요. 초안 모델은 블록이 3개예요. 블록마다 윈도 어텐션과, 전문가 128개 중 토큰마다 3개를 고르는 작은 MoE가 들어 있어요. 입력은 주 모델 37~39층의 상태에서 가져와요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/dspark_ref.py#L10-L14" target="_blank" rel="noopener noreferrer">dspark_ref.py 10–14행</a>) 초안 모델은 자기 기록을 따로 저장하지 않아요. 엔진이 블록마다 윈도 링을 하나씩 두고, 링에는 주 모델 KV의 투영을 넣어요. 주 모델이 행 묶음을 하나 남길 때마다, 그 행들이 해당 세 층에서 가진 상태로 링을 "시딩"(seed)해요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7677-L7681" target="_blank" rel="noopener noreferrer">ds4_model.cu 7677–7681행</a>)</p>
 <p><strong>초안 작성 한 라운드의 입력.</strong> 초안을 쓸 때 엔진은 초안 모델에 블록 하나를 줘요. 0번 행은 방금 정해졌지만 아직 주 모델에 먹이지 않은 토큰(y라고 써요)이에요. 나머지 행은 모두 같은 고정 "노이즈 토큰"으로 채워요. 블록의 행 수는 pack의 dspark_block_size와 같아요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7761-L7766" target="_blank" rel="noopener noreferrer">ds4_model.cu 7761–7766행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/pack_gguf.py#L222" target="_blank" rel="noopener noreferrer">pack_gguf.py 222행</a>) 이 수는 엔진 코드에 적혀 있지 않아요. 주석 세 곳이 5라고 말해요. 검증 스크립트는 블록을 "[y, noise x 4]"라고 적고, 엔진 주석은 "the drafter's fixed T=5"라고 적고, setup 주석은 "6행 검증 윈도"(초안 5개와 y)라고 적어요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/dspark_ref.py#L10-L14" target="_blank" rel="noopener noreferrer">dspark_ref.py 10–14행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9620-L9625" target="_blank" rel="noopener noreferrer">ds4_model.cu 9620–9625행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tests/terminal/test_dsv41_async_t.py#L3-L5" target="_blank" rel="noopener noreferrer">test_dsv41_async_t.py 3–5행</a>) 커널 파일 ds4_attn_split.cuh의 머리 주석에는 "DSpark verify T = 2..5"라고도 적혀 있어요. 6행과 맞지 않아요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_attn_split.cuh#L3-L4" target="_blank" rel="noopener noreferrer">ds4_attn_split.cuh 3–4행</a>) 이 페이지는 verify의 T = n + 1을 기준으로 삼고, 이 주석을 함께 고치지 않은 옛 주석으로 봐요.</p>
 <p><strong>초안 다섯 개는 어떻게 나올까요.</strong> 블록이 세 블록을 지나면 숨은 상태 5행이 나와요. 각 행은 다시 주 모델의 출력 헤드를 지나고, Markov 편향 한 항이 더해져요. 거기서 argmax를 취하면 그 행의 초안이에요. 편향은 바로 앞 토큰만 봐요. 0번 행은 y를 보고, 그다음 행들은 앞 행이 방금 낸 초안을 봐요. 그래서 초안 5개는 블록 순전파 한 번에, 아주 작은 이어 쓰기 다섯 번을 더해서 나와요. 완전한 순전파를 다섯 번 돌리는 것이 아니에요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7877-L7886" target="_blank" rel="noopener noreferrer">ds4_model.cu 7877–7886행</a>) 초안은 기본으로 argmax를 취해요. 환경 변수 DS4_DSPARK_SAMPLE=1을 켜야 초안 모델의 분포에서 뽑는데, 이것은 테스트용 스위치예요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.hpp#L128-L134" target="_blank" rel="noopener noreferrer">ds4_model.hpp 128–134행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1052" target="_blank" rel="noopener noreferrer">ds4_model.cu 1052행</a>)</p>
-<figure class="fig"><svg viewBox="0 0 640 250" role="img" aria-label="그림 DS5-1: 초안 작성 한 라운드의 데이터 흐름. 블록 입력 5행이 블록 세 개, 주 모델 출력 헤드, Markov 편향을 지나 초안 5개와 신뢰도 5개가 되고, 검증 뒤에 남긴 행은 윈도 링에 다시 기록된다">
-<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">초안 작성 한 라운드: 블록 입력 5행, 순전파 1회로 초안 5개와 신뢰도 5개가 동시에 나와요</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="10" y="34" width="120" height="72" rx="4"/>
-<text class="f-text" fill="#182f2b" x="70" y="60" font-size="13" text-anchor="middle">블록 입력 5행</text>
-<text class="f-muted" fill="#5c6d66" x="70" y="82" font-size="12" text-anchor="middle">[y, 노이즈 ×4]</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M130 70 H156 M150 64 L156 70 L150 76"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="160" y="34" width="170" height="72" rx="4"/>
-<text class="f-text" fill="#182f2b" x="245" y="56" font-size="13" text-anchor="middle">DSpark 블록 3개</text>
-<text class="f-muted" fill="#5c6d66" x="245" y="75" font-size="12" text-anchor="middle">윈도 어텐션</text>
-<text class="f-muted" fill="#5c6d66" x="245" y="93" font-size="12" text-anchor="middle">전문가 128개 중 3개 MoE</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M330 70 H356 M350 64 L356 70 L350 76"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="360" y="34" width="130" height="72" rx="4"/>
-<text class="f-text" fill="#182f2b" x="425" y="56" font-size="13" text-anchor="middle">주 모델 출력 헤드</text>
-<text class="f-muted" fill="#5c6d66" x="425" y="75" font-size="12" text-anchor="middle">+ Markov 편향</text>
-<text class="f-muted" fill="#5c6d66" x="425" y="93" font-size="12" text-anchor="middle">행마다 argmax</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M490 70 H516 M510 64 L516 70 L510 76"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="520" y="34" width="110" height="72" rx="4"/>
-<text class="f-text" fill="#182f2b" x="575" y="63" font-size="13" text-anchor="middle">초안 5개</text>
-<text class="f-text" fill="#182f2b" x="575" y="85" font-size="13" text-anchor="middle">신뢰도 5개</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="160" y="140" width="170" height="52" rx="4"/>
-<text class="f-text" fill="#182f2b" x="245" y="162" font-size="13" text-anchor="middle">윈도 링(블록마다 1개)</text>
-<text class="f-muted" fill="#5c6d66" x="245" y="181" font-size="12" text-anchor="middle">주 모델 37–39층 상태</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M245 140 V110 M239 116 L245 110 L251 116"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M575 106 V166 H336 M342 160 L336 166 L342 172"/>
-<text class="f-muted" fill="#5c6d66" x="455" y="158" font-size="12" text-anchor="middle">검증 후: 유지한 행을 윈도 링에 기록</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="218" font-size="12">5행은 한 번에 계산해요. 초안 5개는 차례로 이어 쓰고, 단계마다 작은 편향 하나만 더해요(앞 토큰만 봐요)</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="238" font-size="12">신뢰도 = sigmoid(학습된 내적)예요. 뒤의 두 문턱값을 정하고, 검증에는 쓰이지 않아요</text>
+<figure class="fig"><svg viewBox="0 0 440 416" role="img" aria-label="그림 DS5-1: 초안 작성 한 라운드의 데이터 흐름. 블록 입력 5행이 블록 세 개, 주 모델 출력 헤드, Markov 편향을 지나 초안 5개와 신뢰도 5개가 되고, 검증 뒤에 남긴 행은 윈도 링에 다시 기록된다">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">초안 작성 한 라운드: 블록 입력 5행, 순전파 1회로</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="34" font-size="12" text-anchor="start">초안 5개와 신뢰도 5개가 동시에 나와요</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="200" y="44" width="228" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="314" y="66" font-size="12" text-anchor="middle">블록 입력 5행</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="84" font-size="12" text-anchor="middle">[y, 노이즈 ×4]</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M314 92V100"/>
+<path class="f-muted" fill="#5c6d66" d="M310 100L314 108L318 100Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="108" width="228" height="68" rx="4"/>
+<text class="f-text" fill="#182f2b" x="314" y="130" font-size="12" text-anchor="middle">DSpark 블록 3개</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="148" font-size="12" text-anchor="middle">윈도 어텐션</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="166" font-size="12" text-anchor="middle">전문가 128개 중 3개 MoE</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M314 176V184"/>
+<path class="f-muted" fill="#5c6d66" d="M310 184L314 192L318 184Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="200" y="192" width="228" height="68" rx="4"/>
+<text class="f-text" fill="#182f2b" x="314" y="214" font-size="12" text-anchor="middle">주 모델 출력 헤드</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="232" font-size="12" text-anchor="middle">+ Markov 편향</text>
+<text class="f-muted" fill="#5c6d66" x="314" y="250" font-size="12" text-anchor="middle">행마다 argmax</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M314 260V268"/>
+<path class="f-muted" fill="#5c6d66" d="M310 268L314 276L318 268Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="200" y="276" width="228" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="314" y="296" font-size="12" text-anchor="middle">초안 5개</text>
+<text class="f-text" fill="#182f2b" x="314" y="314" font-size="12" text-anchor="middle">신뢰도 5개</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="12" y="108" width="140" height="68" rx="4"/>
+<text class="f-text" fill="#182f2b" x="82" y="130" font-size="12" text-anchor="middle">윈도 링</text>
+<text class="f-muted" fill="#5c6d66" x="82" y="148" font-size="12" text-anchor="middle">(블록마다 1개)</text>
+<text class="f-muted" fill="#5c6d66" x="82" y="166" font-size="12" text-anchor="middle">주 모델 37–39층 상태</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M152 142H190M184 136L190 142L184 148"/>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M200 300H82V184M76 190L82 184L88 190"/>
+<text class="f-muted" fill="#5c6d66" x="92" y="216" font-size="12" text-anchor="start">검증 후:</text>
+<text class="f-muted" fill="#5c6d66" x="92" y="234" font-size="12" text-anchor="start">유지한 행을</text>
+<text class="f-muted" fill="#5c6d66" x="92" y="252" font-size="12" text-anchor="start">윈도 링에 기록</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="350" font-size="12" text-anchor="start">5행은 한 번에 계산해요. 초안 5개는 차례로 이어 쓰고,</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="366" font-size="12" text-anchor="start">단계마다 작은 편향 하나만 더해요(앞 토큰만 봐요)</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="388" font-size="12" text-anchor="start">신뢰도 = sigmoid(학습된 내적)예요.</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="404" font-size="12" text-anchor="start">뒤의 두 문턱값을 정하고, 검증에는 쓰이지 않아요</text>
 </svg><figcaption>그림 DS5-1　초안 작성 한 라운드. 블록 입력은 [y, 노이즈 ×4]로 5행이고, 세 블록을 지나 한 번에 계산돼요. 초안과 신뢰도가 함께 나와요. 윈도 링에는 주 모델 37–39층 상태의 투영이 들어 있어요. 검증이 끝나면 남긴 행으로 다시 시딩해요.</figcaption></figure>
 <p><strong>신뢰도 다섯 개는 어떻게 계산할까요.</strong> 행마다 신뢰도도 하나씩 나와요. 블록이 낸 그 행에 앞 토큰의 Markov 임베딩 행을 이어 붙이고, 학습된 가중치 벡터와 내적한 뒤 sigmoid를 통과시켜요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L278" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 278행</a>) 엔진 작성자는 이것을 "이 초안이 남을 확률"로 봐요. main.cpp의 주석은 이렇게 말해요. 초안이 검증할 가치가 있는 이유는, 앞의 모든 초안과 함께 남을 확률이 아직 충분히 높기 때문이에요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L169-L175" target="_blank" rel="noopener noreferrer">ds4_main.cpp 169–175행</a>) 이것은 작성자의 쓰임새예요. 신뢰도가 실제로 보정돼 있는지는 이 페이지에 데이터가 없어서 결론을 내리지 않아요.</p>
 <p><strong>초안 작성은 공짜가 아니에요.</strong> 엔진 주석에 시간 측정값이 한 묶음 있어요. 초안 블록(고정 T=5)의 출력 헤드는 4.55 ms에서 2.83 ms로, 한 라운드 전체는 14.49 ms에서 13.46 ms로 줄었어요. 기계는 적혀 있지 않아요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9620-L9625" target="_blank" rel="noopener noreferrer">ds4_model.cu 9620–9625행</a>) 기계별 디코드 속도는 4.7에서 80 token/s까지 다양해요. 토큰당 시간으로 바꾸면 12.5에서 213 ms예요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L63" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 63행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L64-L65" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 64–65행</a>) <span class="ev ev-est">교육용 추정</span>(1000 ÷ 80 = 12.5 ms; 1000 ÷ 4.7 ≈ 213 ms) 이 두 묶음은 기계와 측정 기준이 달라서 곧바로 비교할 수 없어요. 여기서는 초안 한 라운드에 십수 밀리초가 든다는 것만 말할 수 있어요. 그래서 "잘 맞히는 것"만으로는 부족해요. "맞히는 값어치가 있어야" 해요. 뒤의 두 문턱값이 이를 위해 있어요.</p>
@@ -57,48 +66,48 @@
 <p><strong>첫 번째 문턱값: 초안마다의 하한.</strong> dspark_conf의 기본값은 0.5예요. --dspark-conf로도, 요청의 dspark_conf 키로도 바꿀 수 있어요. 초안의 신뢰도가 이 값보다 낮으면 거기서 멈춰요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.hpp#L52-L55" target="_blank" rel="noopener noreferrer">ds4_model.hpp 52–55행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L281-L286" target="_blank" rel="noopener noreferrer">ds4_main.cpp 281–286행</a>) <strong>두 번째 문턱값: 누적곱.</strong> 앞쪽 초안들의 신뢰도를 차례로 곱해요. 곱이 문턱값보다 낮으면 멈춰요. 대부분의 기계에서 기본값은 0이에요. 곧 꺼짐이라는 뜻이에요. RDNA4는 예외이고, 다음 문단에서 다뤄요. 엔진 안에서는 같은 루프예요. 첫 번째 초안부터 세다가, 처음 기준에 못 미치는 초안을 만나면 멈추고 그 뒤는 통째로 버려요. 이유는 간단해요. 세 번째 초안이 쓸모 있으려면 앞의 두 개가 모두 수락돼야 해요. 루프에는 하드 상한도 둘 있어요. 하나는 이 요청이 더 만들 수 있는 토큰 수와 컨텍스트 여유 중 작은 값에서 1을 뺀 값이에요. 다른 하나는 --dspark-depth(기본값 64, 실제로는 쓰이지 않아요)예요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L238-L244" target="_blank" rel="noopener noreferrer">ds4_main.cpp 238–244행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L165" target="_blank" rel="noopener noreferrer">ds4_main.cpp 165행</a>) 이 작은 값이 토큰 1개만 남기면, 엔진은 초안을 아예 쓰지 않아요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L223-L224" target="_blank" rel="noopener noreferrer">ds4_main.cpp 223–224행</a>)</p>
 <p><strong>누적곱 문턱값의 기본값은 하드웨어에 따라 달라요.</strong> RDNA4 그래픽 카드(gfx1200, gfx1201: R9700, RX 9000)는 기본값이 0.5이고, 나머지는 모두 0이에요. 환경 변수 STRATA_DS4_DSPARK_CUM은 어느 기계에서든 우선하고, DS4_DEFAULTS=026을 주면 0.2.6의 0으로 돌아가요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_experts_rule.hpp#L197-L201" target="_blank" rel="noopener noreferrer">ds4_experts_rule.hpp 197–201행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tests/dsv41/experts_rule_test.cpp#L283-L287" target="_blank" rel="noopener noreferrer">experts_rule_test.cpp 283–287행</a>) 주석에는 RDNA4에서만 켜는 이유가 적혀 있어요. 4× R9700, 2.25 bpw, 묶음마다 128토큰 디코드 6번, 같은 id 묶음 조건에서 71.7 → 76.9 token/s(중앙값)였어요. Project Maya는 Radeon 8065S(Strix Halo)에서 +6.5%를 쟀지만, 기계 한 대의 데이터 한 점일 뿐이에요. CUDA에서는 비슷하게 나왔어요. 그래서 Strix와 CUDA는 0으로 둬요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L169-L175" target="_blank" rel="noopener noreferrer">ds4_main.cpp 169–175행</a>) 하한도 어디서나 0.5는 아니에요. Strix Halo의 Windows 문서는 시작 인자를 --dspark auto --dspark-conf 0.65로 적어요. 튜너가 "강제로 켬" 단계를 시험할 때도 똑같이 0.65를 넘겨요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/STRIX_HALO_WINDOWS.md#L78" target="_blank" rel="noopener noreferrer">STRIX_HALO_WINDOWS.md 78행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/tune.py#L121-L122" target="_blank" rel="noopener noreferrer">tune.py 121–122행</a>)</p>
 <p><strong>직접 해 보세요.</strong> 아래 시뮬레이터는 교육용 숫자 한 묶음으로 세 가지를 조절하게 해 줘요. 라운드마다 초안 수(1에서 5), 수락률(각 초안이 남을 조건부 확률의 크기), 신뢰도 문턱값(하한과 누적곱)이에요. 시뮬레이터는 검증 윈도가 한 라운드에 결국 토큰을 몇 개 내놓는지 보여 줘요. 식은 E = 1 + c₁ + c₁c₂ + … + c₁…c<sub>k</sub>예요. k는 문턱값을 넘은 초안의 수이고, cᵢ는 신뢰도예요. <span class="ev ev-est">교육용 추정</span>(E = 1 + Σᵢ₌₁..k ∏ⱼ₌₁..i cⱼ; 기댓값의 유도는 19장 19.2절을 보세요) 신뢰도를 조건부 수락률로 보는 것은 이 페이지의 교육용 가정이에요. 엔진이 측정한 사실이 아니에요.</p>
-<div class="viz" data-viz="ds-draft-window"><figure class="fig"><svg viewBox="0 0 640 316" role="img" aria-label="그림 DS5-2: 초안 다섯 개, 줄이는 방법 세 가지. 신뢰도 0.80, 0.62, 0.45, 0.35, 0.28. 줄이지 않으면 5개를 검증하고 라운드당 기댓값은 토큰 2.62개예요. 하한 0.5만 두면 2개를 검증하고 2.30개예요. 누적곱 문턱값 0.5를 더하면 1개를 검증하고 1.80개예요">
+<div class="viz" data-viz="ds-draft-window"><figure class="fig"><svg viewBox="0 0 440 316" role="img" aria-label="그림 DS5-2: 초안 다섯 개, 줄이는 방법 세 가지. 신뢰도 0.80, 0.62, 0.45, 0.35, 0.28. 줄이지 않으면 5개를 검증하고 라운드당 기댓값은 토큰 2.62개예요. 하한 0.5만 두면 2개를 검증하고 2.30개예요. 누적곱 문턱값 0.5를 더하면 1개를 검증하고 1.80개예요">
 <text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">예시: 초안 다섯 개, 줄이는 세 방법(교육용 숫자이며 실측값이 아니에요)</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="36" font-size="12">막대 높이 = 신뢰도, 점선 = 하한 0.5</text>
-<rect class="f-accent" fill="#136d5a" x="150" y="86" width="40" height="64" rx="2"/>
-<rect class="f-accent" fill="#136d5a" x="220" y="100" width="40" height="50" rx="2"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="290" y="114" width="40" height="36" rx="2"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="360" y="122" width="40" height="28" rx="2"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="430" y="128" width="40" height="22" rx="2"/>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-dasharray="4 3" d="M130 110 H490"/>
-<text class="f-muted" fill="#5c6d66" x="496" y="114" font-size="12">하한 0.5</text>
-<text class="f-text" fill="#182f2b" x="170" y="168" font-size="13" text-anchor="middle">초안 1</text>
-<text class="f-text" fill="#182f2b" x="240" y="168" font-size="13" text-anchor="middle">초안 2</text>
-<text class="f-text" fill="#182f2b" x="310" y="168" font-size="13" text-anchor="middle">초안 3</text>
-<text class="f-text" fill="#182f2b" x="380" y="168" font-size="13" text-anchor="middle">초안 4</text>
-<text class="f-text" fill="#182f2b" x="450" y="168" font-size="13" text-anchor="middle">초안 5</text>
+<rect class="f-accent" fill="#136d5a" x="108" y="86" width="36" height="64" rx="2"/>
+<rect class="f-accent" fill="#136d5a" x="166" y="100" width="36" height="50" rx="2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="224" y="114" width="36" height="36" rx="2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="282" y="122" width="36" height="28" rx="2"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="340" y="128" width="36" height="22" rx="2"/>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-dasharray="4 3" d="M104 110 H380"/>
+<text class="f-muted" fill="#5c6d66" x="386" y="114" font-size="12">하한 0.5</text>
+<text class="f-text" fill="#182f2b" x="126" y="168" font-size="12" text-anchor="middle">초안 1</text>
+<text class="f-text" fill="#182f2b" x="184" y="168" font-size="12" text-anchor="middle">초안 2</text>
+<text class="f-text" fill="#182f2b" x="242" y="168" font-size="12" text-anchor="middle">초안 3</text>
+<text class="f-text" fill="#182f2b" x="300" y="168" font-size="12" text-anchor="middle">초안 4</text>
+<text class="f-text" fill="#182f2b" x="358" y="168" font-size="12" text-anchor="middle">초안 5</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="188" font-size="12">신뢰도 c</text>
-<text class="f-text" fill="#182f2b" x="170" y="188" font-size="12" text-anchor="middle">0.80</text>
-<text class="f-text" fill="#182f2b" x="240" y="188" font-size="12" text-anchor="middle">0.62</text>
-<text class="f-text" fill="#182f2b" x="310" y="188" font-size="12" text-anchor="middle">0.45</text>
-<text class="f-text" fill="#182f2b" x="380" y="188" font-size="12" text-anchor="middle">0.35</text>
-<text class="f-text" fill="#182f2b" x="450" y="188" font-size="12" text-anchor="middle">0.28</text>
+<text class="f-text" fill="#182f2b" x="126" y="188" font-size="12" text-anchor="middle">0.80</text>
+<text class="f-text" fill="#182f2b" x="184" y="188" font-size="12" text-anchor="middle">0.62</text>
+<text class="f-text" fill="#182f2b" x="242" y="188" font-size="12" text-anchor="middle">0.45</text>
+<text class="f-text" fill="#182f2b" x="300" y="188" font-size="12" text-anchor="middle">0.35</text>
+<text class="f-text" fill="#182f2b" x="358" y="188" font-size="12" text-anchor="middle">0.28</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="12">누적곱</text>
-<text class="f-text" fill="#182f2b" x="170" y="206" font-size="12" text-anchor="middle">0.800</text>
-<text class="f-text" fill="#182f2b" x="240" y="206" font-size="12" text-anchor="middle">0.496</text>
-<text class="f-text" fill="#182f2b" x="310" y="206" font-size="12" text-anchor="middle">0.223</text>
-<text class="f-text" fill="#182f2b" x="380" y="206" font-size="12" text-anchor="middle">0.078</text>
-<text class="f-text" fill="#182f2b" x="450" y="206" font-size="12" text-anchor="middle">0.022</text>
+<text class="f-text" fill="#182f2b" x="126" y="206" font-size="12" text-anchor="middle">0.800</text>
+<text class="f-text" fill="#182f2b" x="184" y="206" font-size="12" text-anchor="middle">0.496</text>
+<text class="f-text" fill="#182f2b" x="242" y="206" font-size="12" text-anchor="middle">0.223</text>
+<text class="f-text" fill="#182f2b" x="300" y="206" font-size="12" text-anchor="middle">0.078</text>
+<text class="f-text" fill="#182f2b" x="358" y="206" font-size="12" text-anchor="middle">0.022</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">하한만 설정</text>
-<text class="f-text" fill="#182f2b" x="170" y="228" font-size="12" text-anchor="middle">검증</text>
-<text class="f-text" fill="#182f2b" x="240" y="228" font-size="12" text-anchor="middle">검증</text>
-<text class="f-text" fill="#182f2b" x="310" y="228" font-size="12" text-anchor="middle">중단</text>
-<text class="f-muted" fill="#5c6d66" x="380" y="228" font-size="12" text-anchor="middle">—</text>
-<text class="f-muted" fill="#5c6d66" x="450" y="228" font-size="12" text-anchor="middle">—</text>
+<text class="f-text" fill="#182f2b" x="126" y="228" font-size="12" text-anchor="middle">검증</text>
+<text class="f-text" fill="#182f2b" x="184" y="228" font-size="12" text-anchor="middle">검증</text>
+<text class="f-text" fill="#182f2b" x="242" y="228" font-size="12" text-anchor="middle">중단</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="228" font-size="12" text-anchor="middle">—</text>
+<text class="f-muted" fill="#5c6d66" x="358" y="228" font-size="12" text-anchor="middle">—</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="246" font-size="12">누적곱 0.5 추가</text>
-<text class="f-text" fill="#182f2b" x="170" y="246" font-size="12" text-anchor="middle">검증</text>
-<text class="f-text" fill="#182f2b" x="240" y="246" font-size="12" text-anchor="middle">중단</text>
-<text class="f-muted" fill="#5c6d66" x="310" y="246" font-size="12" text-anchor="middle">—</text>
-<text class="f-muted" fill="#5c6d66" x="380" y="246" font-size="12" text-anchor="middle">—</text>
-<text class="f-muted" fill="#5c6d66" x="450" y="246" font-size="12" text-anchor="middle">—</text>
-<text class="f-text" fill="#182f2b" x="10" y="272" font-size="13">줄이지 않음: 5개 검증, 윈도 6행, 기댓값 1 + 1.62 ≈ 토큰 2.62개</text>
-<text class="f-text" fill="#182f2b" x="10" y="290" font-size="13">하한만 설정: 2개 검증, 윈도 3행, 기댓값 1 + 0.80 + 0.496 ≈ 토큰 2.30개</text>
-<text class="f-text" fill="#182f2b" x="10" y="308" font-size="13">누적곱 0.5 추가: 1개 검증, 윈도 2행, 기댓값 1 + 0.80 = 토큰 1.80개</text>
+<text class="f-text" fill="#182f2b" x="126" y="246" font-size="12" text-anchor="middle">검증</text>
+<text class="f-text" fill="#182f2b" x="184" y="246" font-size="12" text-anchor="middle">중단</text>
+<text class="f-muted" fill="#5c6d66" x="242" y="246" font-size="12" text-anchor="middle">—</text>
+<text class="f-muted" fill="#5c6d66" x="300" y="246" font-size="12" text-anchor="middle">—</text>
+<text class="f-muted" fill="#5c6d66" x="358" y="246" font-size="12" text-anchor="middle">—</text>
+<text class="f-text" fill="#182f2b" x="10" y="272" font-size="12">줄이지 않음: 5개 검증, 윈도 6행, 기댓값 1 + 1.62 ≈ 토큰 2.62개</text>
+<text class="f-text" fill="#182f2b" x="10" y="290" font-size="12">하한만 설정: 2개 검증, 윈도 3행, 기댓값 1 + 0.80 + 0.496 ≈ 토큰 2.30개</text>
+<text class="f-text" fill="#182f2b" x="10" y="308" font-size="12">누적곱 0.5 추가: 1개 검증, 윈도 2행, 기댓값 1 + 0.80 = 토큰 1.80개</text>
 </svg><figcaption>그림 DS5-2　시뮬레이터의 정지 화면. 조절 항목은 라운드당 초안 수, 수락률, 신뢰도 문턱값이고, 읽는 값은 검증 윈도가 한 라운드에 내놓는 토큰 수예요. 검증 = 검증 윈도에 들어감, 중단 = 여기서 막힘, — = 차례가 오지 않음. 이 신뢰도 조합에서는 초안 5개 중 합계 약 1.6개가 수락돼요. 코드 주석의 31–32%와 같은 자릿수예요. 누적곱 문턱값은 토큰 0.5개를 더 깎는 대신 검증 행을 1개 줄여 줘요. 숫자는 교육용 가정이에요.</figcaption></figure></div>
 <p><strong>이 예에서 볼 것.</strong> 초안 다섯 개의 신뢰도는 0.80, 0.62, 0.45, 0.35, 0.28이에요. 누적곱은 차례로 0.800, 0.496, 0.223, 0.078, 0.022예요. <span class="ev ev-est">교육용 추정</span>(0.80 × 0.62 = 0.496; 0.496 × 0.45 ≈ 0.223; 0.223 × 0.35 ≈ 0.078; 0.078 × 0.28 ≈ 0.022) 하한 0.5만 두면 세 번째 초안(0.45)이 막혀서 2개를 검증해요. 누적곱 0.5를 더하면 두 번째 초안의 누적곱이 0.496이에요. 아슬아슬하게 모자라서 이것도 막히고, 1개만 검증해요. 세 방법의 기댓값은 각각 토큰 2.62, 2.30, 1.80개이고, 윈도는 각각 6, 3, 2행이에요. <span class="ev ev-est">교육용 추정</span>(1 + 0.800 + 0.496 + 0.223 + 0.078 + 0.022 ≈ 2.62; 1 + 0.800 + 0.496 ≈ 2.30; 1 + 0.800 = 1.80) 그러면 질문은 이렇게 바뀌어요. 덜 검증한 행들이 아낀 비용이 토큰 0.3~0.8개의 값어치가 있을까요? 이 계산은 기계마다 달라요. RDNA4에서는 값어치가 있고 CUDA에서는 비슷해서, 기본값이 달라요. 업스트림의 실측은 마지막 token/s까지만 주고, 라운드당 토큰 수는 주지 않아요.</p>
 <p><strong>상한을 정하는 스위치도 하나 더 있어요.</strong> --dspark-block N은 라운드당 초안 수를 N개로 제한해요. pack의 블록 크기가 상한이에요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2350" target="_blank" rel="noopener noreferrer">ds4_model.cu 2350행</a>) 튜너는 N = 3을 시험해요. 속도가 표준 설정보다 5% 넘게 빠를 때만 이 설정을 남겨요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L137-L140" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 137–140행</a>) 그러니 "5개"는 출하 상한이지, 모든 기계의 최적값이 아니에요.</p>
@@ -111,38 +120,43 @@
 <p><strong>q가 한 점이라서 규칙이 단순해져요.</strong> 초안은 argmax를 취한 것이라서, q는 d 위에 놓인 점이고 확률이 1이에요. 엔진은 여기서 q를 바로 1로 채워요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7979-L7992" target="_blank" rel="noopener noreferrer">ds4_model.cu 7979–7992행</a>) 그러면 남을 확률은 min(1, p(d) ÷ 1) = p(d)가 돼요. 주 모델이 이 토큰에 준 확률(top-k, top-p, min-p, 온도로 이어진 샘플링 체인을 다 거친 뒤의 값)이 곧 초안이 남을 확률이에요. <span class="ev ev-est">교육용 추정</span>(q(d) = 1 → min(1, p(d) ÷ 1) = p(d)) 초안이 샘플링 체인의 잘림 바깥에 있으면 p(d) = 0이라서 영원히 남지 않아요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L7979-L7992" target="_blank" rel="noopener noreferrer">ds4_model.cu 7979–7992행</a>) 서빙 계층의 기본 요청은 샘플링 요청(온도 1.0, top_p 1.0)이에요. 그래서 평소에는 이 경로를 타요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L115" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 115행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/test_dsv41.py#L419" target="_blank" rel="noopener noreferrer">test_dsv41.py 419행</a>)</p>
 <p><strong>신뢰도는 여기서 등장하지 않아요.</strong> 신뢰도는 어느 초안이 윈도에 들어가는지만 정해요. "남길지"에는 관여하지 않아요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L238-L244" target="_blank" rel="noopener noreferrer">ds4_main.cpp 238–244행</a>) 남길지는 주 모델만 보고 정해요.</p>
 <p><strong>한 라운드에 토큰이 몇 개 나올까요.</strong> m은 연달아 남은 초안의 수예요. 이 라운드의 출력은 이 m개의 초안에, 주 모델이 처음으로 "달라진" 행에서 직접 고른 토큰 하나를 더한 것이라서 모두 m + 1개예요. 전부 거부되면 m = 0이고, 그래도 1개가 나와요. 추측하지 않을 때와 같은 양이에요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8011-L8012" target="_blank" rel="noopener noreferrer">ds4_model.cu 8011–8012행</a>) 이 토큰은 이번 라운드의 상태에는 들어가지 않아요. 다음 라운드의 y가 돼요.</p>
-<figure class="fig"><svg viewBox="0 0 640 274" role="img" aria-label="그림 DS5-3: 검증 윈도 4행. 앞의 초안 두 개는 수락되고 세 번째는 거부돼요. 이번 라운드는 d1, d2와 주 모델 자신의 t를 내서 토큰 3개가 나와요. 윈도는 앞의 3행을 남기고 4번째 행은 롤백해요">
-<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">검증 윈도: 초안 k = 3개 유지, 윈도 T = k + 1 = 4행</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="30" y="30" width="115" height="46" rx="4"/>
-<text class="f-muted" fill="#5c6d66" x="87" y="48" font-size="12" text-anchor="middle">행 0</text>
-<text class="f-text" fill="#182f2b" x="87" y="67" font-size="13" text-anchor="middle">y</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="185" y="30" width="115" height="46" rx="4"/>
-<text class="f-muted" fill="#5c6d66" x="242" y="48" font-size="12" text-anchor="middle">행 1</text>
-<text class="f-text" fill="#182f2b" x="242" y="67" font-size="13" text-anchor="middle">초안 d1</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="340" y="30" width="115" height="46" rx="4"/>
-<text class="f-muted" fill="#5c6d66" x="397" y="48" font-size="12" text-anchor="middle">행 2</text>
-<text class="f-text" fill="#182f2b" x="397" y="67" font-size="13" text-anchor="middle">초안 d2</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="495" y="30" width="115" height="46" rx="4"/>
-<text class="f-muted" fill="#5c6d66" x="552" y="48" font-size="12" text-anchor="middle">행 3</text>
-<text class="f-text" fill="#182f2b" x="552" y="67" font-size="13" text-anchor="middle">초안 d3</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M87 76 V96 M82 90 L87 96 L92 90 M242 76 V96 M237 90 L242 96 L247 90 M397 76 V96 M392 90 L397 96 L402 90 M552 76 V96 M547 90 L552 96 L557 90"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="30" y="100" width="115" height="56" rx="4"/>
-<text class="f-text" fill="#182f2b" x="87" y="122" font-size="13" text-anchor="middle">주 모델이 d1 선택</text>
-<text class="f-muted" fill="#5c6d66" x="87" y="142" font-size="12" text-anchor="middle">초안과 같음</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="185" y="100" width="115" height="56" rx="4"/>
-<text class="f-text" fill="#182f2b" x="242" y="122" font-size="13" text-anchor="middle">주 모델이 d2 선택</text>
-<text class="f-muted" fill="#5c6d66" x="242" y="142" font-size="12" text-anchor="middle">초안과 같음</text>
-<rect class="f-box" fill="#ffffff" stroke="#5c6d66" x="340" y="100" width="115" height="56" rx="4"/>
-<text class="f-text" fill="#182f2b" x="397" y="122" font-size="13" text-anchor="middle">주 모델이 t 선택</text>
-<text class="f-muted" fill="#5c6d66" x="397" y="142" font-size="12" text-anchor="middle">d3과 다름</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="495" y="100" width="115" height="56" rx="4"/>
-<text class="f-text" fill="#182f2b" x="552" y="122" font-size="13" text-anchor="middle">무효</text>
-<text class="f-muted" fill="#5c6d66" x="552" y="142" font-size="12" text-anchor="middle">첫 불일치 이후</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M30 168 V176 H455 V168"/>
-<text class="f-text" fill="#182f2b" x="242" y="196" font-size="13" text-anchor="middle">앞의 m + 1 = 3행 유지: y, d1, d2</text>
-<text class="f-text" fill="#182f2b" x="10" y="222" font-size="13">이번 라운드는 d1, d2, t로 m + 1 = 3개 토큰을 내요. t는 다음 라운드의 y가 돼요</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="243" font-size="12">롤백: 행 3이 윈도 링에 쓴 행은 백업에서, 압축기 상태는 스냅샷에서 복원한 뒤 남긴 행을 재생해요</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="263" font-size="12">그다음 초안 모델이 남긴 3행으로 다시 시딩(seed)해요</text>
+<figure class="fig"><svg viewBox="0 0 440 324" role="img" aria-label="그림 DS5-3: 검증 윈도 4행. 앞의 초안 두 개는 수락되고 세 번째는 거부돼요. 이번 라운드는 d1, d2와 주 모델 자신의 t를 내서 토큰 3개가 나와요. 윈도는 앞의 3행을 남기고 4번째 행은 롤백해요">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">검증 윈도: 초안 k = 3개 유지, 윈도 T = k + 1 = 4행</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="30" width="94" height="46" rx="4"/>
+<text class="f-muted" fill="#5c6d66" x="59" y="48" font-size="12" text-anchor="middle">행 0</text>
+<text class="f-text" fill="#182f2b" x="59" y="67" font-size="12" text-anchor="middle">y</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="118" y="30" width="94" height="46" rx="4"/>
+<text class="f-muted" fill="#5c6d66" x="165" y="48" font-size="12" text-anchor="middle">행 1</text>
+<text class="f-text" fill="#182f2b" x="165" y="67" font-size="12" text-anchor="middle">초안 d1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="224" y="30" width="94" height="46" rx="4"/>
+<text class="f-muted" fill="#5c6d66" x="271" y="48" font-size="12" text-anchor="middle">행 2</text>
+<text class="f-text" fill="#182f2b" x="271" y="67" font-size="12" text-anchor="middle">초안 d2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="330" y="30" width="94" height="46" rx="4"/>
+<text class="f-muted" fill="#5c6d66" x="377" y="48" font-size="12" text-anchor="middle">행 3</text>
+<text class="f-text" fill="#182f2b" x="377" y="67" font-size="12" text-anchor="middle">초안 d3</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M59 76 V96 M54 90 L59 96 L64 90 M165 76 V96 M160 90 L165 96 L170 90 M271 76 V96 M266 90 L271 96 L276 90 M377 76 V96 M372 90 L377 96 L382 90"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="100" width="94" height="72" rx="4"/>
+<text class="f-text" fill="#182f2b" x="59" y="122" font-size="12" text-anchor="middle">주 모델이</text>
+<text class="f-text" fill="#182f2b" x="59" y="140" font-size="12" text-anchor="middle">d1 선택</text>
+<text class="f-muted" fill="#5c6d66" x="59" y="160" font-size="12" text-anchor="middle">초안과 같음</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="118" y="100" width="94" height="72" rx="4"/>
+<text class="f-text" fill="#182f2b" x="165" y="122" font-size="12" text-anchor="middle">주 모델이</text>
+<text class="f-text" fill="#182f2b" x="165" y="140" font-size="12" text-anchor="middle">d2 선택</text>
+<text class="f-muted" fill="#5c6d66" x="165" y="160" font-size="12" text-anchor="middle">초안과 같음</text>
+<rect class="f-box" fill="#ffffff" stroke="#5c6d66" x="224" y="100" width="94" height="72" rx="4"/>
+<text class="f-text" fill="#182f2b" x="271" y="122" font-size="12" text-anchor="middle">주 모델이</text>
+<text class="f-text" fill="#182f2b" x="271" y="140" font-size="12" text-anchor="middle">t 선택</text>
+<text class="f-muted" fill="#5c6d66" x="271" y="160" font-size="12" text-anchor="middle">d3과 다름</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="330" y="100" width="94" height="72" rx="4"/>
+<text class="f-text" fill="#182f2b" x="377" y="131" font-size="12" text-anchor="middle">무효</text>
+<text class="f-muted" fill="#5c6d66" x="377" y="151" font-size="12" text-anchor="middle">첫 불일치 이후</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M12 184 V192 H318 V184"/>
+<text class="f-text" fill="#182f2b" x="165" y="212" font-size="12" text-anchor="middle">앞의 m + 1 = 3행 유지: y, d1, d2</text>
+<text class="f-text" fill="#182f2b" x="12" y="238" font-size="12" text-anchor="start">이번 라운드는 d1, d2, t로 m + 1 = 3개 토큰을 내요.</text>
+<text class="f-text" fill="#182f2b" x="12" y="254" font-size="12" text-anchor="start">t는 다음 라운드의 y가 돼요</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="275" font-size="12" text-anchor="start">롤백: 행 3이 윈도 링에 쓴 행은 백업에서,</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="291" font-size="12" text-anchor="start">압축기 상태는 스냅샷에서 복원한 뒤 남긴 행을 재생해요</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="311" font-size="12" text-anchor="start">그다음 초안 모델이 남긴 3행으로 다시 시딩(seed)해요</text>
 </svg><figcaption>그림 DS5-3　검증 한 번. i번째 행의 출력은 i + 1번째 행의 초안과 비교해요. 0번 행은 d1과, 1번 행은 d2와, 2번 행은 d3과 비교해요. 앞의 두 개는 같고 세 번째는 달라요. 주 모델이 2번 행에서 고른 t가 이번 라운드의 마지막 토큰이고, 3번 행은 무효가 돼요.</figcaption></figure>
 <p><strong>롤백은 무엇을 되돌릴까요.</strong> 주 모델은 k + 1행 모두에 상태를 썼지만, 유효한 것은 앞의 m + 1행뿐이에요. y와 수락된 초안 m개예요. 나머지는 되돌려야 해요. 윈도 링에서 새 행에 덮어 쓰인 행은 검증 윈도가 시작되기 전에 백업해 두고, 롤백할 때 복원해요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10104" target="_blank" rel="noopener noreferrer">ds4_model.cu 10104행</a>) 압축기의 부분 그룹은 먼저 스냅샷을 한 벌 저장해 두고, 롤백할 때 복원한 다음 남긴 행을 재생해요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10137-L10140" target="_blank" rel="noopener noreferrer">ds4_model.cu 10137–10140행</a>) 위치별로 저장한 압축 KV 행과 인덱스 키는 건드리지 않아도 돼요. 그 위치에 다시 도달하면 덮어쓰게 돼요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8027-L8028" target="_blank" rel="noopener noreferrer">ds4_model.cu 8027–8028행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8015" target="_blank" rel="noopener noreferrer">ds4_model.cu 8015행</a>) 마지막으로 초안 모델은 남긴 m + 1행으로 다시 시딩해요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L8016" target="_blank" rel="noopener noreferrer">ds4_model.cu 8016행</a>)</p>
 <p class="bridge"><strong>CS를 배운 분께:</strong> 추측하고 검증하는 일은 CPU의 분기 예측과 파이프라인 플러시와 같아요. 윈도 안의 초안 k개는 "예측한 분기"이고, 검증은 "분기 해소"이고, 롤백은 "파이프라인 플러시"예요. 롤백이 쓰는 방법은 데이터베이스의 오래된 방식이기도 해요. 바꾸기 전에 백업이나 스냅샷을 남겨 두고, 실패하면 복원하고, 성공하면 커밋해요. 상태마다 백업하는 방법이 달라요. 링의 행은 백업을 쓰고, 압축기는 스냅샷에 재생을 더하고, 위치별로 저장한 행은 덮어쓰기에 맡겨요. 이 이야기는 <a href="#chapter/18/sec-4">18장 18.4절</a>에서 다뤘어요. 다만 메인라인 Qwen의 "화이트보드"는 GDN의 점화식 상태였고, 여기서는 재료가 윈도 링과 압축기로 바뀌었어요.</p>
@@ -153,39 +167,46 @@
 <p><strong>문제.</strong> 검증 윈도의 전문가는 두 종류예요. VRAM에 있는 전문가는 GPU가 직접 계산해요. 없는 전문가는 CPU 레인을 타요. RAM 슬롯이나 SSD에서 읽어서 CPU가 계산해요. 어떻게 나누는지는 <a href="#deepseek/experts">2페이지</a>에서 다뤘어요. 층마다 라우팅 결과가 나오기 전에는, 이 층의 전문가가 어느 쪽에 있는지 아무도 몰라요. CPU 몫과 GPU 몫을 어떻게 겹치게 할까요?</p>
 <p><strong>동기 경로: GPU가 그냥 기다려요.</strong> GPU가 먼저 라우팅을 계산해요. 뽑힌 전문가 번호와 입력을 호스트로 복사해요. 호스트는 이벤트가 끝날 때까지 기다린 뒤 계획을 세우고, CPU 레인의 전문가를 계산해요. 이 시간 동안 GPU는 공유 전문가만 먼저 계산하고 기다려야 해요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10430" target="_blank" rel="noopener noreferrer">ds4_model.cu 10430행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10455" target="_blank" rel="noopener noreferrer">ds4_model.cu 10455행</a>)</p>
 <p><strong>비동기 메일박스: GPU가 기다리지 않아요.</strong> 디바이스는 층마다 라우팅 결과와 FFN 입력을 호스트에 매핑된 링 메모리에 써요. 이것이 메일박스이고, 칸은 모두 64개예요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L218" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 218행</a>) 데이터를 다 쓴 뒤 시스템 펜스를 한 번 지나고, 마지막에 시퀀스 번호를 써요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L215-L217" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 215–217행</a>) 호스트에는 서비스 스레드가 하나 있어요. 새 시퀀스 번호를 보면 이 층에서 CPU 레인 전문가의 가중 몫을 계산해서 답장 칸에 써요. 그동안 GPU는 계속 공유 전문가와 VRAM의 전문가를 계산해요. 전문가 합산 직전에야 답장을 기다려요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1117-L1119" target="_blank" rel="noopener noreferrer">ds4_model.cu 1117–1119행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10302-L10305" target="_blank" rel="noopener noreferrer">ds4_model.cu 10302–10305행</a>)</p>
-<figure class="fig"><svg viewBox="0 0 640 256" role="img" aria-label="그림 DS5-4: 한 층 안의 두 가지 편성. 비동기 메일박스에서는 GPU가 공유 전문가와 VRAM 전문가를 계산하는 동안 호스트가 CPU 레인의 전문가를 계산해요. 동기 경로에서는 GPU가 공유 전문가를 끝낸 뒤 호스트를 기다려요">
-<text class="f-text" fill="#182f2b" x="10" y="18" font-size="13">비동기 메일박스: 윈도 행 수 ≤ DS4_ASYNC_T</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="48" font-size="12">GPU</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="30" width="40" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="100" y="49" font-size="12" text-anchor="middle">라우팅</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="120" y="30" width="170" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="205" y="49" font-size="12" text-anchor="middle">공유 + VRAM 전문가</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="290" y="30" width="26" height="28" rx="3"/>
-<text class="f-muted" fill="#5c6d66" x="303" y="49" font-size="12" text-anchor="middle">대기</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="316" y="30" width="64" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="348" y="49" font-size="12" text-anchor="middle">합산</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="82" font-size="12">호스트</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="125" y="64" width="170" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="210" y="83" font-size="12" text-anchor="middle">CPU 레인의 전문가</text>
-<text class="f-muted" fill="#5c6d66" x="392" y="48" font-size="12">라우팅과 입력을 메일박스에 기록</text>
-<text class="f-muted" fill="#5c6d66" x="392" y="82" font-size="12">답장은 합산 직전에 받음</text>
-<text class="f-text" fill="#182f2b" x="10" y="122" font-size="13">동기(호스트 라우팅): 윈도 행 수 &gt; DS4_ASYNC_T</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="152" font-size="12">GPU</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="80" y="134" width="50" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="105" y="153" font-size="12" text-anchor="middle">라우팅</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="130" y="134" width="74" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="167" y="153" font-size="12" text-anchor="middle">공유 전문가</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="204" y="134" width="86" height="28" rx="3"/>
-<text class="f-muted" fill="#5c6d66" x="247" y="153" font-size="12" text-anchor="middle">호스트 대기</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="134" width="90" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="335" y="153" font-size="12" text-anchor="middle">병합</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="186" font-size="12">호스트</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="130" y="168" width="160" height="28" rx="3"/>
-<text class="f-text" fill="#182f2b" x="210" y="187" font-size="12" text-anchor="middle">선택 확인, CPU 레인 계산</text>
-<text class="f-muted" fill="#5c6d66" x="392" y="152" font-size="12">선택된 전문가와 입력을 호스트로 복사</text>
-<text class="f-muted" fill="#5c6d66" x="392" y="186" font-size="12">GPU는 호스트 계산을 기다림</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="222" font-size="12">두 타임라인을 같은 길이로 그린 것은 정렬을 위해서예요. 개념도이고, 실측 비율이 아니에요.</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="242" font-size="12">어느 쪽이 빠른지는 기계에 달려 있어요. Strix Halo에서는 동기가 더 빨라요(코드 답변 약 30%).</text>
+<figure class="fig"><svg viewBox="0 0 440 296" role="img" aria-label="그림 DS5-4: 한 층 안의 두 가지 편성. 비동기 메일박스에서는 GPU가 공유 전문가와 VRAM 전문가를 계산하는 동안 호스트가 CPU 레인의 전문가를 계산해요. 동기 경로에서는 GPU가 공유 전문가를 끝낸 뒤 호스트를 기다려요">
+<text class="f-text" fill="#182f2b" x="12" y="18" font-size="12" text-anchor="start">비동기 메일박스: 윈도 행 수 ≤ DS4_ASYNC_T</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="48" font-size="12" text-anchor="start">GPU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="44" y="30" width="52" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="70" y="49" font-size="12" text-anchor="middle">라우팅</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="96" y="30" width="132" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="162" y="49" font-size="12" text-anchor="middle">공유 + VRAM 전문가</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="228" y="30" width="34" height="28" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="245" y="49" font-size="12" text-anchor="middle">대기</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="262" y="30" width="50" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="287" y="49" font-size="12" text-anchor="middle">합산</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="82" font-size="12" text-anchor="start">호스트</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="96" y="64" width="132" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="162" y="83" font-size="12" text-anchor="middle">CPU 레인의 전문가</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="42" font-size="12" text-anchor="start">라우팅과 입력을</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="58" font-size="12" text-anchor="start">메일박스에 기록</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="78" font-size="12" text-anchor="start">답장은 합산</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="94" font-size="12" text-anchor="start">직전에 받음</text>
+<text class="f-text" fill="#182f2b" x="12" y="122" font-size="12" text-anchor="start">동기(호스트 라우팅): 윈도 행 수 &gt; DS4_ASYNC_T</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="152" font-size="12" text-anchor="start">GPU</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="44" y="134" width="52" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="70" y="153" font-size="12" text-anchor="middle">라우팅</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="96" y="134" width="74" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="133" y="153" font-size="12" text-anchor="middle">공유 전문가</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="170" y="134" width="76" height="28" rx="3"/>
+<text class="f-muted" fill="#5c6d66" x="208" y="153" font-size="12" text-anchor="middle">호스트 대기</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="246" y="134" width="66" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="279" y="153" font-size="12" text-anchor="middle">병합</text>
+<text class="f-muted" fill="#5c6d66" x="10" y="186" font-size="12" text-anchor="start">호스트</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="96" y="168" width="160" height="28" rx="3"/>
+<text class="f-text" fill="#182f2b" x="176" y="187" font-size="12" text-anchor="middle">선택 확인, CPU 레인 계산</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="138" font-size="12" text-anchor="start">선택된 전문가와</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="154" font-size="12" text-anchor="start">입력을 호스트로</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="170" font-size="12" text-anchor="start">복사</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="190" font-size="12" text-anchor="start">GPU는 호스트 계산을</text>
+<text class="f-muted" fill="#5c6d66" x="320" y="206" font-size="12" text-anchor="start">기다림</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="230" font-size="12" text-anchor="start">두 타임라인을 같은 길이로 그린 것은 정렬을 위해서예요.</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="246" font-size="12" text-anchor="start">개념도이고, 실측 비율이 아니에요.</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="266" font-size="12" text-anchor="start">어느 쪽이 빠른지는 기계에 달려 있어요.</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="282" font-size="12" text-anchor="start">Strix Halo에서는 동기가 더 빨라요(코드 답변 약 30%).</text>
 </svg><figcaption>그림 DS5-4　MoE 한 층 안의 두 가지 편성. 메일박스를 쓰면 CPU 레인의 전문가가 GPU의 공유 전문가, VRAM 전문가와 동시에 계산돼요. 동기 경로에서는 GPU의 공유 전문가만 호스트와 겹칠 수 있어요. 어느 편성이 더 빠른지는 기계가 정해요.</figcaption></figure>
 <p class="bridge"><strong>CS를 배운 분께:</strong> 메일박스는 생산자 하나, 소비자 하나인 락 없는 링 큐예요. 생산자는 데이터를 먼저 쓰고, 펜스를 지나고, 마지막에 시퀀스 번호를 공개해요. 소비자는 시퀀스 번호를 폴링하다가 새 번호가 보일 때만 읽어요. 번호를 마지막에 쓰기 때문에, 소비자가 번호를 볼 때 데이터는 이미 다 와 있어요. 이것은 <a href="#chapter/14/sec-3">14장 14.3절</a>의 "커밋됐다고 끝난 것은 아니다"와 같은 종류의 문제예요. 다만 여기서는 "끝남"을 시퀀스 번호가 알려 줘요.</p>
 <p><strong>메일박스에는 라우팅만 들어 있지 않아요.</strong> 디바이스는 다음 층의 선택에 대한 추측도 이 층의 라우팅과 함께 공개해요. 서비스 스레드는 이를 바탕으로 그 전문가들을 미리 읽어서, 이 층이 계산하는 동안 SSD가 읽기를 시작하게 해요. 이 미리 읽기는 페이지 캐시에만 영향을 주고 출력은 그대로예요. 기본으로 켜져 있어요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1137-L1143" target="_blank" rel="noopener noreferrer">ds4_model.cu 1137–1143행</a>) <a href="#deepseek/experts">2페이지</a>에서 다룬 lookahead가 바로 이것이에요.</p>
@@ -198,35 +219,43 @@
 <p><strong>주차하는 방법.</strong> 요청이 들어오면 엔진은 먼저 그 요청이 현재 대화의 이어짐인지 봐요(토큰 접두부가 같고 더 길어요). 맞으면 그 자리에서 이어 가요. 주차할 필요가 없어요. 아니면 현재 대화를 먼저 주차해요. 그다음 주차된 대화 중에 이 프롬프트로 이어 갈 수 있는 것이 있는지 봐요. 있으면 꺼내 와요. 없으면 가장 가까운 체크포인트로 돌아가거나 처음부터 읽어요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L795-L812" target="_blank" rel="noopener noreferrer">ds4_main.cpp 795–812행</a>)</p>
 <p><strong>무엇을 주차할까요.</strong> 위치, 토큰 목록, 층마다의 윈도 링(초안 모델 각 블록의 링도 포함), 압축기의 부분 그룹, 그리고 KV 출처마다의 압축 KV와 인덱스 키예요. 텍스트 대화만 주차해요. 이미지가 든 대화는 주차하지 않고, 이미지가 붙은 프롬프트도 꺼내 오지 않아요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5786-L5794" target="_blank" rel="noopener noreferrer">ds4_model.cu 5786–5794행</a>) 상태의 크기에 대해 문서가 숫자를 하나 줘요. 6.5K 토큰짜리 대화 하나에 약 17 MB예요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L116-L119" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 116–119행</a>) <span class="ev ev-est">교육용 추정</span>(17 × 10⁶ ÷ 6,500 ≈ 토큰당 2.6 KB) 이 숫자로 선형 외삽해 봐요. <span class="ev ev-est">교육용 추정</span>(70,000 × 2.6 KB ≈ 183 MB; 185,000 × 2.6 KB ≈ 484 MB) 이것은 상한이에요. 128행짜리 링은 크기가 고정이라서, 토큰 하나가 늘 때의 한계 비용은 더 작아요. RTX 5070 기계의 3.6 GB/s NVMe로 계산하면, 183 MB를 다시 읽는 데 약 0.05 s예요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L63" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 63행</a>) <span class="ev ev-est">교육용 추정</span>(0.183 GB ÷ 3.6 GB/s ≈ 0.05 s) 다시 읽는 75 s와 세 자릿수 차이예요. 실제로 꺼내 올 때는 데이터를 VRAM로 복사하고 각 링에 되돌려 써야 해요. 엔진은 로그에 "took back a N-token conversation … (X s)"를 출력해요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L638-L642" target="_blank" rel="noopener noreferrer">ds4_main.cpp 638–642행</a>) 이 페이지에는 이 실측값이 없어서, 하한만 줄 수 있어요.</p>
 <p><strong>프롬프트가 바뀌어도 덜 읽을 수 있어요.</strong> 클라이언트가 대화를 이어 쓰면 전체 기록을 프롬프트로 다시 렌더링해요. 이 프롬프트는 엔진에 저장된 토큰 스트림과 글자 하나까지 같다고 할 수 없어요. 예를 들어 렌더링할 때 더 이전의 사고 텍스트가 빠질 수 있어요. 엔진은 여기에 두 가지를 준비해 둬요. 프롬프트를 읽을 때 프롬프트 끝 직전의 토큰과 프롬프트 끝에 체크포인트를 하나씩 저장해요. 다음 라운드에 다시 렌더링된 프롬프트는 적어도 둘 중 한 지점 앞부분과는 같아요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L856-L857" target="_blank" rel="noopener noreferrer">ds4_main.cpp 856–857행</a>) 주차된 대화를 꺼내 올 때 프롬프트가 일부만 맞으면, 프롬프트가 여전히 맞는 가장 가까운 체크포인트까지 꺼내 와요. 프롬프트 끝, 끝 직전 위치, 또는 이 연속된 프롬프트가 시작한 앵커 중 하나예요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L586-L590" target="_blank" rel="noopener noreferrer">ds4_main.cpp 586–590행</a>) 그래서 전체를 이어 가지 못해도, 뒤쪽에서 달라진 부분만 다시 읽어요.</p>
-<figure class="fig"><svg viewBox="0 0 640 280" role="img" aria-label="그림 DS5-5: 대화 주차. 모델 안의 대화가 밀려나면 먼저 RAM 슬롯에 저장해요. RAM에 4개가 넘으면 가장 오래 안 쓴 것을 파일로 써요. 새 프롬프트로 이어 갈 수 있으면 RAM이나 파일에서 꺼내 와요">
-<text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="12">대화 주차: 저장, 넘침, 꺼내기</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="10" y="30" width="160" height="70" rx="4"/>
-<text class="f-text" fill="#182f2b" x="90" y="54" font-size="13" text-anchor="middle">모델 안의 대화</text>
-<text class="f-muted" fill="#5c6d66" x="90" y="74" font-size="12" text-anchor="middle">상태는 VRAM에</text>
-<text class="f-muted" fill="#5c6d66" x="90" y="92" font-size="12" text-anchor="middle">(현재 하나)</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="240" y="30" width="160" height="70" rx="4"/>
-<text class="f-text" fill="#182f2b" x="320" y="54" font-size="13" text-anchor="middle">RAM 슬롯</text>
-<text class="f-muted" fill="#5c6d66" x="320" y="74" font-size="12" text-anchor="middle">최대 4개</text>
-<text class="f-muted" fill="#5c6d66" x="320" y="92" font-size="12" text-anchor="middle">1024토큰 미만은 제외</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="470" y="30" width="160" height="70" rx="4"/>
-<text class="f-text" fill="#182f2b" x="550" y="54" font-size="13" text-anchor="middle">ds4-slots 폴더</text>
-<text class="f-muted" fill="#5c6d66" x="550" y="74" font-size="12" text-anchor="middle">대화마다 파일 한 쌍</text>
-<text class="f-muted" fill="#5c6d66" x="550" y="92" font-size="12" text-anchor="middle">.bin + .meta</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M170 52 H236 M230 46 L236 52 L230 58"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M400 52 H466 M460 46 L466 52 L460 58"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M236 84 H174 M180 78 L174 84 L180 90"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M466 84 H404 M410 78 L404 84 L410 90"/>
-<text class="f-text" fill="#182f2b" x="203" y="44" font-size="13" text-anchor="middle">1</text>
-<text class="f-text" fill="#182f2b" x="433" y="44" font-size="13" text-anchor="middle">2</text>
-<text class="f-text" fill="#182f2b" x="205" y="108" font-size="13" text-anchor="middle">3</text>
-<text class="f-text" fill="#182f2b" x="435" y="108" font-size="13" text-anchor="middle">3</text>
-<text class="f-text" fill="#182f2b" x="10" y="140" font-size="13">1 저장: 다른 대화가 모델을 쓰려 하면, 현재 대화의 상태를 먼저 RAM 슬롯에 저장해요</text>
-<text class="f-text" fill="#182f2b" x="10" y="160" font-size="13">2 넘침: RAM에 4개가 넘으면 가장 오래 안 쓴 것을 파일로 써요</text>
-<text class="f-text" fill="#182f2b" x="10" y="180" font-size="13">3 꺼내기: 새 프롬프트로 이어 갈 슬롯을 RAM이나 파일에서 꺼내고, 늘어난 토큰만 읽어요</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">파일 쓰기: .tmp로 쓴 뒤 이름을 바꿔요. 빈 공간이 8 GiB 미만이면 쓰지 않아요</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="228" font-size="12">폴더 상한: 서빙 계층 2 GiB(엔진 기본값 16 GiB). 넘으면 가장 오래 안 쓴 것부터 지우고, 방금 쓴 것은 남겨요</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="246" font-size="12">시작할 때 지워요: 이 모델의 것이 아닌 것, 손상된 것, 7일 넘게 안 쓴 것</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="264" font-size="12">엔진이 끝나면 RAM의 슬롯을 모두 폴더에 쓰고, 다음에 시작할 때 이어 써요</text>
+<figure class="fig"><svg viewBox="0 0 440 402" role="img" aria-label="그림 DS5-5: 대화 주차. 모델 안의 대화가 밀려나면 먼저 RAM 슬롯에 저장해요. RAM에 4개가 넘으면 가장 오래 안 쓴 것을 파일로 써요. 새 프롬프트로 이어 갈 수 있으면 RAM이나 파일에서 꺼내 와요">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">대화 주차: 저장, 넘침, 꺼내기</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="30" width="124" height="88" rx="4"/>
+<text class="f-text" fill="#182f2b" x="74" y="52" font-size="12" text-anchor="middle">모델 안의 대화</text>
+<text class="f-muted" fill="#5c6d66" x="74" y="72" font-size="12" text-anchor="middle">상태는 VRAM에</text>
+<text class="f-muted" fill="#5c6d66" x="74" y="90" font-size="12" text-anchor="middle">(현재 하나)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="158" y="30" width="124" height="88" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="52" font-size="12" text-anchor="middle">RAM 슬롯</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="72" font-size="12" text-anchor="middle">최대 4개</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="90" font-size="12" text-anchor="middle">1024토큰 미만은</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="108" font-size="12" text-anchor="middle">제외</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="304" y="30" width="124" height="88" rx="4"/>
+<text class="f-text" fill="#182f2b" x="366" y="52" font-size="12" text-anchor="middle">ds4-slots 폴더</text>
+<text class="f-muted" fill="#5c6d66" x="366" y="72" font-size="12" text-anchor="middle">대화마다 파일 한 쌍</text>
+<text class="f-muted" fill="#5c6d66" x="366" y="90" font-size="12" text-anchor="middle">.bin + .meta</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M136 56H156M151 50L156 56L151 62"/>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M282 56H302M297 50L302 56L297 62"/>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M156 96H138M143 90L138 96L143 102"/>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M302 96H284M289 90L284 96L289 102"/>
+<text class="f-text" fill="#182f2b" x="147" y="48" font-size="12" text-anchor="middle">1</text>
+<text class="f-text" fill="#182f2b" x="293" y="48" font-size="12" text-anchor="middle">2</text>
+<text class="f-text" fill="#182f2b" x="147" y="116" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="293" y="116" font-size="12" text-anchor="middle">3</text>
+<text class="f-text" fill="#182f2b" x="12" y="146" font-size="12" text-anchor="start">1 저장: 다른 대화가 모델을 쓰려 하면,</text>
+<text class="f-text" fill="#182f2b" x="12" y="162" font-size="12" text-anchor="start">현재 대화의 상태를 먼저 RAM 슬롯에 저장해요</text>
+<text class="f-text" fill="#182f2b" x="12" y="182" font-size="12" text-anchor="start">2 넘침: RAM에 4개가 넘으면</text>
+<text class="f-text" fill="#182f2b" x="12" y="198" font-size="12" text-anchor="start">가장 오래 안 쓴 것을 파일로 써요</text>
+<text class="f-text" fill="#182f2b" x="12" y="218" font-size="12" text-anchor="start">3 꺼내기: 새 프롬프트로 이어 갈 슬롯을</text>
+<text class="f-text" fill="#182f2b" x="12" y="234" font-size="12" text-anchor="start">RAM이나 파일에서 꺼내고, 늘어난 토큰만 읽어요</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="264" font-size="12" text-anchor="start">파일 쓰기: .tmp로 쓴 뒤 이름을 바꿔요.</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="280" font-size="12" text-anchor="start">빈 공간이 8 GiB 미만이면 쓰지 않아요</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="300" font-size="12" text-anchor="start">폴더 상한: 서빙 계층 2 GiB(엔진 기본값 16 GiB).</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="316" font-size="12" text-anchor="start">넘으면 가장 오래 안 쓴 것부터 지우고, 방금 쓴 것은 남겨요</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="336" font-size="12" text-anchor="start">시작할 때 지워요: 이 모델의 것이 아닌 것,</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="352" font-size="12" text-anchor="start">손상된 것, 7일 넘게 안 쓴 것</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="372" font-size="12" text-anchor="start">엔진이 끝나면 RAM의 슬롯을 모두 폴더에 쓰고,</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="388" font-size="12" text-anchor="start">다음에 시작할 때 이어 써요</text>
 </svg><figcaption>그림 DS5-5　주차의 세 단계와 세 가지 규칙. RAM이 첫 번째 계층이고 폴더가 두 번째 계층이에요. 폴더의 용량은 서빙 계층에서 2 GiB이고, 엔진에서는 16 GiB예요.</figcaption></figure>
 <p><strong>두 계층에 저장해요.</strong> 먼저 RAM에 두고, 넘치면 폴더로 내려요. RAM에는 최대 4개(STRATA_DS4_SLOT_CAP)를 둬요. 넘치면 가장 오래 안 쓴 것을 파일로 써요. 엔진이 끝날 때 RAM에 있는 것을 전부 써 두고, 다음에 시작할 때 이어 써요. 1024토큰보다 짧은 대화는 주차하지 않아요. 다시 읽는 시간이 꺼내 오는 시간과 비슷해서 주차할 값어치가 없어요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L549-L575" target="_blank" rel="noopener noreferrer">ds4_main.cpp 549–575행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L1025-L1028" target="_blank" rel="noopener noreferrer">ds4_main.cpp 1025–1028행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L417-L423" target="_blank" rel="noopener noreferrer">ds4_main.cpp 417–423행</a>) 파일은 먼저 .tmp로 쓰고 이름을 바꿔요. .meta에는 모델 식별 정보, 토큰, 크기를 적어요. 빈 공간이 8 GiB보다 적으면 쓰지 않아요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L512-L541" target="_blank" rel="noopener noreferrer">ds4_main.cpp 512–541행</a>)</p>
 <p><strong>용량과 정리. 두 계층의 기본값이 달라요.</strong> 엔진 자체는 주차가 기본으로 꺼져 있고, 폴더 상한은 16 GiB예요. 서빙 계층은 기본으로 켜고 상한을 2 GiB로 둬요. 폴더는 실행 로그 옆의 ds4-slots에 놓여요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L417-L423" target="_blank" rel="noopener noreferrer">ds4_main.cpp 417–423행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L3653-L3667" target="_blank" rel="noopener noreferrer">server.py 3653–3667행</a>) 서빙 계층이 2 GiB를 설정하고 주차를 켜요. 일주일은 엔진 자체의 기본값이고 서빙 계층은 설정하지 않아요. 상한을 넘으면 가장 오래 안 쓴 것부터 지워요. 방금 쓴 것은 지우지 않아요. 그래서 상한보다 큰 대화 하나도 남을 수 있어요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L489-L490" target="_blank" rel="noopener noreferrer">ds4_main.cpp 489–490행</a>) 시작할 때 엔진은 폴더를 한 번 훑어요. 이 모델의 것이 아닌 것, 손상된 것, 7일 넘게 안 쓴 것을 모두 지워요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L679" target="_blank" rel="noopener noreferrer">ds4_main.cpp 679행</a>) 2 GiB에 얼마나 들어갈까요? <span class="ev ev-est">교육용 추정</span>(2 GiB ÷ 17 MB ≈ 6.5K 토큰짜리 대화 126개. 17 MB는 문서의 원래 값이에요)</p>
@@ -239,31 +268,35 @@
 <p><strong>강도는 모델에게 써 주는 한 줄이에요.</strong> low, medium, high, max는 각각 50, 62, 75, 100에 대응해요. 1에서 100 사이의 정수를 직접 줄 수도 있어요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L108-L109" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 108–109행</a>) 이 네 숫자는 템플릿 안의 표예요. 렌더링할 때 사고 모드의 시스템 부분 맨 앞에 "Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)" 한 줄이 들어가요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/fixtures/deepseek41/chat_template.jinja#L23-L29" target="_blank" rel="noopener noreferrer">chat_template.jinja 23–29행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/fixtures/deepseek41/chat_template.jinja#L209" target="_blank" rel="noopener noreferrer">chat_template.jinja 209행</a>) 서빙 계층의 테스트는 이 한 줄을 하나씩 확인해요. low는 50, medium은 62, xhigh는 100을 쓰고, 40을 주면 40을 써요. extreme을 주면 400을 돌려줘요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/test_dsv41.py#L424-L434" target="_blank" rel="noopener noreferrer">test_dsv41.py 424–434행</a>) 이 숫자는 모델이 읽는 말일 뿐이에요. 엔진은 토큰 번호만 받아요(<span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_main.cpp#L9-L12" target="_blank" rel="noopener noreferrer">ds4_main.cpp 9–12행</a>)). 엔진 안에는 사고 예산이 없어요. 서빙 계층에는 예산이 하나 따로 있어요. 요청과 설정에 아무것도 적지 않으면 DeepSeek-V4.1의 기본 예산은 32,768토큰이에요. 예산에 이르면 서빙 계층이 강제로 마무리하고 사고를 닫아요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L218" target="_blank" rel="noopener noreferrer">server.py 218행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L5856" target="_blank" rel="noopener noreferrer">server.py 5856행</a>) reasoning_budget_tokens로 이 값을 바꿀 수 있고, 0은 예산을 두지 않는다는 뜻이에요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/release-notes-0.2.4.md#L41" target="_blank" rel="noopener noreferrer">release-notes-0.2.4.md 41행</a>) 그러니 강도 숫자는 세지 않아요. 세는 것은 예산이에요.</p>
 <p><strong>기본 샘플링.</strong> 요청에 파라미터가 없으면 온도 1.0, top_p 1.0이에요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L115" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 115행</a>) 그래서 기본 요청은 샘플링 요청이고, 검증은 5.3절의 p(d) 규칙을 따라요.</p>
 <p><strong>도구 호출: DSML에서 OpenAI와 Anthropic으로.</strong> 모델이 직접 쓰는 도구 호출은 DSML 형식이에요. <code>&lt;｜DSML｜ calls&gt;</code>가 <code>&lt;｜DSML｜ invoke name="…"&gt;</code> 여러 개를 감싸고, 파라미터마다 <code>&lt;｜DSML｜ parameter name="…" string="true"&gt;</code>가 하나씩 붙어요. 서빙 계층은 이것을 OpenAI의 tool_calls와 Anthropic의 tool_use로 바꿔요. tool_choice, 스트리밍 파라미터, 사고 안에 적힌 호출도 포함해요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L112-L114" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 112–114행</a>) 변환 코드를 따로 한 벌 더 만들지 않았어요. DsmlTranslator는 DSML 텍스트를 흘려 보내면서, 메인라인 Qwen이 쓰는 도구 호출 텍스트로 바꿔 써요. 그다음 공유 OutputParser에 넘겨요. 그래서 출력 모양 두 가지, tool_choice, 스트리밍 파라미터, 사고와 답변의 분리가 DeepSeek에서도 다른 모델과 똑같이 동작해요. "DSML을 어떻게 쓰는가"를 아는 곳은 한 군데뿐이에요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L1-L19" target="_blank" rel="noopener noreferrer">dsml.py 1–19행</a>)</p>
-<figure class="fig"><svg viewBox="0 0 640 218" role="img" aria-label="그림 DS5-6: DSML 도구 호출의 변환. 모델이 DSML 텍스트를 쓰면 DsmlTranslator가 흘려 보내면서 Qwen 형식의 호출 텍스트로 바꿔 쓰고, 공유 OutputParser가 OpenAI와 Anthropic 두 가지 모양을 만들어 내요">
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="24" width="190" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="105" y="48" font-size="13" text-anchor="middle">모델이 쓴 텍스트</text>
-<text class="f-muted" fill="#5c6d66" x="105" y="68" font-size="12" text-anchor="middle">&lt;｜DSML｜ invoke …&gt;</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M200 54 H226 M220 48 L226 54 L220 60"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="230" y="24" width="200" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="330" y="48" font-size="13" text-anchor="middle">DsmlTranslator</text>
-<text class="f-muted" fill="#5c6d66" x="330" y="68" font-size="12" text-anchor="middle">흘리며 변환, 덜 쓴 태그는 보류</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M430 54 H456 M450 48 L456 54 L450 60"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="460" y="24" width="170" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="545" y="48" font-size="13" text-anchor="middle">Qwen 형식의 호출</text>
-<text class="f-muted" fill="#5c6d66" x="545" y="68" font-size="12" text-anchor="middle">tool_call / function=…</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M545 84 V108 H330 V126 M324 120 L330 126 L336 120"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="230" y="130" width="200" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="330" y="154" font-size="13" text-anchor="middle">공유 OutputParser</text>
-<text class="f-muted" fill="#5c6d66" x="330" y="174" font-size="12" text-anchor="middle">스트리밍 인자, 사고 속 호출</text>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M230 160 H204 M210 154 L204 160 L210 166"/>
-<path class="f-line" fill="none" stroke="#5c6d66" d="M430 160 H456 M450 154 L456 160 L450 166"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="10" y="130" width="190" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="105" y="154" font-size="13" text-anchor="middle">OpenAI tool_calls</text>
-<text class="f-muted" fill="#5c6d66" x="105" y="174" font-size="12" text-anchor="middle">tool_choice 포함</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="460" y="130" width="170" height="60" rx="4"/>
-<text class="f-text" fill="#182f2b" x="545" y="154" font-size="13" text-anchor="middle">Anthropic tool_use</text>
-<text class="f-muted" fill="#5c6d66" x="545" y="174" font-size="12" text-anchor="middle">같은 파싱 결과</text>
-<text class="f-muted" fill="#5c6d66" x="10" y="210" font-size="12">string="true"인 파라미터는 문자열로 유지해요. DSML 철자는 이 한 곳만 알아요</text>
+<figure class="fig"><svg viewBox="0 0 440 412" role="img" aria-label="그림 DS5-6: DSML 도구 호출의 변환. 모델이 DSML 텍스트를 쓰면 DsmlTranslator가 흘려 보내면서 Qwen 형식의 호출 텍스트로 바꿔 쓰고, 공유 OutputParser가 OpenAI와 Anthropic 두 가지 모양을 만들어 내요">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="24" width="320" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="46" font-size="12" text-anchor="middle">모델이 쓴 텍스트</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="64" font-size="12" text-anchor="middle">&lt;｜DSML｜ invoke …&gt;</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 72V88"/>
+<path class="f-muted" fill="#5c6d66" d="M216 88L220 96L224 88Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="60" y="96" width="320" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="118" font-size="12" text-anchor="middle">DsmlTranslator</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="136" font-size="12" text-anchor="middle">흘리며 변환, 덜 쓴 태그는 보류</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 144V160"/>
+<path class="f-muted" fill="#5c6d66" d="M216 160L220 168L224 160Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="168" width="320" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="190" font-size="12" text-anchor="middle">Qwen 형식의 호출</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="208" font-size="12" text-anchor="middle">tool_call / function=…</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 216V232"/>
+<path class="f-muted" fill="#5c6d66" d="M216 232L220 240L224 232Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="60" y="240" width="320" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="220" y="262" font-size="12" text-anchor="middle">공유 OutputParser</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="280" font-size="12" text-anchor="middle">스트리밍 인자, 사고 속 호출</text>
+<path class="f-line" fill="none" stroke="#5c6d66" d="M220 288V300M112 300H328M112 300V312M328 300V312"/>
+<path class="f-muted" fill="#5c6d66" d="M108 304L112 312L116 304ZM324 304L328 312L332 304Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="314" width="200" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="112" y="336" font-size="12" text-anchor="middle">OpenAI tool_calls</text>
+<text class="f-muted" fill="#5c6d66" x="112" y="354" font-size="12" text-anchor="middle">tool_choice 포함</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="228" y="314" width="200" height="48" rx="4"/>
+<text class="f-text" fill="#182f2b" x="328" y="336" font-size="12" text-anchor="middle">Anthropic tool_use</text>
+<text class="f-muted" fill="#5c6d66" x="328" y="354" font-size="12" text-anchor="middle">같은 파싱 결과</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="386" font-size="12" text-anchor="start">string="true"인 파라미터는 문자열로 유지해요.</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="402" font-size="12" text-anchor="start">DSML 철자는 이 한 곳만 알아요</text>
 </svg><figcaption>그림 DS5-6　도구 호출의 번역 체인. 새로 생긴 것은 첫 번째 상자에서 두 번째 상자로 가는 고리뿐이에요. 뒤쪽의 파싱과 두 가지 출력 모양은 메인라인과 공유해요.</figcaption></figure>
 <p><strong>스트리밍의 세부 사항.</strong> 바꿔 쓸 때는 "태그가 될 수도 있는" 조각만 붙잡아 둬요. 예를 들어 <code>&lt;</code>이나 <code>&lt;｜DS</code>예요. 나머지 글자는 그대로 내보내요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L39-L45" target="_blank" rel="noopener noreferrer">dsml.py 39–45행</a>) 파라미터에 string="true"가 있으면 값은 문자열로 남아요. "123"이 숫자로 취급되지 않아요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L183-L197" target="_blank" rel="noopener noreferrer">dsml.py 183–197행</a>) 스트리밍 이벤트를 어떻게 자르고 쌓는지는 <a href="#chapter/23/sec-5">23장 23.5절</a>을 보세요.</p>
 <p><strong>2-bit 양자화가 남긴 패치 두 가지.</strong> 첫째, 2-bit 파일 세트는 &lt;think&gt; 뒤에 답변 전체를 쓰고 &lt;/think&gt;를 쓰지 않은 채 멈추는 일이 자주 있어요. 그러면 글 전체가 사고로 취급되고 답변이 비어요. 주석은 프롬프트 4개 중 4개가 그랬다고 적어요. 파서는 라운드가 stop으로 끝났는데 답변도 호출도 없으면, 사고 텍스트를 답변으로 내놔요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L172-L175" target="_blank" rel="noopener noreferrer">dsml.py 172–175행</a>) 둘째, 템플릿의 철자예요. V4.1 모델은 "&lt;｜DSML｜ calls&gt;"(calls 앞에 공백)라고 쓰는데, 다른 pack은 V4-Flash의 템플릿을 달고 있어서 "&lt;｜DSML｜tool_calls&gt;"라고 써요. 모델이 프롬프트에서 한 가지를 보고 다른 가지를 쓰면, 도구 호출 11번 중 2번만 진짜 호출이 됐어요. 같은 pack에서 주석에 적힌 것은 0/4 대 6/6이고, 뒤의 값은 공백이 있는 템플릿으로 바꾼 뒤예요. <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L226-L232" target="_blank" rel="noopener noreferrer">dsml.py 226–232행</a>) 그래서 서빙 계층은 pack이 달고 온 템플릿을 검사하고, 철자가 틀리면 자기가 가진 템플릿으로 바꿔 써요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/dsml.py#L226-L232" target="_blank" rel="noopener noreferrer">dsml.py 226–232행</a>)</p>

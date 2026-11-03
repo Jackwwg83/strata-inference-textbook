@@ -13,37 +13,41 @@
 <li>헤드마다 q로 이 행들에 점수를 매기고, softmax를 거쳐 가중합을 해요. 64개 헤드는 같은 행들을 읽어요.</li>
 <li>출력의 회전 부분을 되돌리고, FP8로 반올림한 뒤, 그룹 wo_a와 wo_b로 투영해요.</li>
 </ol>
-<figure class="fig"><svg viewBox="0 0 560 360" role="img" aria-label="그림 DS3-1: 어텐션 한 층이 토큰 하나에 하는 일. q와 K = V 한 행을 투영하고, 윈도 링과 골라낸 압축 행과 sink를 읽고, 점수를 매겨 합산한 뒤 출력을 투영한다">
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="8" width="260" height="38" rx="7"/>
-<text fill="currentColor" x="280" y="32" font-size="13" text-anchor="middle">이 층의 입력: p번째 토큰의 은닉 상태</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M280 46V60M145 60V76M415 60V76M145 60H415"/>
-<path class="f-muted" fill="#5c6d66" d="M141 72L145 80L149 72ZM411 72L415 80L419 72Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="82" width="250" height="48" rx="7"/>
-<text fill="currentColor" x="145" y="103" font-size="13" text-anchor="middle">q: wq_a, wq_b 저랭크 투영</text>
-<text class="f-muted" fill="#5c6d66" x="145" y="121" font-size="13" text-anchor="middle">헤드 64개 × 512차원</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="290" y="82" width="250" height="48" rx="7"/>
-<text fill="currentColor" x="415" y="103" font-size="13" text-anchor="middle">이 토큰의 K = V 한 행(512차원)</text>
-<text class="f-muted" fill="#5c6d66" x="415" y="121" font-size="13" text-anchor="middle">FP8 반올림, 링 슬롯 p mod 128에 기록</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M145 130V142M415 130V142M145 142H415M280 142V160"/>
-<path class="f-muted" fill="#5c6d66" d="M276 156L280 164L284 156Z"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="166" width="166" height="56" rx="7"/>
-<text fill="currentColor" x="103" y="189" font-size="13" text-anchor="middle">최근 128행(윈도 링)</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="208" font-size="13" text-anchor="middle">층당 1개, 덮어쓰기, FP8</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="197" y="166" width="166" height="56" rx="7"/>
-<text fill="currentColor" x="280" y="189" font-size="13" text-anchor="middle">인덱서가 고른 ≤ 512행</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="208" font-size="13" text-anchor="middle">압축 행: 추가 전용, FP4</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="374" y="166" width="166" height="56" rx="7"/>
-<text fill="currentColor" x="457" y="189" font-size="13" text-anchor="middle">sink: 헤드당 숫자 1개</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="208" font-size="13" text-anchor="middle">분모에만 들어감, 행 없음</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M103 222V238M280 222V238M457 222V238"/>
-<path class="f-muted" fill="#5c6d66" d="M99 234L103 242L107 234ZM276 234L280 242L284 234ZM453 234L457 242L461 234Z"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="244" width="520" height="52" rx="7"/>
-<text fill="currentColor" x="280" y="266" font-size="13" text-anchor="middle">헤드마다: q로 각 행에 점수를 매기고, softmax(분모에 sink 추가), 가중합</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="285" font-size="13" text-anchor="middle">K = V: 같은 행을 채점에도 가중합에도 씀. 64개 헤드가 같은 행을 읽음</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M280 296V312"/>
-<path class="f-muted" fill="#5c6d66" d="M276 308L280 316L284 308Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="110" y="318" width="340" height="36" rx="7"/>
-<text fill="currentColor" x="280" y="341" font-size="13" text-anchor="middle">출력: 역회전, FP8 반올림, wo_a, wo_b 투영</text>
+<figure class="fig"><svg viewBox="0 0 440 366" role="img" aria-label="그림 DS3-1: 어텐션 한 층이 토큰 하나에 하는 일. q와 K = V 한 행을 투영하고, 윈도 링과 골라낸 압축 행과 sink를 읽고, 점수를 매겨 합산한 뒤 출력을 투영한다">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="110" y="8" width="220" height="34" rx="7"/>
+<text fill="currentColor" x="220" y="29" font-size="12" text-anchor="middle">이 층의 입력: p번째 토큰의 은닉 상태</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 42V54M115 54V66M325 54V66M115 54H325"/>
+<path class="f-muted" fill="#5c6d66" d="M111 62L115 70L119 62ZM321 62L325 70L329 62Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="72" width="205" height="64" rx="7"/>
+<text fill="currentColor" x="115" y="93" font-size="12" text-anchor="middle">q: wq_a, wq_b 저랭크 투영</text>
+<text class="f-muted" fill="#5c6d66" x="115" y="111" font-size="12" text-anchor="middle">헤드 64개 × 512차원</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="223" y="72" width="205" height="64" rx="7"/>
+<text fill="currentColor" x="325" y="93" font-size="12" text-anchor="middle">이 토큰의 K = V 한 행(512차원)</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="111" font-size="12" text-anchor="middle">FP8 반올림,</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="129" font-size="12" text-anchor="middle">링 슬롯 p mod 128에 기록</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M115 136V148M325 136V148M115 148H325M220 148V162"/>
+<path class="f-muted" fill="#5c6d66" d="M216 158L220 166L224 158Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="168" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="78" y="188" font-size="12" text-anchor="middle">최근 128행(윈도 링)</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="206" font-size="12" text-anchor="middle">덮어쓰기</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="224" font-size="12" text-anchor="middle">FP8, 층당 1개</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="168" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="220" y="188" font-size="12" text-anchor="middle">인덱서가 고른</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="206" font-size="12" text-anchor="middle">≤ 512행, 압축 행</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="224" font-size="12" text-anchor="middle">추가 전용, FP4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="296" y="168" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="362" y="188" font-size="12" text-anchor="middle">sink: 헤드당 숫자 1개</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="206" font-size="12" text-anchor="middle">분모에만 들어감,</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="224" font-size="12" text-anchor="middle">행 없음</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M78 232V244M220 232V244M362 232V244"/>
+<path class="f-muted" fill="#5c6d66" d="M74 240L78 248L82 240ZM216 240L220 248L224 240ZM358 240L362 248L366 240Z"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="250" width="416" height="52" rx="7"/>
+<text fill="currentColor" x="220" y="272" font-size="12" text-anchor="middle">헤드마다: q로 각 행에 점수를 매기고, softmax(분모에 sink 추가), 가중합</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="291" font-size="12" text-anchor="middle">K = V: 같은 행을 채점에도 가중합에도 씀. 64개 헤드가 같은 행을 읽음</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 302V312"/>
+<path class="f-muted" fill="#5c6d66" d="M216 312L220 320L224 312Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="60" y="322" width="320" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="344" font-size="12" text-anchor="middle">출력: 역회전, FP8 반올림, wo_a, wo_b 투영</text>
 </svg><figcaption>그림 DS3-1　어텐션 한 층이 토큰 하나에 하는 일. q는 저랭크 투영에서 나오고, K와 V는 같은 행이에요. 헤드마다 세 곳을 읽어요. 윈도 링의 최근 128행, 인덱서가 고른 최대 512개 압축 행, 학습된 sink 하나예요. 레시피의 구조만 그렸고, 상자마다 출처는 본문에 있어요.</figcaption></figure>
 <p>숫자의 출처는 구분해야 해요. 128, 512, 헤드 64개는 파일 머리말과 실험실 프로그램 주석에 적힌 숫자예요 <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41_lab/ds4_lab.cu#L1-L4" target="_blank" rel="noopener noreferrer">ds4_lab.cu 1–4행</a>). 엔진은 pack의 ds4.txt에서 sliding_window, index_topk, num_attention_heads를 직접 읽어요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L519-L522" target="_blank" rel="noopener noreferrer">ds4_model.cu 519–522행</a>). 코드에 박아 둔 기하 검사는 네 가지예요. head_dim은 512여야 하고, index_head_dim은 128이어야 하고, 토큰당 전문가 수는 8 이하, hc는 8 이하여야 해요. 하나라도 어긋나면 pack 로딩이 실패해요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2166-L2169" target="_blank" rel="noopener noreferrer">2166–2169행</a>).</p>
 <p><dfn>K = V</dfn>는 두 벌을 한 벌로 합친다는 뜻이에요. 8장에서는 위치마다 키 k와 값 v를 저장했어요. k는 "어디를 볼지"를, v는 "무엇을 보게 될지"를 정해요. 여기서는 같은 행을 먼저 내적에 쓰고, 이어서 가중합에도 써요. GPU 커널도 같은 행 포인터 묶음을 사용해요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L892-L903" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 892–903행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L934-L941" target="_blank" rel="noopener noreferrer">934–941행</a>). 64개 헤드가 이 행 하나를 함께 쓰는 방식을 멀티 쿼리 어텐션(MQA)이라고 해요. 8장의 GQA보다 한 걸음 더 나간 거예요. GQA는 헤드 24개를 2그룹으로 나누고, MQA는 모든 헤드가 한 그룹이에요. 배경은 <a href="https://arxiv.org/abs/1911.02150" target="_blank" rel="noopener noreferrer">Shazeer의 원 논문</a>을 보세요.</p>
@@ -53,44 +57,45 @@
 <h2 id="sec-2">3.2 128행 링: 가장 최근 토큰은 하나도 잃지 않아요</h2>
 <p><dfn>윈도 링</dfn>은 층마다 있는 고정 크기 캐시로, 128행이에요. 위치 p의 행은 슬롯 p mod 128에 써요. 새 행은 128개 토큰 전의 옛 행을 덮어써요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L1297-L1331" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 1297–1331행</a>). 한 행은 512차원이고 FP8 코드로 저장해요. 값 32개마다 2의 거듭제곱 스케일이 하나씩 붙어요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L22-L33" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 22–33행</a>). FP8이 무엇인지는 <a href="#chapter/04/c04-float">4장 「이진수와 부동소수점: FP32, FP16, BF16」</a>을 보세요.</p>
 <p>한 행이 몇 바이트인지는 바로 계산돼요. 코드 512개에 스케일 512 ÷ 32 = 16개를 더해 528바이트예요. 16의 배수라서 패딩이 필요 없어요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L3209-L3213" target="_blank" rel="noopener noreferrer">ds4_model.cu 3209–3213행</a>). 한 층의 링은 128 × 528 = 67,584바이트예요. DeepSeek-V4.1-Flash는 40층이에요 <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L3" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 3행</a>). 40층이면 2,703,360바이트로 약 2.58 MiB예요 <span class="ev ev-est">교육용 추정</span>. 이 크기는 컨텍스트 길이와 상관없어요. 클러스터 페이지도 독립적으로 같은 528을 계산했어요(<a href="#deepinfer/pd-kv/sec-4">DeepInfer 3페이지</a>).</p>
-<figure class="fig"><svg viewBox="0 0 560 226" role="img" aria-label="그림 DS3-2: 윈도 링에 쓰기. 위치 128이 슬롯 0에 쓰여 위치 0을 덮어쓰고, 링에는 위치 1부터 128까지 남는다">
-<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="13" text-anchor="start">위치 127을 쓴 뒤: 슬롯 s에 위치 s가 들어 있음</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="55" y="45" font-size="13" text-anchor="middle">슬롯 0</text>
-<text class="f-muted" fill="#5c6d66" x="55" y="62" font-size="13" text-anchor="middle">위치 0</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="135" y="45" font-size="13" text-anchor="middle">슬롯 1</text>
-<text class="f-muted" fill="#5c6d66" x="135" y="62" font-size="13" text-anchor="middle">위치 1</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="215" y="45" font-size="13" text-anchor="middle">슬롯 2</text>
-<text class="f-muted" fill="#5c6d66" x="215" y="62" font-size="13" text-anchor="middle">위치 2</text>
-<text class="f-muted" fill="#5c6d66" x="285" y="53" font-size="13" text-anchor="middle">…</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="355" y="45" font-size="13" text-anchor="middle">슬롯 126</text>
-<text class="f-muted" fill="#5c6d66" x="355" y="62" font-size="13" text-anchor="middle">위치 126</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="400" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="435" y="45" font-size="13" text-anchor="middle">슬롯 127</text>
-<text class="f-muted" fill="#5c6d66" x="435" y="62" font-size="13" text-anchor="middle">위치 127</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="104" font-size="13" text-anchor="start">위치 128이 들어옴: 슬롯 = 128 mod 128 = 0, 위치 0의 옛 행을 덮어씀</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="20" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="55" y="131" font-size="13" text-anchor="middle">슬롯 0</text>
-<text fill="currentColor" x="55" y="148" font-size="13" text-anchor="middle">위치 128</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="135" y="131" font-size="13" text-anchor="middle">슬롯 1</text>
-<text class="f-muted" fill="#5c6d66" x="135" y="148" font-size="13" text-anchor="middle">위치 1</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="215" y="131" font-size="13" text-anchor="middle">슬롯 2</text>
-<text class="f-muted" fill="#5c6d66" x="215" y="148" font-size="13" text-anchor="middle">위치 2</text>
-<text class="f-muted" fill="#5c6d66" x="285" y="139" font-size="13" text-anchor="middle">…</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="355" y="131" font-size="13" text-anchor="middle">슬롯 126</text>
-<text class="f-muted" fill="#5c6d66" x="355" y="148" font-size="13" text-anchor="middle">위치 126</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="400" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="435" y="131" font-size="13" text-anchor="middle">슬롯 127</text>
-<text class="f-muted" fill="#5c6d66" x="435" y="148" font-size="13" text-anchor="middle">위치 127</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M20 168H470M20 162V168M470 162V168"/>
-<text fill="currentColor" x="245" y="188" font-size="13" text-anchor="middle">링에는 이제 위치 1 … 128이 들어 있음: 딱 128행(방금 쓴 행 포함)</text>
-<text class="f-muted" fill="#5c6d66" x="245" y="212" font-size="13" text-anchor="middle">단계마다 슬롯 하나만 쓰고 나머지는 옮기지 않음. 위치 mod 128로 슬롯을 찾음</text>
+<figure class="fig"><svg viewBox="0 0 440 242" role="img" aria-label="그림 DS3-2: 윈도 링에 쓰기. 위치 128이 슬롯 0에 쓰여 위치 0을 덮어쓰고, 링에는 위치 1부터 128까지 남는다">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">위치 127을 쓴 뒤: 슬롯 s에 위치 s가 들어 있음</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="44" y="45" font-size="12" text-anchor="middle">슬롯 0</text>
+<text class="f-muted" fill="#5c6d66" x="44" y="62" font-size="12" text-anchor="middle">위치 0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="86" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="118" y="45" font-size="12" text-anchor="middle">슬롯 1</text>
+<text class="f-muted" fill="#5c6d66" x="118" y="62" font-size="12" text-anchor="middle">위치 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="160" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="192" y="45" font-size="12" text-anchor="middle">슬롯 2</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="62" font-size="12" text-anchor="middle">위치 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="322" y="45" font-size="12" text-anchor="middle">슬롯 126</text>
+<text class="f-muted" fill="#5c6d66" x="322" y="62" font-size="12" text-anchor="middle">위치 126</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="364" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="396" y="45" font-size="12" text-anchor="middle">슬롯 127</text>
+<text class="f-muted" fill="#5c6d66" x="396" y="62" font-size="12" text-anchor="middle">위치 127</text>
+<text class="f-muted" fill="#5c6d66" x="244" y="53" font-size="12" text-anchor="middle">…</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="104" font-size="12" text-anchor="start">위치 128이 들어옴: 슬롯 = 128 mod 128 = 0, 위치 0의 옛 행을 덮어씀</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="12" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="44" y="131" font-size="12" text-anchor="middle">슬롯 0</text>
+<text fill="currentColor" x="44" y="148" font-size="12" text-anchor="middle">위치 128</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="86" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="118" y="131" font-size="12" text-anchor="middle">슬롯 1</text>
+<text class="f-muted" fill="#5c6d66" x="118" y="148" font-size="12" text-anchor="middle">위치 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="160" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="192" y="131" font-size="12" text-anchor="middle">슬롯 2</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="148" font-size="12" text-anchor="middle">위치 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="322" y="131" font-size="12" text-anchor="middle">슬롯 126</text>
+<text class="f-muted" fill="#5c6d66" x="322" y="148" font-size="12" text-anchor="middle">위치 126</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="364" y="112" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="396" y="131" font-size="12" text-anchor="middle">슬롯 127</text>
+<text class="f-muted" fill="#5c6d66" x="396" y="148" font-size="12" text-anchor="middle">위치 127</text>
+<text class="f-muted" fill="#5c6d66" x="244" y="139" font-size="12" text-anchor="middle">…</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M12 168H428M12 162V168M428 162V168"/>
+<text fill="currentColor" x="220" y="188" font-size="12" text-anchor="middle">링에는 이제 위치 1 … 128이 들어 있음: 딱 128행(방금 쓴 행 포함)</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="212" font-size="12" text-anchor="middle">단계마다 슬롯 하나만 쓰고 나머지는 옮기지 않음.</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="228" font-size="12" text-anchor="middle">위치 mod 128로 슬롯을 찾음</text>
 </svg><figcaption>그림 DS3-2　윈도 링은 슬롯 128개로 이뤄진 고리예요. 위치 p는 슬롯 p mod 128에 쓰이고, 가장 오래된 행이 덮어써지고, 나머지 행은 제자리에 있어요. 위치 128이 슬롯 0에 쓰이고 나면 링에는 위치 1부터 128까지 딱 맞게 들어 있어요.</figcaption></figure>
 <p>위치 127부터는 토큰이 보는 윈도가 자기 자신을 포함해 정확히 128행이에요. 그보다 앞선 토큰은 p + 1행뿐이에요. 엔진은 링의 행을 먼저 BF16 작업 행으로 디코딩하고, 새 행을 이어 붙인 뒤, 최근 128개 위치를 가져와요. 링에서 가장 오래된 행은 제외됐다가 곧 새 행에 덮여요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10090-L10118" target="_blank" rel="noopener noreferrer">ds4_model.cu 10090–10118행</a>). 왜 128개 토큰만 정확히 남길까요? 업스트림은 이유를 적지 않았어요. 아래는 추론이에요. <span class="ev ev-est">교육용 추정</span> 가까운 토큰이 영향이 가장 커요. 반쯤 쓴 문장이나 방금 정의한 변수 이름이 이 몇 행 안에 있어요. 이것을 정확히 남기는 비용은 고정이에요. 그보다 오래된 토큰은 3.3절의 압축 행이 맡아요.</p>
 <p>링은 덮어쓰기 방식이라 한번 덮으면 되돌릴 수 없어요. 추측 디코딩이 초안 토큰 묶음을 검증할 때는, 층마다 덮어쓰일 행을 먼저 최대 16행까지 백업해 두고, 초안이 거부되면 되써요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4357-L4360" target="_blank" rel="noopener noreferrer">ds4_model.cu 4357–4360행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L175-L176" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 175–176행</a>). 층마다 링 백업 영역은 16 × 528 = 8,448바이트예요 <span class="ev ev-est">교육용 추정</span>. R &gt; 1인 소스 층은 그룹 버퍼와 새 압축 행의 스냅샷도 따로 준비해요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4357-L4361" target="_blank" rel="noopener noreferrer">ds4_model.cu 4357–4361행</a>). 백업 영역은 초안 모델이 들어 있는 pack에서만 할당해요. 초안을 어떻게 검증하는지는 <a href="#deepseek/draft">DSpark와 대화 주차</a> 페이지에서 다뤄요.</p>
@@ -99,34 +104,34 @@
 <h2 id="sec-3">3.3 압축 행: R개 위치를 한 행으로 뭉쳐요</h2>
 <p>128개 토큰보다 앞선 위치는 원본 행이 이미 링에 덮여 사라졌어요. 그 위치들은 압축 행으로 남아요. R개 위치마다 한 행이에요. R을 <dfn>압축비</dfn>라 부르고, 층마다 숫자 하나예요. pack의 compress_ratios 목록에서 와요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L531" target="_blank" rel="noopener noreferrer">ds4_model.cu 531행</a>). R = 0인 층은 압축 행이 없고 윈도 어텐션만 해요. DSpark 초안 모델의 블록은 반드시 이런 층이어야 해요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2383-L2384" target="_blank" rel="noopener noreferrer">2383–2384행</a>).</p>
 <p>R개 위치를 어떻게 한 행으로 뭉칠까요? 위치마다 먼저 512차원 벡터 한 쌍, kv와 score를 투영해서 슬롯 p mod R에 써요. 위치 p가 (p + 1) mod R = 0을 만족하면 이 그룹이 가득 찬 거예요. 엔진은 차원마다 따로, R개 score에 softmax를 한 번 적용해요. 얻은 가중치로 kv를 가중합하고, 마지막에 RMSNorm을 해요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L570-L604" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 570–604행</a>). 결과에 회전 위치 임베딩을 더하고 FP4로 반올림해요. E2M1 코드에 값 16개마다 E4M3 스케일이 하나 붙어요. 한 행은 256 + 32 = 288바이트예요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10223-L10232" target="_blank" rel="noopener noreferrer">ds4_model.cu 10223–10232행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L22-L33" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh 22–33행</a>). 아직 차지 않은 그룹은 FP32 버퍼에 머물러요. kv와 score 각각 R × 512개 float이에요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4329-L4331" target="_blank" rel="noopener noreferrer">ds4_model.cu 4329–4331행</a>).</p>
-<figure class="fig"><svg viewBox="0 0 560 296" role="img" aria-label="그림 DS3-3: 압축기. R개 위치가 각각 kv와 score 한 쌍을 내고, 차원마다 softmax 가중합을 한 뒤, 정규화, 회전, FP4 반올림을 거쳐 압축 행 한 행이 된다">
-<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="13" text-anchor="start">R개 위치마다 한 그룹(그림은 R = 4, 설명용)</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="26" width="110" height="46" rx="6"/>
-<text fill="currentColor" x="75" y="46" font-size="13" text-anchor="middle">위치 4k</text>
-<text class="f-muted" fill="#5c6d66" x="75" y="63" font-size="13" text-anchor="middle">kv, score</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="155" y="26" width="110" height="46" rx="6"/>
-<text fill="currentColor" x="210" y="46" font-size="13" text-anchor="middle">위치 4k + 1</text>
-<text class="f-muted" fill="#5c6d66" x="210" y="63" font-size="13" text-anchor="middle">kv, score</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="26" width="110" height="46" rx="6"/>
-<text fill="currentColor" x="345" y="46" font-size="13" text-anchor="middle">위치 4k + 2</text>
-<text class="f-muted" fill="#5c6d66" x="345" y="63" font-size="13" text-anchor="middle">kv, score</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="425" y="26" width="110" height="46" rx="6"/>
-<text fill="currentColor" x="480" y="46" font-size="13" text-anchor="middle">위치 4k + 3</text>
-<text class="f-muted" fill="#5c6d66" x="480" y="63" font-size="13" text-anchor="middle">kv, score</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M75 72V84M210 72V84M345 72V84M480 72V84M75 84H480M277 84V98"/>
-<path class="f-muted" fill="#5c6d66" d="M273 94L277 102L281 94Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="104" width="520" height="48" rx="7"/>
-<text fill="currentColor" x="280" y="125" font-size="13" text-anchor="middle">차원마다 따로 한 번: R개 score에 softmax</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="143" font-size="13" text-anchor="middle">이 가중치로 R개 kv를 가중합</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M280 152V164"/>
-<path class="f-muted" fill="#5c6d66" d="M276 160L280 168L284 160Z"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="170" width="360" height="36" rx="7"/>
-<text fill="currentColor" x="280" y="193" font-size="13" text-anchor="middle">RMSNorm → 회전 위치 임베딩 → FP4 반올림</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M280 206V218"/>
-<path class="f-muted" fill="#5c6d66" d="M276 214L280 222L284 214Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="150" y="224" width="260" height="36" rx="7"/>
-<text fill="currentColor" x="280" y="247" font-size="13" text-anchor="middle">압축 행 1개: 256 + 32 = 288바이트</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="282" font-size="13" text-anchor="middle">위치 p는 슬롯 p mod R에 기록. (p + 1) mod R = 0이면 그룹이 가득 참</text>
+<figure class="fig"><svg viewBox="0 0 440 296" role="img" aria-label="그림 DS3-3: 압축기. R개 위치가 각각 kv와 score 한 쌍을 내고, 차원마다 softmax 가중합을 한 뒤, 정규화, 회전, FP4 반올림을 거쳐 압축 행 한 행이 된다">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">R개 위치마다 한 그룹(그림은 R = 4, 설명용)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="59" y="46" font-size="12" text-anchor="middle">위치 4k</text>
+<text class="f-muted" fill="#5c6d66" x="59" y="63" font-size="12" text-anchor="middle">kv, score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="119" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="166" y="46" font-size="12" text-anchor="middle">위치 4k + 1</text>
+<text class="f-muted" fill="#5c6d66" x="166" y="63" font-size="12" text-anchor="middle">kv, score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="226" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="273" y="46" font-size="12" text-anchor="middle">위치 4k + 2</text>
+<text class="f-muted" fill="#5c6d66" x="273" y="63" font-size="12" text-anchor="middle">kv, score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="333" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="380" y="46" font-size="12" text-anchor="middle">위치 4k + 3</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="63" font-size="12" text-anchor="middle">kv, score</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M59 72V84M166 72V84M273 72V84M380 72V84M59 84H380M220 84V98"/>
+<path class="f-muted" fill="#5c6d66" d="M216 94L220 102L224 94Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="104" width="416" height="48" rx="7"/>
+<text fill="currentColor" x="220" y="125" font-size="12" text-anchor="middle">차원마다 따로 한 번: R개 score에 softmax</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="143" font-size="12" text-anchor="middle">이 가중치로 R개 kv를 가중합</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 152V160"/>
+<path class="f-muted" fill="#5c6d66" d="M216 160L220 168L224 160Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="170" width="320" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="193" font-size="12" text-anchor="middle">RMSNorm → 회전 위치 임베딩 → FP4 반올림</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 206V214"/>
+<path class="f-muted" fill="#5c6d66" d="M216 214L220 222L224 214Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="90" y="224" width="260" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="247" font-size="12" text-anchor="middle">압축 행 1개: 256 + 32 = 288바이트</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="282" font-size="12" text-anchor="middle">위치 p는 슬롯 p mod R에 기록. (p + 1) mod R = 0이면 그룹이 가득 참</text>
 </svg><figcaption>그림 DS3-3　압축기는 R개 위치를 한 행으로 뭉쳐요. 차원마다 가중치는 softmax가 정해요. 단순 평균이 아니라 학습된 가중 평균이에요. 그림의 R = 4는 그리기 편하려고 고른 값이고, 실제 R은 층마다 compress_ratios가 정해요.</figcaption></figure>
 <p>R = 1이면 뭉치지 않아요. 위치마다 압축 행이 하나지만, 윈도 행의 복사본이 아니라 따로 하는 투영이에요(compressor.wkv에 정규화) <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10129-L10135" target="_blank" rel="noopener noreferrer">ds4_model.cu 10129–10135행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/ref.py#L250-L251" target="_blank" rel="noopener noreferrer">ref.py 250–251행</a>).</p>
 <p>모든 층이 자기 압축 행을 저장하지는 않아요. kv_source_layer_ids에 오른 소스 층만 압축기를 갖고 압축 캐시를 소유해요. 그 뒤에 오는 압축비가 같은 층은 그 캐시를 바로 읽어요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2393-L2412" target="_blank" rel="noopener noreferrer">ds4_model.cu 2393–2412행</a>). 로딩 때 검사가 하나 있어요. ratio가 0보다 큰 층 앞에는 같은 압축비의 소스 층이 이미 있어야 하고, 없으면 오류가 나요. 코드 주석에 따르면 V4.1에서 20번째 층이 압축비 1의 첫 층이고, 20~39층이 모두 이 층의 압축 행과 인덱스 키를 읽어요 <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9261-L9262" target="_blank" rel="noopener noreferrer">9261–9262행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9304-L9306" target="_blank" rel="noopener noreferrer">9304–9306행</a>). 앞쪽 20개 층의 소스 층별 압축비는 pack의 ds4.txt가 정하는데, 고정한 저장소에는 그 값이 없어서 이 페이지는 모두 R로 적어요. 클러스터 페이지는 "앞 층의 캐시를 읽는" 층을 YoCo 소비 층이라고 불러요(<a href="#deepinfer/pd-kv/sec-4">DeepInfer 3페이지</a>). Strata 코드에도 yoco라는 이름이 쓰여요.</p>
@@ -140,80 +145,83 @@
 <p>모든 층에 인덱서가 있는 것은 아니에요. index_source_layer_ids에 오른 층만 압축 행에 점수를 매기고 목록을 갱신해요. 나머지 층은 가장 최근 목록을 그대로 써요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9582-L9594" target="_blank" rel="noopener noreferrer">ds4_model.cu 9582–9594행</a>). 인덱스 키는 압축 캐시를 가진 소스 층에서만 만들어요. 압축 행(회전 전)에 투영, 정규화, 회전, FP4 반올림을 한 번 더 거친 결과예요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10156-L10170" target="_blank" rel="noopener noreferrer">10156–10170행</a>).</p>
 <p>소스 층의 목록은 먼저 사전 선별을 한 번 거칠 수 있고, 이를 후보 블록이라고 해요. candidate_source_layer_id가 가리키는 층(테스트 픽스처에서는 20번째 층)이 압축 행을 candidate_block_size개씩 블록으로 묶고, 블록마다 최고 점수를 취하고, 그중 점수가 가장 높은 candidate_topk_blocks개 블록을 골라요. 최신 위치가 들어 있는 블록은 반드시 포함돼요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L798-L812" target="_blank" rel="noopener noreferrer">ds4_kernels.cu 798–812행</a>). 이후의 인덱서 층은 이 결과를 써서 그 블록 안의 위치에만 점수를 매겨요. 블록 수가 candidate_topk_blocks 이하이면 사전 선별은 작동하지 않아요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10188-L10215" target="_blank" rel="noopener noreferrer">ds4_model.cu 10188–10215행</a>). 변환기 테스트 픽스처 하나에서는 블록 크기가 8이고 블록 수가 2048이에요(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tests/terminal/test_pack_gguf_engram.py#L173-L177" target="_blank" rel="noopener noreferrer">test_pack_gguf_engram.py 173–177행</a>). 실제 pack도 이 두 값이라면, 사전 선별은 압축 행이 8 × 2048 = 16,384행을 넘어야 작동해요 <span class="ev ev-est">교육용 추정</span>.</p>
 <p>아래 인터랙티브 그림에서 컨텍스트 길이를 고르면, 디코드 토큰 하나가 이번 단계에 읽는 행을 볼 수 있어요. 윈도 링의 128행에 인덱서가 고른 최대 512개 압축 행이 더해져요. 정적 그림은 기본 컨텍스트 8,192에 R = 1인 층이에요.</p>
-<div class="viz" data-viz="ds-attention-state"><figure class="fig"><svg viewBox="0 0 560 318" role="img" aria-label="그림 DS3-4: R = 1인 층에서 컨텍스트가 8,192일 때, 디코드 토큰 하나는 윈도 128행에 골라낸 압축 행 512행을 더해 모두 640행을 읽는다. 컨텍스트가 길어져도 이 수는 그대로다">
-<text class="f-muted" fill="#5c6d66" x="20" y="16" font-size="13" text-anchor="start">예: R = 1인 층, 컨텍스트 8,192(기본값), 8,192번째 토큰이 앞을 돌아보는 중</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="26" width="520" height="30" rx="3"/>
-<rect class="f-warn" fill="#9e5d24" x="39" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="44" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="49" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="50" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="51" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="55" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="57" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="64" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="66" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="68" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="83" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="97" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="129" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="134" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="143" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="185" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="207" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="222" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="223" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="234" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="237" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="242" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="279" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="294" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="302" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="309" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="315" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="318" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="319" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="341" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="342" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="353" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="440" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="443" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="485" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="505" y="26" width="2" height="30"/>
-<rect class="f-accent" fill="#136d5a" x="531" y="22" width="9" height="38" rx="1"/>
-<rect class="f-warn" fill="#9e5d24" x="20" y="76" width="10" height="14" rx="2"/>
-<text fill="currentColor" x="38" y="88" font-size="13" text-anchor="start">세로선: 인덱서가 고른 512행(위치는 설명용, 실제로는 점수가 정함)</text>
-<rect class="f-accent" fill="#136d5a" x="20" y="98" width="10" height="14" rx="2"/>
-<text fill="currentColor" x="38" y="110" font-size="13" text-anchor="start">윈도: 최근 128행, 링에서 오고 선택을 거치지 않음</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="20" y="120" width="10" height="14" rx="2"/>
-<text fill="currentColor" x="38" y="132" font-size="13" text-anchor="start">나머지 압축 행: 이번 단계엔 안 읽지만 계속 보관해야 함</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 148H540"/>
-<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="13" text-anchor="start">컨텍스트</text>
-<text class="f-muted" fill="#5c6d66" x="150" y="168" font-size="13" text-anchor="start">윈도 행</text>
-<text class="f-muted" fill="#5c6d66" x="240" y="168" font-size="13" text-anchor="start">압축 행 n</text>
-<text class="f-muted" fill="#5c6d66" x="360" y="168" font-size="13" text-anchor="start">선택 행</text>
-<text class="f-muted" fill="#5c6d66" x="450" y="168" font-size="13" text-anchor="start">읽는 행</text>
-<text fill="currentColor" x="20" y="192" font-size="13" text-anchor="start">300</text>
-<text fill="currentColor" x="150" y="192" font-size="13" text-anchor="start">128</text>
-<text fill="currentColor" x="240" y="192" font-size="13" text-anchor="start">300</text>
-<text fill="currentColor" x="360" y="192" font-size="13" text-anchor="start">300(전체)</text>
-<text fill="currentColor" x="450" y="192" font-size="13" text-anchor="start">428</text>
-<text fill="currentColor" x="20" y="214" font-size="13" text-anchor="start">8,192</text>
-<text fill="currentColor" x="150" y="214" font-size="13" text-anchor="start">128</text>
-<text fill="currentColor" x="240" y="214" font-size="13" text-anchor="start">8,192</text>
-<text fill="currentColor" x="360" y="214" font-size="13" text-anchor="start">512</text>
-<text fill="currentColor" x="450" y="214" font-size="13" text-anchor="start">640</text>
-<text fill="currentColor" x="20" y="236" font-size="13" text-anchor="start">262,144</text>
-<text fill="currentColor" x="150" y="236" font-size="13" text-anchor="start">128</text>
-<text fill="currentColor" x="240" y="236" font-size="13" text-anchor="start">262,144</text>
-<text fill="currentColor" x="360" y="236" font-size="13" text-anchor="start">512</text>
-<text fill="currentColor" x="450" y="236" font-size="13" text-anchor="start">640</text>
-<text fill="currentColor" x="20" y="258" font-size="13" text-anchor="start">1,048,576</text>
-<text fill="currentColor" x="150" y="258" font-size="13" text-anchor="start">128</text>
-<text fill="currentColor" x="240" y="258" font-size="13" text-anchor="start">1,048,576</text>
-<text fill="currentColor" x="360" y="258" font-size="13" text-anchor="start">512</text>
-<text fill="currentColor" x="450" y="258" font-size="13" text-anchor="start">640</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="288" font-size="13" text-anchor="start">n = ⌊컨텍스트 ÷ R⌋, 선택 행 = min(512, n), 층·토큰당 읽는 행 ≤ 128 + 512 = 640</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="308" font-size="13" text-anchor="start">읽는 행 수는 그대로지만, 인덱서가 점수를 매길 행 n은 컨텍스트와 함께 늘어남</text>
+<div class="viz" data-viz="ds-attention-state"><figure class="fig"><svg viewBox="0 0 440 368" role="img" aria-label="그림 DS3-4: R = 1인 층에서 컨텍스트가 8,192일 때, 디코드 토큰 하나는 윈도 128행에 골라낸 압축 행 512행을 더해 모두 640행을 읽는다. 컨텍스트가 길어져도 이 수는 그대로다">
+<text class="f-muted" fill="#5c6d66" x="12" y="16" font-size="12" text-anchor="start">예: R = 1인 층, 컨텍스트 8,192(기본값),</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="32" font-size="12" text-anchor="start">8,192번째 토큰이 앞을 돌아보는 중</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="42" width="416" height="30" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="27" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="31" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="35" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="36" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="37" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="40" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="42" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="47" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="49" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="50" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="62" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="74" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="99" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="103" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="110" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="144" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="162" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="174" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="174" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="183" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="186" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="190" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="219" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="231" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="238" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="243" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="248" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="250" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="251" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="269" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="270" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="278" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="348" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="350" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="384" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="400" y="42" width="2" height="30"/>
+<rect class="f-accent" fill="#136d5a" x="419" y="38" width="9" height="38" rx="1"/>
+<rect class="f-warn" fill="#9e5d24" x="12" y="92" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="104" font-size="12" text-anchor="start">세로선: 인덱서가 고른 512행(위치는 설명용, 실제로는 점수가 정함)</text>
+<rect class="f-accent" fill="#136d5a" x="12" y="114" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="126" font-size="12" text-anchor="start">윈도: 최근 128행, 링에서 오고 선택을 거치지 않음</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="12" y="136" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="148" font-size="12" text-anchor="start">나머지 압축 행: 이번 단계엔 안 읽지만 계속 보관해야 함</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M12 164H428"/>
+<text class="f-muted" fill="#5c6d66" x="12" y="184" font-size="12" text-anchor="start">컨텍스트</text>
+<text class="f-muted" fill="#5c6d66" x="92" y="184" font-size="12" text-anchor="start">윈도 행</text>
+<text class="f-muted" fill="#5c6d66" x="168" y="184" font-size="12" text-anchor="start">압축 행 n</text>
+<text class="f-muted" fill="#5c6d66" x="250" y="184" font-size="12" text-anchor="start">선택 행</text>
+<text class="f-muted" fill="#5c6d66" x="350" y="184" font-size="12" text-anchor="start">읽는 행</text>
+<text fill="currentColor" x="12" y="208" font-size="12" text-anchor="start">300</text>
+<text fill="currentColor" x="92" y="208" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="208" font-size="12" text-anchor="start">300</text>
+<text fill="currentColor" x="250" y="208" font-size="12" text-anchor="start">300(전체)</text>
+<text fill="currentColor" x="350" y="208" font-size="12" text-anchor="start">428</text>
+<text fill="currentColor" x="12" y="230" font-size="12" text-anchor="start">8,192</text>
+<text fill="currentColor" x="92" y="230" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="230" font-size="12" text-anchor="start">8,192</text>
+<text fill="currentColor" x="250" y="230" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="230" font-size="12" text-anchor="start">640</text>
+<text fill="currentColor" x="12" y="252" font-size="12" text-anchor="start">262,144</text>
+<text fill="currentColor" x="92" y="252" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="252" font-size="12" text-anchor="start">262,144</text>
+<text fill="currentColor" x="250" y="252" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="252" font-size="12" text-anchor="start">640</text>
+<text fill="currentColor" x="12" y="274" font-size="12" text-anchor="start">1,048,576</text>
+<text fill="currentColor" x="92" y="274" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="274" font-size="12" text-anchor="start">1,048,576</text>
+<text fill="currentColor" x="250" y="274" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="274" font-size="12" text-anchor="start">640</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="304" font-size="12" text-anchor="start">n = ⌊컨텍스트 ÷ R⌋, 선택 행 = min(512, n),</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="320" font-size="12" text-anchor="start">층·토큰당 읽는 행 ≤ 128 + 512 = 640</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="340" font-size="12" text-anchor="start">읽는 행 수는 그대로지만,</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="356" font-size="12" text-anchor="start">인덱서가 점수를 매길 행 n은 컨텍스트와 함께 늘어남</text>
 </svg><figcaption>그림 DS3-4　R = 1인 층에서 디코드 토큰 하나가 읽는 행 수: 윈도 128행에 골라낸 min(512, n)행을 더해요. 컨텍스트가 300에서 1,048,576까지 늘어도 읽는 행은 최대 640으로 더 늘지 않아요. 하지만 압축 행 n은 늘어나고, 인덱서는 그 전부에 점수를 매겨야 해요. 교육용 추정이고, 행 수는 이 절의 공식으로 계산했어요.</figcaption></figure></div>
 <p>어텐션이 읽는 행에는 상한이 있지만, 인덱서의 스캔에는 공통 상한이 없어요. 디코드할 때 소스 층과 사전 선별을 쓰지 않는 인덱서 층은 매 단계 n행 전부에 점수를 매겨요. 사전 선별을 쓰는 층은 후보 블록 안의 위치에만 점수를 매겨요(위 설명 참고). 전부 채점하는 층은 인덱스 키를 n × 80바이트 읽고 곱셈-덧셈을 n × 32 × 128번 해요(헤드 수는 주석 기준) <span class="ev ev-est">교육용 추정</span>. n은 컨텍스트에 비례해 늘어요. 프롬프트를 읽을 때는 위치마다 한 번씩 채점해야 해요. 토큰 L개짜리 프롬프트는 R = 1인 인덱서 층 하나에서 모두 L(L + 1) ÷ 2쌍이고, 일반식은 L²/(2R)이에요. L = 8,192일 때 약 3.4 × 10⁷쌍, L = 262,144일 때 약 3.4 × 10¹⁰쌍, L = 1,048,576일 때 약 5.5 × 10¹¹쌍이에요 <span class="ev ev-est">교육용 추정</span>. 262,144 구간은 8장에서 계산한 전체 어텐션의 쌍 수(약 344억, <a href="#chapter/08/c08-complexity">8장 「계산 복잡도와 O(n²)」</a>)와 같아요. 줄어드는 것은 쌍마다 드는 비용이에요. 64개 헤드 × 512차원으로 전체 어텐션을 하면 쌍마다 곱셈-덧셈이 2 × 32,768번(내적과 가중합) 들어요. 인덱서는 쌍마다 32 × 128 = 4,096번이고 softmax도 없어서, 대략 16배 싸요 <span class="ev ev-est">교육용 추정</span>. 문서도 같은 이야기를 해요. 프롬프트가 아주 길면 읽는 속도가 느려지는데, "인덱서의 작업량이 길이의 제곱으로 늘기 때문"이고, 512K나 1M에서는 첫 응답을 몇 분씩 기다려야 해요 <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L98-L100" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 98–100행</a>).</p>
 <p class="bridge"><strong>CS를 배운 분께:</strong> 검색 시스템의 "후보 검색 후 정밀 재정렬"과 같은 2단계 구조예요. 후보 검색은 싸지만 전체를 훑어야 하고, 재정렬은 비싸지만 후보만 봐요. 여기서 후보 검색은 인덱서가 모든 압축 행을 훑는 일이고, 재정렬은 640행에 하는 진짜 어텐션이에요. 후보 블록 사전 선별은 후보 검색 앞에 거친 인덱스를 한 겹 더 두는 것과 비슷해요. 블록 단위로 먼저 절반 넘게 걸러내요.</p>
@@ -221,36 +229,37 @@
 
 <h2 id="sec-5">3.5 토큰 하나가 남기는 것: 상태 세 가지, 롤백 방법 두 가지</h2>
 <p>토큰 하나가 모든 층을 지나고 나면 엔진에는 네 가지가 남아요. 층마다의 윈도 링, 아직 차지 않은 압축기 그룹, 소스 층의 압축 행과 인덱스 키(추가 전용), 그리고 Engram의 n-gram 기록이에요. 마지막 것은 <a href="#deepseek/engram">Engram 페이지</a>에서 다뤄요. <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.hpp#L8-L11" target="_blank" rel="noopener noreferrer">ds4_model.hpp 8–11행</a>) 앞의 세 가지가 대화를 되돌릴 수 있는지, 주차할 수 있는지를 결정해요.</p>
-<figure class="fig"><svg viewBox="0 0 560 300" role="img" aria-label="그림 DS3-5: 토큰 하나가 남기는 세 가지 상태. 덮어쓰는 윈도 링, 덮어쓰는 그룹 버퍼, 추가만 하는 압축 행. 롤백 방법은 복사 또는 잘라내기다">
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="14" width="166" height="150" rx="7"/>
-<text fill="currentColor" x="103" y="38" font-size="13" text-anchor="middle">윈도 링(층당 1블록)</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="62" font-size="13" text-anchor="middle">128행 × 528 B</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="82" font-size="13" text-anchor="middle">40층 약 2.58 MiB</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="102" font-size="13" text-anchor="middle">덮어쓰기: 옛 행 버림</text>
-<text fill="currentColor" x="103" y="132" font-size="13" text-anchor="middle">롤백: 먼저 복사</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="152" font-size="13" text-anchor="middle">화이트보드처럼</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="197" y="14" width="166" height="150" rx="7"/>
-<text fill="currentColor" x="280" y="38" font-size="13" text-anchor="middle">그룹 버퍼</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="62" font-size="13" text-anchor="middle">덜 찬 R개 위치</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="82" font-size="13" text-anchor="middle">FP32: kv와 score</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="102" font-size="13" text-anchor="middle">덮어쓰기: 차면 비움</text>
-<text fill="currentColor" x="280" y="132" font-size="13" text-anchor="middle">롤백: 먼저 복사</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="152" font-size="13" text-anchor="middle">화이트보드처럼</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="374" y="14" width="166" height="150" rx="7"/>
-<text fill="currentColor" x="457" y="38" font-size="13" text-anchor="middle">압축 행 + 인덱스 키</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="62" font-size="13" text-anchor="middle">추가 전용, 위치 순</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="82" font-size="13" text-anchor="middle">368 B/위치(R = 1)</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="102" font-size="13" text-anchor="middle">컨텍스트와 함께 늘어남</text>
-<text fill="currentColor" x="457" y="132" font-size="13" text-anchor="middle">롤백: 위치 자르기</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="152" font-size="13" text-anchor="middle">노트처럼</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M103 164V190M280 164V190M103 190H280M191 190V206"/>
-<path class="f-muted" fill="#5c6d66" d="M187 202L191 210L195 202Z"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="212" width="342" height="36" rx="7"/>
-<text fill="currentColor" x="191" y="235" font-size="13" text-anchor="middle">체크포인트: 최대 4개, 링과 그룹 버퍼만 복사</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M191 248V262M457 164V262M191 262H457M324 262V270"/>
-<path class="f-muted" fill="#5c6d66" d="M320 268L324 276L328 268Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="130" y="278" width="388" height="18" rx="5"/>
-<text fill="currentColor" x="324" y="292" font-size="13" text-anchor="middle">대화 주차: 상태 전체를 내보냄, 압축 행 포함</text>
+<figure class="fig"><svg viewBox="0 0 440 324" role="img" aria-label="그림 DS3-5: 토큰 하나가 남기는 세 가지 상태. 덮어쓰는 윈도 링, 덮어쓰는 그룹 버퍼, 추가만 하는 압축 행. 롤백 방법은 복사 또는 잘라내기다">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="14" width="132" height="160" rx="7"/>
+<text fill="currentColor" x="78" y="38" font-size="12" text-anchor="middle">윈도 링(층당 1블록)</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="62" font-size="12" text-anchor="middle">128행 × 528 B</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="82" font-size="12" text-anchor="middle">40층 약 2.58 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="102" font-size="12" text-anchor="middle">덮어쓰기: 옛 행 버림</text>
+<text fill="currentColor" x="78" y="142" font-size="12" text-anchor="middle">롤백: 먼저 복사</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="162" font-size="12" text-anchor="middle">화이트보드처럼</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="14" width="132" height="160" rx="7"/>
+<text fill="currentColor" x="220" y="38" font-size="12" text-anchor="middle">그룹 버퍼</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="62" font-size="12" text-anchor="middle">덜 찬 R개 위치</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="82" font-size="12" text-anchor="middle">FP32: kv와 score</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="102" font-size="12" text-anchor="middle">덮어쓰기: 차면 비움</text>
+<text fill="currentColor" x="220" y="142" font-size="12" text-anchor="middle">롤백: 먼저 복사</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="162" font-size="12" text-anchor="middle">화이트보드처럼</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="296" y="14" width="132" height="160" rx="7"/>
+<text fill="currentColor" x="362" y="38" font-size="12" text-anchor="middle">압축 행 + 인덱스 키</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="62" font-size="12" text-anchor="middle">추가 전용, 위치 순</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="82" font-size="12" text-anchor="middle">368 B/위치(R = 1)</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="102" font-size="12" text-anchor="middle">컨텍스트와</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="118" font-size="12" text-anchor="middle">함께 늘어남</text>
+<text fill="currentColor" x="362" y="142" font-size="12" text-anchor="middle">롤백: 위치 자르기</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="162" font-size="12" text-anchor="middle">노트처럼</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M78 174V200M220 174V200M78 200H220M149 200V214"/>
+<path class="f-muted" fill="#5c6d66" d="M145 210L149 218L153 210Z"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="220" width="274" height="36" rx="7"/>
+<text fill="currentColor" x="149" y="243" font-size="12" text-anchor="middle">체크포인트: 최대 4개, 링과 그룹 버퍼만 복사</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M149 256V270M362 174V270M149 270H362M220 270V278"/>
+<path class="f-muted" fill="#5c6d66" d="M216 274L220 282L224 274Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="284" width="416" height="28" rx="5"/>
+<text fill="currentColor" x="220" y="303" font-size="12" text-anchor="middle">대화 주차: 상태 전체를 내보냄, 압축 행 포함</text>
 </svg><figcaption>그림 DS3-5　상태 세 가지, 롤백 방법 두 가지. 덮어쓰는 둘은 미리 복사해 둘 수밖에 없어요(체크포인트). 추가만 하는 압축 행은 위치를 잘라서 되돌려요. 대화 주차는 세 가지를 체크포인트와 함께 내보내요. 숫자는 교육용 추정이고, 공식은 본문에 있어요.</figcaption></figure>
 <p>20장은 두 종류의 기억을 "노트와 화이트보드"에 비유했어요. 압축 행은 노트예요. 뒤로만 쓰고 위치 순으로 정렬돼 있어서, 되돌리려면 "몇 쪽까지 썼는지"만 작게 고치면 되고, 넘친 부분은 나중에 다시 써요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5691-L5692" target="_blank" rel="noopener noreferrer">ds4_model.cu 5691–5692행</a>). 링과 덜 찬 그룹 버퍼는 화이트보드예요. 9장의 GDN 상태도 이런 화이트보드예요(<a href="#chapter/09/c09-rnn-state">9장 「순환 신경망과 "상태"」</a>). 새 내용이 옛 내용을 덮어쓰니, 되돌리려면 미리 사진을 찍어 둘 수밖에 없어요. 체크포인트가 그 사진이고, 이 둘만 복사해요. 동시에 최대 4개를 보관해요. 지난 번 프롬프트의 끝, 그 바로 앞 위치, 앵커 하나, 공유 접두부 하나예요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1104-L1110" target="_blank" rel="noopener noreferrer">1104–1110행</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5751-L5755" target="_blank" rel="noopener noreferrer">5751–5755행</a>). 하나당 적어도 2.58 MiB예요 <span class="ev ev-est">교육용 추정</span>. 화이트보드를 왜 사진으로 남기는지는 <a href="#chapter/20/c20-copy-on-write">20장 「스냅샷과 쓰기 시 복사」</a>를 보세요.</p>
 <p>다른 요청이 대화를 모델 밖으로 밀어내면, 엔진은 <dfn>대화 주차</dfn>를 해요. 상태 전체를 써서 내보내는 거예요. 내용은 token, 층마다의 링과 그룹 버퍼, 소스 층마다의 압축 행과 인덱스 키(0부터 pos ÷ R행까지), 그리고 체크포인트예요 <span class="ev ev-code">코드 사실</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5788-L5806" target="_blank" rel="noopener noreferrer">ds4_model.cu 5788–5806행</a>). 크기를 구하는 공식은 이미 있어요. 헤더와 4 × pos바이트의 token, 층마다 16 + 67,584바이트에 그룹 버퍼(2 × R × 512 × 4바이트, R &gt; 1인 소스 층에만 있어요), 소스 층마다 ⌊pos ÷ R⌋ × (288 + 80)바이트, 거기에 체크포인트를 더해요. 문서가 주는 숫자는 6.5K 토큰당 약 17 MB예요 <span class="ev ev-report">업스트림 보고</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L116" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md 116행</a>). 공식으로 어림하면 링 2.70 MB, 최대 4개 체크포인트가 최소 10.8 MB, R = 1인 소스 층 하나가 6,500 × 368 ≈ 2.4 MB이고 합계 약 15.9 MB예요. 여기에 그룹 버퍼와 다른 소스 층이 더해지니 문서와 같은 규모예요 <span class="ev ev-est">교육용 추정</span>. 앞쪽 20개 층의 R이 없어서 이 계산은 규모만 어림할 수 있어요. 대화 주차의 흐름은 <a href="#deepseek/draft">DSpark와 대화 주차</a> 페이지에서 다뤄요.</p>

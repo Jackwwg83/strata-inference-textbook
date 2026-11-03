@@ -13,37 +13,42 @@
 <li>Cada cabeza puntúa esas filas con q, aplica softmax y hace la suma ponderada. Las 64 cabezas leen las mismas filas.</li>
 <li>La parte rotada de la salida se gira de vuelta, se redondea a FP8 y pasa por las proyecciones agrupadas wo_a y wo_b.</li>
 </ol>
-<figure class="fig"><svg viewBox="0 0 560 360" role="img" aria-label="Figura DS3-1: lo que hace una capa de atención con un token: proyecta q y una fila K = V, lee el anillo de ventana, las filas comprimidas elegidas y el sink, puntúa y suma, y proyecta la salida">
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="150" y="8" width="260" height="38" rx="7"/>
-<text fill="currentColor" x="280" y="32" font-size="13" text-anchor="middle">Entrada: estado oculto del token p</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M280 46V60M145 60V76M415 60V76M145 60H415"/>
-<path class="f-muted" fill="#5c6d66" d="M141 72L145 80L149 72ZM411 72L415 80L419 72Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="82" width="250" height="48" rx="7"/>
-<text fill="currentColor" x="145" y="103" font-size="13" text-anchor="middle">q: wq_a, wq_b (rango bajo)</text>
-<text class="f-muted" fill="#5c6d66" x="145" y="121" font-size="13" text-anchor="middle">64 cabezas × 512 dim.</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="290" y="82" width="250" height="48" rx="7"/>
-<text fill="currentColor" x="415" y="103" font-size="13" text-anchor="middle">Fila K = V de este token (512 dim.)</text>
-<text class="f-muted" fill="#5c6d66" x="415" y="121" font-size="13" text-anchor="middle">Redondeo a FP8; ranura p mod 128</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M145 130V142M415 130V142M145 142H415M280 142V160"/>
-<path class="f-muted" fill="#5c6d66" d="M276 156L280 164L284 156Z"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="166" width="166" height="56" rx="7"/>
-<text fill="currentColor" x="103" y="189" font-size="13" text-anchor="middle">Últimas 128 filas</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="208" font-size="12" text-anchor="middle">anillo · sobrescribe · FP8</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="197" y="166" width="166" height="56" rx="7"/>
-<text fill="currentColor" x="280" y="189" font-size="13" text-anchor="middle">≤ 512 filas del indexer</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="208" font-size="12" text-anchor="middle">comprimidas · añadir · FP4</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="374" y="166" width="166" height="56" rx="7"/>
-<text fill="currentColor" x="457" y="189" font-size="12" text-anchor="middle">sink: un número por cabeza</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="208" font-size="12" text-anchor="middle">solo denominador, sin fila</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M103 222V238M280 222V238M457 222V238"/>
-<path class="f-muted" fill="#5c6d66" d="M99 234L103 242L107 234ZM276 234L280 242L284 234ZM453 234L457 242L461 234Z"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="244" width="520" height="52" rx="7"/>
-<text fill="currentColor" x="280" y="266" font-size="13" text-anchor="middle">Cada cabeza: puntuar con q, softmax (sink en el denominador), sumar</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="285" font-size="13" text-anchor="middle">K = V: una misma fila se puntúa y se suma; 64 cabezas, mismas filas</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M280 296V312"/>
-<path class="f-muted" fill="#5c6d66" d="M276 308L280 316L284 308Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="110" y="318" width="340" height="36" rx="7"/>
-<text fill="currentColor" x="280" y="341" font-size="13" text-anchor="middle">Salida: rotación inversa, FP8, wo_a y wo_b</text>
+<figure class="fig"><svg viewBox="0 0 440 382" role="img" aria-label="Figura DS3-1: lo que hace una capa de atención con un token: proyecta q y una fila K = V, lee el anillo de ventana, las filas comprimidas elegidas y el sink, puntúa y suma, y proyecta la salida">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="8" width="320" height="34" rx="7"/>
+<text fill="currentColor" x="220" y="29" font-size="12" text-anchor="middle">Entrada: estado oculto del token p</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 42V54M115 54V66M325 54V66M115 54H325"/>
+<path class="f-muted" fill="#5c6d66" d="M111 62L115 70L119 62ZM321 62L325 70L329 62Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="72" width="205" height="48" rx="7"/>
+<text fill="currentColor" x="115" y="93" font-size="12" text-anchor="middle">q: wq_a, wq_b (rango bajo)</text>
+<text class="f-muted" fill="#5c6d66" x="115" y="111" font-size="12" text-anchor="middle">64 cabezas × 512 dim.</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="223" y="72" width="205" height="48" rx="7"/>
+<text fill="currentColor" x="325" y="93" font-size="12" text-anchor="middle">Fila K = V (512 dim.)</text>
+<text class="f-muted" fill="#5c6d66" x="325" y="111" font-size="12" text-anchor="middle">Redondeo FP8; ranura p mod 128</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M115 120V132M325 120V132M115 132H325M220 132V146"/>
+<path class="f-muted" fill="#5c6d66" d="M216 142L220 150L224 142Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="152" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="78" y="172" font-size="12" text-anchor="middle">Últimas 128 filas</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="190" font-size="12" text-anchor="middle">anillo, sobrescribe</text>
+<text class="f-muted" fill="#5c6d66" x="78" y="208" font-size="12" text-anchor="middle">FP8</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="154" y="152" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="220" y="172" font-size="12" text-anchor="middle">≤ 512 del indexer</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="190" font-size="12" text-anchor="middle">comprimidas, añadir</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="208" font-size="12" text-anchor="middle">FP4</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="296" y="152" width="132" height="64" rx="7"/>
+<text fill="currentColor" x="362" y="172" font-size="12" text-anchor="middle">sink: 1 por cabeza</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="190" font-size="12" text-anchor="middle">solo denominador,</text>
+<text class="f-muted" fill="#5c6d66" x="362" y="208" font-size="12" text-anchor="middle">sin fila</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M78 216V228M220 216V228M362 216V228"/>
+<path class="f-muted" fill="#5c6d66" d="M74 224L78 232L82 224ZM216 224L220 232L224 224ZM358 224L362 232L366 224Z"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="234" width="416" height="84" rx="7"/>
+<text fill="currentColor" x="220" y="256" font-size="12" text-anchor="middle">Cada cabeza: puntuar con q, softmax</text>
+<text fill="currentColor" x="220" y="274" font-size="12" text-anchor="middle">(sink en el denominador), sumar</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="293" font-size="12" text-anchor="middle">K = V: una misma fila se puntúa y se suma;</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="311" font-size="12" text-anchor="middle">64 cabezas, mismas filas</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 318V328"/>
+<path class="f-muted" fill="#5c6d66" d="M216 328L220 336L224 328Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="60" y="338" width="320" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="360" font-size="12" text-anchor="middle">Salida: rotación inversa, FP8, wo_a y wo_b</text>
 </svg><figcaption>Figura DS3-1　Lo que hace una capa de atención con un token. q sale de una proyección de rango bajo; K y V son una misma fila. Cada cabeza lee tres cosas: las últimas 128 filas del anillo de ventana, hasta 512 filas comprimidas elegidas por el indexer y un sink aprendido. El dibujo muestra la estructura de la receta; el origen de cada caja está en el texto.</figcaption></figure>
 <p>Conviene separar de dónde sale cada número. 128, 512 y 64 cabezas son números de la cabecera del archivo y de los comentarios del programa de laboratorio <span class="ev ev-report">Informe upstream</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41_lab/ds4_lab.cu#L1-L4" target="_blank" rel="noopener noreferrer">ds4_lab.cu, líneas 1–4</a>). El motor lee sliding_window, index_topk y num_attention_heads del ds4.txt del pack <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L519-L522" target="_blank" rel="noopener noreferrer">ds4_model.cu, líneas 519–522</a>). Hay cuatro comprobaciones de geometría escritas a fuego: head_dim debe ser 512, index_head_dim debe ser 128, los expertos por token no pasan de 8 y hc no pasa de 8. Si falla una, el pack no carga <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2166-L2169" target="_blank" rel="noopener noreferrer">líneas 2166–2169</a>).</p>
 <p><dfn>K = V</dfn> significa que dos copias se funden en una. En el capítulo 8, cada posición guarda una clave k y un valor v: k decide «dónde mirar» y v decide «qué se ve». Aquí la misma fila se usa primero para el producto escalar y después para la suma ponderada; el kernel de GPU usa el mismo juego de punteros de fila <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L892-L903" target="_blank" rel="noopener noreferrer">ds4_kernels.cu, líneas 892–903</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L934-L941" target="_blank" rel="noopener noreferrer">líneas 934–941</a>). Además las 64 cabezas comparten esa fila, y eso se llama atención multiconsulta (MQA). Va un paso más allá que la GQA del capítulo 8: en la GQA, 24 cabezas se reparten en 2 grupos; en la MQA, todas las cabezas forman un solo grupo. Como contexto, está <a href="https://arxiv.org/abs/1911.02150" target="_blank" rel="noopener noreferrer">el artículo original de Shazeer</a>.</p>
@@ -53,44 +58,46 @@
 <h2 id="sec-2">3.2 El anillo de 128 filas: ningún token reciente se pierde</h2>
 <p>El <dfn>anillo de ventana</dfn> es una caché de tamaño fijo, una por capa, de 128 filas. La fila de la posición p se escribe en la ranura p mod 128, y la fila nueva sobrescribe la que tenía 128 tokens de antigüedad <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L1297-L1331" target="_blank" rel="noopener noreferrer">ds4_kernels.cu, líneas 1297–1331</a>). Cada fila tiene 512 dimensiones, se guarda como códigos FP8, y cada 32 valores llevan una escala que es una potencia de 2 <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L22-L33" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh, líneas 22–33</a>). Qué es FP8 está en <a href="#chapter/04/c04-float">Capítulo 4 «Binario y coma flotante»</a>.</p>
 <p>Cuántos bytes ocupa una fila se calcula directamente: 512 códigos más 512 ÷ 32 = 16 escalas, 528 bytes en total, justo un múltiplo de 16, así que no hace falta relleno <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L3209-L3213" target="_blank" rel="noopener noreferrer">ds4_model.cu, líneas 3209–3213</a>). El anillo de una capa son 128 × 528 = 67.584 bytes. DeepSeek-V4.1-Flash tiene 40 capas <span class="ev ev-report">Informe upstream</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L3" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md, línea 3</a>); las 40 capas suman 2.703.360 bytes, unos 2,58 MiB <span class="ev ev-est">Estimación didáctica</span>. Esta cantidad no depende de la longitud del contexto. La página del clúster calculó el mismo 528 por su cuenta (<a href="#deepinfer/pd-kv/sec-4">DeepInfer, página 3</a>).</p>
-<figure class="fig"><svg viewBox="0 0 560 226" role="img" aria-label="Figura DS3-2: escritura del anillo de ventana: la posición 128 se escribe en la ranura 0 y sobrescribe la posición 0; en el anillo quedan las posiciones 1 a 128">
-<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="13" text-anchor="start">Tras escribir la posición 127: la ranura s guarda la posición s</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="55" y="45" font-size="12" text-anchor="middle">Ranura 0</text>
-<text class="f-muted" fill="#5c6d66" x="55" y="62" font-size="12" text-anchor="middle">pos. 0</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="135" y="45" font-size="12" text-anchor="middle">Ranura 1</text>
-<text class="f-muted" fill="#5c6d66" x="135" y="62" font-size="12" text-anchor="middle">pos. 1</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="215" y="45" font-size="12" text-anchor="middle">Ranura 2</text>
-<text class="f-muted" fill="#5c6d66" x="215" y="62" font-size="12" text-anchor="middle">pos. 2</text>
-<text class="f-muted" fill="#5c6d66" x="285" y="53" font-size="13" text-anchor="middle">…</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="355" y="45" font-size="12" text-anchor="middle">Ranura 126</text>
-<text class="f-muted" fill="#5c6d66" x="355" y="62" font-size="12" text-anchor="middle">pos. 126</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="400" y="26" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="435" y="45" font-size="12" text-anchor="middle">Ranura 127</text>
-<text class="f-muted" fill="#5c6d66" x="435" y="62" font-size="12" text-anchor="middle">pos. 127</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="104" font-size="13" text-anchor="start">Llega la posición 128: ranura 128 mod 128 = 0, pisa la fila de la posición 0</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="20" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="55" y="131" font-size="12" text-anchor="middle">Ranura 0</text>
-<text fill="currentColor" x="55" y="148" font-size="12" text-anchor="middle">pos. 128</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="135" y="131" font-size="12" text-anchor="middle">Ranura 1</text>
-<text class="f-muted" fill="#5c6d66" x="135" y="148" font-size="12" text-anchor="middle">pos. 1</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="180" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="215" y="131" font-size="12" text-anchor="middle">Ranura 2</text>
-<text class="f-muted" fill="#5c6d66" x="215" y="148" font-size="12" text-anchor="middle">pos. 2</text>
-<text class="f-muted" fill="#5c6d66" x="285" y="139" font-size="13" text-anchor="middle">…</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="320" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="355" y="131" font-size="12" text-anchor="middle">Ranura 126</text>
-<text class="f-muted" fill="#5c6d66" x="355" y="148" font-size="12" text-anchor="middle">pos. 126</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="400" y="112" width="70" height="44" rx="5"/>
-<text fill="currentColor" x="435" y="131" font-size="12" text-anchor="middle">Ranura 127</text>
-<text class="f-muted" fill="#5c6d66" x="435" y="148" font-size="12" text-anchor="middle">pos. 127</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M20 168H470M20 162V168M470 162V168"/>
-<text fill="currentColor" x="245" y="188" font-size="13" text-anchor="middle">El anillo guarda ahora las posiciones 1 … 128: 128 filas justas</text>
-<text class="f-muted" fill="#5c6d66" x="245" y="212" font-size="13" text-anchor="middle">Cada paso escribe una ranura; el resto no se mueve; ranura = pos. mod 128</text>
+<figure class="fig"><svg viewBox="0 0 440 258" role="img" aria-label="Figura DS3-2: escritura del anillo de ventana: la posición 128 se escribe en la ranura 0 y sobrescribe la posición 0; en el anillo quedan las posiciones 1 a 128">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">Tras escribir la posición 127: la ranura s guarda la posición s</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="44" y="45" font-size="12" text-anchor="middle">Ran. 0</text>
+<text class="f-muted" fill="#5c6d66" x="44" y="62" font-size="12" text-anchor="middle">pos. 0</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="86" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="118" y="45" font-size="12" text-anchor="middle">Ran. 1</text>
+<text class="f-muted" fill="#5c6d66" x="118" y="62" font-size="12" text-anchor="middle">pos. 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="160" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="192" y="45" font-size="12" text-anchor="middle">Ran. 2</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="62" font-size="12" text-anchor="middle">pos. 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="322" y="45" font-size="12" text-anchor="middle">Ran. 126</text>
+<text class="f-muted" fill="#5c6d66" x="322" y="62" font-size="12" text-anchor="middle">pos. 126</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="364" y="26" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="396" y="45" font-size="12" text-anchor="middle">Ran. 127</text>
+<text class="f-muted" fill="#5c6d66" x="396" y="62" font-size="12" text-anchor="middle">pos. 127</text>
+<text class="f-muted" fill="#5c6d66" x="244" y="53" font-size="12" text-anchor="middle">…</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="104" font-size="12" text-anchor="start">Llega la posición 128: ranura 128 mod 128 = 0,</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="120" font-size="12" text-anchor="start">pisa la fila de la posición 0</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="12" y="128" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="44" y="147" font-size="12" text-anchor="middle">Ran. 0</text>
+<text fill="currentColor" x="44" y="164" font-size="12" text-anchor="middle">pos. 128</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="86" y="128" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="118" y="147" font-size="12" text-anchor="middle">Ran. 1</text>
+<text class="f-muted" fill="#5c6d66" x="118" y="164" font-size="12" text-anchor="middle">pos. 1</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="160" y="128" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="192" y="147" font-size="12" text-anchor="middle">Ran. 2</text>
+<text class="f-muted" fill="#5c6d66" x="192" y="164" font-size="12" text-anchor="middle">pos. 2</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="128" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="322" y="147" font-size="12" text-anchor="middle">Ran. 126</text>
+<text class="f-muted" fill="#5c6d66" x="322" y="164" font-size="12" text-anchor="middle">pos. 126</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="364" y="128" width="64" height="44" rx="5"/>
+<text fill="currentColor" x="396" y="147" font-size="12" text-anchor="middle">Ran. 127</text>
+<text class="f-muted" fill="#5c6d66" x="396" y="164" font-size="12" text-anchor="middle">pos. 127</text>
+<text class="f-muted" fill="#5c6d66" x="244" y="155" font-size="12" text-anchor="middle">…</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M12 184H428M12 178H12V184M428 178V184"/>
+<text fill="currentColor" x="220" y="204" font-size="12" text-anchor="middle">El anillo guarda ahora las posiciones 1 … 128: 128 filas justas</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="228" font-size="12" text-anchor="middle">Cada paso escribe una ranura; el resto no se mueve;</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="244" font-size="12" text-anchor="middle">ranura = pos. mod 128</text>
 </svg><figcaption>Figura DS3-2　El anillo de ventana es un círculo de 128 ranuras. La posición p se escribe en la ranura p mod 128, la fila más antigua se sobrescribe y las demás no se mueven. Tras escribir la posición 128 en la ranura 0, el anillo contiene justo las posiciones 1 a 128.</figcaption></figure>
 <p>Desde la posición 127, la ventana que ve un token tiene justo 128 filas, incluida la suya; los tokens anteriores solo ven p + 1 filas. El motor primero decodifica las filas del anillo a filas de trabajo en BF16, añade la fila nueva y toma las últimas 128 posiciones; la fila más antigua del anillo queda excluida y luego la fila nueva la sobrescribe <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10090-L10118" target="_blank" rel="noopener noreferrer">ds4_model.cu, líneas 10090–10118</a>). ¿Por qué conservar con exactitud solo 128 tokens? Upstream no escribe el motivo; esto es una inferencia: <span class="ev ev-est">Estimación didáctica</span> los tokens cercanos pesan más, media frase y el nombre de la variable recién definida caben en esas filas, y guardarlos con exactitud tiene un costo fijo; los tokens más antiguos pasan a las filas comprimidas de la sección 3.3.</p>
 <p>El anillo se sobrescribe, y lo sobrescrito no vuelve. Cuando la decodificación especulativa verifica un lote de tokens borrador, cada capa copia antes las filas que se van a sobrescribir, hasta 16 filas, y las devuelve si se rechaza el borrador <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4357-L4360" target="_blank" rel="noopener noreferrer">ds4_model.cu, líneas 4357–4360</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L175-L176" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh, líneas 175–176</a>). La zona de copia del anillo de cada capa es 16 × 528 = 8.448 bytes <span class="ev ev-est">Estimación didáctica</span>. Las capas fuente con R &gt; 1 reservan además un búfer de grupo y una instantánea de la fila comprimida nueva <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4357-L4361" target="_blank" rel="noopener noreferrer">ds4_model.cu, líneas 4357–4361</a>). La zona de copia solo se reserva en los packs con modelo borrador. Cómo se verifican los borradores se explica en <a href="#deepseek/draft">la página de DSpark y aparcar la conversación</a>.</p>
@@ -99,34 +106,35 @@
 <h2 id="sec-3">3.3 Filas comprimidas: R posiciones amasadas en una fila</h2>
 <p>De las posiciones anteriores a los últimos 128 tokens, las filas originales ya las sobrescribió el anillo. Quedan como filas comprimidas: una por cada R posiciones. R se llama <dfn>razón de compresión</dfn>, es un número por capa y viene de la lista compress_ratios del pack <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L531" target="_blank" rel="noopener noreferrer">ds4_model.cu, línea 531</a>). Las capas con R = 0 no tienen filas comprimidas y solo hacen atención de ventana; los bloques del modelo borrador DSpark deben ser de este tipo <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2383-L2384" target="_blank" rel="noopener noreferrer">líneas 2383–2384</a>).</p>
 <p>¿Cómo se amasan R posiciones en una fila? Cada posición proyecta primero un par de vectores de 512 dimensiones, kv y score, y los escribe en la ranura p mod R. Cuando la posición p cumple (p + 1) mod R = 0, el grupo está completo. El motor hace un softmax por cada dimensión sobre los R score, usa los pesos resultantes para sumar ponderadamente los kv y al final aplica RMSNorm <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L570-L604" target="_blank" rel="noopener noreferrer">ds4_kernels.cu, líneas 570–604</a>). Al resultado se le añade la codificación posicional rotatoria (RoPE) y se redondea a FP4: códigos E2M1, con una escala E4M3 cada 16 valores. Una fila ocupa 256 + 32 = 288 bytes <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10223-L10232" target="_blank" rel="noopener noreferrer">ds4_model.cu, líneas 10223–10232</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cuh#L22-L33" target="_blank" rel="noopener noreferrer">ds4_kernels.cuh, líneas 22–33</a>). El grupo incompleto espera en un búfer FP32: kv y score, R × 512 floats cada uno <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L4329-L4331" target="_blank" rel="noopener noreferrer">ds4_model.cu, líneas 4329–4331</a>).</p>
-<figure class="fig"><svg viewBox="0 0 560 296" role="img" aria-label="Figura DS3-3: el compresor: cada una de las R posiciones aporta un par kv y score, se hace softmax y suma ponderada por dimensión, y luego se normaliza, se rota y se redondea a FP4 para obtener una fila comprimida">
-<text class="f-muted" fill="#5c6d66" x="20" y="18" font-size="13" text-anchor="start">Un grupo cada R posiciones (en el dibujo R = 4, solo como ejemplo)</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="26" width="110" height="46" rx="6"/>
-<text fill="currentColor" x="75" y="46" font-size="13" text-anchor="middle">Posición 4k</text>
-<text class="f-muted" fill="#5c6d66" x="75" y="63" font-size="13" text-anchor="middle">kv, score</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="155" y="26" width="110" height="46" rx="6"/>
-<text fill="currentColor" x="210" y="46" font-size="13" text-anchor="middle">Posición 4k + 1</text>
-<text class="f-muted" fill="#5c6d66" x="210" y="63" font-size="13" text-anchor="middle">kv, score</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="290" y="26" width="110" height="46" rx="6"/>
-<text fill="currentColor" x="345" y="46" font-size="13" text-anchor="middle">Posición 4k + 2</text>
-<text class="f-muted" fill="#5c6d66" x="345" y="63" font-size="13" text-anchor="middle">kv, score</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="425" y="26" width="110" height="46" rx="6"/>
-<text fill="currentColor" x="480" y="46" font-size="13" text-anchor="middle">Posición 4k + 3</text>
-<text class="f-muted" fill="#5c6d66" x="480" y="63" font-size="13" text-anchor="middle">kv, score</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M75 72V84M210 72V84M345 72V84M480 72V84M75 84H480M277 84V98"/>
-<path class="f-muted" fill="#5c6d66" d="M273 94L277 102L281 94Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="20" y="104" width="520" height="48" rx="7"/>
-<text fill="currentColor" x="280" y="125" font-size="13" text-anchor="middle">Para cada dimensión: softmax sobre los R score</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="143" font-size="13" text-anchor="middle">suma ponderada de los R kv con esos pesos</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M280 152V164"/>
-<path class="f-muted" fill="#5c6d66" d="M276 160L280 168L284 160Z"/>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="100" y="170" width="360" height="36" rx="7"/>
-<text fill="currentColor" x="280" y="193" font-size="13" text-anchor="middle">RMSNorm → RoPE → redondeo a FP4</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M280 206V218"/>
-<path class="f-muted" fill="#5c6d66" d="M276 214L280 222L284 214Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="150" y="224" width="260" height="36" rx="7"/>
-<text fill="currentColor" x="280" y="247" font-size="13" text-anchor="middle">Fila comprimida: 256 + 32 = 288 bytes</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="282" font-size="13" text-anchor="middle">Posición p → ranura p mod R; si (p + 1) mod R = 0, el grupo está completo</text>
+<figure class="fig"><svg viewBox="0 0 440 312" role="img" aria-label="Figura DS3-3: el compresor: cada una de las R posiciones aporta un par kv y score, se hace softmax y suma ponderada por dimensión, y luego se normaliza, se rota y se redondea a FP4 para obtener una fila comprimida">
+<text class="f-muted" fill="#5c6d66" x="12" y="18" font-size="12" text-anchor="start">Un grupo cada R posiciones (aquí R = 4, solo como ejemplo)</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="59" y="46" font-size="12" text-anchor="middle">Pos. 4k</text>
+<text class="f-muted" fill="#5c6d66" x="59" y="63" font-size="12" text-anchor="middle">kv, score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="119" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="166" y="46" font-size="12" text-anchor="middle">Pos. 4k + 1</text>
+<text class="f-muted" fill="#5c6d66" x="166" y="63" font-size="12" text-anchor="middle">kv, score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="226" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="273" y="46" font-size="12" text-anchor="middle">Pos. 4k + 2</text>
+<text class="f-muted" fill="#5c6d66" x="273" y="63" font-size="12" text-anchor="middle">kv, score</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="333" y="26" width="94" height="46" rx="6"/>
+<text fill="currentColor" x="380" y="46" font-size="12" text-anchor="middle">Pos. 4k + 3</text>
+<text class="f-muted" fill="#5c6d66" x="380" y="63" font-size="12" text-anchor="middle">kv, score</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M59 72V84M166 72V84M273 72V84M380 72V84M59 84H380M220 84V98"/>
+<path class="f-muted" fill="#5c6d66" d="M216 94L220 102L224 94Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="104" width="416" height="48" rx="7"/>
+<text fill="currentColor" x="220" y="125" font-size="12" text-anchor="middle">Para cada dimensión: softmax sobre los R score</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="143" font-size="12" text-anchor="middle">suma ponderada de los R kv con esos pesos</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 152V160"/>
+<path class="f-muted" fill="#5c6d66" d="M216 160L220 168L224 160Z"/>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="60" y="170" width="320" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="193" font-size="12" text-anchor="middle">RMSNorm → RoPE → redondeo a FP4</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M220 206V214"/>
+<path class="f-muted" fill="#5c6d66" d="M216 214L220 222L224 214Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#5c6d66" x="90" y="224" width="260" height="36" rx="7"/>
+<text fill="currentColor" x="220" y="247" font-size="12" text-anchor="middle">Fila comprimida: 256 + 32 = 288 bytes</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="282" font-size="12" text-anchor="middle">Posición p → ranura p mod R;</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="298" font-size="12" text-anchor="middle">si (p + 1) mod R = 0, el grupo está completo</text>
 </svg><figcaption>Figura DS3-3　El compresor amasa un grupo de R posiciones en una fila. Los pesos de cada dimensión los da un softmax: es un promedio ponderado aprendido, no un promedio simple. En el dibujo R = 4 solo por claridad; el R real lo decide compress_ratios de cada capa.</figcaption></figure>
 <p>Con R = 1 no se amasa: cada posición tiene una fila comprimida, pero sigue siendo una proyección aparte (compressor.wkv más normalización), no una copia de la fila de la ventana <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10129-L10135" target="_blank" rel="noopener noreferrer">ds4_model.cu, líneas 10129–10135</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tools/dsv41/ref.py#L250-L251" target="_blank" rel="noopener noreferrer">ref.py, líneas 250–251</a>).</p>
 <p>No todas las capas guardan sus propias filas comprimidas. Solo las capas fuente que lista kv_source_layer_ids llevan compresor y son dueñas de la caché comprimida; las capas posteriores con la misma razón de compresión la leen directamente <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L2393-L2412" target="_blank" rel="noopener noreferrer">ds4_model.cu, líneas 2393–2412</a>). Al cargar hay una comprobación: antes de una capa con ratio mayor que 0 debe existir una capa fuente con la misma razón; si no, da error. Un comentario del código dice que en V4.1 la capa 20 es la primera con razón 1, y que las capas 20 a 39 leen sus filas comprimidas y sus claves de índice <span class="ev ev-report">Informe upstream</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9261-L9262" target="_blank" rel="noopener noreferrer">líneas 9261–9262</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9304-L9306" target="_blank" rel="noopener noreferrer">líneas 9304–9306</a>). La razón de cada capa fuente entre las primeras 20 la decide el ds4.txt del pack; el repositorio fijado no trae sus valores, así que esta página los escribe siempre como R. La página del clúster llama capas consumidoras YoCo a las que leen la caché de capas anteriores (<a href="#deepinfer/pd-kv/sec-4">DeepInfer, página 3</a>); el código de Strata también usa el nombre yoco.</p>
@@ -140,81 +148,85 @@
 <p>No todas las capas tienen indexer. Solo las capas que lista index_source_layer_ids puntúan las filas comprimidas y actualizan la lista; las demás reutilizan la última lista <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L9582-L9594" target="_blank" rel="noopener noreferrer">ds4_model.cu, líneas 9582–9594</a>). La clave de índice solo se genera en las capas fuente que tienen caché comprimida: es la fila comprimida (antes de rotar) tras otra proyección, normalización, rotación y redondeo a FP4 <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10156-L10170" target="_blank" rel="noopener noreferrer">líneas 10156–10170</a>).</p>
 <p>La lista de una capa fuente puede pasar antes por una preselección, llamada bloques candidatos. La capa que indica candidate_source_layer_id (en el banco de pruebas, la capa 20) agrupa primero las filas comprimidas en bloques de candidate_block_size filas, toma la puntuación más alta de cada bloque y elige los candidate_topk_blocks bloques mejor puntuados; el bloque que contiene la posición más reciente siempre entra <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_kernels.cu#L798-L812" target="_blank" rel="noopener noreferrer">ds4_kernels.cu, líneas 798–812</a>). Las capas de índice posteriores usan ese resultado y solo puntúan las posiciones de esos bloques; si el número de bloques no pasa de candidate_topk_blocks, la preselección no actúa <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L10188-L10215" target="_blank" rel="noopener noreferrer">ds4_model.cu, líneas 10188–10215</a>). En un banco de pruebas del conversor, el tamaño de bloque es 8 y el número de bloques es 2048 (<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/tests/terminal/test_pack_gguf_engram.py#L173-L177" target="_blank" rel="noopener noreferrer">test_pack_gguf_engram.py, líneas 173–177</a>). Si un pack real usara esos dos valores, la preselección no actuaría hasta que las filas comprimidas pasaran de 8 × 2048 = 16.384 <span class="ev ev-est">Estimación didáctica</span>.</p>
 <p>El gráfico interactivo de abajo te deja elegir una longitud de contexto y ver qué filas lee un token de decode en este paso: las 128 filas del anillo de ventana más como máximo 512 filas comprimidas elegidas por el indexer. El gráfico estático muestra el contexto por defecto, 8.192, en una capa con R = 1.</p>
-<div class="viz" data-viz="ds-attention-state"><figure class="fig"><svg viewBox="0 0 560 338" role="img" aria-label="Figura DS3-4: en una capa con R = 1 y contexto de 8.192, un token de decode lee 128 filas de ventana más 512 filas comprimidas elegidas, 640 en total; si el contexto crece, este número no cambia">
-<text class="f-muted" fill="#5c6d66" x="20" y="16" font-size="13" text-anchor="start">Ejemplo: capa con R = 1, contexto 8.192 (por defecto), el token 8.192 mira atrás</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="26" width="520" height="30" rx="3"/>
-<rect class="f-warn" fill="#9e5d24" x="39" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="44" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="49" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="50" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="51" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="55" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="57" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="64" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="66" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="68" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="83" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="97" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="129" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="134" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="143" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="185" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="207" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="222" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="223" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="234" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="237" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="242" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="279" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="294" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="302" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="309" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="315" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="318" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="319" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="341" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="342" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="353" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="440" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="443" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="485" y="26" width="2" height="30"/>
-<rect class="f-warn" fill="#9e5d24" x="505" y="26" width="2" height="30"/>
-<rect class="f-accent" fill="#136d5a" x="531" y="22" width="9" height="38" rx="1"/>
-<rect class="f-warn" fill="#9e5d24" x="20" y="76" width="10" height="14" rx="2"/>
-<text fill="currentColor" x="38" y="88" font-size="13" text-anchor="start">Líneas: las 512 filas que elige el indexer (posición solo ilustrativa)</text>
-<rect class="f-accent" fill="#136d5a" x="20" y="98" width="10" height="14" rx="2"/>
-<text fill="currentColor" x="38" y="110" font-size="13" text-anchor="start">Ventana: últimas 128 filas, salen del anillo sin selección</text>
-<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="20" y="120" width="10" height="14" rx="2"/>
-<text fill="currentColor" x="38" y="132" font-size="13" text-anchor="start">Resto de filas comprimidas: no se leen ahora, pero siempre se guardan</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M20 148H540"/>
-<text class="f-muted" fill="#5c6d66" x="20" y="168" font-size="13" text-anchor="start">Contexto</text>
-<text class="f-muted" fill="#5c6d66" x="150" y="168" font-size="13" text-anchor="start">Ventana</text>
-<text class="f-muted" fill="#5c6d66" x="240" y="168" font-size="13" text-anchor="start">Comprimidas n</text>
-<text class="f-muted" fill="#5c6d66" x="360" y="168" font-size="13" text-anchor="start">Elegidas</text>
-<text class="f-muted" fill="#5c6d66" x="450" y="168" font-size="13" text-anchor="start">Leídas</text>
-<text fill="currentColor" x="20" y="192" font-size="13" text-anchor="start">300</text>
-<text fill="currentColor" x="150" y="192" font-size="13" text-anchor="start">128</text>
-<text fill="currentColor" x="240" y="192" font-size="13" text-anchor="start">300</text>
-<text fill="currentColor" x="360" y="192" font-size="13" text-anchor="start">300 (todas)</text>
-<text fill="currentColor" x="450" y="192" font-size="13" text-anchor="start">428</text>
-<text fill="currentColor" x="20" y="214" font-size="13" text-anchor="start">8.192</text>
-<text fill="currentColor" x="150" y="214" font-size="13" text-anchor="start">128</text>
-<text fill="currentColor" x="240" y="214" font-size="13" text-anchor="start">8.192</text>
-<text fill="currentColor" x="360" y="214" font-size="13" text-anchor="start">512</text>
-<text fill="currentColor" x="450" y="214" font-size="13" text-anchor="start">640</text>
-<text fill="currentColor" x="20" y="236" font-size="13" text-anchor="start">262.144</text>
-<text fill="currentColor" x="150" y="236" font-size="13" text-anchor="start">128</text>
-<text fill="currentColor" x="240" y="236" font-size="13" text-anchor="start">262.144</text>
-<text fill="currentColor" x="360" y="236" font-size="13" text-anchor="start">512</text>
-<text fill="currentColor" x="450" y="236" font-size="13" text-anchor="start">640</text>
-<text fill="currentColor" x="20" y="258" font-size="13" text-anchor="start">1.048.576</text>
-<text fill="currentColor" x="150" y="258" font-size="13" text-anchor="start">128</text>
-<text fill="currentColor" x="240" y="258" font-size="13" text-anchor="start">1.048.576</text>
-<text fill="currentColor" x="360" y="258" font-size="13" text-anchor="start">512</text>
-<text fill="currentColor" x="450" y="258" font-size="13" text-anchor="start">640</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="288" font-size="13" text-anchor="start">En general: n = ⌊contexto ÷ R⌋; filas elegidas = min(512, n)</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="308" font-size="13" text-anchor="start">Lectura por capa y token: ≤ 128 + 512 = 640 filas</text>
-<text class="f-muted" fill="#5c6d66" x="20" y="328" font-size="13" text-anchor="start">Las filas leídas no crecen; las que puntúa el indexer (n) crecen con el contexto</text>
+<div class="viz" data-viz="ds-attention-state"><figure class="fig"><svg viewBox="0 0 440 404" role="img" aria-label="Figura DS3-4: en una capa con R = 1 y contexto de 8.192, un token de decode lee 128 filas de ventana más 512 filas comprimidas elegidas, 640 en total; si el contexto crece, este número no cambia">
+<text class="f-muted" fill="#5c6d66" x="12" y="16" font-size="12" text-anchor="start">Ejemplo: capa con R = 1, contexto 8.192 (por defecto),</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="32" font-size="12" text-anchor="start">el token 8.192 mira atrás</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="42" width="416" height="30" rx="3"/>
+<rect class="f-warn" fill="#9e5d24" x="27" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="31" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="35" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="36" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="37" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="40" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="42" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="47" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="49" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="50" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="62" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="74" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="99" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="103" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="110" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="144" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="162" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="174" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="174" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="183" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="186" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="190" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="219" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="231" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="238" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="243" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="248" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="250" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="251" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="269" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="270" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="278" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="348" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="350" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="384" y="42" width="2" height="30"/>
+<rect class="f-warn" fill="#9e5d24" x="400" y="42" width="2" height="30"/>
+<rect class="f-accent" fill="#136d5a" x="419" y="38" width="9" height="38" rx="1"/>
+<rect class="f-warn" fill="#9e5d24" x="12" y="92" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="104" font-size="12" text-anchor="start">Líneas: las 512 filas que elige el indexer</text>
+<text fill="currentColor" x="30" y="120" font-size="12" text-anchor="start">(posición solo ilustrativa)</text>
+<rect class="f-accent" fill="#136d5a" x="12" y="130" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="142" font-size="12" text-anchor="start">Ventana: últimas 128 filas, salen del anillo sin selección</text>
+<rect class="f-side" fill="#f0f3ed" stroke="#5c6d66" x="12" y="152" width="10" height="14" rx="2"/>
+<text fill="currentColor" x="30" y="164" font-size="12" text-anchor="start">Resto de filas comprimidas: no se leen</text>
+<text fill="currentColor" x="30" y="180" font-size="12" text-anchor="start">ahora, pero siempre se guardan</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1" d="M12 196H428"/>
+<text class="f-muted" fill="#5c6d66" x="12" y="216" font-size="12" text-anchor="start">Contexto</text>
+<text class="f-muted" fill="#5c6d66" x="92" y="216" font-size="12" text-anchor="start">Ventana</text>
+<text class="f-muted" fill="#5c6d66" x="168" y="216" font-size="12" text-anchor="start">Compr. n</text>
+<text class="f-muted" fill="#5c6d66" x="250" y="216" font-size="12" text-anchor="start">Elegidas</text>
+<text class="f-muted" fill="#5c6d66" x="350" y="216" font-size="12" text-anchor="start">Leídas</text>
+<text fill="currentColor" x="12" y="240" font-size="12" text-anchor="start">300</text>
+<text fill="currentColor" x="92" y="240" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="240" font-size="12" text-anchor="start">300</text>
+<text fill="currentColor" x="250" y="240" font-size="12" text-anchor="start">300 (todas)</text>
+<text fill="currentColor" x="350" y="240" font-size="12" text-anchor="start">428</text>
+<text fill="currentColor" x="12" y="262" font-size="12" text-anchor="start">8.192</text>
+<text fill="currentColor" x="92" y="262" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="262" font-size="12" text-anchor="start">8.192</text>
+<text fill="currentColor" x="250" y="262" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="262" font-size="12" text-anchor="start">640</text>
+<text fill="currentColor" x="12" y="284" font-size="12" text-anchor="start">262.144</text>
+<text fill="currentColor" x="92" y="284" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="284" font-size="12" text-anchor="start">262.144</text>
+<text fill="currentColor" x="250" y="284" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="284" font-size="12" text-anchor="start">640</text>
+<text fill="currentColor" x="12" y="306" font-size="12" text-anchor="start">1.048.576</text>
+<text fill="currentColor" x="92" y="306" font-size="12" text-anchor="start">128</text>
+<text fill="currentColor" x="168" y="306" font-size="12" text-anchor="start">1.048.576</text>
+<text fill="currentColor" x="250" y="306" font-size="12" text-anchor="start">512</text>
+<text fill="currentColor" x="350" y="306" font-size="12" text-anchor="start">640</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="336" font-size="12" text-anchor="start">En general: n = ⌊contexto ÷ R⌋; filas elegidas = min(512, n)</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="352" font-size="12" text-anchor="start">Lectura por capa y token: ≤ 128 + 512 = 640 filas</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="372" font-size="12" text-anchor="start">Las filas leídas no crecen; las que puntúa</text>
+<text class="f-muted" fill="#5c6d66" x="12" y="388" font-size="12" text-anchor="start">el indexer (n) crecen con el contexto</text>
 </svg><figcaption>Figura DS3-4　Cuántas filas lee un token de decode en una capa con R = 1: 128 de ventana más las min(512, n) elegidas. Con un contexto de 300 a 1.048.576, las filas leídas llegan como mucho a 640 y no crecen más; pero las filas comprimidas n sí crecen, y el indexer debe puntuarlas todas. Estimación didáctica: el número de filas sale de la fórmula de esta sección.</figcaption></figure></div>
 <p>Las filas que lee la atención tienen un tope; el recorrido del indexer no tiene un tope común. En el decode, las capas fuente y las capas de índice sin preselección puntúan las n filas en cada paso; las que usan preselección solo puntúan las posiciones de los bloques candidatos (véase arriba). Una capa que puntúa todo lee n × 80 bytes de claves de índice y hace n × 32 × 128 multiplicaciones-sumas (con el número de cabezas según el comentario) <span class="ev ev-est">Estimación didáctica</span>. n crece linealmente con el contexto. Para leer un prompt hay que puntuar cada posición una vez: en un prompt de L tokens, una capa de índice con R = 1 hace L(L + 1) ÷ 2 pares, y en general L²/(2R). Con L = 8.192 son unos 3,4 × 10⁷ pares, con L = 262.144 unos 3,4 × 10¹⁰ y con L = 1.048.576 unos 5,5 × 10¹¹ <span class="ev ev-est">Estimación didáctica</span>. El nivel de 262.144 coincide con el número de pares de la atención completa que se calculó en el capítulo 8 (unos 34.400 millones, <a href="#chapter/08/c08-complexity">Capítulo 8 «O(n²)»</a>). Lo que se ahorra es el costo de cada par: con atención completa de 64 cabezas × 512 dimensiones, cada par necesita 2 × 32.768 multiplicaciones-sumas (el producto escalar y la suma ponderada); el indexer solo hace 32 × 128 = 4.096 por par, sin softmax, así que sale unas 16 veces más barato en un cálculo grueso <span class="ev ev-est">Estimación didáctica</span>. La documentación lo dice igual: con prompts muy largos, la lectura es lenta «porque el trabajo del indexer crece con el cuadrado de la longitud», y la primera respuesta con 512K o 1M tarda muchos minutos <span class="ev ev-report">Informe upstream</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L98-L100" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md, líneas 98–100</a>).</p>
 <p class="bridge"><strong>Si estudiaste informática:</strong> es el esquema de dos etapas de los sistemas de búsqueda, «recuperar y reordenar»: la recuperación es barata pero recorre toda la base; el reordenamiento es caro y solo mira los candidatos. Aquí la recuperación es el indexer recorriendo todas las filas comprimidas, y el reordenamiento es la atención de verdad sobre 640 filas. La preselección por bloques candidatos es como añadir un índice grueso antes de la recuperación, que descarta de entrada más de la mitad por bloques.</p>
@@ -222,36 +234,36 @@
 
 <h2 id="sec-5">3.5 Qué deja un token: tres estados, dos formas de retroceder</h2>
 <p>Un token que recorre todas las capas deja cuatro cosas en el motor: el anillo de ventana de cada capa; el grupo incompleto del compresor; las filas comprimidas y las claves de índice de las capas fuente, que solo se añaden; y el historial de n-gramas de Engram, que pertenece a <a href="#deepseek/engram">la página de Engram</a>. <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.hpp#L8-L11" target="_blank" rel="noopener noreferrer">ds4_model.hpp, líneas 8–11</a>) Las tres primeras deciden si la conversación puede retroceder y si se puede aparcar.</p>
-<figure class="fig"><svg viewBox="0 0 560 300" role="img" aria-label="Figura DS3-5: los tres estados que deja un token: anillo de ventana que se sobrescribe, búfer de grupo que se sobrescribe y filas comprimidas que solo se añaden; se retrocede copiando o truncando">
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="20" y="14" width="166" height="150" rx="7"/>
-<text fill="currentColor" x="103" y="38" font-size="13" text-anchor="middle">Anillo de ventana</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="62" font-size="13" text-anchor="middle">128 filas × 528 B</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="82" font-size="13" text-anchor="middle">40 capas ≈ 2,58 MiB</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="102" font-size="13" text-anchor="middle">se sobrescribe</text>
-<text fill="currentColor" x="103" y="132" font-size="13" text-anchor="middle">Retroceso: copiar antes</text>
-<text class="f-muted" fill="#5c6d66" x="103" y="152" font-size="13" text-anchor="middle">como una pizarra</text>
-<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="197" y="14" width="166" height="150" rx="7"/>
-<text fill="currentColor" x="280" y="38" font-size="13" text-anchor="middle">Búfer de grupo</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="62" font-size="12" text-anchor="middle">grupo de R sin completar</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="82" font-size="13" text-anchor="middle">FP32: kv y score</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="102" font-size="13" text-anchor="middle">se vacía al completarse</text>
-<text fill="currentColor" x="280" y="132" font-size="13" text-anchor="middle">Retroceso: copiar antes</text>
-<text class="f-muted" fill="#5c6d66" x="280" y="152" font-size="13" text-anchor="middle">como una pizarra</text>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="374" y="14" width="166" height="150" rx="7"/>
-<text fill="currentColor" x="457" y="38" font-size="13" text-anchor="middle">Comprimidas + claves</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="62" font-size="12" text-anchor="middle">solo añadir, por posición</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="82" font-size="13" text-anchor="middle">368 B/posición (R = 1)</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="102" font-size="13" text-anchor="middle">crece con el contexto</text>
-<text fill="currentColor" x="457" y="132" font-size="13" text-anchor="middle">Retroceso: truncar</text>
-<text class="f-muted" fill="#5c6d66" x="457" y="152" font-size="13" text-anchor="middle">como un cuaderno</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M103 164V190M280 164V190M103 190H280M191 190V206"/>
-<path class="f-muted" fill="#5c6d66" d="M187 202L191 210L195 202Z"/>
-<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="20" y="212" width="342" height="36" rx="7"/>
-<text fill="currentColor" x="191" y="235" font-size="13" text-anchor="middle">Checkpoint: hasta 4; copia anillo y grupo</text>
-<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M191 248V262M457 164V262M191 262H457M324 262V270"/>
-<path class="f-muted" fill="#5c6d66" d="M320 268L324 276L328 268Z"/>
-<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="130" y="278" width="388" height="18" rx="5"/>
-<text fill="currentColor" x="324" y="292" font-size="13" text-anchor="middle">Aparcar la conversación: todo el estado y las comprimidas</text>
+<figure class="fig"><svg viewBox="0 0 440 314" role="img" aria-label="Figura DS3-5: los tres estados que deja un token: anillo de ventana que se sobrescribe, búfer de grupo que se sobrescribe y filas comprimidas que solo se añaden; se retrocede copiando o truncando">
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="12" y="14" width="136" height="150" rx="7"/>
+<text fill="currentColor" x="80" y="38" font-size="12" text-anchor="middle">Anillo de ventana</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="62" font-size="12" text-anchor="middle">128 filas × 528 B</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="82" font-size="12" text-anchor="middle">40 capas ≈ 2,58 MiB</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="102" font-size="12" text-anchor="middle">se sobrescribe</text>
+<text fill="currentColor" x="80" y="132" font-size="12" text-anchor="middle">Retroceso: copiar</text>
+<text class="f-muted" fill="#5c6d66" x="80" y="152" font-size="12" text-anchor="middle">antes; como pizarra</text>
+<rect class="f-box" fill="#ffffff" stroke="#dce3d9" x="152" y="14" width="136" height="150" rx="7"/>
+<text fill="currentColor" x="220" y="38" font-size="12" text-anchor="middle">Búfer de grupo</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="62" font-size="12" text-anchor="middle">grupo R incompleto</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="82" font-size="12" text-anchor="middle">FP32: kv y score</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="102" font-size="12" text-anchor="middle">vaciado al llenarse</text>
+<text fill="currentColor" x="220" y="132" font-size="12" text-anchor="middle">Retroceso: copiar</text>
+<text class="f-muted" fill="#5c6d66" x="220" y="152" font-size="12" text-anchor="middle">antes; como pizarra</text>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="292" y="14" width="136" height="150" rx="7"/>
+<text fill="currentColor" x="360" y="38" font-size="12" text-anchor="middle">Comprimidas + claves</text>
+<text class="f-muted" fill="#5c6d66" x="360" y="62" font-size="12" text-anchor="middle">solo añadir</text>
+<text class="f-muted" fill="#5c6d66" x="360" y="82" font-size="12" text-anchor="middle">368 B/pos. (R = 1)</text>
+<text class="f-muted" fill="#5c6d66" x="360" y="102" font-size="12" text-anchor="middle">crece con contexto</text>
+<text fill="currentColor" x="360" y="132" font-size="12" text-anchor="middle">Retroceso: truncar</text>
+<text class="f-muted" fill="#5c6d66" x="360" y="152" font-size="12" text-anchor="middle">como un cuaderno</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M80 164V190M220 164V190M80 190H220M150 190V204"/>
+<path class="f-muted" fill="#5c6d66" d="M146 200L150 208L154 200Z"/>
+<rect class="f-side" fill="#f0f3ed" stroke="#dce3d9" x="12" y="210" width="274" height="36" rx="7"/>
+<text fill="currentColor" x="149" y="233" font-size="12" text-anchor="middle">Checkpoint: máx. 4; copia anillo y grupo</text>
+<path class="f-line" fill="none" stroke="#5c6d66" stroke-width="1.4" d="M149 246V260M360 164V260M149 260H360M220 260V268"/>
+<path class="f-muted" fill="#5c6d66" d="M216 264L220 272L224 264Z"/>
+<rect class="f-soft" fill="#e5f1df" stroke="#dce3d9" x="12" y="274" width="416" height="28" rx="5"/>
+<text fill="currentColor" x="220" y="293" font-size="12" text-anchor="middle">Aparcar la conversación: todo el estado y las comprimidas</text>
 </svg><figcaption>Figura DS3-5　Tres estados, dos formas de retroceder. Los dos que se sobrescriben solo se pueden copiar de antemano (checkpoint); las filas comprimidas, que solo se añaden, retroceden truncando la posición. Aparcar la conversación escribe los tres, junto con los checkpoints. Los números son estimación didáctica; las fórmulas están en el texto.</figcaption></figure>
 <p>El capítulo 20 compara dos tipos de memoria con un cuaderno y una pizarra. Las filas comprimidas son el cuaderno: solo se escribe hacia delante, ordenado por posición, y para retroceder basta reducir «hasta qué página se ha escrito»; lo que sobra se reescribe después <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5691-L5692" target="_blank" rel="noopener noreferrer">ds4_model.cu, líneas 5691–5692</a>). El anillo y el búfer de grupo incompleto son la pizarra, y el estado GDN del capítulo 9 también es una pizarra así (<a href="#chapter/09/c09-rnn-state">Capítulo 9 «Dos tipos de memoria»</a>): lo nuevo tapa lo viejo, y para volver atrás hay que sacar una foto antes. El checkpoint es esa foto; solo copia esos dos elementos, y se guardan como máximo 4 a la vez: el final del prompt anterior, una posición antes de él, un ancla y un prefijo compartido <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L1104-L1110" target="_blank" rel="noopener noreferrer">líneas 1104–1110</a>, <a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5751-L5755" target="_blank" rel="noopener noreferrer">líneas 5751–5755</a>). Cada uno ocupa al menos 2,58 MiB <span class="ev ev-est">Estimación didáctica</span>. Por qué la pizarra necesita una foto está en <a href="#chapter/20/c20-copy-on-write">Capítulo 20 «Instantáneas y copia en escritura»</a>.</p>
 <p>Cuando otra petición desaloja la conversación del modelo, el motor hace un <dfn>aparcar la conversación</dfn>: escribe todo el estado. Incluye los tokens, el anillo y el búfer de grupo de cada capa, las filas comprimidas y las claves de índice de cada capa fuente (0 a pos ÷ R filas) y los checkpoints <span class="ev ev-code">Hecho de código</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/dsv41/ds4_model.cu#L5788-L5806" target="_blank" rel="noopener noreferrer">ds4_model.cu, líneas 5788–5806</a>). Hay una fórmula para el tamaño: la cabecera y 4 × pos bytes de tokens, más 16 + 67.584 bytes por capa y el búfer de grupo (2 × R × 512 × 4 bytes, solo en las capas fuente con R &gt; 1), más ⌊pos ÷ R⌋ × (288 + 80) bytes por capa fuente, más los checkpoints. La documentación da unos 17 MB por cada 6,5K tokens <span class="ev ev-report">Informe upstream</span>(<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/DEEPSEEK41.md#L116" target="_blank" rel="noopener noreferrer">DEEPSEEK41.md, línea 116</a>). Con la fórmula, una estimación gruesa: anillo 2,70 MB, hasta 4 checkpoints al menos 10,8 MB, una capa fuente con R = 1 6.500 × 368 ≈ 2,4 MB, en total unos 15,9 MB, y falta el búfer de grupo y las demás capas fuente; está en el mismo orden de magnitud que la documentación <span class="ev ev-est">Estimación didáctica</span>. Como falta la R de las primeras 20 capas, la cuenta solo puede llegar al orden de magnitud. El proceso de aparcar la conversación pertenece a <a href="#deepseek/draft">la página de DSpark y aparcar la conversación</a>.</p>
