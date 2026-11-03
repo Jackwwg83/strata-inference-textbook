@@ -1,5 +1,5 @@
 <div class="hook"><span class="eyebrow">先从一件怪事说起</span>
-<p>Strata 的 README 开头写着：在你自己的游戏电脑上，运行一个 1250 亿参数的 AI 模型。它对显卡的要求是 12 GB 显存起步。<span class="ev ev-report">上游报告</span>[S01]</p>
+<p>Strata v0.1.45 的 README 开头写着：在你自己的游戏电脑上，运行一个 1250 亿参数的 AI 模型。它对显卡的要求是 12 GB 显存起步。<span class="ev ev-report">上游报告</span><a href="https://github.com/Niko1221/Strata/blob/477ac13cbe8e582c20484871ce459d20d82df09d/README.md#L5-L6" target="_blank" rel="noopener noreferrer">README 第 5–6 行</a> 现在的文档换了说法：这类模型通常跑在有几百 GB 显存的服务器上，而你的显卡只有 12–24 GB。<span class="ev ev-report">上游报告</span>[S02]</p>
 <p>按常识算一下：1250 亿个参数，就算每个只占 1 字节，也要 125 GB。一张 12 GB 的显卡，怎么装得下？这本书要回答的就是这类问题：一个 AI 模型在你的电脑里，到底是怎样跑起来的。顺着这个问题，我们会把计算机组成、操作系统、算法、网络这些基础知识串起来。</p></div>
 <p class="tldr"><strong>一句话：</strong>聊天 AI 每次只生成一个 token。生成这一个 token，要动用显卡、内存、处理器和硬盘。Strata 的本事，是把这四样东西安排得刚好够用。</p>
 
@@ -68,7 +68,7 @@
 <text class="f-muted" fill="#5c6d66" x="10" y="206" font-size="11">读题快十几倍，因为提问里的 token 能一起算（第 16 章）</text>
 </svg><figcaption>图 1-3　先读题，后写答案。读题时整段提问一起算，所以单位时间处理的 token 多得多；写答案只能一个接一个。</figcaption></figure></div>
 <p>第一阶段叫 <dfn>prefill</dfn>（读题）：模型把你的整段提问一次读进去。提问里的 token 都是已知的，可以一起算。第二阶段叫 <dfn>decode</dfn>（写答案）：每个新 token 都依赖上一个，只能一个一个来。</p>
-<p>Strata 的上游测量显示，同一台机器上，读题每秒能处理约 1,299 个 token，写答案每秒约 93 个。<span class="ev ev-report">上游报告</span>[S03] 所以提问越长，等第一个字的时间越长。README 也提醒：一段对话的第一条消息要完整读一遍，大约每 30,000 个 token 需要 1 分钟；之后的追问只读新增部分，几秒就能开始回答。[S01]</p>
+<p>Strata 的上游测量显示，同一台机器上，读题每秒能处理约 1,299 个 token，写答案每秒约 93 个。<span class="ev ev-report">上游报告</span>[S03] 所以提问越长，等第一个字的时间越长。（这些速度是上游用引擎 0.1.26 测的，没有重测。）上游文档也提醒：长文是一大块一大块读的，速度在每秒 1,000 个 token 以上；一段对话的第一条消息要完整读一遍，之后的追问只读新增部分，几秒就能开始回答。<span class="ev ev-report">上游报告</span>[S02]</p>
 
 <h2 id="sec-3">1.3 模型、引擎、应用：三个常被混为一谈的角色</h2>
 <p>用一家餐厅来比喻，见图 1-4。Strata 自己的文档也用了厨房的比喻。[S02]</p>
@@ -97,9 +97,9 @@
 <text class="f-muted" fill="#5c6d66" x="134" y="270" font-size="12">Qwen3.8-Flash-Next</text>
 </svg><figcaption>图 1-4　三个角色各管一段。应用交给引擎的是一串 token 编号，引擎按模型的配方计算。</figcaption></figure>
 <ul>
-<li><strong>模型是配方。</strong>它是训练好的一大堆数字（叫“参数”或“权重”），加上一套固定的计算规则。Qwen3.8-Flash-Next 就是一个模型。</li>
-<li><strong>推理引擎是厨房和厨师。</strong>它负责在你的硬件上，按配方把计算做出来。Strata 就是一个推理引擎；llama.cpp、vLLM 也是。Strata 主要跑在 NVIDIA 和 AMD 显卡上（CUDA / HIP）；另有社区成员编写和测试的实验版，包括 Intel Arc（SYCL）和 Apple Silicon Mac（Metal）。[S01]</li>
-<li><strong>应用是前台。</strong>它接待你，把你的话整理好交给厨房，再把做好的菜端给你。Strata 自带的网页聊天界面、以及通过 API 接入的编程工具，都在这一层。[S01]</li>
+<li><strong>模型是配方。</strong>它是训练好的一大堆数字（叫“参数”或“权重”），加上一套固定的计算规则。Qwen3.8-Flash-Next 就是一个模型。Strata 现在还能运行 Qwen3.6-35B-A3B 和 DeepSeek-V4.1-Flash，后者用自己的引擎，见 <a href="#deepseek">DeepSeek 专栏</a>。本书跟的是 Qwen3.8-Flash-Next 这一条线。<span class="ev ev-report">上游报告</span>[S01]</li>
+<li><strong>推理引擎是厨房和厨师。</strong>它负责在你的硬件上，按配方把计算做出来。Strata 就是一个推理引擎；llama.cpp、vLLM 也是。Strata 的引擎有几种后端：NVIDIA 显卡（CUDA，含 Linux ARM64 的 DGX Spark）、AMD 显卡（HIP）、Intel Arc（SYCL，仅 Linux）和 Apple Silicon Mac（Metal）。README 的支持列表里，只有 AMD RX 6000 还标着 experimental。<span class="ev ev-report">上游报告</span>[S01] 引擎是单独的安装包：Windows 和 Linux 的安装包里不带引擎，应用第一次启动时按你的显卡下载（Mac 的包里带着小的 Metal 引擎）。<span class="ev ev-report">上游报告</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/INSTALL.md#L37-L48" target="_blank" rel="noopener noreferrer">INSTALL.md 第 37–48 行</a></li>
+<li><strong>应用是前台。</strong>它接待你，把你的话整理好交给厨房，再把做好的菜端给你。Strata 自带的桌面应用（聊天、文件和实时预览）、终端里的 <code>strata launch</code>，以及通过 API 接入的编程工具（Claude Code、Codex CLI 等），都在这一层。[S01]</li>
 </ul>
 <p>分清这三层，排查问题时就不会找错地方。引擎做得再快，模型也不会变聪明：配方不变，换个厨房，菜的味道应该一样。反过来，如果回答质量变差，原因可能在配方（换了模型或压缩得太狠），可能在厨房（引擎有 bug，算错了），也可能在前台（模板或协议把你的话传错了）。</p>
 
@@ -121,7 +121,7 @@
 <text class="f-muted" fill="#5c6d66" x="200" y="270" font-size="12" text-anchor="middle">地下仓库：最大，也最慢</text>
 <text class="f-text" fill="#182f2b" x="200" y="290" font-size="11" text-anchor="middle">一张 28.8 GB 的查找表，每个 token 只读其中几行</text>
 <text class="f-muted" fill="#5c6d66" x="200" y="334" font-size="12" text-anchor="middle">越往上：越快、越小、越贵</text>
-</svg><figcaption>图 1-5　Strata 怎样使用三层存储。容量是 README 给出的硬件要求，分工来自上游文档。[S01][S02]</figcaption></figure>
+</svg><figcaption>图 1-5　Strata 怎样使用三层存储。显存 12–24 GB 和分工来自上游文档；内存 32–64 GB 取自<a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/MODELS.md#L116-L139" target="_blank" rel="noopener noreferrer">MODELS.md 的配置说明</a>（64 GB 能跑全部尺寸；32 GB 只能靠低内存模式，一部分专家留在硬盘上）。[S02]</figcaption></figure>
 <p>显卡（GPU）算得最快，但显存最小，常见的游戏卡只有 12–24 GB。内存（RAM）大得多，但它离显卡远，数据要经过一条叫 PCIe 的总线才能送过去。硬盘（SSD）最大，也最慢。</p>
 <p>Strata 的分工是这样的 <span class="ev ev-report">上游报告</span>[S02]：</p>
 <ol>
@@ -157,7 +157,7 @@
 <p class="bridge"><strong>学过计算机的同学：</strong>这就是《计算机组成原理》里的存储层次，只是多了显存这一层。对 CPU 来说，显存是另一块设备上的内存，CPU 不能像访问自己的内存那样直接读写它，数据要经 PCIe 搬运（第 14 章讲 DMA）。</p>
 
 <h2 id="sec-5">1.5 算一笔账：24,576 和 480</h2>
-<p>README 说，这个模型由 24,576 个“专家”组成，每写一个词只需要其中 10 个。[S01] 为了好懂，这句话做了简化。我们去源码里核对一下。</p>
+<p>上游的 HOW_IT_WORKS 文档说，这个模型由 24,576 个“专家”组成，每写一个词只需要其中 10 个。[S02] 为了好懂，这句话做了简化。我们去源码里核对一下。</p>
 <p>源码定义的模型结构是 48 层、每层 512 个专家 <span class="ev ev-code">代码事实</span>[S04]；每个 token 在<strong>每一层</strong>选 10 个专家 <span class="ev ev-code">代码事实</span>[S13]。图 1-7 把这个结构画了出来。</p>
 <figure class="fig"><svg viewBox="0 0 400 236" role="img" aria-label="图 1-7：48 层，每层 512 个专家，每层选中 10 个，一个 token 一共做 480 次专家选择">
 <text class="f-muted" fill="#5c6d66" x="10" y="18" font-size="11">每一行是一层的 512 个专家；高亮的是这一层选中的 10 个</text>
@@ -248,12 +248,12 @@
 <p>本书的每个结论，都会标明它属于哪一类证据：</p>
 <ul>
 <li><span class="ev ev-code">代码事实</span>从固定版本的源码里直接读到的。例如“48 层”。</li>
-<li><span class="ev ev-report">上游报告</span>Strata 作者在文档里写的说明或测得的数据，本书没有自己复测。例如“RTX 5070 上每秒生成 94 个 token”。[S01]</li>
+<li><span class="ev ev-report">上游报告</span>Strata 作者在文档里写的说明或测得的数据，本书没有自己复测。例如“RTX 5070 上每秒生成 93 个 token”（Q2_0，4K 提问）。[S03]</li>
 <li><span class="ev ev-est">教学推演</span>本书用简化模型推算的结果，用来帮你建立直觉，不是实测。浏览器里的交互实验都属于这一类。</li>
 <li>基础原理：数学或计算机的通用规律，不依赖 Strata，不另加标签。</li>
 </ul>
 <p>为什么要这么讲究？因为 AI 圈里的数字特别容易被搬错地方。别人显卡上的速度、某个配置下的显存占用、一张宣传图里的简化说法，一旦脱离了条件，就可能误导人。学会问“这个数字是在什么条件下得到的”，比记住任何一个数字都有用。</p>
-<p>本书的源码阅读固定在 Strata v0.1.45 上，也就是 2026-10-16 的提交 477ac13…，页脚有它的完整编号。书里的事实在 2026-10-19 核对过。Strata 还在快速迭代，新版本里的数字可能已经不同。</p>
+<p>本书的源码阅读固定在 Strata v0.2.9 上，也就是 2026-10-31 的提交 c62d5e3a…，页脚有它的完整编号。书里的事实在 2026-11-02 核对过。本书的上一版固定在 v0.1.45（2026-10-16，提交 477ac13…）；个别句子仍引用那个版本，句中会写明。Strata 还在快速迭代，新版本里的数字可能已经不同。</p>
 <p><strong>动手：</strong>打开本章的交互实验「一个 token 的旅程」。它把图 1-1 的路径拆成可以逐步检查的环节，让你看清每一步的输入和输出。试着为其中一条箭头想一个“出错会怎样”的例子：比如模板换了，或者分词器和模型不配套。实验里的数字都是教学推演，不是你电脑上的实测。</p>
 
 <div class="recap"><h3>记住这三点</h3><ol>
@@ -262,12 +262,12 @@
 <li>每个数字都要问：它是代码事实、上游报告，还是推算？它的单位和范围是什么？</li>
 </ol></div>
 <div class="myth"><p><strong>常见误解：“模型文件多大，就要多大显存。”</strong></p>
-<p>不一定。文件大小只说明权重在硬盘上占多少字节。运行时，一部分权重可以留在内存里，由 CPU 计算或按需送到显卡；显存里还要放对话历史和临时数据。Strata 要下载约 70 GB 的模型，却能在 12 GB 显卡上运行。[S01]</p></div>
+<p>不一定。文件大小只说明权重在硬盘上占多少字节。运行时，一部分权重可以留在内存里，由 CPU 计算或按需送到显卡；显存里还要放对话历史和临时数据。Strata 的 Q2_0、IQ2_XS、IQ3_XXS 三个包要下载 66 到 76 GB，却能在 12 GB 显卡上运行。<span class="ev ev-report">上游报告</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/MODELS.md#L143" target="_blank" rel="noopener noreferrer">MODELS.md 第 143 行</a></p></div>
 
 <details class="deep"><summary>深入一层：给想读源码的人</summary>
 <h3>服务层和引擎的真实边界</h3>
 <p>在 Strata 的服务代码里，应用层交给引擎的不是 HTTP 请求，也不是原始 JSON，而是一串 token 编号：接口是 <code>Engine.generate(ids, max_new, sampling, cancel)</code>，返回一个逐个产出 token 编号的迭代器。<span class="ev ev-code">代码事实</span>[S15] 模板渲染、分词、协议解析都在这条边界之外。所以排查问题时，第一步是判断错误发生在边界的哪一侧。</p>
-<p>同一个文件开头还写着：服务一次只处理一个序列，请求按先来先服务（FIFO）排队。[S15] 这是默认行为。从 v0.1.39 起，在模型的配置文件里写 <code>"parallel": N</code>，引擎就能同时解码最多 N 段对话；不写或写 1，仍是一次一个。引擎的一个批处理窗口最多放 8 行，所以 N 默认最大是 8。v0.1.40 新增了可选的 <code>--batch-mtp</code>：打开后，只要显存够，超过 8 段对话也能轮流使用这些 8 行的窗口。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/477ac13cbe8e582c20484871ce459d20d82df09d/serve/server.py#L2676-L2697" target="_blank" rel="noopener noreferrer">server.py</a> 这说的是单卡。多卡层切分时，v0.1.43.1 起只要没写 <code>--batch-groups</code>，引擎就把对话分组、按流水线跑，并关掉 <code>--batch-mtp</code>，日志里会说明（第 25 章）。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/477ac13cbe8e582c20484871ce459d20d82df09d/src/program/generate.cpp#L5044-L5067" target="_blank" rel="noopener noreferrer">generate.cpp</a> v0.1.45 起，层切分时每组对话各用一个 8 行的窗口，所以总数可以超过 8，只要每组不超过 8 段。例如 4 张卡上的 16 段对话，分成 4 组，每组 4 段。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/program/generate.cpp#L6097-L6128" target="_blank" rel="noopener noreferrer">generate.cpp</a> README 提醒，在 12 GB 显卡上同时解码多段对话，会让每个回答都变慢。[S01] “支持 OpenAI 兼容 API”仍不等于“支持多人同时使用”，第 25 章会讨论把它扩展到多用户需要什么。</p>
+<p>同一个文件开头还写着：服务一次只处理一个序列，请求按先来先服务（FIFO）排队。[S15] 这是默认行为。从 v0.1.39 起，在模型的配置文件里写 <code>"parallel": N</code>，引擎就能同时解码最多 N 段对话；不写或写 1，仍是一次一个。引擎的一个批处理窗口，在 CUDA 的默认构建、SYCL 和 Metal 里最多放 8 行，所以 N 默认最大是 8。v0.1.40 新增了可选的 <code>--batch-mtp</code>：打开后，只要显存够，超过 8 段对话也能轮流使用这些 8 行的窗口。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/serve/server.py#L3300-L3324" target="_blank" rel="noopener noreferrer">server.py</a> v0.2.8 起，AMD（HIP）构建的窗口能放 16 行。构建选项 <code>STRATA_WINDOW_MAX_T</code> 取 auto、8 或 16，auto 在 HIP 上是 16，在 CUDA 上是 8。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/include/strata/kernels/window_limits.hpp#L1-L25" target="_blank" rel="noopener noreferrer">window_limits.hpp</a><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/CMakeLists.txt#L101-L102" target="_blank" rel="noopener noreferrer">CMakeLists.txt</a> 这些说的是单卡。多卡层切分时，v0.1.43.1 起只要没写 <code>--batch-groups</code>，引擎就把对话分组、按流水线跑，并关掉 <code>--batch-mtp</code>，日志里会说明（第 25 章）。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/program/generate.cpp#L6047-L6072" target="_blank" rel="noopener noreferrer">generate.cpp</a> v0.1.45 起，层切分时每组对话各用一个窗口，所以总数可以超过 8，只要每组不超过窗口的行数：8 行，HIP 构建是 16 行。例如 4 张卡上的 16 段对话，分成 4 组，每组 4 段；4 张 AMD 卡上的 64 段，可以分成 4 组，每组 16 段。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/src/program/generate.cpp#L6097-L6128" target="_blank" rel="noopener noreferrer">generate.cpp</a><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/BATCHING.md#L541-L543" target="_blank" rel="noopener noreferrer">BATCHING.md</a> 上游的并行文档在 RTX 5070 12 GB 上实测：同时发 2 或 4 个请求，总速度比一次一个低 11 到 24 %；但 4 个请求一起到、设 <code>"parallel": 4</code> 时，最后一个请求的首 token 等待从 11.2 秒降到 1.8 秒。槽位买到的是等待时间，不是速度，所以设置向导让 12 GB 显卡保持一次一个。<span class="ev ev-report">上游报告</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/docs/BATCHING.md#L644-L664" target="_blank" rel="noopener noreferrer">BATCHING.md 第 644–664 行</a> “支持 OpenAI 兼容 API”仍不等于“支持多人同时使用”，第 25 章会讨论把它扩展到多用户需要什么。</p>
 <h3>不同层次的“缓存”不能混为一谈</h3>
 <p>CPU 的硬件缓存保存最近访问过的内存行；Strata 的专家缓存把部分权重放进显存；KV 缓存保存对话历史的中间结果；会话缓存保存可以恢复的整段序列状态；查找表的行缓存保存从硬盘读到的表行。它们缓存的对象、生命周期和失效条件完全不同。“加个缓存”只有说清<strong>缓存什么、怎样确认还是同一个对象、何时失效</strong>，才有意义。</p>
 <h3>注释不等于事实</h3>

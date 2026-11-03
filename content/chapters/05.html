@@ -1,11 +1,11 @@
 <div class="hook"><span class="eyebrow">你可能注意到过</span>
 <p>显卡的宣传页上写着每秒几十万亿次运算。可同一张卡跑大模型，每秒只吐几十个 token。按运算次数算，生成一个 token 远用不了那么久。时间都去哪了？</p>
-<p>Strata 的源码注释里有一句很直白的结论：这个引擎“受限于启动开销，而不是带宽”。还有一句：GEMV 只占一个 token 的约 16%，所以把它优化几个百分点，“动不了总数”。<span class="ev ev-code">代码事实</span>[S13][S14] 这一章教你用三把尺子找出时间花在哪：带宽与延迟、roofline、Amdahl 定律。</p></div>
+<p>Strata 的源码注释里有一句很直白的结论：这个引擎“受限于启动开销，而不是带宽”。还有一句：GEMV 只占一个 token 的约 16%，所以把它优化几个百分点，“动不了总数”。<span class="ev ev-report">上游报告</span>[S13][S14] 这一章教你用三把尺子找出时间花在哪：带宽与延迟、roofline、Amdahl 定律。</p></div>
 <p class="tldr"><strong>一句话：</strong>一段计算的耗时，至少是“算的时间”和“搬数据的时间”里较长的那个；写答案时数据多、运算少，所以卡在搬运上。优化之前先量清楚各部分占多少：只占 16% 的部分，快到无穷也只能让整体快 19%。</p>
 
 <h2 id="sec-1">5.1 显卡那么快，为什么 token 还是慢</h2>
 <p>想象一位厨师，切菜快得惊人，可食材要从楼下仓库一趟趟搬上来。只要搬运跟不上，厨师刀再快也只能等着。显卡的计算单元就是这位厨师，显存、内存就是仓库，中间的通道每秒能搬多少字节，决定了厨师能不能忙起来。</p>
-<p>写答案时，每生成一个 token，都要把这一步用到的权重读一遍。第 10 章算过，光是专家数据就有约 664 MB。Strata 的源码里记着一个测量：在那台测试机上，从内存读专家的速度是 44.14 GB/s。<span class="ev ev-code">代码事实</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/include/strata/core/expert_source.hpp#L698-L705" target="_blank" rel="noopener noreferrer">expert_source.hpp</a> 假如每个 token 的 663.6 MB 专家都从内存读，光读就要 663.6 MB ÷ 44.14 GB/s ≈ 15 ms，每秒最多 66 个 token，还没开始算。<span class="ev ev-est">教学推演</span></p>
+<p>写答案时，每生成一个 token，都要把这一步用到的权重读一遍。第 10 章算过，光是专家数据就有约 664 MB。Strata 的源码里记着一个测量：在那台测试机上，从内存读专家的速度是 44.14 GB/s。<span class="ev ev-report">上游报告</span><a href="https://github.com/Niko1221/Strata/blob/c62d5e3a15b40ea51c96aae9e8d36928965f53ab/include/strata/core/expert_source.hpp#L698-L705" target="_blank" rel="noopener noreferrer">expert_source.hpp</a> 假如每个 token 的 663.6 MB 专家都从内存读，光读就要 663.6 MB ÷ 44.14 GB/s ≈ 15 ms，每秒最多 66 个 token，还没开始算。<span class="ev ev-est">教学推演</span></p>
 <p>这就是为什么 Strata 要把热门专家放进显存（显存读得快得多），并让 CPU 在内存里就地计算没命中的专家（CPU 算的这部分，数据不必过 PCIe；完整的分工见第 13 章）。上游实测的输出速度是每秒 93 个 token（RTX 5070 12 GB，Q2_0，4K 提问，引擎 0.1.26，开启投机解码），比上面那个“全从内存读”的上限还高。原因有二：大量专家根本不用从内存读；投机解码让一轮能产出不止一个 token（第 18 章）。<span class="ev ev-report">上游报告</span>[S03]</p>
 <aside class="primer" id="c05-bandwidth-latency">
 <h3>带宽与延迟</h3>
@@ -116,8 +116,8 @@
 <p>它和关键路径是一对搭档。Amdahl 说“占比小的部分优化了也没用”；关键路径说“不在最长链上的部分，优化了<strong>完全</strong>没用”，因为总时间由最长的那条链决定，别的链再快也只是早点开始等。所以性能分析的第一步永远是量出时间线：哪些步骤在关键路径上，各占多少。</p>
 <p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/阿姆达尔定律" target="_blank" rel="noopener noreferrer">维基百科：阿姆达尔定律</a> · <a href="https://zh.wikipedia.org/zh-cn/关键路径" target="_blank" rel="noopener noreferrer">维基百科：关键路径</a> · <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html" target="_blank" rel="noopener noreferrer">CUDA C++ 最佳实践指南（含 Amdahl 定律一节）</a></p>
 </aside>
-<p>Strata 的源码里有一个教科书式的例子。开发者发现另一个工具把每行的线程数从 32 改成 64 后带宽更高，看起来是“免费的提速”。实测却是：带专家时 64 线程每秒 11.75 个 token，32 线程 11.99 个；不带专家时 20.19 对 20.26，在噪声范围内一样，还略差。注释给出的解释正是 Amdahl：GEMV 只占一个 token 的约 16%，那里快几个百分点，动不了总数。<span class="ev ev-code">代码事实</span>[S14] 注意这些 token/s 是开发早期的测量，和今天的速度不能直接比。</p>
-<p>同一份源码还量出了真正的大头：启动开销。一个只处理 48 个数的小内核，测出来也要约 0.028 ms，因为这就是这台机器上启动一个内核的代价；一层 GDN 要启动约 19 个内核，一个 block 约 45 个。把一个 block 的 43 个节点录成 CUDA Graph 一次重放，耗时从 2.393 ms 降到 1.585 ms，快了 1.51 倍，省下的全是启动开销。<span class="ev ev-code">代码事实</span>[S13] 见图 5-5。这是 5.1 节专栏里“小包裹看延迟”的翻版：每次启动都是一个小包裹。</p>
+<p>Strata 的源码里有一个教科书式的例子。开发者发现另一个工具把每行的线程数从 32 改成 64 后带宽更高，看起来是“免费的提速”。实测却是：带专家时 64 线程每秒 11.75 个 token，32 线程 11.99 个；不带专家时 20.19 对 20.26，在噪声范围内一样，还略差。注释给出的解释正是 Amdahl：GEMV 只占一个 token 的约 16%，那里快几个百分点，动不了总数。<span class="ev ev-report">上游报告</span>[S14] 注意这些 token/s 是开发早期的测量，和今天的速度不能直接比。</p>
+<p>同一份源码还量出了真正的大头：启动开销。一个只处理 48 个数的小内核，测出来也要约 0.028 ms，因为这就是这台机器上启动一个内核的代价；一层 GDN 要启动约 19 个内核，一个 block 约 45 个。把一个 block 的 43 个节点录成 CUDA Graph 一次重放，耗时从 2.393 ms 降到 1.585 ms，快了 1.51 倍，省下的全是启动开销。<span class="ev ev-report">上游报告</span>[S13] 见图 5-5。这是 5.1 节专栏里“小包裹看延迟”的翻版：每次启动都是一个小包裹。</p>
 <figure class="fig"><svg viewBox="0 0 400 200" role="img" aria-label="图 5-5：同样的计算，直接逐个启动内核要 2.393 毫秒，录成 CUDA Graph 重放只要 1.585 毫秒">
 <text class="f-text" fill="#182f2b" x="10" y="20" font-size="13" font-weight="600">同样的工作，两种发射方式</text>
 <text class="f-text" fill="#182f2b" x="10" y="48" font-size="12">直接逐个启动内核</text>
