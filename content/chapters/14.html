@@ -1,5 +1,5 @@
 <div class="hook"><span class="eyebrow">你可能遇到过</span>
-<p>第一次启动 Strata，电脑会卡上一两分钟，鼠标都不太跟手。README 提前打了招呼：模型启动时，要把 35–55 GB 读进内存，并且把其中一部分“锁住”给显卡用；这期间电脑变慢甚至没有响应，是正常的，等着就好。<span class="ev ev-report">上游报告</span>[S01]</p>
+<p>第一次启动 Strata，电脑会卡上一两分钟，鼠标都不太跟手。上游的排错表提前打了招呼：模型启动时，要把 35–55 GB 读进内存，并且把其中一部分“锁住”给显卡用；这期间电脑变慢甚至没有响应，是正常的，等着就好。<span class="ev ev-report">上游报告</span>（<code>docs/TROUBLESHOOTING.md</code>）</p>
 <p>内存为什么要“锁”？锁了之后显卡能干什么、不锁又会出什么事？这一章从操作系统最基本的把戏讲起：你的程序看到的内存地址，其实是“假”的。</p></div>
 <p class="tldr"><strong>一句话：</strong>操作系统会随时挪动内存页，而显卡的 DMA 引擎只认开工时拿到的物理地址，所以要搬的内存必须先锁页；搬运是异步的，函数返回不等于数据已到，要靠完成信号；用两块缓冲区轮流“一边搬、一边算”，就能把搬运时间藏起来，前提是每次覆盖前都等到“用完”的信号。</p>
 
@@ -28,7 +28,7 @@
 <text class="f-muted" fill="#5c6d66" x="20" y="292" font-size="14">页 2 暂时不在内存，用到时才读回来</text>
 </svg><figcaption>图 14-1　页表把虚拟页翻译成物理页框。操作系统可以随时改这张表：把页挪到别的页框，或者换出到硬盘。</figcaption></figure>
 <p>这带来三个好处：程序之间互相隔离；内存不够时，不常用的页可以<dfn>换出</dfn>到硬盘，用到时再读回；物理内存可以零零碎碎地分配，程序却看到连续的地址。代价是：同一个虚拟页，此刻在哪个页框，操作系统说了算，而且随时会变。</p>
-<p>每次访问都查页表太慢，所以 CPU 里有一个专门缓存翻译结果的小部件，叫 <dfn>TLB</dfn>（快表）。它只装得下几千条。Strata 的源码算过一笔账：33.97 GB 的专家权重按 4 KB 一页切，是 830 万页，任何 TLB 都装不下，读每个专家都会不停地查表；换成 2 MB 的大页，只要一万六千多页。<span class="ev ev-code">代码事实</span>（<code>include/strata/core/pinned.hpp</code>）可惜在 Windows 上，普通用户账户默认没有使用大页的权限，所以普通页是常见情况，引擎会在启动时报告它拿到的是哪一种。<span class="ev ev-code">代码事实</span>（<code>pinned.hpp</code>）</p>
+<p>每次访问都查页表太慢，所以 CPU 里有一个专门缓存翻译结果的小部件，叫 <dfn>TLB</dfn>（快表）。它只装得下几千条。Strata 的源码算过一笔账：33.97 GB 的专家权重按 4 KB 一页切，是 830 万页，任何 TLB 都装不下，读每个专家都会不停地查表；换成 2 MB 的大页，只要一万六千多页。<span class="ev ev-report">上游报告</span>（<code>include/strata/core/pinned.hpp</code>）可惜在 Windows 上，普通用户账户默认没有使用大页的权限，所以普通页是常见情况，引擎会在启动时报告它拿到的是哪一种。<span class="ev ev-code">代码事实</span>（<code>pinned.hpp</code>）</p>
 <p class="further">延伸阅读：<a href="https://zh.wikipedia.org/zh-cn/虚拟内存" target="_blank" rel="noopener noreferrer">维基百科：虚拟内存</a> · <a href="https://zh.wikipedia.org/zh-cn/分頁" target="_blank" rel="noopener noreferrer">维基百科：分页</a> · <a href="https://zh.wikipedia.org/zh-cn/轉譯後備緩衝區" target="_blank" rel="noopener noreferrer">维基百科：转译后备缓冲器（TLB）</a> · <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/vm-paging.pdf" target="_blank" rel="noopener noreferrer">OSTEP 第 18 章：分页</a></p>
 </aside>
 <p class="bridge"><strong>学过操作系统的同学：</strong>这就是“页表 ＋ TLB ＋ 缺页中断”那一套。本章关心的是它的一个副作用：页表能随时改，而外部设备并不知道。</p>
@@ -56,7 +56,7 @@
 <text class="f-text" fill="#182f2b" x="10" y="236" font-size="14">锁页之后：系统保证搬完之前不挪这些页，</text>
 <text class="f-text" fill="#182f2b" x="10" y="258" font-size="14">DMA 照着开工时的号码读写才安全。</text>
 </svg><figcaption>图 14-2　DMA 不看页表。被它使用的内存一旦被操作系统挪动，它读到的就是别人的数据。</figcaption></figure></div>
-<p>Strata 的专家权重全部放在锁页内存里。<span class="ev ev-report">上游报告</span>[S02] 源码的说法更直白：这块“专家区”才是引擎真正的工作集，必须锁页，拷贝引擎才能跑满带宽。<span class="ev ev-code">代码事实</span>（<code>pinned.hpp</code>）具体做法是：先保留一大块内存，在碰它任何一页之前，就把整块注册成 CUDA 的锁页内存，并且映射到显卡的地址空间；整块注册失败时，就一段一段地注册，剩下的部分改用操作系统的“常驻”锁定，至少保证它不被换出。v0.1.40 起，如果这块内存用的是大页，就省掉这一步：大页本来就不会被换出。<span class="ev ev-code">代码事实</span>（<code>src/core/pinned.cu</code>）上游的排错表也写着：在 Windows 上，日志里出现整块注册“内存不足”是正常的，引擎会改为按层分段锁定。</p>
+<p>Strata 的专家权重全部放在锁页内存里。<span class="ev ev-report">上游报告</span>[S02] 源码的说法更直白：这块“专家区”才是引擎真正的工作集，必须锁页，拷贝引擎才能跑满带宽。<span class="ev ev-code">代码事实</span>（<code>pinned.hpp</code>）具体做法是：先保留一大块内存，在碰它任何一页之前，就把整块注册成 CUDA 的锁页内存，并且映射到显卡的地址空间；整块注册失败时，就一段一段地注册，剩下的部分改用操作系统的“常驻”锁定，至少保证它不被换出。v0.1.40 起，如果这块内存用的是大页，就省掉这一步“常驻”锁定：大页本来就不会被换出。<span class="ev ev-code">代码事实</span>（<code>src/core/pinned.cu</code>）注册也不是总有益。在 Windows 的 Strix Halo（gfx1151）集成显卡上，v0.2.1.2 起引擎默认不注册专家区，只用“常驻”锁定保住它。<span class="ev ev-code">代码事实</span>（<code>src/core/arch_defaults.cpp</code>）原因是注册整块专家区会占光全部空闲显存，缓存一个槽位也分不到，引擎起不来。<span class="ev ev-report">上游报告</span>（<code>arch_defaults.cpp</code> 注释）Radeon 780M 则是另一种情形：已注册的内存会被内核迁移页面弄失效，每次失效都要赶走进程的 GPU 队列，在部分固件上可能让显卡复位。v0.2.1 起可以用 <code>STRATA_ARENA_PIN_GIB=none</code> 手动改成不注册，但它不是默认值：上游测得它慢 1% 到 4%，也没能根治复位。<span class="ev ev-report">上游报告</span>（<code>include/strata/core/arch_defaults.hpp</code> 注释）上游的排错表也写着：在 Windows 上，日志里出现整块注册“内存不足”是正常的，引擎会改为按层分段锁定。</p>
 <p>锁页之后，数据有三条路可以上显卡，见图 14-3。</p>
 <figure class="fig"><svg viewBox="0 0 400 300" role="img" aria-label="图 14-3：三条上显卡的路。普通内存要先由 CPU 拷进中转区再 DMA；锁页内存可直接 DMA；映射到显卡地址空间的锁页内存可以被 GPU 内核经 PCIe 直接读">
 <text class="f-text" fill="#182f2b" x="20" y="22" font-size="15" font-weight="600">① 普通内存</text>
@@ -110,6 +110,7 @@
 <li><strong>验证窗口的提交</strong>可以不等计算图跑完就返回，让下一步的草稿生成同时进行；但任何从别的流或主机去读写会话状态的代码（新请求、存档、快照等），都必须先调用 <code>wait_commit()</code>。<span class="ev ev-code">代码事实</span>[S08]</li>
 <li><strong>每层的主循环</strong>不调用“等整条流做完”的函数，而是查询一个事件。源码注释还记下一个坑：每个 token 释放一次锁页缓冲区，而释放锁页内存会隐式地让整个设备同步，于是每个 token 结尾都多了一次全设备等待。修法是在会话开始时一次分配好、反复使用。<span class="ev ev-code">代码事实</span>（<code>include/strata/core/session.hpp</code>）</li>
 </ul>
+<p>读硬盘上的专家，也是同一个思路。在 Linux 上，专家直接从 GGUF 文件里读时，引擎默认开着“预读”：I/O 线程用整块读取，提前把本层缺的专家，和路由预测的后几层专家，读进页缓存；三个张量的页都在页缓存里的专家，直接从映射算，不再拷贝。<span class="ev ev-code">代码事实</span>（<code>src/program/generate.cpp</code>）预读还带一道“解码闸门”：每 16 个解码窗口评估一次，页缓存余量低于 0.55 就关，高于 0.65 再开。<span class="ev ev-report">上游报告</span>（<code>docs/DETAILS.md</code>）这套默认从 v0.2.0-beta 起；专家放在 experts.bin 包里时，v0.2.1 起也这样，但页缓存装不下至少 55% 的专家就不开。<span class="ev ev-report">上游报告</span>（<code>docs/DETAILS.md</code>）Windows 和 macOS 不变；<code>STRATA_IO_PREFETCH=0</code> 可以关掉预读。</p>
 <p>第 11 章的硬盘读取也是同一个思路：token 一确定就提交 16 个读请求，到第 1 层要用之前才取结果。</p>
 
 <h2 id="sec-4">14.4 双缓冲：一边搬，一边算</h2>
@@ -145,12 +146,13 @@
 <text class="f-muted" fill="#5c6d66" x="18" y="70" font-size="14">可以复用</text>
 <text class="f-text" fill="#182f2b" x="200" y="264" font-size="14" text-anchor="middle">没有“用完”事件，就不能回到空闲</text>
 </svg><figcaption>图 14-6　一块缓冲区的一生。两个事件把四个状态串起来；少了任何一个，就可能读到没搬完的数据，或者覆盖还没用完的数据。</figcaption></figure>
-<p>Strata 读长提示词时，就用了这样的环形缓冲区：不在显存里的专家，经一组锁页的环形槽位、在单独的拷贝流上送上显卡。<span class="ev ev-code">代码事实</span>[S12] 每个槽位配两个事件，一个表示“拷完了”，一个表示“用完了”。<span class="ev ev-code">代码事实</span>（<code>prefill.cpp</code>）前面提到的辅助复制线程也是同一套规矩：第 j 个任务写进第 j mod 16 块锁页缓冲区（默认 16 块），而且要先等第 j − 16 个任务从这块缓冲区发出的 DMA 完成，才能往里写。<span class="ev ev-code">代码事实</span>（<code>prefill.cpp</code>）</p>
+<p>Strata 读长提示词时，就用了这样的环形缓冲区：不在显存里的专家，经一组锁页的环形槽位、在单独的拷贝流上送上显卡。<span class="ev ev-code">代码事实</span>[S12] 每个槽位配两个事件，一个表示“拷完了”，一个表示“用完了”。<span class="ev ev-code">代码事实</span>（<code>prefill.cpp</code>）前面提到的辅助复制线程也是同一套规矩：按默认的 16 块算，第 j 个任务写进第 j mod 16 块锁页缓冲区，而且要先等第 j − 16 个任务从这块缓冲区发出的 DMA 完成，才能往里写。<span class="ev ev-code">代码事实</span>（<code>prefill.cpp</code>）如果专家要从文件里读，页缓存里的页又不到九成，引擎就把块数改成线程数的 4 倍。<span class="ev ev-code">代码事实</span>（<code>prefill.cpp</code>）</p>
 <p>环有多大也有讲究。源码注释记录了一次测量（Q2_0，每块 8192 个 token）：环形槽位从 96 个加到 384 个，读提示词从每秒 1,153 个 token 提高到 1,294 个，因为下一层的专家能在本层注意力计算期间就送到。而当大量专家要靠主机复制时，大环反而更慢，因为瓶颈是主机复制，多出来的槽位只是占了缓存的位置。<span class="ev ev-report">上游报告</span>（<code>prefill.cpp</code> 注释）多 GPU 分层时，每一级还有两块锁页的交接缓冲区：下一级读第 c 块时，这一级已经在处理第 c ＋ 1 块。<span class="ev ev-code">代码事实</span>[S12] 这就是双缓冲。</p>
 
 <h2 id="sec-5">14.5 锁页不是免费的</h2>
 <p>既然锁页这么好，把内存全锁上行不行？不行。锁住的页，操作系统就不能再挪、不能换出，也不能在内存紧张时收回。锁得越多，留给系统、其他程序和文件缓存的弹性就越小。[R02]</p>
-<p>Strata 在这件事上很小心。低内存的“驻留”模式会给系统留出 4 GiB 空闲内存。<span class="ev ev-report">上游报告</span>[S03] 如果用 <code>--resident-budget-gib</code> 给它设了内存预算，在 Windows 上这个预算还要受“可提交内存”（commit limit）的限制，超出时引擎会把预算压低，并给出提示。<span class="ev ev-code">代码事实</span>（<code>src/core/expert_source.cpp</code>） 在 Windows 上，显卡映射的锁页内存还要计入一块“共享显存”预算：源码记录过一台 63 GB 的电脑，一段段锁到驱动拒绝为止，锁了 28 GiB，结果那块预算被占满，之后每一次显存分配都报“内存不足”。为此引擎提供了可选的上限设置；但它不是默认值，因为一台 64 GB 的电脑实测多锁了也没事，而设上限会让读提示词慢约 20%。<span class="ev ev-code">代码事实</span>（<code>pinned.cu</code>）这种取舍没有放之四海而皆准的答案，只能按机器量。</p>
+<p>Strata 在这件事上很小心。低内存的“驻留”模式会给系统留出 4 GiB 空闲内存。<span class="ev ev-report">上游报告</span>[S03] 如果用 <code>--resident-budget-gib</code> 给它设了内存预算，在 Windows 上这个预算还要受“可提交内存”（commit limit）的限制，超出时引擎会把预算压低，并给出提示。<span class="ev ev-code">代码事实</span>（<code>src/core/expert_source.cpp</code>） 在 Windows 上，显卡映射的锁页内存还要计入一块“共享显存”预算：源码记录过一台 63 GB 的电脑，一段段锁到驱动拒绝为止，锁了 28 GiB，结果那块预算被占满，之后每一次显存分配都报“内存不足”。为此引擎提供了可选的上限设置；但它不是默认值，因为一台 64 GB 的电脑实测多锁了也没事，而设上限会让读提示词慢约 20%。<span class="ev ev-report">上游报告</span>（<code>pinned.cu</code>）这种取舍没有放之四海而皆准的答案，只能按机器量。</p>
+<p>锁页之间还会互相抢额度。v0.2.7 开发期间，一条内存策略曾只看“表加 8 GiB 余量”，就把 26.8 GiB 的逐层 n-gram 表（PLE 表）锁进内存。在一台 64 GB 的 Windows 电脑上，引擎随后要为约 51 GiB 的专家区（IQ3_S）锁页，可锁的内存已被这张表占去，加载专家时报错 1453（ERROR_WORKING_SET_QUOTA）。现在的规则要求内存同时装得下这张表、还要填的专家区和余量，任何一项未知就不锁。这个错误在 v0.2.7 发布前就修了。<span class="ev ev-report">上游报告</span>（<code>include/strata/core/ple_residency.hpp</code> 注释、<code>src/core/ple_residency_test.cpp</code>）</p>
 <p>还有一个有趣的对照：长上下文的 KV 页缓存（第 12 章提过），完整的 KV 数据放在锁页、并映射给显卡的内存里，显存里只放一部分页，再用一张“页号 → 显存槽位”的表记录谁在显存。<span class="ev ev-code">代码事实</span>（<code>include/strata/kernels/kv_stream.hpp</code>）这几乎就是一套迷你的虚拟内存：页表、缺页、替换，全由 GPU 自己完成。</p>
 
 <h2 id="sec-6">14.6 动手：把竞态变成必现</h2>
