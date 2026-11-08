@@ -1,5 +1,5 @@
 /* Pure numbers behind the DeepInfer wide-ep widgets. Teaching model, not DeepInfer code.
-   Rounding of redundant experts: deepinfer/model_executor/eplb/__init__.py resolve_num_extra_experts (pin 774ce244).
+   Rounding of redundant experts: deepinfer/model_executor/eplb/__init__.py resolve_num_extra_experts (pin a679bb86).
    Replication and placement: a single-layer port of deepinfer/model_executor/eplb/policy.py. */
 (function (root) {
   'use strict';

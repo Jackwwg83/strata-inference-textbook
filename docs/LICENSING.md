@@ -10,6 +10,6 @@
 
 ## DeepInfer 专栏
 
-专栏（`content/columns/deepinfer/`）介绍 DeepSeek 的 DeepInfer（`deepseek-ai/DeepInfer`，锁定提交 `774ce244b87cc0eb8d4b94ab9f5de2ab22049f01`），上游许可为 Apache License 2.0。专栏只用自写解释、短标识符引用和指向锁定提交的链接，没有复制上游源码文件、文档全文或图片；上游的性能图在页面里按读图结果重画并注明出处。
+专栏（`content/columns/deepinfer/`）介绍 DeepSeek 的 DeepInfer（`deepseek-ai/DeepInfer`，锁定提交 `a679bb86ce36e883a98a97733492b686e5b9a08e`），上游许可为 Apache License 2.0。专栏只用自写解释、短标识符引用和指向锁定提交的链接，没有复制上游源码文件、文档全文或图片；上游的性能图在页面里按读图结果重画并注明出处。
 
 两个交互图用 JavaScript 重写了上游算法的简化教学版：`src/viz/di-wide-ep.math.js` 移植 `deepinfer/model_executor/eplb/policy.py` 的单层复制与摆放策略，`src/viz/di-spec-sched.math.js` 复现 `csrc/engine/mtp_varlen.hpp` 中 `MTPVarlen::schedule` 的预算搜索。文件头注明了出处。它们是教学模型，不是 DeepInfer 代码。专栏不是 DeepSeek 的官方材料，也不代表 DeepSeek 的背书。
