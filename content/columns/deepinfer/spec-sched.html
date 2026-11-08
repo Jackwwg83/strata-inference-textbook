@@ -132,7 +132,7 @@
 <div class="callout vs"><strong>对照 Strata：</strong>Strata 的 MTP 窗口长度由启动参数 <code>--spec</code> 固定；只有设了 <code>--spec-min-p</code>，草稿的把握低于门槛时才不再往窗口里加。按实测耗时比“每毫秒期望提交几个 token”的 DraftPolicy，管的是提示词查找草稿（<a href="#chapter/19">第 19 章</a> 19.5 节）。这些都是为一个用户的一个窗口做决定。DeepInfer 要决定的是一整批几十个请求一共验几个、谁多谁少，门槛也不是固定的，而是由“多验一个值不值”当场算出来；比较的单位从“一个窗口”变成了“一张 CUDA Graph 的一次重放”。</div>
 
 <h2 id="sec-3">4.3 上游的账：少验三成，吞吐多几个百分点</h2>
-<p>问答给了一张表，对比固定验 5 个和按置信度变长验证。条件是 EP64/DP64，也就是 64 张卡做专家并行，注意力按<dfn>数据并行</dfn>（DP）分成 64 份；表里的吞吐是用这套配置的基准数据推算的估计值，不是线上实测。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/a679bb86ce36e883a98a97733492b686e5b9a08e/doc/inference_deployment_qa.md#L305-L316" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>）为什么要铺满 64 张卡，见<a href="#deepinfer/wide-ep">“宽专家并行”一页</a>。</p>
+<p>问答给了一张表，对比固定验 5 个和按置信度变长验证。条件是 EP64/DP64，也就是 64 张卡做专家并行，注意力按<dfn>数据并行</dfn>（DP）分成 64 份；数据集是 Open-PerfectBlend（<a href="https://github.com/deepseek-ai/DeepInfer/blob/a679bb86ce36e883a98a97733492b686e5b9a08e/doc/inference_deployment_qa.md?plain=1#L307" target="_blank" rel="noopener noreferrer">问答第 307 行</a>）；表里的吞吐是用这套配置的基准数据推算的估计值，不是线上实测。<span class="ev ev-report">上游报告</span>（<a href="https://github.com/deepseek-ai/DeepInfer/blob/a679bb86ce36e883a98a97733492b686e5b9a08e/doc/inference_deployment_qa.md#L305-L316" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>）为什么要铺满 64 张卡，见<a href="#deepinfer/wide-ep">“宽专家并行”一页</a>。</p>
 <figure class="fig"><svg viewBox="0 0 400 334" role="img" aria-label="图 D4-3：上游估算的变长验证收益。每卡 16 条时慢 1.5%，60 条时快 5.4%，96 条时快 11.0%">
 <text class="f-text" fill="#182f2b" x="10" y="18" font-size="13" font-weight="600">按置信度验证比固定验 5 个，吞吐变化</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="36" font-size="12">EP64/DP64，上游用基准数据推算；左列是每卡并发请求数</text>
@@ -162,7 +162,7 @@
 <text class="f-text" fill="#182f2b" x="356" y="286" font-size="12">+11%</text>
 <text class="f-muted" fill="#5c6d66" x="70" y="306" font-size="12">验 3.24 个，接受 3.15（固定：5 个，3.30）</text>
 <text class="f-muted" fill="#5c6d66" x="10" y="328" font-size="12">条长：1 个百分点 = 20 像素；验、接受：每请求每步平均长度</text>
-</svg><figcaption>图 D4-3　并发越高，按置信度验证越赚：每卡 96 条时吞吐多 11%；16 条时反而慢 1.5%。每步验的草稿少了 11%–35%，平均接受长度只降了 0.04–0.17。数据来自上游问答。</figcaption></figure>
+</svg><figcaption>图 D4-3　并发越高，按置信度验证越赚：每卡 96 条时吞吐多 11%；16 条时反而慢 1.5%。每步验的草稿少了 11%–35%，平均接受长度只降了 0.04–0.17。数据来自上游问答，数据集是 Open-PerfectBlend。</figcaption></figure>
 <p>问答的总结是：验证的草稿少了约 30%（5.00 降到 3.2–4.4），平均接受长度基本不变（3.29 对 3.20），在每卡约 60 条的生产工作点，吞吐多 4%–7%。<span class="ev ev-report">上游报告</span> 问答没写明“接受长度”里含不含主模型自己的那 1 个 token，本页不替它解释。</p>
 <p>为什么并发低时不赚？一个合理的解释是：批小的时候，解码卡在搬权重上，多验几个 token 几乎不加时间，砍掉草稿省不下什么，却会丢掉一点接受长度（16 条时从 3.32 降到 3.24）。批大了，前向开始受算力限制，每个多验的 token 都实打实地花时间，砍掉低概率草稿才划算。<span class="ev ev-est">教学推演</span> “卡在搬运还是卡在计算”的判断方法，见<a href="#chapter/05/c05-roofline">第 5 章「roofline」</a>。上面的模拟器里，把 N 和 t₁ 一起调大，能看到同样的方向。</p>
 <p>模拟器和真实系统还差一件事：模拟器里的置信度就是真实概率，按它分名额永远不亏。真实系统里，表里 16 条/卡那一行是 −1.5%。可能的原因之一是置信度估错，砍掉了本来能被接受的草稿；另外几种也说得通：耗时模型有误差，定总数用的是更早一轮的置信度，总数还要向上补到一张图的大小。<span class="ev ev-est">教学推演</span> 何况这张表本身也是用基准数据推算的估计。（<a href="https://github.com/deepseek-ai/DeepInfer/blob/a679bb86ce36e883a98a97733492b686e5b9a08e/doc/inference_deployment_qa.md#L307" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md</a>）</p>
