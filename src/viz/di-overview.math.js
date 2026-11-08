@@ -2,7 +2,7 @@
    inference system, whether each one ships in the open-source release, and the order a
    request visits them. Teaching model, not DeepInfer code.
    Blocks and arrows follow doc/images/architecture_overview.png and doc/inference_deployment_qa.md
-   at DeepInfer 774ce244; release status follows README.md L38-L42 and the repository tree. */
+   at DeepInfer a679bb86; release status follows README.md L38-L42 and the repository tree. */
 (function (root) {
   'use strict';
   // open: the code is in this release. partial: the engine code is in, the glue that runs it as a

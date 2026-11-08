@@ -1,5 +1,5 @@
 /* Pure numbers behind the DeepInfer page "pd-kv" (P/D split and the KV cache store).
-   Teaching model, not DeepInfer code. Constants come from DeepInfer at commit 774ce244:
+   Teaching model, not DeepInfer code. Constants come from DeepInfer at commit a679bb86:
    - 128-token blocks: deepinfer/model_executor/model_metadata_utils.py (resolved_tokens_per_block)
      and deepinfer/worker/cache_engine.py (KVSTORE_GRAIN).
    - backtracking = max(raw, nextn + 1), nextn defaults to 5: deepinfer/environ.py.
