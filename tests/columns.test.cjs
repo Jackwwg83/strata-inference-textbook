@@ -71,6 +71,15 @@ test('the built site routes, lists and prints the column pages', () => {
     }
   }
   assert.ok(!/href="#deepinfer\//.test(full), 'print book must rewrite in-app column links');
+  // Every in-page link of the print book must land on an id in the print book: chapter and column
+  // sections get prefixed ids there, so #chapter/NN/sec-K and #col/page/sec-K must be rewritten to match.
+  for (const f of ['dist/fullbook.html', 'dist/en/fullbook.html', 'dist/ar/fullbook.html']) {
+    if (!fs.existsSync(path.join(root, f))) continue;
+    const s = fs.readFileSync(path.join(root, f), 'utf8');
+    const ids = new Set([...s.matchAll(/\sid="([^"]+)"/g)].map(m => m[1]));
+    const broken = [...new Set([...s.matchAll(/href="#([^"]+)"/g)].map(m => m[1]).filter(h => !ids.has(h)))];
+    assert.deepEqual(broken, [], f + ' has in-page links without a target');
+  }
   const app = fs.readFileSync(path.join(root, 'src/app.js'), 'utf8');
   for (const f of ['function columnPage(', 'function bindColumn(', 'columnSide(current)', 'columnCards()', 'colHits']) assert.ok(app.includes(f), f);
 });
