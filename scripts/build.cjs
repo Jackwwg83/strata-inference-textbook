@@ -160,11 +160,20 @@ function staticPage(Book, lang) {
   const U = strings(lang);
   const sourcesByID = new Map(Book.sources.map(s => [s.id, s]));
   const refs = s => s.replace(/\[((?:S|R)\d{2})\]/g, (m, id) => sourcesByID.has(id) ? `<a class="ref" href="${esc(sourcesByID.get(id).url)}">[${id}]</a>` : m);
-  const wrap = s => refs(s).replace(/<table>/g, '<div class="table-wrap"><table>').replace(/<\/table>/g, '</table></div>').replace(/<details class="deep">/g, '<details class="deep" open>').replace(/href="#chapter\/(\d{2})\/([a-z0-9-]+)"/g, 'href="#$2"').replace(/href="#chapter\/(\d{2})"/g, 'href="#chapter-$1"');
+  const wrap = s => printLinks(refs(s)).replace(/<table>/g, '<div class="table-wrap"><table>').replace(/<\/table>/g, '</table></div>').replace(/<details class="deep">/g, '<details class="deep" open>');
+  // In-app links become in-page anchors. Sections get prefixed ids in print (cNN-sec-K, <prefix>-<page>-sec-K),
+  // a column page becomes <column>-<page>, and a column's home becomes its first page.
+  const colOf = new Map(Book.columns.map(c => [c.id, c]));
+  const printLinks = s => s.replace(/href="#([a-z]+)\/([a-z0-9-]+)(?:\/([a-z0-9-]+))?"/g, (m, c, p, a) => {
+    const sec = a && /^sec-\d+$/.test(a);
+    if (c === 'chapter') return a ? `href="#${sec ? `c${p}-${a}` : a}"` : `href="#chapter-${p}"`;
+    const col = colOf.get(c);
+    if (!col) return m;
+    return a ? `href="#${sec ? `${col.prefix}-${p}-${a}` : a}"` : `href="#${c}-${p}"`;
+  }).replace(/href="#([a-z]+)"/g, (m, c) => (colOf.has(c) && colOf.get(c).pages.length ? `href="#${c}-${colOf.get(c).pages[0].id}"` : m));
   const toc = Book.chapters.map(c => `<li><a href="#chapter-${c.id}">${c.id} · ${esc(c.title)}</a></li>`).join('');
   const chapters = Book.chapters.map(c => `<section class="chapter-print" id="chapter-${c.id}"><p class="metadata">CHAPTER ${c.id} · ${esc(c.part)} · ${esc(c.level)}</p><h1>${esc(c.title)}</h1><p>${esc(c.deck)}</p><p class="metadata">${U.sCourses}${esc(c.courses.join(' / '))}<br>${U.fullPrereq}${esc(c.prereq)}</p><h3>${U.sGoals}</h3><ul>${c.goals.map(g => `<li>${esc(g)}</li>`).join('')}</ul>${wrap(c.html).replace(/id="sec-(\d+)"/g, `id="c${c.id}-sec-$1"`)}<h2>${U.sQuiz}</h2>${c.quiz.map((q, i) => `<h3>${i + 1}. ${esc(q.text)}</h3><p>${q.choices.map((a, j) => String.fromCharCode(65 + j) + '. ' + esc(a)).join('<br>')}</p><p><strong>${U.fullAnswer(String.fromCharCode(65 + q.correct))}</strong>${esc(q.why)}</p>`).join('')}<h3>${U.fullOpen}</h3><p>${esc(c.problem)}</p><p><strong>${U.fullArgument}</strong>${esc(c.answer)}</p></section>`).join('');
-  const colLinks = s => s.replace(/href="#([a-z]+)\/([a-z0-9-]+)\/([a-z0-9-]+)"/g, (m, c, p, a) => (c === 'chapter' ? m : `href="#${a}"`)).replace(/href="#([a-z]+)\/([a-z0-9-]+)"/g, (m, c, p) => (c === 'chapter' ? m : `href="#${c}-${p}"`));
-  const columns = Book.columns.map(col => col.pages.map((p, i) => `<section class="chapter-print" id="${col.id}-${p.id}"><p class="metadata">${esc(col.title)} · ${i + 1}/${col.pages.length} · ${esc(col.upstream.name)} ${col.upstream.commit}</p><h1>${esc(p.title)}</h1><p>${esc(p.deck)}</p>${colLinks(wrap(p.html)).replace(/id="sec-(\d+)"/g, `id="${col.prefix}-${p.id}-sec-$1"`)}</section>`).join('')).join('');
+  const columns = Book.columns.map(col => col.pages.map((p, i) => `<section class="chapter-print" id="${col.id}-${p.id}"><p class="metadata">${esc(col.title)} · ${i + 1}/${col.pages.length} · ${esc(col.upstream.name)} ${col.upstream.commit}</p><h1>${esc(p.title)}</h1><p>${esc(p.deck)}</p>${wrap(p.html).replace(/id="sec-(\d+)"/g, `id="${col.prefix}-${p.id}-sec-$1"`)}</section>`).join('')).join('');
   const h = U.sWeekHead;
   const weeks = `<div class="table-wrap"><table><thead><tr><th>${h[0]}</th><th>${h[1]}</th><th>${h[2]}</th><th>${h[3]}</th></tr></thead><tbody>` + Book.weeks.map(w => `<tr><td>${w.week}</td><td>${esc(w.chapters)} · ${esc(w.title)}</td><td>${esc(w.lab)}</td><td>${esc(w.deliverable)}</td></tr>`).join('') + '</tbody></table></div>';
   const teacher = Book.teacher ? `<section class="chapter-print"><h1>${U.fullTeacher}</h1>${weeks}${wrap(Book.teacher)}</section>` : '';
